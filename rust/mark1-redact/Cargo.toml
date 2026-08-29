@@ -26,6 +26,7 @@ zeroize = { workspace = true }        # pre-image bytes are wiped, never persist
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = { workspace = true }
+serde_json = { workspace = true }   # conformance test parses vectors/redact/manifest.json (12 §3.4)
 
 [[bench]]
 name = "throughput"

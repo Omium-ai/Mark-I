@@ -1,0 +1,103 @@
+// m1p.v1 — local-fabric control messages (D-N).
+//
+// Transcribed from 08 §4.2's control table and §4.3's handshake, which have
+// declared these shapes since the doc set froze while citing them as "defined
+// in m1p.v1, doc 07" — a definition no .proto carried. Two build waves hit
+// that hole independently (the shim's gate.rs and mark1d's Hello handshake
+// both reported it unimplementable), so the definition now exists where the
+// citation always said it did. The fields below are 08's, transcribed —
+// nothing here is authored from memory.
+//
+// SCOPE, NORMATIVE (08 §4.2): control messages ride M1PL frames on the local
+// fabric ONLY. They never reach the spool, never reach the wire, and are not
+// members of Event.body — which is why nothing in this file carries an
+// event_id, a durability class, or a server-stamped band. A control message
+// appearing anywhere durable is a bug by definition.
+//
+// Everything here is [P0] operational: component names, pids, counts, enum
+// codes. No user content, nothing derived from it.
+
+syntax = "proto3";
+
+package m1p.v1;
+
+import "m1p/v1/artifacts.proto";
+
+// First frame on every connection (08 §4.3 step 2: any other first frame ⇒
+// close M1E-4003). mark1d replies HelloAck or closes.
+message Hello {
+  // "mark1-hookshim" | "mark1-proxy" | "cortexd" | "tailer" — the writer set
+  // 07 §5 enumerates. Free text, not an enum: a new writer must be able to
+  // introduce itself before the daemon's release knows its name.
+  string component = 1;
+  uint32 pid = 2;
+  // The writer's own semver, for `mark1 doctor` correlation — never an
+  // admission criterion (rejection authority belongs to the M1PL ver byte).
+  string version = 3;
+  // 16-byte session UUIDv7 when the writer is session-bound (shim, tailer);
+  // empty for session-less writers (cortexd push maps).
+  bytes session_id = 4;
+}
+
+message HelloAck {
+  bool accepted = 1;
+  // The daemon stating M1PL_MAX_FRAME (07 §5's symbol — the daemon telling
+  // the writer which build it is talking to, NOT a negotiated ceiling: a
+  // writer may send smaller frames, never a larger bound).
+  uint32 max_frame = 2;
+  // Set only when accepted = false: the single M1PL version this daemon
+  // speaks. Possible only mid-upgrade, and loud (08 §4.3 step 3).
+  uint32 want_ver = 3;
+}
+
+// hookshim → mark1d: read the cached VerdictEvent{PROVISIONAL} + knee state
+// for a gate decision. THE GATE READS THE CACHE; IT NEVER COMPUTES — this
+// round-trip is a map lookup, budgeted ≤ 5 ms (08 §4.2).
+message GateQuery {
+  // task_seg task id, same bytes as Event.task_id (envelope.proto field 4).
+  bytes task_id = 1;
+  GateKind gate = 2;
+  // The shim, not the daemon, owns the agent-facing deadline: the agent
+  // hook's own budget minus 10 ms (08 §4.4). The daemon treats an expired
+  // deadline as "answer allow, count Dropped{gate_timeout}" — fail-open for
+  // availability, the posture matrix's first row.
+  uint32 deadline_ms = 3;
+}
+
+enum GateKind {
+  GATE_KIND_UNSPECIFIED = 0;
+  GATE_KIND_STOP = 1;
+  GATE_KIND_TOOL = 2;
+}
+
+message GateVerdict {
+  GateDecision decision = 1;
+  // The fused verdict backing the decision — the one Verdict enum
+  // (artifacts.proto, BUILD-01: one vocabulary, everywhere).
+  Verdict verdict = 2;
+  // Ordered exactly [satisfied, violated, refused, error] (08 §2's rule for
+  // every posterior[4] on every surface).
+  repeated double posterior = 3;
+  string reason = 4;
+  // Reference into the local evidence store (~/.omium/mark1/evidence/…),
+  // resolvable on THIS device only — never a URL, never uploaded content.
+  string evidence_ref = 5;
+}
+
+enum GateDecision {
+  GATE_DECISION_UNSPECIFIED = 0;
+  GATE_DECISION_ALLOW = 1;
+  GATE_DECISION_BLOCK = 2;
+}
+
+// Mandatory drain barrier on SessionEnd/shutdown (08 §4.2): the writer sends
+// Flush and MUST wait for FlushAck before exiting its drain path — the one
+// place the fire-and-forget fabric is allowed to block, because 07 §6's
+// "mandatory drain on SessionEnd" is a durability promise, not a latency one.
+message Flush {}
+
+message FlushAck {
+  // Events the daemon admitted to the spool since this connection's Hello —
+  // the writer's receipt that its stream is durable, not a global counter.
+  uint64 drained = 1;
+}

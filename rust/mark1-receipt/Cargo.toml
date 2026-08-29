@@ -23,7 +23,12 @@ blake3 = { workspace = true }            # checkpoint Merkle over event_id leave
 sha2 = { workspace = true }              # key_id = "ed25519:" + sha256(pub)[:16]
 ed25519-dalek = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }        # canonical_bytes operates on serde_json::Value
+# arbitrary_precision is load-bearing, not a convenience: without it serde_json
+# holds any integer outside i64/u64 as f64, so a correctly signed payload
+# carrying one (Python ints and Go's json.Number are unbounded) re-serialises
+# to different bytes here and reads as non_canonical_payload in Rust alone —
+# a cross-language divergence the huge_int vector now locks out.
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 constant_time_eq = { workspace = true }  # hash/signature comparison

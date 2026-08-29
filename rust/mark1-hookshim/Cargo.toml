@@ -22,6 +22,8 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 x25519-dalek = { workspace = true }
 chacha20poly1305 = { workspace = true }
+hmac = { workspace = true }        # spill-seal KDF: HMAC-SHA256 over the X25519 shared secret (04 §5.4)
+sha2 = { workspace = true }
 zeroize = { workspace = true }
 libc = { workspace = true }
 # NOTE: no tokio, no clap, no config crate — the shim is a synchronous, argument-less,
@@ -30,5 +32,16 @@ libc = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
 
+# Integration tests replay the conformance hook fixtures against the spawned
+# binary; a bin-only crate's tests see only dev-dependencies, so the crates
+# needed to decode frames and unseal the spill ring are restated here.
 [dev-dependencies]
 tempfile = { workspace = true }
+m1p-wire = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+x25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+libc = { workspace = true }
