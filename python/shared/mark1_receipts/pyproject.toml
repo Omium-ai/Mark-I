@@ -7,6 +7,14 @@ dependencies = [
     "cryptography>=44.0",    # Ed25519 + P-256 verification; signing stays in keys.py's Signer protocol
 ]
 
+[dependency-groups]
+# Test-only; the conformance suite (12 §3.4 / conformance_crosslang.sh's Python leg)
+# runs via `pytest -k conf_vectors`, so pytest must resolve inside the one uv.lock.
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",  # the justfile invokes -o asyncio_mode=auto for every python suite
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
