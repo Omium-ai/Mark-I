@@ -1,0 +1,1 @@
+aws configure set aws_access_key_id ⟨redacted:api_key:ef2891531bf864b5⟩ --profile ci
