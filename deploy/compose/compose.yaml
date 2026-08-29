@@ -36,8 +36,10 @@ services:
     environment:
       CLICKHOUSE_PASSWORD: mark1
     ports:
-      - "58123:8123"   # HTTP — the only interface querychoke uses
-      - "59000:9000"   # native
+      - "58123:8123"   # HTTP — migrations lane + M1_TEST_CH_DSN's URL form
+      - "59000:9000"   # native — what chconn actually speaks (clickhouse-go v2's
+                       #   native API cannot use the HTTP port); DSN form
+                       #   clickhouse://default:mark1@127.0.0.1:59000
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     volumes:
