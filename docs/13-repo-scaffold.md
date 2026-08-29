@@ -465,7 +465,6 @@ go 1.25.0
 
 require (
     github.com/Omium-ai/omium-mark1/proto/gen/go v0.0.0
-    github.com/edsrzf/mmap-go v1.2.0              // spool ledger mmap (07 §6)
     github.com/fsnotify/fsnotify v1.9.0           // transcript discovery watchers (04 §2.1)
     github.com/fxamacker/cbor/v2 v2.7.0           // Go parallel PolicyBundle decoder (04 §2.6)
     github.com/google/uuid v1.6.0                 // UUIDv7 (RFC 9562)
@@ -508,7 +507,7 @@ go 1.25.0
 require (
     github.com/Omium-ai/omium-mark1/proto/gen/go v0.0.0
     github.com/ClickHouse/clickhouse-go/v2 v2.34.0        // imported ONLY under internal/querychoke + internal/ingest/chproj — depguard-enforced (§7.3)
-    github.com/aws/aws-sdk-go-v2 v1.36.0
+    github.com/aws/aws-sdk-go-v2 v1.36.3                  // NOT 1.36.0: service/s3 v1.79.0 requires ≥1.36.3, so MVS cannot hold the lower pin — a pin set must be resolvable or it pins nothing
     github.com/aws/aws-sdk-go-v2/config v1.29.0           // IRSA credential chain
     github.com/aws/aws-sdk-go-v2/service/kms v1.38.0      // section-split bundle signing, server chain key (05 §4.5)
     github.com/aws/aws-sdk-go-v2/service/s3 v1.79.0       // S3-first landing (05 §2)
@@ -530,7 +529,7 @@ replace github.com/Omium-ai/omium-mark1/proto/gen/go => ../../proto/gen/go
 
 ### 3.5 Go build/test discipline
 
-- `CGO_ENABLED=0` for all three modules, always — cross-compiles for the CLI/daemon matrix and static distroless images fall out for free. `go-keyring` and `mmap-go` are pure Go; nothing in the closure needs cgo. CI asserts it (`go env CGO_ENABLED` check in `ci.yml`) so a cgo dependency cannot sneak in as a transitive default.
+- `CGO_ENABLED=0` for all three modules, always — cross-compiles for the CLI/daemon matrix and static distroless images fall out for free. `go-keyring` is pure Go; nothing in the closure needs cgo. CI asserts it (`go env CGO_ENABLED` check in `ci.yml`) so a cgo dependency cannot sneak in as a transitive default.
 - Tests: stdlib `testing` + native `go test -fuzz` for the spool record decoder and fabric frame reader (plan §Critical-files 3). No testify, no mocks framework — the estate writes table tests against interfaces, and so does Mark 1.
 - `govulncheck ./...` per module is a required CI gate — **new machinery**; the estate CI lacks it (grounding delta 4), and NFR-SECURITY-004 requires it in Mark 1's own CI.
 
@@ -1078,7 +1077,7 @@ ignore = ["S101"]      # asserts are the estate's registry discipline (PROBE_HAN
 | Layer | Mechanism | Catches |
 |---|---|---|
 | Rust | `deny.toml` `[bans]` (below) via `cargo deny check` in `lint-rust` | any crate named `opentelemetry*`, `tracing-opentelemetry` — **including transitive** (bans walk the resolved graph in `Cargo.lock`) |
-| Go | depguard `no-otel` rule (§7.3) for direct imports, **plus** `tools/ci/otel_gate.sh` scanning `go.sum` for `go.opentelemetry.io` | direct and transitive |
+| Go | depguard `no-otel` rule (§7.3) for direct imports, **plus** `tools/ci/otel_gate.sh` scanning `go.sum` for `go.opentelemetry.io` | direct and transitive — **with exactly one waiver, D-M** (RECONCILIATION; founder-visible). Verified 2026-08-28: every maintained Go ClickHouse client, the §3.4-mandated `clickhouse-go/v2` included, unconditionally package-imports the OTel API *stub* (`otel`/`otel/trace`: interface types, nothing executes), so "zero OTel in `go.sum`" and "a ClickHouse ledger" are jointly unsatisfiable and a gate demanding the impossible is a gate someone deletes. The waiver is not an allowlist: on a dependency-file hit the gate switches from the string proxy to the executable claim — `go list -deps -test ./...` must contain no SDK/exporter/OTLP/metric/bridge/contrib package, `go.mod`'s otel lines must all be `// indirect`, and no first-party `.go` file may import `go.opentelemetry.io` — and its summary line says `OK WITH D-M WAIVER`, never plain OK |
 | Python | ruff `banned-api` (§7.4) for imports, **plus** `otel_gate.sh` scanning `uv.lock` for `name = "opentelemetry` | direct and transitive |
 
 ```toml

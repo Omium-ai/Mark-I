@@ -797,6 +797,7 @@ offset  size  field
 - **Transport and permissions.** Unix domain socket at `$XDG_RUNTIME_DIR/omium-mark1/m1p.sock` (fallback `~/.omium/mark1/m1p.sock`), created `0600` with a `0700` parent directory — only the enrolled OS user can connect; there is no group or world grant, ever. On Windows: named pipe `\\.\pipe\omium-mark1-<user-SID>` with a DACL granting access to the owning user's SID only (the SID in the name prevents squatting collisions between users; the DACL is the actual boundary).
 - **Who may write:** hookshim, proxy, cortexd, and the tailers. Anything else connecting can only be same-user code, which already owns the machine — the fabric's threat model is other users and accidents, not the owner.
 - Where an agent cannot exec the shim, the loopback-HTTP fallback listener requires a per-session bearer token (0600 file), literal-loopback `Host` validation, and `Origin` rejection; it decodes into the same `Event` and enters `mark1d` through the same admission path — no second trust class exists.
+- **Control messages** (`Hello`/`HelloAck`, `GateQuery`/`GateVerdict`, `Flush`/`FlushAck`) are defined in `m1p/v1/fabric.proto` (D-N) with `08` §4.2's field sets, transcribed. They ride M1PL frames on the fabric ONLY — never the spool, never the wire, never `Event.body` — which is why none of them carries an `event_id`, a durability class, or anything from the server-stamped band. `08` §4.3 owns the handshake semantics; this document owns only the statement that the set exists and where it may travel.
 
 ## 6. Spool segment binary layout
 
@@ -835,7 +836,11 @@ offset  size      field
                              [17..20) reserved zero
 28      len - 20  payload    one encoded m1p.v1.Event
 
-spool.ledger (mmap'd, fixed 128 bytes: two 64-byte A/B slots)
+spool.ledger (fixed 128 bytes: two 64-byte A/B slots; access method is
+NOT normative — Vector-disk-v2 mmaps it, mark1d uses pwrite/pread+fsync,
+and the crash-safety never rested on either: it rests on the A/B slot
+alternation plus the per-slot CRC, which make a torn write by any method
+land on the older consistent slot)
 =============================================================
 offset  size  field        (per slot; slot B at +64)
 ------  ----  -----------------------------------------------------------
@@ -859,7 +864,7 @@ The writer alternates slots and updates the ledger only *after* a segment fsync;
 
 **Recovery after an unclean shutdown:**
 
-1. Map `spool.ledger`; select the slot with the highest `generation` whose CRC verifies. Both invalid (first boot or ledger corruption) ⇒ `write_seq/write_off` = lowest existing segment at offset 64, `ack_seq/ack_off` the same.
+1. Read `spool.ledger`; select the slot with the highest `generation` whose CRC verifies. Both invalid (first boot or ledger corruption) ⇒ `write_seq/write_off` = lowest existing segment at offset 64, `ack_seq/ack_off` the same.
 2. Open segment `write_seq` and scan forward from `write_off`. The ledger is only ever *behind* the true durable end (it's updated post-fsync), so scanning forward finds records the ledger hasn't caught up to.
 3. Per record: read `len`; if fewer than 4 bytes remain, or `len` violates its bound, or fewer than `len + 4` bytes remain, or `crc32c` fails over `record_id || payload` — **the tail is torn**: truncate the segment to the last good record boundary and stop. A torn final record is *expected* after `kill -9` (it was mid-write and never fsync-acked); truncation discards it deterministically instead of letting a half-record poison every future scan.
 4. Anything discarded at step 3 that was billing-grade is accounted: the daemon emits `Dropped{CRC_LOSS, durability_class, quantity}` in its first batch. The class comes from byte [16] of the discarded record's `record_id`, which sits before the payload and therefore survives a torn or CRC-failing payload — the reason the class rides outside the protobuf at all (§3). The loss window is bounded by the fsync cadence; it is never silent.
@@ -3594,7 +3599,7 @@ Eviction policy, in priority order: (1) any row whose `grammar_rev`/`query_rev`/
 
 ### Encrypted spill rings
 
-Two rings, one shape: the proxy tee's spill and the hookshim's emergency spill. Fixed-size ring files (256 MiB proxy / 64 MiB shim) of self-delimiting frames `len | crc32c | nonce(24) | ciphertext`, XChaCha20-Poly1305 under a key wrapped by the device key — a stolen laptop's disk yields nothing readable. Rules bound to both rings identically: **post-redaction content only** (no pre-redaction plaintext persistence exists anywhere on the device), 0600, overwrite-oldest on wrap, and a **hard ≤24 h TTL with receipted expiry** — the expiry sweep emits `Dropped{reason: RING_EXPIRED}` and overwrite-on-wrap emits `Dropped{reason: RING_EVICTED}` (§3), so shed spill data is accounted, not vanished. Drained into the spool (through the normal admission path) as soon as mark1d is reachable.
+Two rings, one shape: the proxy tee's spill and the hookshim's emergency spill. Fixed-size ring files (256 MiB proxy / 64 MiB shim) of self-delimiting sealed frames `len | ver | ts(u64 ns) | ephemeral_pub(32) | nonce(12) | ciphertext` — ChaCha20-Poly1305 under a key derived per-frame via X25519 against the device spill public key (HMAC-SHA256 KDF, label `"m1p.spill.seal.v1"`). Sealing-to-a-pubkey rather than wrapping a symmetric key means the WRITER holds no decryption capability at all: a stolen laptop's disk yields nothing readable, and neither does a compromised shim process, because only the daemon's private half (minted by `mark1d`, held under file custody) can unseal. The `ts` in the frame is what the ≤24 h TTL is evaluated against at drain. This paragraph originally described `crc32c | nonce(24) | XChaCha20` under a wrapped key; the shipped construction (both ends, byte-for-byte, locked by a cross-language fixture: the Go drain unseals a ring the real Rust shim wrote) is the one stated here. Rules bound to both rings identically: **post-redaction content only** (no pre-redaction plaintext persistence exists anywhere on the device), 0600, cap-with-counted-shed at overflow (v1: the writer stops appending at the cap and counts each refusal in an O_APPEND `.shed` sidecar — see `04` §5.4 for why not in-place eviction), and a **hard ≤24 h TTL with receipted expiry** — the drain emits `Dropped{reason: RING_EXPIRED}` for aged-out frames and converts the shed count to `Dropped{reason: RING_EVICTED}` (§3), so shed spill data is accounted, not vanished. Drained into the spool (through the normal admission path) as soon as mark1d is reachable.
 
 ### Raw evidence
 

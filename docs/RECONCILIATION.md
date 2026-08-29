@@ -1093,7 +1093,7 @@ zero-OTel rule for Python alone. And `secret_type_gate.sh`'s rule 3 was narrowed
 green there is a leak CI blessed. Narrowing a pattern to silence a false positive, without
 recording that the coverage shrank, is how a control becomes decoration.
 
-### The eleven cross-document decisions (lead, binding)
+### The fourteen cross-document decisions (lead, binding)
 
 Eight of the 37 were contradictions between frozen documents, which cannot be fixed by editing
 one side. They were decided before repair began so that no two agents could resolve the same
@@ -1112,11 +1112,15 @@ contradiction two different ways:
 | D-I | Drop `13` §1's `.github/CODEOWNERS` mirror claim | The root file resolves; a later mirror would silently shadow it. |
 | D-J | `GateHealth`: drop `read_p50_us`, keep `read_p99_us` and add it to `11` §2.3 | `11` §2.3 closes the gate field set at `{reads, allows, blocks, timeouts}` and claims conformance asserts that closure — while SLO-7 depends on a p99 the closed set omits. The test and the SLO contradicted each other. |
 | D-K | Advisory identity mismatch = **403 / M1E-8003**, not 400 | A well-formed batch asserting the wrong identity is Forbidden, not malformed. `08` §2.1 is right; `07` §2 is corrected. |
+| D-L | Root `Cargo.toml`: memberless workspace members are **commented out** until each crate's src lands, un-commented in the same change that lands it | `cargo metadata` refuses a member with no target, so `--locked` builds and `Cargo.lock` generation were impossible with all 9 members declared. Stub `lib.rs` files were rejected: an empty crate makes `override_pattern_gate` and `secret_type_gate` report over source that says nothing, which is the decorated-gate failure again. Comments are bracket- and quote-free so `otel_gate.sh`'s member parse stays exact. |
+| D-M | `otel_gate.sh` gains its ONE waiver: the inert OTel API stub the sanctioned Go ClickHouse client compiles — **founder-visible, like BUILD-10** | Verified 2026-08-28: `clickhouse-go/v2` (13 §3.4's mandated pin) and `ch-go` alike unconditionally package-import `go.opentelemetry.io/otel/trace`, so "zero OTel in `go.sum`" and "a ClickHouse ledger" are jointly unsatisfiable — CON-005 as written demanded the impossible, and a gate demanding the impossible is a gate someone deletes. The waiver replaces the string proxy with the executable claim: `go list -deps -test ./...` shows exactly 8 compiled otel packages, all inside the two API-stub module trees (`otel`, `otel/trace`), zero SDK/exporter/OTLP/metric/bridge/contrib; `go.mod`'s otel lines must be `// indirect`; no first-party `.go` imports the namespace (depguard's rule, re-proven). The summary prints `OK WITH D-M WAIVER`, never plain OK. Rust and Python get no waiver. ADR-0005's guarantee — nothing OTel executes, no OTLP endpoint exists, M1P is the only telemetry fabric — holds exactly as written. |
+| D-N | The fabric control set (`Hello`/`HelloAck`, `GateQuery`/`GateVerdict`, `Flush`/`FlushAck`) is defined in new `proto/m1p/v1/fabric.proto`, transcribed from `08` §4.2's table; `07` §5 gains the pointer | Both docs cited a definition ("defined in m1p.v1, doc 07") that no `.proto` carried, and two build waves hit the hole independently — the shim's gate path and mark1d's Hello handshake were each reported unimplementable against the frozen contract. Additive (`buf lint` clean, new file, no breaking surface); the fields are `08`'s, transcribed, not authored. Control messages never reach the spool, the wire, or `Event.body` — stated in the proto header and in `07` §5. Unblocks `gate.rs` and the handshake for the Phase 2 stop-gate row |
 
 **Still not signed, and still blocking:** ADRs 0001/0002/0004/0009; SEC-01; SEC-02 (which gates
 R-03); ENG-01 and ENG-05 scope. No production ClickHouse write may occur before ADR-0001 is
-signed. BUILD-10's licensing consequence (`mark1-receipt` becoming Apache-2.0) remains a lead
-decision flagged for founder visibility, not a founder approval.
+signed. BUILD-10's licensing consequence (`mark1-receipt` becoming Apache-2.0) and **D-M** (the
+otel-gate waiver for the CH client's inert API stub) remain lead decisions flagged for founder
+visibility, not founder approvals.
 
 ---
 
@@ -1197,6 +1201,172 @@ write-shaped template; and `07`'s `bundle_acks` and `coverage_transitions` both 
 above: the property is 22 of 22, not 21 of 21, because the audit query behind the older number
 looked for a column named `tenant_id` and so classified `m1_tenants` — whose tenant key is `id`,
 and which is the root of the tenancy graph — as global.
+
+---
+
+## Eighth pass — the first code: C2 + C3 + C4, built by two concurrent waves (2026-08-28)
+
+The first product code exists. Two adversarially-verified build waves ran in parallel —
+territorially disjoint by construction (wave 1: `rust/`, `go/mark1d`, `conformance/vectors/`,
+root `Cargo.toml`; wave 2: `go/controld` only) — each shaped build → CI gate → spec skeptic →
+class-sweep fix. Everything below was **executed**, not reviewed.
+
+**Landed.**
+- `conformance/vectors/m1pl/`: 19 golden vector files + manifest + a stdlib self-check that
+  re-derives every expectation from the bytes; the family is armed in `EXPECTED`.
+- `rust/m1p-wire` (C2): the reference M1PL codec — incremental three-outcome decoder, every
+  check from the 9 buffered header bytes before any allocation, reject sticky-by-buffer;
+  cargo-fuzz target seeded read-only from the frozen vectors; 7/7 tests, fmt/clippy clean.
+- `go/mark1d` (C3): `internal/fabric` (the parallel decoder) and **`internal/spool` in full** —
+  byte-exact segment headers, crc32c records, A/B ledger, adaptive 250/500 ms fsync, class-1
+  block-on-full vs class-2 drop-newest, the 6-step recovery with a truncation sweep over EVERY
+  byte position of the un-fsynced tail proving zero billing-grade loss and exact
+  `Dropped{CRC_LOSS}` accounting from the class byte alone.
+- `go/controld` (C4): skeleton + `internal/ingest` in full — the 05 §2 stages in order,
+  S3-first ack (a failing PUT fails the request; proven), D-K identity rejection, quarantine-
+  never-strip, bounded zstd, idempotent replay; integration-tested against live Postgres and
+  ClickHouse, including the RLS seams and a live R3 refusal.
+- **The lock**: `conformance_crosslang.sh` green — all 22 m1pl vectors agree bit-identically
+  across the two hand-written implementations, 2 Rust + 2 Go conformance tests executed.
+
+**What the skeptics caught before it could ship** (each fixed with a class sweep, then re-proven):
+wave 1 — `feed()` silently discarding already-accepted events when a later frame in the same
+buffer rejects (the loss `Dropped{}` accounting could never see), and recovery boot-looping
+forever on a segment-header torn in the create→fsync window, the exact routine-crash class 07 §6
+declares handled; wave 2 — landing keys derived from server receipt time, which defeated batch
+idempotency at every hour boundary and let a corrupted re-send dodge its 409 (keys now derive
+from the batch_id's own uuidv7 timestamp: `batch_id → key` is a pure function), and an R3 boot
+assertion that read back the client's own settings — a check that passed by never executing —
+now probed on a settings-free connection and proven to refuse live.
+
+**Doc amendments this pass** (reconciliation owner; each records its build-derived reason in
+place): `05` §2.2 key-time clause (receipt time → batch_id time), `05` §1.3 (+`AUTH_DEV_TOKEN_
+HMAC_KEY`, the C4 dev seam), `07` §6 (ledger access method declared non-normative — A/B+CRC is
+the crash-safety, not mmap; `mmap-go` dropped from `13` §3.4 and `go/mark1d/go.mod`), `13` §3.4
+(`aws-sdk-go-v2` pin 1.36.0 → 1.36.3: `service/s3 v1.79.0` requires ≥1.36.3, so MVS could not
+hold the doc's pin — an unresolvable pin set pins nothing), `13` §7.5 (D-M recorded),
+`deploy/compose` comment (querychoke speaks native, not HTTP), and `stores-up` now provisions
+the 07-mandated `m1p_ingest` settings profile — CH 24.8's compiled default is `async_insert=0`,
+so the un-provisioned lane was a store this repo's own boot refusal correctly rejects.
+
+**Contradictions surfaced by the build and settled**: CON-005 vs the ClickHouse client (→ D-M);
+`05` §7.1's `controld_worker` pool vs `m1_060`'s dissolution of that role (code follows the
+migration: no worker pool in C4); `13` §3.4's byte-identical-obs claim vs the no-grpc depguard
+(no-grpc won; the vendored file's gRPC halves removed, source path recorded in its header).
+
+**Still deferred by dependency, recorded in code**: coverage_transition + checkpoint-leaf side
+effects await the C6 receipt writer; revocation is wired through a seam whose production
+verifier lands with enroll (WS-6); `mark1` CLI module remains empty (its `go.sum` defers).
+
+---
+
+## Ninth pass — the receipts spine: C6 + C7, three languages locked (2026-08-29)
+
+The trust product exists. `python/shared/mark1_receipts` (vendored from recovery-orchestrator,
+source path + date in every header), `rust/mark1-receipt`, `go/mark1d/internal/identity`, and
+`tools/verifier` — the offline verifier binary with `08` §7.7's exit contract — all landed, and
+`conformance_crosslang.sh` now locks **three languages** (rust=16, go=26, python collected) over
+the receipt family plus m1pl.
+
+**The vectors were built by the lead inline** after the workflow's vectors agent stalled 6/6 —
+the canonical-JSON + dual-signature + Merkle synthesis across four docs exceeds what an agent
+can deliberate under the 180 s watchdog. The lesson is procedural and it is now practice:
+*heavy cross-document contract synthesis is lead work; agents implement against a frozen
+referee.* The README at `conformance/vectors/receipt/` is normative where the docs delegated
+construction (RFC 6962-shape BLAKE3, `0x00`/`0x01` leaf/node domain separation, integers-only
+canonical JSON, the 8-defect vocabulary); `gen_vectors.py` reproduces the manifest
+byte-identically, verified after every extension.
+
+**The S1 that mattered — key-role binding.** The skeptic proved that nothing bound a `key_id`
+to a ROLE: the server chain key alone could mint a chain the offline verifier called
+device-attested and VALID — voiding `m1_002`'s stated reason for dual-signing ("server-only
+would let Omium mint history"). The dual-signature control existed as two signature *checks*
+and zero *identity* checks. Fixed in all three languages (role-carrying key sets; role mismatch
+= `unknown_key`, the frozen vocabulary's honest word for "not in the published set *for that
+role*"), locked by a new negative vector (`server_key_as_device_origin`), and proven in the
+shipped binary: the forged chain now exits 5.
+
+Seven more skeptic findings fixed with class sweeps, the notable ones: Python keyed the
+device-signature requirement on the UNSIGNED `record_type` row column (relabel-the-row bypass);
+the verifier printed `chain VALID` on an **empty export** (a truncation is not a verified
+history — now exit 1); Go demanded a device key on server-only record classes, making the
+**discontinuity receipt** — the one record that admits continuity loss — unverifiable; Rust
+refused integers beyond i64/u64 that Python and Go render exactly (a signed receipt the
+customer-facing verifier called forged); and the Rust/Python vector loops went green over an
+emptied manifest (the decorated-gate class, ported Go's guard). Vectors extended append-only;
+frozen prefix verified unchanged.
+
+---
+
+## Tenth pass — the capture perimeter and the first customer number: C8 + C9 (2026-08-29)
+
+One workflow, eight agents, both rows. Everything executed.
+
+**Landed.**
+- `conformance/hooks/claudecode/v2.1.251/` — 9 hook-event fixtures (the doc registers 9, not the
+  folklore 7) + transcript streams exhibiting the real ~2.5× overcount shape (4 streaming
+  rewrites, naive sum 2562 vs true 1042) with a machine-checkable `expectations.json` and a
+  selfcheck that goes red under 3 deliberate mutations. All identities synthetic, grep-verified.
+- `rust/mark1-redact` — the two-axis scanner: streaming detect with a split-secret carry window,
+  fail-closed admit with NO off switch in the API, panic-caught internal failure ⇒ Quarantine,
+  8-rule data table, `conformance/vectors/redact/` frozen (13 pairs) and armed in EXPECTED.
+- `rust/mark1-hookshim` — off-check FIRST (before stdin, before any I/O), maps-as-data,
+  UUIDv7-only stamping (seq belongs to mark1d, R-4), 45 ms abandon timer, spill ring sealed via
+  X25519+ChaCha20Poly1305 with the admit axis run BEFORE encryption. Every exit code 0.
+- `go/mark1d` capture path — UDS listener with perm refusals, admission (epoch/seq stamp, class
+  closure, redact seam), the transcript tailer with last-line-wins + sidechain-never-emits as
+  protocol invariants, claudecode adapter, runnable daemon.
+- `python/intel` app/tvo — Thm 4.1/4.2/5.1 as frozen forms with precondition refusals, the
+  deterministic waste taxonomy (no Shapley — ADR-0003 gated), coverage band + M1E-5004 floor
+  refusal, report assembly with cost_basis never mixed. **The golden test reproduces Paper I's
+  worked example from a committed fixture of the paper's own numbers.**
+
+**The two S1s the skeptic caught — both the decorated-control class, both in the daemon wiring:**
+`cmd/main.go` wired the redact-admit seam as a literal pass-through (every event spooled as
+pre-redaction plaintext: the F-36 property existed in the crate and nowhere in the running
+binary), and mark1d **never checked the kill switch** — `mark1 off` + a supervisor restart would
+have silently resumed capture, the exact CoverageTransition-attributable gap SEC-01 is about.
+Fixed: a Go admit twin now passes all 13 frozen redact vectors bit-identically (crosslang go
+count 26→40), and the daemon parks off-gated before any I/O with an e2e pinning park-at-boot,
+mid-run teardown, and re-arm across restart. Plus S2s: workspace containment now reads each
+stream's own cwd (the `ReplaceAll("/","-")` munge collision was tailable), and a 'certified'
+noise certificate missing its rates now refuses instead of silently downgrading to CALIBRATED
+under a guarantee-grade banner.
+
+**D-N.** Both the shim and daemon builders independently refuted the same frozen-contract claim:
+`08` §4.2 declares the fabric control messages "defined in m1p.v1, doc 07" and no proto defined
+them. Settled by the lead as decision D-N (see the decisions table): `proto/m1p/v1/fabric.proto`
+transcribes `08`'s declared shapes, additively; the Phase-1 shim stays observer-only (Stop maps
+to an observer Turn — byte-identical to a gate answering allow).
+
+**Residue — CLOSED.** 8 S3s triaged by the lead: 7 fixed by the cleanup pass, 1 accepted
+(pre-existing lint debt in untouched files, tracked). The two C8-acceptance items are the ones
+worth remembering. **Duplicate Usage after the quiesce flush**: settled by reading `07` §7's
+worked example rather than `04` §2.1's slogan — identical post-flush rewrites are suppressed
+(the true duplicate), *updated* numbers re-emit once under the SAME `idem_key` and the rollup
+keeps `max(event_id)`; the strictly-once reading would have silently dropped corrected
+cumulative counts and under-billed. **The spill-ring drain now exists**: `mark1d` mints the
+X25519 keypair, unseals the ring, re-runs admission fail-closed, honors the ≤24 h TTL with
+`Dropped{RING_EXPIRED}`, and truncates crash-safely — with the two ends locked by a
+cross-language fixture (the Go drain unseals bytes the real Rust shim binary wrote). Ring
+overflow is no longer silent: a counted `.shed` sidecar becomes `Dropped{RING_EVICTED}` at
+drain. Also closed: waste-taxonomy channels now PARTITION under a stated precedence with the
+`channels + unattributed == total` assertion, Thm 4.2/5.1 gained their theorem-precondition
+refusals (`p=0`, `α=0`, `ρ<1` strict — the tests had enshrined out-of-domain calls), and usd/quota
+report bases are symmetric (usd guarantee-grade requires the pinned price-table version exactly
+as quota requires the confirmed shadow price; cross-basis fields are constructor errors).
+
+Three doc-vs-code divergences the cleanup surfaced were settled by the lead in the docs (each
+records its reason in place): `04` §2.1's dedupe clause now states the post-emission rule;
+`04` §5.4 + `07` §rings now state cap-with-counted-shed as the v1 overflow behavior (in-place
+eviction inside a sealed append-only ring rewrites frames the crash model assumes immutable —
+the loss ledger, not the eviction order, carries the guarantee); and `07` §rings now describes
+the sealed-frame format the shipped writer actually produces (X25519 seal-to-pubkey: the WRITER
+holds no decryption capability, strictly stronger than the wrapped-key prose it replaces).
+
+**Independent final verification by the lead** (not an agent's tail): gates green (`OK WITH
+D-M WAIVER` + the two expected PARTIALs), crosslang 54 vectors rust=17/go=40/python collected,
+16 Rust suites ok, 10 mark1d + 9 controld Go packages ok, 126 Python tests passed.
 
 ---
 

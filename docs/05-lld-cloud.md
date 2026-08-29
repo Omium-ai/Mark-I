@@ -155,6 +155,12 @@ type Config struct {
 
     RevocationCacheMaxAge time.Duration // REVOCATION_CACHE_MAX_AGE  default 60s, max 60s (clamped down, never up)
     DrainTimeout          time.Duration // DRAIN_TIMEOUT             default 25s (< pod grace 30s)
+
+    // C4-only dev seam, REQUIRED until enroll's Ed25519/OIDC verifier lands (WS-6):
+    // the HMAC key behind the interim device-token implementation. Listed here because
+    // a config the code requires but the doc omits is how a deploy learns its env vars
+    // from a crashloop instead of from this section.
+    AuthDevTokenHMACKey string // AUTH_DEV_TOKEN_HMAC_KEY   required; DELETED in the same commit that lands enroll
 }
 
 // The derived value — the whole point:
@@ -227,7 +233,7 @@ Stages run strictly in order; each row names input → output, the failure postu
 
 ### 2.2 The S3-first landing, precisely
 
-- **Key:** `t/<tenant>/ingest/v1/dt=<YYYY-MM-DD>/hh=<HH>/<batch_uuidv7>.m1p.zst` in the ingest bucket — layout, object-lock and retention are `07`'s S3 section. `<tenant>` comes from the stage-3 stamp, never the envelope. Date/hour from server receipt time.
+- **Key:** `t/<tenant>/ingest/v1/dt=<YYYY-MM-DD>/hh=<HH>/<batch_uuidv7>.m1p.zst` in the ingest bucket — layout, object-lock and retention are `07`'s S3 section. `<tenant>` comes from the stage-3 stamp, never the envelope. Date/hour from **the `batch_uuidv7`'s embedded timestamp**, never server receipt time: `batch_id → key` must be a pure function or the idempotency story below is false at every hour boundary — a retry of a 13:59:58 batch arriving at 14:00:04 would miss the `If-None-Match` on a fresh key, double-land in the replay log, and let a corrupted re-send (same `batch_id`, different bytes) dodge the 409. This clause originally said "server receipt time", which contradicted `08 §2.3`, `07`'s S3-layout idempotency claim, and the 412 reasoning three bullets down; the seventh-pass build proved the boundary case and the pure-function form won. Skew cost: replay listings by date window are approximate to the edge's clock, which replay tolerates by construction.
 - **Encryption:** SSE-KMS under the tenant's dedicated key `alias/mark1-tenant-<tenant_uuid>`; the bucket policy denies any PUT whose KMS key doesn't match the prefix (`07`), so a stamping bug upstream becomes a write *failure*, not a cross-tenant write.
 - **Idempotent landing:** PUT with `If-None-Match: *` (S3 conditional write). Three outcomes:
   - PUT succeeds → first landing; proceed to ack.
