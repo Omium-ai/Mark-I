@@ -2103,4 +2103,152 @@ impl DropReason {
         }
     }
 }
+/// First frame on every connection (08 §4.3 step 2: any other first frame ⇒
+/// close M1E-4003). mark1d replies HelloAck or closes.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Hello {
+    /// "mark1-hookshim" | "mark1-proxy" | "cortexd" | "tailer" — the writer set
+    /// 07 §5 enumerates. Free text, not an enum: a new writer must be able to
+    /// introduce itself before the daemon's release knows its name.
+    #[prost(string, tag="1")]
+    pub component: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub pid: u32,
+    /// The writer's own semver, for `mark1 doctor` correlation — never an
+    /// admission criterion (rejection authority belongs to the M1PL ver byte).
+    #[prost(string, tag="3")]
+    pub version: ::prost::alloc::string::String,
+    /// 16-byte session UUIDv7 when the writer is session-bound (shim, tailer);
+    /// empty for session-less writers (cortexd push maps).
+    #[prost(bytes="vec", tag="4")]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HelloAck {
+    #[prost(bool, tag="1")]
+    pub accepted: bool,
+    /// The daemon stating M1PL_MAX_FRAME (07 §5's symbol — the daemon telling
+    /// the writer which build it is talking to, NOT a negotiated ceiling: a
+    /// writer may send smaller frames, never a larger bound).
+    #[prost(uint32, tag="2")]
+    pub max_frame: u32,
+    /// Set only when accepted = false: the single M1PL version this daemon
+    /// speaks. Possible only mid-upgrade, and loud (08 §4.3 step 3).
+    #[prost(uint32, tag="3")]
+    pub want_ver: u32,
+}
+/// hookshim → mark1d: read the cached VerdictEvent{PROVISIONAL} + knee state
+/// for a gate decision. THE GATE READS THE CACHE; IT NEVER COMPUTES — this
+/// round-trip is a map lookup, budgeted ≤ 5 ms (08 §4.2).
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GateQuery {
+    /// task_seg task id, same bytes as Event.task_id (envelope.proto field 4).
+    #[prost(bytes="vec", tag="1")]
+    pub task_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(enumeration="GateKind", tag="2")]
+    pub gate: i32,
+    /// The shim, not the daemon, owns the agent-facing deadline: the agent
+    /// hook's own budget minus 10 ms (08 §4.4). The daemon treats an expired
+    /// deadline as "answer allow, count Dropped{gate_timeout}" — fail-open for
+    /// availability, the posture matrix's first row.
+    #[prost(uint32, tag="3")]
+    pub deadline_ms: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GateVerdict {
+    #[prost(enumeration="GateDecision", tag="1")]
+    pub decision: i32,
+    /// The fused verdict backing the decision — the one Verdict enum
+    /// (artifacts.proto, BUILD-01: one vocabulary, everywhere).
+    #[prost(enumeration="Verdict", tag="2")]
+    pub verdict: i32,
+    /// Ordered exactly \[satisfied, violated, refused, error\] (08 §2's rule for
+    /// every posterior\[4\] on every surface).
+    #[prost(double, repeated, tag="3")]
+    pub posterior: ::prost::alloc::vec::Vec<f64>,
+    #[prost(string, tag="4")]
+    pub reason: ::prost::alloc::string::String,
+    /// Reference into the local evidence store (~/.omium/mark1/evidence/…),
+    /// resolvable on THIS device only — never a URL, never uploaded content.
+    #[prost(string, tag="5")]
+    pub evidence_ref: ::prost::alloc::string::String,
+}
+/// Mandatory drain barrier on SessionEnd/shutdown (08 §4.2): the writer sends
+/// Flush and MUST wait for FlushAck before exiting its drain path — the one
+/// place the fire-and-forget fabric is allowed to block, because 07 §6's
+/// "mandatory drain on SessionEnd" is a durability promise, not a latency one.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct Flush {
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct FlushAck {
+    /// Events the daemon admitted to the spool since this connection's Hello —
+    /// the writer's receipt that its stream is durable, not a global counter.
+    #[prost(uint64, tag="1")]
+    pub drained: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum GateKind {
+    Unspecified = 0,
+    Stop = 1,
+    Tool = 2,
+}
+impl GateKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            GateKind::Unspecified => "GATE_KIND_UNSPECIFIED",
+            GateKind::Stop => "GATE_KIND_STOP",
+            GateKind::Tool => "GATE_KIND_TOOL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "GATE_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "GATE_KIND_STOP" => Some(Self::Stop),
+            "GATE_KIND_TOOL" => Some(Self::Tool),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum GateDecision {
+    Unspecified = 0,
+    Allow = 1,
+    Block = 2,
+}
+impl GateDecision {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            GateDecision::Unspecified => "GATE_DECISION_UNSPECIFIED",
+            GateDecision::Allow => "GATE_DECISION_ALLOW",
+            GateDecision::Block => "GATE_DECISION_BLOCK",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "GATE_DECISION_UNSPECIFIED" => Some(Self::Unspecified),
+            "GATE_DECISION_ALLOW" => Some(Self::Allow),
+            "GATE_DECISION_BLOCK" => Some(Self::Block),
+            _ => None,
+        }
+    }
+}
 // @@protoc_insertion_point(module)
