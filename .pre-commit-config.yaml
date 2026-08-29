@@ -1,0 +1,45 @@
+# Pre-commit is a courtesy accelerator; CI is the authority — every hook here has a CI twin,
+# so a skipped hook changes nothing except how late you find out.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.0
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]   # conformance fixtures are the sanctioned exception, via .gitattributes lfs if ever needed
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -l -w
+        language: system
+        types: [go]
+      - id: ruff
+        name: ruff check + format
+        entry: uv run ruff check --fix --exit-non-zero-on-fix
+        language: system
+        types: [python]
+      - id: buf-lint
+        name: buf lint
+        entry: buf lint proto
+        language: system
+        files: ^proto/
+        pass_filenames: false
+      - id: otel-gate
+        name: no-OTel lockfile gate
+        entry: tools/ci/otel_gate.sh
+        language: system
+        files: (Cargo\.lock|go\.sum|uv\.lock)$
+        pass_filenames: false

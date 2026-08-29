@@ -1,0 +1,274 @@
+// m1p.v1 — the batch envelope and per-event identity.
+//
+// Transcribed from 07 §2 ("Envelope and identity"); the loss-accounting
+// message at the bottom is 07 §3's `Dropped` / `DropReason`, placed here per
+// 13 §1 ("envelope.proto — Batch, Event envelope, Dropped{}, idem/event_id
+// fields").
+//
+// FILE SPLIT NOTE: 07 §2 writes this file with two imports (events,
+// intelligence) because §2–§4 describe a three-file protocol. 13 §1 splits the
+// same message set across six files (envelope, events, verify, intelligence,
+// policy, artifacts), so the `Event.body` oneof — unchanged, same types, same
+// field numbers — needs all five siblings imported. No type moved packages:
+// everything is still `m1p.v1`.
+//
+// VERSION POLICY (07 §1): additive only within the major. A breaking change is
+// `m1p.v2` in `proto/m1p/v2/`; this file is never edited in place for one.
+// Deleted fields become `reserved` in both number and name. There is no
+// `wasm_module` field and deliberately no reserved slot for one.
+
+syntax = "proto3";
+
+package m1p.v1;
+
+import "google/protobuf/timestamp.proto";
+import "m1p/v1/artifacts.proto";
+import "m1p/v1/events.proto";
+import "m1p/v1/intelligence.proto";
+import "m1p/v1/policy.proto";
+import "m1p/v1/verify.proto";
+
+// The batch envelope. Exactly one Batch per POST /m1p/v1/ingest body
+// (zstd-compressed application/x-m1p-protobuf). 07 §2, 08 §2.1.
+message Batch {
+  // Client-supplied. 16-byte UUIDv7, minted per upload attempt-group and
+  // echoed in the M1P-Batch-Id header so transport logs and payloads join.
+  bytes batch_id = 1;
+
+  // Client-supplied. 16-byte UUIDv7 of the agent session all events belong to.
+  bytes session_id = 2;
+
+  // Client-supplied. Identifies the emitting edge software, not the user.
+  SdkInfo sdk = 3;
+
+  // Client-supplied, stamped at send time (not event time). The server
+  // computes clock skew from this; it is never used for ordering.
+  google.protobuf.Timestamp sent_at = 4;
+
+  repeated Event events = 5;
+
+  // Accounting for everything that did NOT make it into events[] since the
+  // last acked batch: spool sheds, CRC losses, unsupported-agent drops.
+  // Rides beside the events rather than among them because a dropped event
+  // cannot carry itself.
+  repeated Dropped dropped = 6;
+
+  // ---------------------------------------------------------------------
+  // ADVISORY CROSS-CHECK FIELDS — NOT IN THE TRUST PATH.
+  // The authoritative tenant_id and device_id are stamped by controld from
+  // the verified bearer-token claims, never read from this envelope. These
+  // copies exist only so a mismatch is detectable: if either is non-empty
+  // and disagrees with the token claims, controld REJECTS the batch with
+  // 403 / M1E-8003 (08 §2.1) and emits a security event. Forbidden, not 400:
+  // the batch is well-formed, it just asserts an identity the token does not
+  // grant. They are cross-checks, not inputs.
+  // ---------------------------------------------------------------------
+  bytes advisory_device_id = 7;  // 16 bytes or empty
+  bytes advisory_tenant_id = 8;  // 16 bytes or empty
+}
+
+// Emitting edge software identity. 07 §2.
+message SdkInfo {
+  string name = 1;           // e.g. "mark1d"
+  string version = 2;        // semver of the emitting binary
+  string os = 3;             // "linux" | "darwin" | "windows"
+  string arch = 4;           // "amd64" | "arm64"
+  string agent = 5;          // wrapped agent: "claudecode" | "codex" | ...
+  string agent_version = 6;  // as sniffed at runtime, drives field-map choice
+}
+
+// The per-event envelope. Common identity + exactly one typed body. 07 §2.
+message Event {
+  // ---- Client-stamped identity ------------------------------------------
+
+  // 16-byte UUIDv7, RFC 9562 Method 1: a monotonic counter per daemon
+  // guarantees strict ordering even for same-millisecond bursts.
+  //
+  // This one 16-byte value carries four roles at once and the design only
+  // works while they stay the same bytes (07 §2): server dedupe key at
+  // controld.ingest, ClickHouse ReplacingMergeTree ordering-key tail, spool
+  // cursor (the leading 16 bytes of every spool record_id, 07 §6), and Merkle
+  // leaf identity in ReceiptCheckpoint. Splitting any role off breaks billing
+  // dedupe, merge collapse, ack-resume, or the offline receipt verifier.
+  bytes event_id = 1;
+
+  // Per-session monotonic sequence assigned by mark1d at admission. This is
+  // the causal-order source of truth: developer clocks drift, so wall-clock
+  // ordering across events is not trustworthy; seq is.
+  //
+  // seq is unique only WITHIN a session_epoch — see session_epoch below.
+  uint64 seq = 2;
+
+  // 16-byte session UUIDv7; duplicates Batch.session_id so events remain
+  // self-describing after the batch envelope is shed at ingest.
+  bytes session_id = 3;
+
+  // 16-byte task UUIDv7 assigned at TaskOpen under task_seg.v1 rules;
+  // empty for events that precede or outlive any task.
+  bytes task_id = 4;
+
+  // Client wall clock at the instant the event occurred. Display and
+  // skew-analysis only — never ordering, never billing windows.
+  google.protobuf.Timestamp occurred_at = 5;
+
+  // Daemon-boot epoch qualifying `seq`. Assigned by mark1d at boot from a
+  // durable, per-device, monotonically increasing counter; constant for the
+  // lifetime of one mark1d process.
+  //
+  // 07 §2 is authoritative for this field and its ordering rule. The
+  // per-session seq counter
+  // lives in mark1d's memory, but sessions outlive the daemon (04 §11.4 calls
+  // launchd killing mark1d during sleep "not an edge case but a routine") and
+  // fully-acked spool segments are deleted whole (07 §6), so the seq
+  // high-water mark is not reconstructible from disk. A restarted daemon
+  // would otherwise re-issue seq 1, 2, 3… for a still-live session, producing
+  // duplicate (session_id, seq) pairs, and spill-ring replay would drain
+  // pre-crash events AFTER post-restart ones — inverting causal order in
+  // exactly the window where ordering matters most.
+  //
+  // ORDERING RULE, NORMATIVE: within one session_id, causal order is the
+  // LEXICOGRAPHIC order of the pair (session_epoch, seq) — compare
+  // session_epoch first, seq only to break ties. Every consumer that 07 has
+  // reading `seq` for order reads the pair instead: the §2 "causal-order
+  // source of truth", the §6/§7 replay and dedupe paths, task_seg.v1
+  // denominators, and attempt-indexed knee fitting. (session_id,
+  // session_epoch, seq) is unique; (session_id, seq) alone is not, across a
+  // restart.
+  //
+  // It rides the Event and not the Batch because a single batch legitimately
+  // mixes epochs: after a restart the uploader drains pre-restart spool
+  // records alongside freshly admitted ones.
+  //
+  // uint32, not uint64: it counts daemon boots on ONE device. 2^32 boots is
+  // ~136 years at one boot per second, the varint costs the same bytes as a
+  // uint64 at realistic values, and the narrower type keeps the field from
+  // reading like a timestamp. It is not a clock — it is never compared across
+  // devices and never interpreted as time.
+  uint32 session_epoch = 6;
+
+  // ---- Body (exactly one) -------------------------------------------------
+  oneof body {
+    // events.proto families (10–29)
+    SessionStart session_start = 10;
+    SessionEnd session_end = 11;
+    TaskOpen task_open = 12;
+    TaskClose task_close = 13;
+    Turn turn = 14;
+    ToolUse tool_use = 15;
+    ModelRequest model_request = 16;
+    ModelResponse model_response = 17;
+    Usage usage = 18;
+    CoverageTransition coverage_transition = 19;
+    GuardDecision guard_decision = 20;
+    ReceiptCheckpoint receipt_checkpoint = 21;
+    // Diagnostic-class fleet health (07 §3). 07 ratifies the slot but
+    // deliberately does not transcribe the message: 11 §2.3 owns its field
+    // set, so a gauge is added or refused in exactly one place. See
+    // EdgeHealth in events.proto.
+    EdgeHealth edge_health = 22;
+
+    // intelligence.proto families (30–49)
+    AnchorVote anchor_vote = 30;
+    JudgeVote judge_vote = 31;
+    RmScore rm_score = 32;
+    ConsistencyVote consistency_vote = 33;
+    VerdictEvent verdict_event = 34;
+    CortexInjection cortex_injection = 35;
+    MemoryInjection memory_injection = 36;
+    ArtifactOutcome artifact_outcome = 37;
+    RouteDecision route_decision = 38;
+    EvidenceExcerpt evidence_excerpt = 39;  // opt-in tiers only (E1/E2)
+  }
+
+  // ---- SERVER-STAMPED band (900–999) --------------------------------------
+  // Populated by controld.ingest from VERIFIED token claims and its own
+  // clock, after batch acceptance. MUST be unset on the client wire: any
+  // client-set value in this band ⇒ batch reject + security event. For
+  // tenant_id/device_id that reject is the SAME identity-disagreement
+  // 403 M1E-8003 as the advisory band above (see field 62's note), not a 400:
+  // a client asserting its own tenancy is an identity claim the server
+  // refuses, not a malformed request it cannot parse.
+  // The band lives in the same message so one type flows from hook stdin to
+  // ClickHouse row with no lossy re-mapping.
+  bytes tenant_id = 900;                          // SERVER-STAMPED
+  bytes device_id = 901;                          // SERVER-STAMPED
+  google.protobuf.Timestamp received_at = 902;    // SERVER-STAMPED
+  sint64 clock_skew_ms = 903;                     // SERVER-STAMPED, sent_at vs received_at
+}
+
+// Loss accounting. Exactly three fields by design: what, which class, how
+// many. Every shed, eviction, expiry, CRC loss, quarantine or degraded parse
+// MUST appear here in the next batch — silence is the one failure mode the
+// ledger can't price.
+// 07 §3; carried on Batch.dropped (07 §2), never inside Event.body.
+message Dropped {
+  DropReason reason = 1;  // [P0]
+
+  // Field 2 was `string category`, the event-family name. Deleted, not
+  // renamed: 08:149 and 08 §4.4 already send `category: DIAGNOSTIC` — a
+  // DURABILITY class, not a family — 11 §3 requires every metric label to be a
+  // closed enum, and the spool record's byte [16] carries that class outside
+  // the payload precisely so full-spool policy applies without decoding
+  // protobuf (07 §6). Reason + class is what the loss ledger prices; the
+  // family name priced nothing.
+  //
+  // RESERVED although nothing has shipped against this contract, because
+  // `breaking: WIRE_JSON` (proto/buf.yaml) freezes number and JSON name from
+  // the commit that introduced them, not from first deployment. Without both
+  // reservations a later additive field could land on 2 or on `category` and
+  // inherit a decoder's memory of a string there. The reservation is itself
+  // in `conf_schema_closed_field_set`'s golden (12 §3.6): this message's field
+  // set is closed, so un-reserving 2 is as red as adding a field.
+  reserved 2;
+  reserved "category";
+
+  uint64 quantity = 3;                   // [P0]
+
+  // [P0] Which durability contract the lost records were under. This is the
+  // half of a drop that decides whether it pages: 11 §3.1 routes any
+  // billing-grade count to A-04, and the coverage band's lower edge is
+  // narrowed by billing-grade drops only (07 "Coverage").
+  DurabilityClass durability_class = 4;
+}
+
+// 07 §6's per-class durability contract, as carried in a drop. Values 1 and 2
+// are deliberately identical to the spool record's class byte [16], so the
+// ledger and the on-disk record name the class the same way with no mapping
+// table between them.
+enum DurabilityClass {
+  DURABILITY_CLASS_UNSPECIFIED = 0;
+  DURABILITY_CLASS_BILLING_GRADE = 1;  // usage, verdict_event, receipt_checkpoint —
+                                       // block on full, never silently shed
+  DURABILITY_CLASS_DIAGNOSTIC = 2;     // everything else — drop-newest on full
+}
+
+// 07 §3. Zero value decodes as "sender newer than receiver — retain, don't
+// guess"; a receiver never collapses an unknown reason into a known one.
+//
+// 5–10 are additive: 04 and 08 normatively require the edge to emit each of
+// them, and before they existed every one collapsed to UNSPECIFIED, which is
+// the one thing the loss ledger cannot attribute.
+enum DropReason {
+  DROP_REASON_UNSPECIFIED = 0;
+  DROP_REASON_SPOOL_SHED = 1;                // diagnostics drop-newest on full
+  DROP_REASON_CRC_LOSS = 2;                  // torn/corrupt spool record (07 §6)
+  DROP_REASON_UNSUPPORTED_AGENT_VERSION = 3; // sniffed version has no field map
+  DROP_REASON_LOCAL_QUARANTINE = 4;          // admit-to-upload redaction refused it
+  DROP_REASON_GATE_TIMEOUT = 5;              // gate fail-open allow: shim connect,
+                                             // cache miss, or deadline (04 §1.4,
+                                             // §2.3, §5; M1E-5001)
+  DROP_REASON_QUARANTINED = 6;               // poison batch moved out of the spool by
+                                             // the 4xx rule, never auto-retried
+                                             // (04 §2.5) — an UPLOAD refusal, where
+                                             // LOCAL_QUARANTINE is an ADMISSION one
+  DROP_REASON_FABRIC_UNAVAILABLE = 7;        // cortexd push refresh shed as
+                                             // recomputable (04 §6.6, 08 §4.4)
+  DROP_REASON_RING_EVICTED = 8;              // spill ring wrapped: oldest-diagnostic-
+                                             // first eviction (04 §5.4)
+  DROP_REASON_RING_EXPIRED = 9;              // spill ring's ≤24 h TTL sweep — 07's
+                                             // `Dropped{reason: spill_expired}`
+                                             // (07 "Local edge stores")
+  DROP_REASON_PARSE_DEGRADED = 10;           // mark1-frames fell back to opaque
+                                             // passthrough on vendor drift; wire
+                                             // observations lost (04 §4, §10 F-09)
+}

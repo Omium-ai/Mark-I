@@ -1,0 +1,47 @@
+# golangci-lint v2 config — one file at repo root, all three modules run it (§6.2 lint-go).
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck        # an ignored error on the spool/uplink path is silent data loss
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - gosec           # G-series: exec, file perms, weak crypto
+    - depguard        # the mechanical import-boundary gate — rules below
+    - forbidigo       # no fmt.Print* outside cmd/ (edge logs via obs or not at all)
+  settings:
+    depguard:
+      rules:
+        no-otel:
+          deny:
+            - pkg: "go.opentelemetry.io"
+              desc: "Mark 1 has zero OpenTelemetry (CON-005 / ADR-0005). Telemetry rides M1P."
+        clickhouse-choke:
+          files:
+            - "!**/internal/querychoke/**"
+            - "!**/internal/ingest/chproj/**"
+          deny:
+            - pkg: "github.com/ClickHouse/clickhouse-go"
+              desc: "ClickHouse is reachable ONLY through controld.querychoke (05 §6); chproj projects rows for ingest."
+        no-grpc:
+          deny:
+            - pkg: "google.golang.org/grpc"
+              desc: "No gRPC in Mark 1 — M1P is plain HTTPS; the fabric is M1PL."
+    gosec:
+      excludes:
+        - G304   # file inclusion via variable — tailers/spool open computed paths by design, behind WorkspaceSet
+    forbidigo:
+      forbid:
+        - pattern: "^fmt\\.Print"
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [gosec, forbidigo]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

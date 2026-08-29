@@ -1,0 +1,423 @@
+# omium-mark1 release — tag-triggered edge release (13 §9.3.2).
+#
+#   tag edge/vX.Y.Z  ->  full gate set + MANDATORY benchmarks  ->  five-triple build
+#                    ->  sign/notarize per OS (13 §8.4, 09 §11.1)
+#                    ->  CycloneDX SBOM + SLSA provenance per artifact (13 §8.5)
+#                    ->  publish + open the ring-0 manifest PR (09 §11.2)
+#
+# Cloud services have no semver: they are promoted by <sha7> through GitOps (13 §9.1/§9.3.1).
+# The `images` job here exists for the release-lane container scan and attestation only.
+name: release
+
+on:
+  push:
+    tags:
+      - "edge/v*"
+
+permissions:
+  contents: write        # create the release, open the manifest PR branch
+  id-token: write        # OIDC: Azure Trusted Signing, AWS ECR, provenance
+  attestations: write    # SLSA build provenance
+  packages: read
+
+env:
+  CARGO_TERM_COLOR: always
+  GO_VERSION: "1.25.0"
+  SYFT_VERSION: "v1.20.0"
+  TRIVY_VERSION: "0.58.2"
+  NFPM_VERSION: "v2.41.1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # A release re-runs the whole gate set from a clean checkout. Nothing is inherited
+  # from the PR that produced the commit.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: verify
+    runs-on: ubuntu-24.04
+    env:
+      M1_REQUIRE_STORES: "1"
+      # Same store contract as ci.yml's `integration` job and the justfile's defaults; see there.
+      M1_TEST_PG_DSN: postgres://mark1:mark1@127.0.0.1:5432/mark1_test
+      M1_TEST_CH_DSN: http://127.0.0.1:8123/?database=default
+      M1_TEST_S3_ENDPOINT: http://127.0.0.1:9002
+      CLICKHOUSE_HOST: "127.0.0.1"
+      CLICKHOUSE_CLIENT: ".stores/bin/clickhouse client --host 127.0.0.1 --port 9000"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly   # `just ci` includes the fuzz smoke
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: astral-sh/setup-uv@v5
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
+      - uses: extractions/setup-just@v2
+      - run: |
+          cargo install cargo-deny --locked --version 0.16.4
+          cargo install cargo-fuzz --locked --version 0.12.0
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          uv tool install "pip-audit==2.9.0"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: just stores-up
+      - run: just migrate "$M1_TEST_PG_DSN"
+      - run: just ci
+
+  # ---------------------------------------------------------------------------
+  # Benchmarks, MANDATORY and with no fallback.
+  #
+  # The PR lane may defer this stage when the pinned runner is unavailable (ci.yml
+  # `bench-deferred`) — that is the whole point of deferring: it keeps an unowned machine off
+  # the critical path of every merge while guaranteeing the budgets are still enforced exactly
+  # once, here, before anything ships. If the runner is not available at release time the
+  # release FAILS. A performance regression can merge; it cannot ship.
+  # ---------------------------------------------------------------------------
+  # `runs-on` is resolved by the scheduler BEFORE any step runs, so a refusal step inside `bench`
+  # could never fire: with the variable empty the label set matches no runner and the job just
+  # queues until GitHub's 24h timeout. The check has to be its own job on a hosted runner — the
+  # same shape ci.yml uses for bench/bench-deferred.
+  bench-preflight:
+    name: bench-preflight
+    if: vars.MARK1_BENCH_RUNNER == ''
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          echo "::error title=No pinned bench runner::12 §7.1's budgets gate this release and can only be measured on the pinned runner class (bench/RUNNER.md). Provision it and set MARK1_BENCH_RUNNER."
+          exit 1
+
+  bench:
+    name: bench
+    needs: [bench-preflight]
+    # A skipped `needs` skips its dependents unless the condition carries a status function, and
+    # bench-preflight is skipped exactly when the runner IS configured — which is when bench must
+    # run. Hence !cancelled() rather than a bare variable test.
+    if: ${{ !cancelled() && vars.MARK1_BENCH_RUNNER != '' }}
+    runs-on: [self-hosted, "${{ vars.MARK1_BENCH_RUNNER }}"]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v2
+      - run: just bench
+      - name: Record the result against the trend (12 §7.2)
+        run: |
+          mkdir -p bench/history
+          cp -r target/criterion "bench/history/${GITHUB_REF_NAME//\//-}" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench/history/
+
+  # ---------------------------------------------------------------------------
+  # Five triples (13 §2.3): x86_64/aarch64 linux-gnu, x86_64/aarch64 apple-darwin,
+  # x86_64-pc-windows-msvc. glibc, not musl. Built with --locked / -mod=readonly from a clean
+  # checkout, so "what ran during the build" is toolchain + lockfile and nothing else — the
+  # honest precondition for the provenance statement below (13 §2.4).
+  # ---------------------------------------------------------------------------
+  build-edge:
+    name: build-edge (${{ matrix.triple }})
+    needs: [verify, bench]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, triple: x86_64-unknown-linux-gnu,  goos: linux,   goarch: amd64 }
+          - { os: ubuntu-24.04, triple: aarch64-unknown-linux-gnu, goos: linux,   goarch: arm64 }
+          - { os: macos-14,     triple: x86_64-apple-darwin,       goos: darwin,  goarch: amd64 }
+          - { os: macos-14,     triple: aarch64-apple-darwin,      goos: darwin,  goarch: arm64 }
+          - { os: windows-2022, triple: x86_64-pc-windows-msvc,    goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Cross linker for aarch64 linux
+        if: matrix.triple == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: Rust edge binaries
+        run: cargo build --release --locked --target ${{ matrix.triple }} -p mark1-proxy -p mark1-hookshim -p cortexd
+      - name: Go edge binaries
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.triple }}"
+          for m in mark1d mark1; do
+            (cd "go/$m" && go build -mod=readonly -trimpath -ldflags "-s -w" \
+               -o "../../dist/${{ matrix.triple }}/$m" ./cmd)
+          done
+      - name: Stage the supervised set
+        shell: bash
+        run: |
+          set -euo pipefail
+          for b in mark1-proxy mark1-hookshim cortexd; do
+            src="target/${{ matrix.triple }}/release/$b"
+            [ -f "$src.exe" ] && src="$src.exe"
+            cp "$src" "dist/${{ matrix.triple }}/"
+          done
+          ls -l "dist/${{ matrix.triple }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: edge-${{ matrix.triple }}
+          path: dist/${{ matrix.triple }}/
+
+  # ---------------------------------------------------------------------------
+  # macOS: lipo to Universal2, hardened-runtime codesign, .pkg, notarize, staple.
+  # Notarization is NOT optional — Gatekeeper quarantines unsigned daemons and mark1d is exactly
+  # the long-lived background process users are trained to distrust (09 §11.1).
+  # ---------------------------------------------------------------------------
+  package-macos:
+    name: package-macos
+    needs: build-edge
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: edge-x86_64-apple-darwin,  path: dist/x86_64-apple-darwin }
+      - uses: actions/download-artifact@v4
+        with: { name: edge-aarch64-apple-darwin, path: dist/aarch64-apple-darwin }
+      - name: lipo Universal2
+        run: |
+          set -euo pipefail
+          mkdir -p dist/universal2
+          for b in mark1d mark1 mark1-proxy mark1-hookshim cortexd; do
+            chmod +x dist/*/"$b"
+            lipo -create -output "dist/universal2/$b" \
+              "dist/x86_64-apple-darwin/$b" "dist/aarch64-apple-darwin/$b"
+            lipo -info "dist/universal2/$b"
+          done
+      - name: Import Developer ID certificate
+        env:
+          P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          security create-keychain -p "$RUNNER_TEMP" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$RUNNER_TEMP" build.keychain
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/devid.p12"
+          security import "$RUNNER_TEMP/devid.p12" -k build.keychain -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$RUNNER_TEMP" build.keychain >/dev/null
+          rm -f "$RUNNER_TEMP/devid.p12"
+      - name: codesign + pkgbuild + notarize + staple
+        env:
+          DEVELOPER_ID: ${{ vars.APPLE_DEVELOPER_ID_APPLICATION }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          VERSION: ${{ github.ref_name }}
+        run: deploy/packaging/macos/notarize.sh dist/universal2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-macos
+          path: dist/pkg/
+
+  # ---------------------------------------------------------------------------
+  # Windows: WiX MSI, Authenticode via Azure Trusted Signing over an OIDC-scoped CI identity —
+  # chosen over an EV token so a one-founder company has no hardware-token custody (09 §11.1).
+  # ---------------------------------------------------------------------------
+  package-windows:
+    name: package-windows
+    needs: build-edge
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: edge-x86_64-pc-windows-msvc, path: dist/win }
+      - name: Build MSI (WiX)
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix build deploy/packaging/windows/mark1.wxs `
+            -d BinDir="$PWD/dist/win" -d Version="$($env:GITHUB_REF_NAME -replace '^edge/v','')" `
+            -o dist/pkg/mark1.msi
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/trusted-signing-action@v0.5
+        with:
+          endpoint: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_TRUSTED_SIGNING_PROFILE }}
+          files-folder: dist/pkg
+          files-folder-filter: msi,exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-windows
+          path: dist/pkg/
+
+  # ---------------------------------------------------------------------------
+  # Linux: nfpm .deb/.rpm + tarball, each binary carrying a detached signature that
+  # `mark1 verify-release` checks before execution.
+  # ---------------------------------------------------------------------------
+  package-linux:
+    name: package-linux
+    needs: build-edge
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: edge-x86_64-unknown-linux-gnu,  path: dist/x86_64-unknown-linux-gnu }
+      - uses: actions/download-artifact@v4
+        with: { name: edge-aarch64-unknown-linux-gnu, path: dist/aarch64-unknown-linux-gnu }
+      - name: nfpm packages + tarballs
+        run: |
+          set -euo pipefail
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@${NFPM_VERSION}
+          VERSION="${GITHUB_REF_NAME#edge/v}"
+          mkdir -p dist/pkg
+          for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            chmod +x "dist/$triple"/*
+            arch=amd64; [ "$triple" = "aarch64-unknown-linux-gnu" ] && arch=arm64
+            for fmt in deb rpm; do
+              NFPM_VERSION_ENV="$VERSION" BIN_DIR="dist/$triple" ARCH="$arch" \
+                nfpm package -f deploy/packaging/linux/nfpm.yaml -p "$fmt" -t dist/pkg/
+            done
+            tar -czf "dist/pkg/mark1-${VERSION}-${triple}.tar.gz" -C "dist/$triple" .
+          done
+      - name: Detached GPG signatures
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.LINUX_RELEASE_GPG_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.LINUX_RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          for f in dist/pkg/*; do
+            gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+              --detach-sign --armor -o "$f.asc" "$f"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-linux
+          path: dist/pkg/
+
+  # ---------------------------------------------------------------------------
+  # Cloud images. Tagged <sha7> and nothing else — on an IMMUTABLE ECR repository a floating
+  # tag is a permanent pin, not a pointer (13 §9.5). trivy blocks the release (12 §11.3).
+  # ---------------------------------------------------------------------------
+  images:
+    name: images
+    needs: verify
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          # controld is the only cloud service with source in the tree today. A matrix leg whose
+          # Dockerfile does not exist fails the leg, and `publish` needs all of them — so the
+          # adjudicator and intel legs land in the same PR as their service skeletons
+          # (14 §1.10 `mark1-intel`, §2.5 `adjudicator-svc`), not before.
+          - { name: controld, dockerfile: go/controld/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+      - id: sha7
+        run: echo "tag=$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          provenance: false      # provenance is attested below by attest-build-provenance
+          tags: ${{ steps.ecr.outputs.registry }}/omium/mark1-${{ matrix.name }}:${{ steps.sha7.outputs.tag }}
+      - name: trivy
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            | tar -xz -C /usr/local/bin trivy
+          trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+            "${{ steps.ecr.outputs.registry }}/omium/mark1-${{ matrix.name }}:${{ steps.sha7.outputs.tag }}"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.ecr.outputs.registry }}/omium/mark1-${{ matrix.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # ---------------------------------------------------------------------------
+  # SBOM + SLSA + publish. NFR-SECURITY-004: a release without an SBOM does not publish, and
+  # `mark1 verify-release` checks signature AND provenance (repo, workflow, commit SHA) before
+  # any binary is executed (09 §11.2).
+  # ---------------------------------------------------------------------------
+  publish:
+    name: publish
+    needs: [package-macos, package-windows, package-linux, images]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pkg-*
+          path: dist/pkg
+          merge-multiple: true
+      - name: CycloneDX SBOM per artifact
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin "${SYFT_VERSION}"
+          mkdir -p dist/sbom
+          # Source SBOM for the whole release (the `just sbom` recipe's output).
+          syft dir:. -o cyclonedx-json > dist/sbom/mark1-source.cdx.json
+          for f in dist/pkg/*; do
+            case "$f" in *.asc|*.cdx.json) continue ;; esac
+            syft "file:$f" -o cyclonedx-json > "dist/sbom/$(basename "$f").cdx.json"
+          done
+          test -s dist/sbom/mark1-source.cdx.json   # no SBOM, no release
+      - name: SLSA build provenance for every published artifact
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/pkg/*"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#edge/v}"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "mark1 edge v${VERSION}" \
+            --notes "Edge binaries for five triples. Verify with \`mark1 verify-release\`: it checks the detached signature AND the SLSA provenance (repo, workflow, commit) before executing anything." \
+            dist/pkg/* dist/sbom/*
+      - name: Open the ring-0 manifest PR (09 §11.2 — a ring promotion is a reviewed commit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#edge/v}"
+          BRANCH="release/manifest-${VERSION}"
+          git config user.name  "omium-release-bot"
+          git config user.email "release@omium.ai"
+          git checkout -b "$BRANCH"
+          deploy/packaging/manifest/bump.sh --ring 0 --version "$VERSION" --artifacts dist/pkg
+          git add deploy/packaging/manifest
+          git commit -m "manifest: point ring 0 at edge/v${VERSION}"
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "manifest: ring 0 -> edge/v${VERSION}" \
+            --body "Monotonic manifest_seq bump pointing ring 0 (Omium dogfood) at edge/v${VERSION}. Ring 1/2 promotions are separate reviewed commits."

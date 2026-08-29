@@ -1,0 +1,32 @@
+[package]
+name = "mark1-receipt"
+version.workspace = true
+edition.workspace = true
+# NOT license.workspace (= UNLICENSED). This crate is Apache-2.0 for a structural reason, not a
+# generous one: tools/verifier is Apache-2.0 and published, and it depends on THIS crate. A
+# proprietary dependency makes the verifier unbuildable by the customer and unpublishable to
+# crates.io (which refuses a package whose dependencies are not themselves published) — which
+# would reduce "a standalone verifier validates the chain offline, with our server unreachable"
+# to marketing. The receipt format IS the public contract: canonical bytes, the domain prefix,
+# the Merkle checkpoint and key_id derivation are things a customer must be able to re-implement
+# to check our work. There is no moat in them; the moat is the corpus. Nothing else in the
+# workspace changes license — fusion, policy, redaction and the wire remain UNLICENSED.
+license = "Apache-2.0"
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = { workspace = true }            # checkpoint Merkle over event_id leaves (04 §7.2)
+sha2 = { workspace = true }              # key_id = "ed25519:" + sha256(pub)[:16]
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }        # canonical_bytes operates on serde_json::Value
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+constant_time_eq = { workspace = true }  # hash/signature comparison
+
+[dev-dependencies]
+proptest = { workspace = true }

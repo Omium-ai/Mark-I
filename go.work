@@ -1,0 +1,8 @@
+go 1.25.0
+
+use (
+	./go/controld
+	./go/mark1
+	./go/mark1d
+	./proto/gen/go
+)

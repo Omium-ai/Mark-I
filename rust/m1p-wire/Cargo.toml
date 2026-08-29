@@ -1,0 +1,26 @@
+[package]
+name = "m1p-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# UNLICENSED is proprietary AND is not a valid SPDX expression. `publish = false` is what makes
+# that non-negotiable: it stops `cargo publish` in the wrong directory (crates.io is append-only
+# -- yank hides, it does not delete) and it is the condition cargo-deny's `private.ignore` keys
+# off, so the licence gate can pass on our own crates without weakening it for dependencies.
+publish = false
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+prost = { workspace = true }
+prost-types = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+# NOTE: no build.rs — gen/m1p.v1.rs is the committed, `just gen`-staged copy of
+# proto/gen/rust/m1p.v1.rs and is include!'d by src/lib.rs (13 §2.4).
+
+[dev-dependencies]
+proptest = { workspace = true }

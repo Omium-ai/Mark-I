@@ -1,0 +1,144 @@
+// proto/m1p/v1/intelligence.proto
+//
+// Context injections, routing decisions, and coverage transitions.
+//
+// Message bodies are transcribed from 07 §4 (CortexInjection, MemoryInjection,
+// RouteDecision) and 07 §3 (CoverageTransition), which are authoritative for
+// every transmitted byte. 13 §1 assigns these four messages to this file;
+// verify.proto takes the verification half of 07 §4.
+//
+// Semantics: 04 §6.7 (cortexd's L0/L2 index and the token-budget binary
+// search), 06 §9.5 (memory injection rules), 06 §11 (off-policy evaluation and
+// the fidelity filter), 04 §2.7 (the single coverage door).
+//
+// Privacy classes, per 07 §3: [P0] operational, [P1] pseudonymous. No [P2]
+// content-derived field appears here.
+//
+// No message in this file carries identity: event_id, session_id, task_id and
+// the server-stamped tenant_id/device_id all live on m1p.v1.Event (07 §2).
+// This file does not import envelope.proto — envelope.proto imports the body
+// files, so the dependency edge runs one way only.
+
+syntax = "proto3";
+
+package m1p.v1;
+
+// ---------------------------------------------------------------------------
+// Injections (contracts C6/C8) — 07 §4
+// ---------------------------------------------------------------------------
+
+// Emitted on every cortex map serve (04 §6.7). The map is assembled at index
+// settle, not at query time: PPR over L2 seeded by the live recent-edit set,
+// files ranked, per-file symbol signatures emitted richest-first, then a binary
+// search over inclusion depth until the rendering fits token_budget.
+message CortexInjection {
+  bytes root_hash = 1;      // [P1] L0 merkle root the map was computed at —
+                            //      the same root that stamps
+                            //      AnchorIntegrity.worktree_merkle_root, so
+                            //      ledger joins know exactly what tree an
+                            //      answer described (04 §6.7)
+  uint64 index_clock = 2;   // [P0] cortexd's monotonic index generation
+  uint32 token_budget = 3;  // [P0] budget the map was binary-searched into
+  uint32 tokens_used = 4;   // [P0] the served-set size; also the join key for
+                            //      TVO's reexploration_tokens term, which is
+                            //      claimable only where a CortexInjection
+                            //      exists — no counterfactual model (06 §8.3)
+  InjectionChannel channel = 5; // [P0]
+}
+
+// Emitted on every memory-artifact serve (06 §9.5): the TaskOpen pack, or a
+// reactive pitfall_remedy fired by a matching PostToolUseFailure signature.
+// At most m_inject = 3 artifacts per task (D30) — ArtifactOutcome attribution
+// is only recorded for injection sets at or below that bound, because
+// ADMIT-LCB's samples assume near-additive utility.
+message MemoryInjection {
+  repeated bytes artifact_ids = 1;  // [P1] admitted artifacts delivered
+  InjectionChannel channel = 2;     // [P0]
+  uint32 tokens_used = 3;           // [P0] injection cost — TVO numerator input
+}
+
+enum InjectionChannel {
+  INJECTION_CHANNEL_UNSPECIFIED = 0;
+  INJECTION_CHANNEL_SESSION_START = 1;
+  INJECTION_CHANNEL_HOOK_CONTEXT = 2;
+  INJECTION_CHANNEL_MCP_PULL = 3;
+  INJECTION_CHANNEL_REACTIVE_PITFALL = 4;  // PostToolUseFailure-triggered
+}
+
+// ---------------------------------------------------------------------------
+// Routing (contract C9) — 07 §4
+// ---------------------------------------------------------------------------
+
+// One routing decision. This is the OPE logging row: 06 §11.1 consumes
+// (context, action, reward, propensity) tuples, and 06 §11.2 filters them by
+// fidelity before either estimator sees them.
+message RouteDecision {
+  bytes decision_id = 1;          // [P1] 16-byte UUIDv7
+  string action = 2;              // [P0] chosen rung, e.g. "claude-haiku-4-5"
+  repeated string candidates = 3; // [P0] the ladder considered
+  double propensity = 4;          // [P0] P(action | policy). ε defaults to 0,
+                                  // so this is logged HONESTLY as 1.0 — never
+                                  // fabricate exploration that didn't happen;
+                                  // OPE over fake propensities is confident
+                                  // garbage. 06 §11.4 states what ε = 0 does
+                                  // and does not license concluding; the fix
+                                  // is a per-tenant contractual opt-in to
+                                  // ε = 0.03–0.05, never a prettier number here
+  RouteFidelity fidelity = 5;     // [P0]
+  uint64 bundle_seq = 6;          // [P0] policy provenance
+}
+
+// How strongly the decision actually bound the request. This is the OPE input
+// filter (06 §11.2), not a description of intent.
+enum RouteFidelity {
+  ROUTE_FIDELITY_UNSPECIFIED = 0;
+  // The proxy rewrote the request on the wire; the decision provably bound.
+  // DR/SNIPS consumes ONLY these — the logged action IS the executed action,
+  // so propensity is the true propensity of what happened.
+  ROUTE_FIDELITY_WIRE_ENFORCED = 1;
+  // We steered agent config; the agent may or may not have obeyed. Enters OPE
+  // only after a served-model confirmation join against Usage events;
+  // unconfirmed or contradicted rows are excluded.
+  ROUTE_FIDELITY_CONFIG_STEERED = 2;
+  // A suggestion surfaced to the human. Never enters OPE — its propensity
+  // describes an intention, not an event.
+  ROUTE_FIDELITY_ADVISORY = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Coverage (contract C13) — 07 §3
+// ---------------------------------------------------------------------------
+
+// Per-event receipted. Every capture-affecting state change routes through the
+// single coverage.Transition() door (04 §2.7) and lands here with a reason
+// code, so every enable/disable/bypass window is attributable AND provable:
+// the receipt row carries a NOT NULL receipt_id (07 "Coverage") and the
+// offline verifier can recompute the coverage band from the customer's own
+// receipt chain.
+//
+// Durability: DIAGNOSTIC — spool class byte 2, drop-newest on a full spool,
+// never blocking a writer. Receipted and block-on-full are independent
+// properties: 07 §6 closes the billing-grade set at exactly {usage,
+// verdict_event, receipt_checkpoint}, so stamping class byte 1 here would hand
+// coverage records a backpressure contract 07 never authorized.
+//
+// Downstream: band = observed_ms / (observed_ms + bypass_ms + disabled_ms),
+// narrowed by billing-grade Dropped{} accounting (07 "Coverage");
+// guarantee-grade TVO issuance is REFUSED below the coverage floor
+// (M1E-5004), not footnoted.
+message CoverageTransition {
+  CoverageKind kind = 1;    // [P0]
+  bytes workspace_id = 2;   // [P1] HMAC_tenant(workspace root path)
+  uint64 duration_ms = 3;   // [P0] length of a closed bypass window; 0 otherwise
+  string reason_code = 4;   // [P0] machine code: "mark1_off" | "disk_hard_stop" |
+                            //      "user_enable" | "proxy_bypass" |
+                            //      "proxy_failed" | "unsupported_agent_version" |
+                            //      "transcript_retention_gap" (04 §2.7)
+}
+
+enum CoverageKind {
+  COVERAGE_KIND_UNSPECIFIED = 0;
+  COVERAGE_KIND_ENABLE = 1;
+  COVERAGE_KIND_DISABLE = 2;
+  COVERAGE_KIND_BYPASS = 3;  // capture degraded (e.g. proxy auto-bypass)
+}

@@ -1,0 +1,35 @@
+# omium-mark1 CODEOWNERS — most-specific-last wins (GitHub semantics).
+
+# Default: everything needs a core review.
+*                                   @Omium-ai/mark1-core
+
+# --- Contract surfaces: a change here is a change to what Mark 1 *is* ---
+/proto/                             @Omium-ai/mark1-core @Omium-ai/mark1-security
+/migrations/                        @Omium-ai/mark1-core @Omium-ai/mark1-security
+/docs/07-data-model.md              @Omium-ai/mark1-core @Omium-ai/mark1-security
+/docs/08-api-contracts.md           @Omium-ai/mark1-core @Omium-ai/mark1-security
+/docs/adr/                          @Omium-ai/mark1-core @Omium-ai/mark1-security
+
+# --- Security-relevant code paths: legality, secrets, tenancy, signing ---
+/rust/mark1-proxy/src/guard/        @Omium-ai/mark1-security
+/rust/mark1-redact/                 @Omium-ai/mark1-security
+/rust/mark1-receipt/                @Omium-ai/mark1-security
+/rust/mark1-policy/src/verify.rs    @Omium-ai/mark1-security
+/go/mark1d/internal/identity/       @Omium-ai/mark1-security
+/go/mark1d/internal/capture/        @Omium-ai/mark1-security
+/go/controld/internal/auth/         @Omium-ai/mark1-security
+/go/controld/internal/querychoke/   @Omium-ai/mark1-security
+/go/controld/internal/dprelease/    @Omium-ai/mark1-security
+/python/shared/mark1_receipts/      @Omium-ai/mark1-security
+/tools/verifier/                    @Omium-ai/mark1-security
+
+# --- The gates that enforce the design must not be quietly weakened ---
+/tools/ci/                          @Omium-ai/mark1-security
+/deny.toml                          @Omium-ai/mark1-security
+/.golangci.yml                      @Omium-ai/mark1-security
+/.github/workflows/                 @Omium-ai/mark1-security
+/CODEOWNERS                         @Omium-ai/mark1-security
+
+# --- Conformance fixtures are evidence; changing evidence is a security review ---
+/conformance/canary/                @Omium-ai/mark1-security
+/conformance/tenancy/               @Omium-ai/mark1-security

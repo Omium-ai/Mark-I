@@ -1,0 +1,57 @@
+[package]
+name = "cortexd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# UNLICENSED is proprietary AND is not a valid SPDX expression. `publish = false` is what makes
+# that non-negotiable: it stops `cargo publish` in the wrong directory (crates.io is append-only
+# -- yank hides, it does not delete) and it is the condition cargo-deny's `private.ignore` keys
+# off, so the licence gate can pass on our own crates without weakening it for dependencies.
+publish = false
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# --- runtime + the MCP loopback server (04 §6.5, 08 §6) ---
+tokio = { workspace = true }
+axum = { workspace = true }
+http = { workspace = true }
+bytes = { workspace = true }
+
+# --- L0..L3 index stack (04 §6.1) ---
+notify = { workspace = true }
+blake3 = { workspace = true }
+memmap2 = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-python = { workspace = true }
+tree-sitter-rust = { workspace = true }
+tree-sitter-go = { workspace = true }
+tree-sitter-typescript = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+petgraph = { workspace = true }
+redb = { workspace = true }
+rusqlite = { workspace = true }        # CAS keyed (path, content_hash, grammar_rev, query_rev, indexer_rev)
+zstd = { workspace = true }            # CAS artifact bodies (07 §derived artifacts)
+
+# --- workspace crates ---
+m1p-wire = { workspace = true }        # CortexInjection + L0 root pushes over M1PL
+mark1-policy = { workspace = true }    # the bundle's `cortex` section, fail-static
+
+# --- misc ---
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+libc = { workspace = true }            # nice(19) + IOPRIO_CLASS_IDLE for full-index passes
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }     # named-pipe fabric, IDLE_PRIORITY_CLASS
+
+[dev-dependencies]
+tempfile = { workspace = true }

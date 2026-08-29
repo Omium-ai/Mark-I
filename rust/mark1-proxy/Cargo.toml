@@ -1,0 +1,72 @@
+[package]
+name = "mark1-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# UNLICENSED is proprietary AND is not a valid SPDX expression. `publish = false` is what makes
+# that non-negotiable: it stops `cargo publish` in the wrong directory (crates.io is append-only
+# -- yank hides, it does not delete) and it is the condition cargo-deny's `private.ignore` keys
+# off, so the licence gate can pass on our own crates without weakening it for dependencies.
+publish = false
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# --- runtime + HTTP hot path (04 §3.2) ---
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+tower = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+
+# --- upstream TLS (04 §3.4: pools keyed (upstream, credential-identity)) ---
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+webpki-roots = { workspace = true }
+
+# --- workspace crates ---
+m1p-wire = { workspace = true }
+mark1-frames = { workspace = true }
+mark1-policy = { workspace = true }
+mark1-receipt = { workspace = true }   # per-event receipted oauth_contamination (04 §3.1(6))
+mark1-redact = { workspace = true }    # both axes: redact-in-transit + spill admit
+
+# --- provenance guard: HMAC fingerprint, constant-time compare, Secret<T> custody (04 §3.1/§3.3) ---
+hmac = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+
+# --- tee spill ring: sealed to the device X25519 key, framed len|crc32c|nonce|ct (04 §5.4, 07) ---
+x25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+crc32c = { workspace = true }
+
+# --- misc ---
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+libc = { workspace = true }            # RLIMIT_CORE=0 + PR_SET_DUMPABLE=0 before credential load
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "latency"
+harness = false

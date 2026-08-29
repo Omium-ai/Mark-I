@@ -1,0 +1,32 @@
+[package]
+name = "mark1-redact"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# UNLICENSED is proprietary AND is not a valid SPDX expression. `publish = false` is what makes
+# that non-negotiable: it stops `cargo publish` in the wrong directory (crates.io is append-only
+# -- yank hides, it does not delete) and it is the condition cargo-deny's `private.ignore` keys
+# off, so the licence gate can pass on our own crates without weakening it for dependencies.
+publish = false
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aho-corasick = { workspace = true }   # prefilter before the regex confirm (04 §7.1)
+regex = { workspace = true }
+hmac = { workspace = true }           # per-tenant HMAC of a redacted span
+sha2 = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }        # pre-image bytes are wiped, never persisted
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "throughput"
+harness = false

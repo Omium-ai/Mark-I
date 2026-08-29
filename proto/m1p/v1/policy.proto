@@ -1,0 +1,211 @@
+// proto/m1p/v1/policy.proto
+//
+// The protobuf side of the policy plane. File assignment per 13 §1's repo tree:
+// "policy.proto — bundle ACK types, GuardDecision (bundle body itself is
+// CBOR, 07)".
+//
+// ---------------------------------------------------------------------------
+// WHAT IS DELIBERATELY NOT IN THIS FILE
+// ---------------------------------------------------------------------------
+//
+// * The PolicyBundle body. It is canonically-encoded CBOR (RFC 8949 §4.2.1
+//   deterministic encoding), six sections, section-split Ed25519 signatures —
+//   defined in 07 "PolicyBundle v1 — the canonical CBOR schema" and decoded by
+//   `mark1-policy` (Rust) with a conformance-validated Go twin in `mark1d`.
+//   Signatures are over BYTES. A protobuf mirror of the body would be a second
+//   encoding of a signed object, i.e. exactly the canonicalisation mismatch
+//   07's bundle catalog refuses ("storing anything but those bytes invites a
+//   canonicalization mismatch between what we signed and what we serve").
+//
+// * `wasm_module`, in any form, including a reserved slot for one. 07 §1 is
+//   normative and explicit: "There is no `wasm_module` field in `m1p.v1`, and
+//   no reserved slot for one. The bundle→RCE branch is deleted, not parked."
+//   No field number was ever assigned to it, so there is no burned number to
+//   `reserved` — and a reserved slot would itself be the parking space the
+//   design refuses. 07 decode rule 4 restates it for the CBOR side. If learned
+//   policy ever needs executable code that is `PolicyBundle v2` under a
+//   separately held signing key and an ADR-level decision, never a field.
+//
+// * Any field that can carry a command string. 07 decode rule 1: "There is no
+//   field in this schema whose value is executed, evaluated, templated into a
+//   shell, or loaded as a module." Rule 2: anchors are enabled by
+//   LOCAL-CATALOG ID only — the catalog lives on the device, is user-consented,
+//   and a bundle can turn a consented anchor on or off but cannot introduce,
+//   rename or define one. Every bundle-influenced vocabulary below is closed:
+//   as a proto enum where the published wire form permits one, and as a fixed
+//   list validated at ingest where 08 §3.2 already fixed the wire form as a
+//   string (see BundleAck). Every `string` field is justified inline at its
+//   declaration, and none is an input to any executor.
+//
+// * Identity. `tenant_id`, `device_id` and `session_id` belong to the envelope
+//   (07 §2) and are stamped by `controld` from VERIFIED bearer-token claims,
+//   never read from a client-supplied body. envelope.proto is NOT imported
+//   here: envelope.proto imports THIS file (Event.body carries GuardDecision at
+//   field 20, 07 §2), and protobuf forbids import cycles — which buf STANDARD
+//   also enforces via PACKAGE_NO_IMPORT_CYCLE. Nothing in this file redeclares
+//   an identity field.
+
+syntax = "proto3";
+
+package m1p.v1;
+
+// ---------------------------------------------------------------------------
+// GuardDecision — the OAuth-provenance guard (04 §3.1, contract C5/C-05)
+// ---------------------------------------------------------------------------
+
+// Sampled record of the OAuth-provenance guard. Reproduced from 07 §3
+// ("Coverage, guard, receipts, loss accounting"); 13 §1 files it here rather
+// than in events.proto because the guard is policy-plane surface.
+//
+// WHY THE REFUSAL IS PROVABLE, and what each field contributes to that claim:
+//   * `outcome` + `reason_code` say what the guard did and why;
+//   * `cred_fingerprint` binds the decision to a specific enrolled credential
+//     (04 §3.1 step 3: constant-time compare against the fingerprint recorded
+//     at provisioning), so a refusal names WHICH credential was refused
+//     without carrying the credential;
+//   * `sample_rate` is carried so honest rates reconstruct — a decision stream
+//     with an unrecorded sampling rate supports no rate claim at all;
+//   * the surrounding Event supplies event_id, occurred_at, session_id and the
+//     server-stamped tenant_id/device_id (07 §2);
+//   * and the whole thing is receipted: 07's receipt-class table gives
+//     `guard_contamination` its own chain link, `subject_id` = this event's
+//     event_id, carrying `checkpoint_seq` + `inclusion_path` + `leaf_index`
+//     into an already-sealed, device-signed checkpoint. That link is what makes
+//     the refusal evidence rather than an assertion.
+//
+// Nothing here can name a command: `reason_code` is emitted by our own binary
+// from a closed vocabulary and is never evaluated, and there is no field for a
+// request line, a URL, a header value or a process argument.
+message GuardDecision {
+  GuardOutcome outcome = 1;     // [P0] 07 §3
+
+  // [P1] HMAC_tenant of the enrollment-matched credential fingerprint,
+  // 32 bytes (07 §3). A digest, not the credential; per-tenant-keyed for the
+  // reason 07 §4 gives for every low-entropy digest — a plain hash of a small
+  // vocabulary is dictionary-invertible and cross-tenant-joinable.
+  bytes cred_fingerprint = 2;
+
+  // [P0] Probability this decision was emitted. 07 §3: carried so honest rates
+  // reconstruct. A refusal sample of 1.0 is what lets the compliance surface
+  // speak about refusals rather than about a sample of them.
+  double sample_rate = 3;
+
+  // [P0] Machine code: "unprovisioned_cred" | "oauth_marker" | ... (07 §3;
+  // 04 §3.1 names the first). A closed, edge-emitted vocabulary — never
+  // customer text, never bundle-supplied, never executed. Kept as a string
+  // verbatim from 07 §3, which is frozen; ingest length/charset validation is
+  // the server-side guard on it.
+  string reason_code = 4;
+}
+
+// 07 §3, verbatim.
+enum GuardOutcome {
+  GUARD_OUTCOME_UNSPECIFIED = 0;
+  GUARD_OUTCOME_FORWARDED = 1;
+  GUARD_OUTCOME_REFUSED = 2;  // 403, no override path exists in the binary
+}
+
+// ---------------------------------------------------------------------------
+// Bundle ACK — the other half of policy distribution (05 §4.3, 08 §3.2)
+// ---------------------------------------------------------------------------
+
+// What an edge reports after it verified (or refused) a distributed bundle.
+// 07 "Policy bundles": "The ACK ledger is the other half of distribution: the
+// edge reports which seq it verified and activated, and the canary query below
+// is the only input the rollout controller trusts, because 'we pushed it' is a
+// claim and 'the device ACKed it' is a record."
+//
+// Field set is 05 §4.3's: "(channel, seq, bundle_hash, result:
+// applied|rejected|partial, sections_skipped[], reject_code)". The same section
+// then states what is NOT in the body — "the ledger row adds `device_id` (from
+// the token stamp), `edge_version`, and `acked_at`" — so those three are
+// server-derived from the authenticated request and are absent here by design;
+// a client-supplied device_id would be the trust-boundary mistake 07 §2's
+// advisory-field note exists to prevent.
+//
+// WIRE FORM OF THE VOCABULARY FIELDS. `result`, `sections_skipped` and
+// `reject_code` are strings, not proto enums, because 08 §3.2's ACK body is
+// the normative wire form ("applied", ["cortex"], "M1E-3001") and buf.yaml
+// pins `breaking: WIRE_JSON`, which freezes the JSON projection an enum would
+// render as BUNDLE_ACK_RESULT_APPLIED. Enums here would have moved each
+// vocabulary's closure onto the wire and broken the published contract to buy
+// it; the closure lives at INGEST instead, which MUST reject an ACK carrying a
+// value outside the lists given at each field — the same server-side guard
+// GuardDecision.reason_code relies on, and what lets 05 §4.3's halt rule key
+// on the exact string "M1E-3005". Nothing here is evaluated, so a bundle still
+// cannot round-trip a command string back to us through an ACK; `channel` is
+// the one free-text value and is justified at its declaration.
+message BundleAck {
+  // Rollout channel: "canary" | "stable" | agent-specific channels. `string`
+  // and not an enum on 07's explicit reasoning ("text, not enum: adding a
+  // channel is a rollout decision, not a schema migration"). Safe as free text
+  // because it is echoed back from what the server itself published, is used
+  // only as a lookup key into `policy_bundles (tenant_id, channel, seq)`, and
+  // is never evaluated; an unknown channel is 404 M1E-3004 (08 §3.2).
+  string channel = 1;
+
+  // The bundle sequence being ACKed. Monotonic per (tenant, channel); the
+  // catalog makes a regression or a gap an INSERT that cannot commit
+  // (07 "Policy bundles", trg_bundle_seq_monotonic). uint64 renders as a JSON
+  // STRING ("483") under proto3's canonical mapping, so 08 §3.2's unquoted 483
+  // is the side that moves — the type is not narrowed to flatter an example.
+  uint64 seq = 2;
+
+  // 32 bytes: the hash of the bundle's canonical CBOR bytes, as stored in
+  // `policy_bundles.body_sha256` (07) and as leafed into the transparency log
+  // (05 §4.4: "leaves are SHA-256(bundle canonical bytes)"). Carried raw rather
+  // than as an algorithm-prefixed string so the ACK cannot disagree with the
+  // catalog about encoding. NOTE: 08 §3.2 renders this JSON field as
+  // "blake3:…" while 07 and 05 both specify SHA-256 — a documented
+  // disagreement about the algorithm LABEL only; the field is 32 bytes either
+  // way and the label is out-of-band.
+  bytes bundle_hash = 3;
+
+  // "applied" | "rejected" | "partial" (08 §3.2, 05 §4.3). Empty or
+  // unrecognised is not an ACK and is rejected rather than defaulted, because
+  // the canary controller's denominator treats silence and refusal differently
+  // (07 "Policy bundles": "a failed verify is an ACK too"). 07's
+  // `bundle_acks.result` column stores THESE THREE VALUES VERBATIM and is
+  // CHECK-constrained to them: 05 §4.2 assigns ownership of the ACK contract
+  // to 08 §3.2, so there is one vocabulary and no mapping to get wrong. It
+  // once held a second one ('verified_active' | 'verify_failed' |
+  // 'stale_rejected') that two documents claimed the ledger "mapped" without
+  // either one stating the mapping -- a promise, not a specification. Nothing
+  // was lost closing it: the verify/stale split is `reject_code` below at
+  // finer grain, and that vocabulary could not say "partial" at all.
+  string result = 4;
+
+  // Sections the edge kept at last-known-good because their `section_version`
+  // was newer than this edge understands (08 §10.3 rule 2, skip-and-retain).
+  // 07's fixed six, verbatim from its CDDL: "verify" | "route" | "memory" |
+  // "cortex" | "gates" | "agent_maps". The canary controller halts a rollout
+  // on `partial > 20%` (05 §4.3), so ingest refusing an off-vocabulary name is
+  // what stops a typo'd or attacker-chosen section from perturbing the count.
+  // An edge that skipped a section it cannot even name still reports
+  // "partial", which already counts as non-adoption.
+  repeated string sections_skipped = 5;
+
+  // Why the bundle was refused: 08 §9's policy error codes. "M1E-3001"
+  // (signature invalid on any section, including the `prev_hash` mismatch fork
+  // family — a security event), "M1E-3002" (seq <= last-accepted: regression
+  // or replay; rollback is previous content under a HIGHER seq per 05 §4.6, so
+  // this check has no exception path), "M1E-3003" (transparency-log inclusion
+  // proof missing or invalid against the pinned log head), "M1E-3005" (A
+  // COMMAND STRING REACHED AN EDGE DECODER: the whole bundle is rejected,
+  // never piecewise, and one occurrence halts the rollout), "M1E-3006"
+  // (past `max_age` with the control plane unreachable — the edge falls to
+  // built-in defaults and flags verdicts `stale_cert`). All fail-static.
+  // "M1E-3004" is absent on purpose: unknown channel is a server 404, so it
+  // can never be an edge ACK.
+  //
+  // MUST be empty when result is "applied" and MUST be set otherwise — the
+  // server rejects an ACK that violates either half, because "rejected with no
+  // reason" is the shape that makes an incident unattributable.
+  string reject_code = 6;
+}
+
+// No BundleAckResult / BundleSection / BundleRejectCode enums: with the three
+// fields carrying 08 §3.2's strings, an enum here would name a vocabulary it
+// no longer constrains, and generate three dead types in three languages that
+// a reader could mistake for the wire form. The vocabularies live at their
+// fields, which is the only place they bind anything.

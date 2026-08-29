@@ -1,0 +1,290 @@
+# omium-mark1 CI — a thin matrix over the justfile recipes. THE JUSTFILE IS THE CI CONTRACT:
+# every job below invokes a recipe a developer can run locally, so a gate that passes locally and
+# fails here is a bug in the recipe, not in the environment.
+#
+# Required checks (branch protection on main): gen, contracts, rust, go, python, gates,
+# fuzz-smoke, integration, security, bench-gate.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Tool pins. A floating tool version is a statement about *time* (13 §9.5).
+  GO_VERSION: "1.25.0"
+  GOLANGCI_VERSION: "v2.1.6"
+  GOVULNCHECK_VERSION: "v1.1.4"
+  PIP_AUDIT_VERSION: "2.9.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Proto: the ratchet. Wired from the very first proto commit (13 §5.5).
+  # ---------------------------------------------------------------------------
+  gen:
+    name: gen
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # buf breaking --against '.git#branch=main' needs history
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
+      - uses: extractions/setup-just@v2
+      - run: just gen-check
+      - run: just lint-proto
+
+  # ---------------------------------------------------------------------------
+  # The contract-sync rule (13 §10.3): a contract diff must carry its doc diff.
+  # ---------------------------------------------------------------------------
+  contracts:
+    name: contracts
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: extractions/setup-just@v2
+      - run: just contracts "${{ github.event.pull_request.base.sha }}"
+
+  # ---------------------------------------------------------------------------
+  # Three-OS coverage for Rust and Go is non-negotiable from day one: the edge ships to all
+  # three and 04 §11.5 documents real per-OS SEMANTIC differences, not just build differences.
+  # ---------------------------------------------------------------------------
+  rust:
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable   # rust-toolchain.toml pins the actual channel
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - run: cargo install cargo-deny --locked --version 0.16.4
+      - run: just lint-rust
+      - run: just test-rust
+
+  go:
+    name: go (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # 13 §3.5 calls CGO_ENABLED=0 load-bearing and says CI asserts it. Building under it, rather
+    # than echoing its value, is what makes that an assertion: a dependency that needs cgo —
+    # arriving transitively, as somebody else's default — fails `just build-go` here instead of
+    # at the first release that tries to cross-compile a static binary out of it.
+    env:
+      CGO_ENABLED: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: extractions/setup-just@v2
+      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${{ env.GOLANGCI_VERSION }}
+      - run: go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
+      - run: just build-go
+      - run: just lint-go
+      - run: just test-go
+
+  python:
+    name: python
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: extractions/setup-just@v2
+      - run: |
+          uv tool install "pip-audit==${PIP_AUDIT_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: just lint-py
+      - run: just test-py
+
+  # ---------------------------------------------------------------------------
+  # The design-enforcing gates (13 §7.5) + cross-language conformance vectors.
+  # ---------------------------------------------------------------------------
+  gates:
+    name: gates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: extractions/setup-just@v2
+      - run: just gates
+      - run: just conformance
+
+  fuzz-smoke:
+    name: fuzz-smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - run: cargo install cargo-fuzz --locked --version 0.12.0
+      - run: just fuzz 60
+
+  # ---------------------------------------------------------------------------
+  # Store-backed suites — the tenant-isolation lane. 12 §11.4 is normative:
+  #   real stores on EVERY PR, provisioned as NATIVE BINARIES on the Linux runner.
+  #   No Docker. No testcontainers. No service containers. No skip-if-absent.
+  # M1_REQUIRE_STORES=1 inverts the estate's skipif idiom — a missing DSN is a hard error and the
+  # required suites assert zero skips. The decorative-RLS incident was invisible precisely because
+  # nothing ever executed against a real Postgres as the real role.
+  # ---------------------------------------------------------------------------
+  integration:
+    name: integration
+    runs-on: ubuntu-24.04
+    env:
+      M1_REQUIRE_STORES: "1"
+      # These override the justfile's defaults, so they have to track them exactly — the store
+      # contract lives at the top of the justfile and this block is its only other copy.
+      M1_TEST_PG_DSN: postgres://mark1:mark1@127.0.0.1:5432/mark1_test
+      M1_TEST_CH_DSN: http://127.0.0.1:8123/?database=default
+      M1_TEST_S3_ENDPOINT: http://127.0.0.1:9002
+      # `just migrate` sends m1_ch_*.sql to a ClickHouse client and refuses to run at all without
+      # CLICKHOUSE_HOST (scripts/migrate-db.sh §"ClickHouse lane"). What `stores-up` provisions is
+      # the multi-call binary, not a `clickhouse-client` on PATH, so the command is several words
+      # — migrate-db.sh reads it into an argv array, which is what makes that legal.
+      #
+      # Host and port are on argv, not in the environment: the pinned 24.8 client honours only
+      # CLICKHOUSE_USER and CLICKHOUSE_PASSWORD from the environment (the binary contains no
+      # other CLICKHOUSE_* name), so CLICKHOUSE_HOST alone would leave it on its localhost
+      # default — right here by luck, wrong anywhere else. CLICKHOUSE_HOST is still set because
+      # migrate-db.sh's precondition demands it before it will apply anything.
+      CLICKHOUSE_HOST: "127.0.0.1"
+      CLICKHOUSE_CLIENT: ".stores/bin/clickhouse client --host 127.0.0.1 --port 9000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: extractions/setup-just@v2
+      - name: Provision Postgres + ClickHouse + MinIO as native binaries
+        run: just stores-up
+      - name: Migrate (idempotency asserted by applying twice)
+        run: |
+          just migrate "$M1_TEST_PG_DSN"
+          just migrate "$M1_TEST_PG_DSN"
+      - run: just test-integration
+      - run: just test-isolation
+      - name: Store logs on failure
+        if: failure()
+        run: tail -n 200 .stores/log/*.log || true
+
+  security:
+    name: security
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+      - name: hadolint every Dockerfile
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /usr/local/bin/hadolint \
+            https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+          chmod +x /usr/local/bin/hadolint
+          find . -name Dockerfile -not -path './.git/*' -print0 | xargs -0 -r hadolint
+
+  # ---------------------------------------------------------------------------
+  # Benchmarks. 12 §7.1's absolute budgets are only meaningful on the pinned runner class
+  # (bench/RUNNER.md); GitHub-hosted numbers have variance that is not ours to control.
+  #
+  # The runner is a real machine somebody has to own. Until it exists — or on any day it is
+  # down — this stage DEFERS to the mandatory pre-release bench in release.yml and says so
+  # loudly. It is never silently skipped, and it never blocks every merge in the repo on the
+  # liveness of one unowned box. Set the repo variable MARK1_BENCH_RUNNER to the runner's label
+  # to arm the gating lane; clear it to disarm.
+  # ---------------------------------------------------------------------------
+  bench:
+    name: bench
+    if: vars.MARK1_BENCH_RUNNER != ''
+    runs-on: [self-hosted, "${{ vars.MARK1_BENCH_RUNNER }}"]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v2
+      - run: just bench
+
+  bench-deferred:
+    name: bench-deferred
+    if: vars.MARK1_BENCH_RUNNER == ''
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Announce the deferral loudly
+        run: |
+          set -eu
+          MSG="BENCHMARKS DEFERRED: no pinned bench runner is configured (repo variable
+          MARK1_BENCH_RUNNER is empty). 12 §7.1's latency/throughput budgets are NOT checked on
+          this PR. They WILL be checked, mandatorily and without a fallback, by the 'bench'
+          job in release.yml before any artifact is published — a regression cannot ship, it
+          can only merge and then block the release."
+          echo "::warning title=Benchmarks deferred to release::${MSG}"
+          {
+            echo "### :hourglass: Benchmarks deferred"
+            echo
+            echo "${MSG}"
+            echo
+            echo "Owner action: provision the pinned runner class (see \`bench/RUNNER.md\`),"
+            echo "register it self-hosted, and set repo variable \`MARK1_BENCH_RUNNER\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The single required check for the bench stage: red when a benchmark actually regressed,
+  # green when it ran clean or was explicitly deferred — and red if neither happened, so
+  # "both jobs skipped" can never masquerade as a pass.
+  bench-gate:
+    name: bench-gate
+    runs-on: ubuntu-24.04
+    needs: [bench, bench-deferred]
+    if: always()
+    steps:
+      - run: |
+          set -eu
+          echo "bench=${{ needs.bench.result }} bench-deferred=${{ needs.bench-deferred.result }}"
+          case "${{ needs.bench.result }}" in
+            success) echo "Benchmarks ran on the pinned runner and met 12 §7.1's budgets."; exit 0 ;;
+            failure) echo "::error title=Benchmark regression::A gated benchmark exceeded its budget. There is no perf-waiver label (12 §7.3): raise the budget in 02 and 12 in its own PR, or fix the regression."; exit 1 ;;
+          esac
+          if [ "${{ needs.bench-deferred.result }}" != "success" ]; then
+            echo "::error title=Bench stage did not run::Neither the pinned-runner bench nor the deferral notice completed. The stage must never be silently absent."
+            exit 1
+          fi
+          echo "Benchmarks deferred to the mandatory pre-release run in release.yml."

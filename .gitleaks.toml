@@ -1,0 +1,149 @@
+# omium-mark1 gitleaks config — the estate's config (Omium-platform/.gitleaks.toml), carried over
+# with the estate-only paths dropped and a narrow, path-scoped allowlist for conformance fixtures.
+#
+# The estate's rules exist because each one caught something that was actually committed. They are
+# kept verbatim rather than re-derived; the comments say what they caught.
+
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Custom rules — things gitleaks' default set does NOT catch.
+# ---------------------------------------------------------------------------
+
+# A Supabase service_role JWT sat in an estate design doc in plaintext, valid until 2035, and the
+# default rule set did not flag it. Any JWT with a payload is a finding: if it decodes, it was
+# minted against something real.
+[[rules]]
+id = "omium-jwt"
+description = "JWT (three base64url segments). A committed JWT is a committed credential."
+regex = '''\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'''
+keywords = ["eyJ"]
+
+[[rules]]
+id = "omium-jwt-unsigned"
+description = "Unsigned or truncated JWT — still leaks issuer, role and project."
+regex = '''\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{20,}'''
+keywords = ["eyJ"]
+
+# Omium's own API-key format. Four live keys were found across 21 estate files, several as
+# `os.environ.get(..., "<live key>")` DEFAULTS — a hardcoded fallback that survives any rotation.
+[[rules]]
+id = "omium-api-key"
+description = "Omium API key (omium_ prefix)."
+regex = '''\bomium_[A-Za-z0-9]{24,}'''
+keywords = ["omium_"]
+
+# A key with a fixed format should be matched on its format, not its entropy — the default
+# high-entropy heuristic lets a low-entropy planted key walk past.
+[[rules]]
+id = "omium-fernet-key"
+description = "Fernet / 32-byte base64 encryption key assigned to a key-shaped name."
+regex = '''(?i)\b(encryption[_-]?key|fernet[_-]?key|data[_-]?encryption[_-]?key)\b\s*[=:]\s*["'`]?([A-Za-z0-9_-]{43}=)'''
+secretGroup = 2
+keywords = ["encryption_key", "encryptionkey", "fernet", "ENCRYPTION_KEY"]
+
+[[rules]]
+id = "omium-oauth-client-secret"
+description = "OAuth client secret (40 hex, GitHub App format)."
+regex = '''(?i)\bclient[_-]?secret\b\s*[=:]\s*["'`]?([0-9a-f]{40})\b'''
+secretGroup = 1
+keywords = ["client_secret", "clientsecret", "clientSecret"]
+
+# Mark 1 signing key material. The update key and the bundle key are deliberately separate
+# (09 §11.2); either one in the tree is a release-integrity incident, not a lint finding.
+[[rules]]
+id = "mark1-private-key-block"
+description = "PEM private key block — update key, bundle key, Developer ID key, repo GPG key."
+regex = '''-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY(?: BLOCK)?-----'''
+keywords = ["PRIVATE KEY"]
+
+# A Postgres/ClickHouse/S3 URI with a real inline password. RE2 has no lookahead, so template
+# interpolation is excluded by banning `$ { < % *` as the password's FIRST character.
+[[rules]]
+id = "omium-db-uri-password"
+description = "Database or object-store URI with an inline password."
+regex = '''\b(postgres(?:ql)?|clickhouse|redis|rediss|amqp|amqps|s3|mongodb(?:\+srv)?)://[^\s:/@]+:[^\s:/@$\{<%*][^\s:/@]{7,}@'''
+keywords = ["postgres://", "postgresql://", "clickhouse://", "redis://", "s3://", "amqp://", "mongodb://"]
+
+  # Rule-scoped and matched against the LINE, not the secret: for a URI the rule's capture is the
+  # scheme, so a global allowlist regex never sees the password at all.
+  [rules.allowlist]
+  regexTarget = "line"
+  regexes = [
+    '''omium[_-]?dev[_-]?password''',
+    '''://mark1:mark1@''',
+    '''://placeholder:placeholder@''',
+    '''(?i)://[^\s]*:(password|postgres|secret|changeme|example)@''',
+  ]
+
+# ---------------------------------------------------------------------------
+# Allowlist
+#
+# Deliberately NARROW. The estate's blanket `\.md$` / `docs/` / `tests?/` / `fixtures?/`
+# exemptions were removed after verifying they suppressed zero real findings and had hidden a
+# live service_role JWT for months. Add a path here only with a comment saying what you verified.
+# ---------------------------------------------------------------------------
+[allowlist]
+description = "Generated artifacts, binaries, and documented placeholder patterns."
+
+paths = [
+  # Build output and dependency trees — not authored here.
+  '''(^|/)target/''',
+  '''(^|/)dist/''',
+  '''(^|/)\.venv/''',
+  '''(^|/)__pycache__/''',
+  '''(^|/)\.stores/''',
+
+  # Lockfiles: hashes, not secrets. They MUST stay committed (cargo-deny/pip-audit/govulncheck
+  # are meaningless without them) but scanning their hashes is noise.
+  '''(^|/)Cargo\.lock$''',
+  '''(^|/)uv\.lock$''',
+  '''(^|/)go\.sum$''',
+  '''(^|/)go\.work\.sum$''',
+  '''(^|/)buf\.lock$''',
+
+  # Committed protobuf codegen — machine-generated, never hand-edited (§0.2).
+  '''(^|/)proto/gen/''',
+  '''(^|/)rust/m1p-wire/gen/''',
+
+  # Binaries and PUBLIC key material. This does NOT exempt `.key` or `.pem` — those are exactly
+  # what the rules above exist to catch.
+  '''\.(png|jpg|jpeg|gif|svg|ico|pdf|woff2?|ttf)$''',
+  '''\.pub$''',
+
+  # --- Conformance fixtures (§1). Path-scoped, per-directory, with the reason each is safe. ---
+  #
+  # conformance/canary/token-shapes/ records credential SHAPES only — prefix, length, alphabet,
+  # structural markers — never live values (12 §3.3). Without this exemption the corpus reds the
+  # scanner by construction and the pressure becomes "sanitize the scanner", which is how the
+  # corpus quietly stops being a canary. The directory is CODEOWNERS-owned by mark1-security
+  # (§10.1) precisely because this allowlist exists: the review, not the scanner, is the control.
+  '''(^|/)conformance/canary/token-shapes/''',
+  # Cross-language byte vectors: frozen, generated once by the Rust reference implementation.
+  # High-entropy hashes and signatures, no credentials.
+  '''(^|/)conformance/vectors/''',
+  # Golden SSE transcripts and hook fixtures: recorded sessions, redacted at record time by
+  # mark1-redact before they are ever written (04 §7.1).
+  '''(^|/)conformance/frames/''',
+  '''(^|/)conformance/hooks/''',
+]
+
+regexes = [
+  # Explicit placeholders.
+  '''(?i)(password|secret|token|key)\s*[=:]\s*(["'])?(your[_-]?[a-z_]+|example|placeholder|xxx+|change[-_ ]?me|todo|fixme|dummy|fake|sample|insert[_-]?here|<[^>]+>)(["'])?''',
+  # Template interpolation is a reference, not a value.
+  '''\$\{[^}]+\}''',
+  '''\{\{[^}]+\}\}''',
+  '''\$\([A-Z_]+\)''',
+  # Documented local-dev constants, all of which say so in their own name.
+  '''omium[_-]?dev[_-]?password''',
+  '''minioadmin''',
+]
+
+stopwords = [
+  "example",
+  "placeholder",
+  "changeme",
+  "sample",
+]

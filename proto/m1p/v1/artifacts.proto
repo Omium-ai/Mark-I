@@ -1,0 +1,215 @@
+// proto/m1p/v1/artifacts.proto
+//
+// File assignment per 13 §1's repo tree: "artifacts.proto — ArtifactOutcome,
+// ReceiptCheckpoint, EvidenceRecord". Bodies reproduced from 07 §3 (receipts)
+// and 07 §4 (evidence, outcomes) with field numbers verbatim.
+//
+// ---------------------------------------------------------------------------
+// LAYERING — WHY THIS FILE IMPORTS NOTHING
+// ---------------------------------------------------------------------------
+// This is the import leaf of `m1p.v1`. Everything here is a primitive that
+// another file needs, and nothing here needs another file:
+//   verify.proto   imports it (AnchorVote.evidence is EvidenceRecord;
+//                  JudgeVote.tier_used is EvidenceTier; every vote carries a
+//                  Verdict)
+//   envelope.proto imports it (Event.body carries ReceiptCheckpoint at 21 and
+//                  ArtifactOutcome at 37, 07 §2)
+// `Verdict` therefore lives HERE and not in verify.proto: ArtifactOutcome needs
+// it, verify.proto needs EvidenceRecord, and a Verdict in verify.proto would
+// make the two files mutually importing — which protobuf forbids outright and
+// buf STANDARD rejects (PACKAGE_NO_IMPORT_CYCLE). The evidence cluster
+// (EvidenceRecord/EvidenceExcerpt and their enums) is kept whole in one file
+// for the same reason plus one more: the "typed, never free text" argument is
+// only reviewable if the typed record and the opt-in excerpt sit side by side.
+//
+// Identity is the envelope's (07 §2) and is not redeclared here: tenant_id and
+// device_id are server-stamped by controld from verified token claims, and
+// event_id/session_id/task_id ride on Event. envelope.proto is not imported —
+// it imports this file.
+
+syntax = "proto3";
+
+package m1p.v1;
+
+// ---------------------------------------------------------------------------
+// Verdict vocabulary (07 §4, verbatim)
+// ---------------------------------------------------------------------------
+
+// The four-verdict vocabulary, adopted verbatim from the platform's
+// sweep_verdict enum (migration 008) and unchanged. Order is load-bearing:
+// VerdictEvent.posterior[i] corresponds to enum value i+1 (07 §4, 06 §3.1).
+//
+// Declared HERE rather than in verify.proto because this file is the import
+// leaf: ArtifactOutcome needs Verdict and verify.proto needs EvidenceRecord,
+// so the alternative placement is an import cycle (PACKAGE_NO_IMPORT_CYCLE).
+//
+// VERDICT_ERROR is infrastructure failure — tamper, sandbox failure, missing
+// runtime, anchor crash or timeout — and is a DISTINCT verdict, never a
+// variant of VERDICT_VIOLATED. Conflating them incurs provable excess risk
+// (Paper II) and misstates the customer's code as broken when it was our
+// plumbing that broke: 04 §2.2 requires a crashed anchor to emit
+// AnchorVote{vote: VERDICT_ERROR}, "error, never violated".
+//
+// VERDICT_REFUSED is a statement about the verifier plane, never about the
+// customer's code (06 §2.2): an unimplemented vote kind, a not-adjudicable
+// task, or the Chow abstention where the ensemble declines to issue a
+// confident satisfied/violated claim. The posterior always disambiguates
+// which kind of refusal this was (06 §3, "Latent classes").
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0;
+  VERDICT_SATISFIED = 1;
+  VERDICT_VIOLATED = 2;
+  VERDICT_REFUSED = 3;
+  VERDICT_ERROR = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Evidence — typed, never free text (default tier E0). 07 §4.
+// ---------------------------------------------------------------------------
+
+// The ONLY default-tier evidence carrier. Deliberately has no field that
+// could hold a path or an excerpt — the constraint is structural, not
+// a validation rule someone can forget (07 §4).
+//
+// EXCERPTS ARE NOT THIS MESSAGE. Sanitized diff hunks are a separate,
+// per-tenant opt-in class: tier E1, structurally scrubbed, and carrying a
+// MANDATORY `redaction_receipt_id` proving the scrub ran — see EvidenceExcerpt
+// below, whose payload travels as a multipart attachment rather than inline so
+// that the default decode path physically cannot receive content (07 §4).
+// E2 (full diff) exists only on VPC-gateway / self-host deployments and is
+// never available on the Omium-cloud path. Adding a path, a message, a line
+// number or an excerpt field to THIS message would collapse that whole tiering
+// into a promise.
+message EvidenceRecord {
+  // [P0] Local-catalog anchor/verifier id ("ruff", "tsc-incremental", ...);
+  // NEVER a command. 07 bundle decode rule 2: anchors are enabled by
+  // local-catalog ID only, and the catalog lives on the device under user
+  // consent — a bundle cannot introduce, rename or define one. The finite
+  // vocabulary is a property of the catalog, so ingest applies the length and
+  // charset validation that a proto `string` cannot express.
+  string tool = 1;
+
+  // [P0] The tool's own diagnostic code ("E0308", "TS2345") — a finite public
+  // vocabulary, safe to carry literally. Same ingest-side length/charset
+  // validation as `tool`.
+  string diagnostic_code = 2;
+
+  EvidenceCategory category = 3;  // [P0]
+  EvidenceCounts counts = 4;      // [P0]
+
+  // [P0] The ROLE of the affected file, not its path. Paths are content.
+  PathRole path_role = 5;
+
+  // [P1] 32 bytes, HMAC_tenant over the tool's structurally-normalized output.
+  // Per-tenant HMAC and not a plain hash for 07 §4's reason: diagnostics have
+  // small effective vocabularies, so a plain digest is dictionary-invertible
+  // and equal digests across tenants would leak "org A and org B hit the same
+  // failure in the same code" — a correlation Omium must be UNABLE to make.
+  bytes output_hmac = 6;
+}
+
+// 07 §4, verbatim.
+enum EvidenceCategory {
+  EVIDENCE_CATEGORY_UNSPECIFIED = 0;
+  EVIDENCE_CATEGORY_LINT = 1;
+  EVIDENCE_CATEGORY_TYPE = 2;
+  EVIDENCE_CATEGORY_BUILD = 3;
+  EVIDENCE_CATEGORY_TEST = 4;
+  EVIDENCE_CATEGORY_SECURITY = 5;
+}
+
+// 07 §4, verbatim. Counts only — the whole point of typed evidence.
+message EvidenceCounts {
+  uint32 errors = 1;          // [P0]
+  uint32 warnings = 2;        // [P0]
+  uint32 files_affected = 3;  // [P0]
+}
+
+// 07 §4, verbatim. A closed role vocabulary is what lets fusion reason about
+// "the diff touched tests" without anyone learning which tests.
+enum PathRole {
+  PATH_ROLE_UNSPECIFIED = 0;
+  PATH_ROLE_TEST = 1;
+  PATH_ROLE_SRC = 2;
+  PATH_ROLE_CONFIG = 3;
+  PATH_ROLE_VENDOR = 4;
+}
+
+// Opt-in tiers only. Never emitted unless the tenant enabled the class;
+// the payload itself travels as a multipart attachment, not inline —
+// so the default decode path physically cannot receive content (07 §4).
+// This message names an attachment and a receipt; it carries no content.
+message EvidenceExcerpt {
+  EvidenceTier tier = 1;            // [P0] E1 or E2 only; E0 has no excerpt
+  bytes evidence_event_id = 2;      // [P1] the EvidenceRecord this expands
+  string attachment_name = 3;       // [P0] multipart part name
+  bytes redaction_receipt_id = 4;   // [P1] receipt proving the scrub ran (E1)
+}
+
+// 07 §4, verbatim.
+enum EvidenceTier {
+  EVIDENCE_TIER_UNSPECIFIED = 0;
+  EVIDENCE_TIER_E0 = 1;  // typed record only (the default)
+  EVIDENCE_TIER_E1 = 2;  // sanitized diff hunks, redaction-receipted (opt-in)
+  EVIDENCE_TIER_E2 = 3;  // full diff (VPC/self-host only)
+}
+
+// ---------------------------------------------------------------------------
+// Artifact outcomes (contract C8). 07 §4.
+// ---------------------------------------------------------------------------
+
+// LCB fuel: joins an injected artifact to the task's eventual verdict (07 §4).
+message ArtifactOutcome {
+  bytes artifact_id = 1;        // [P1]
+  Verdict task_verdict = 2;     // [P0]
+  bool artifact_followed = 3;   // [P0] heuristic: did the trajectory use it
+}
+
+// ---------------------------------------------------------------------------
+// Receipt checkpoints (contract C13). 07 §3 + 07 "The receipt chain".
+// ---------------------------------------------------------------------------
+
+// Edge announcement of a checkpoint: batch N events / T seconds -> Merkle root
+// -> chained DUAL-SIGNED receipt in Postgres (07 §3, 07 "The checkpoint
+// model"). `mark1d` seals every N events or T seconds — bundle-tunable, with
+// billing-grade classes forcing a seal on SessionEnd — builds a Merkle tree
+// over the batch's event ids in spool order, signs the root with the DEVICE
+// key, and uploads it with the batch.
+//
+// DUAL SIGNATURE, and why only one signature is on this wire. `controld`
+// verifies `origin_signature` against the enrolled device key, COUNTERSIGNS the
+// same canonical bytes with the server chain key, takes the tenant's head lock,
+// and appends at seq+1 / checkpoint_seq+1 (07 receipt chain, m1_receipts:
+// `device_key_id`/`device_signature` plus `server_key_id`/`server_signature`,
+// both over the SAME signing input). The countersignature cannot appear here
+// because it does not exist until the server has seen this message. Together
+// the two close both fraud directions: Omium cannot mint history the device
+// never signed, and a device cannot claim Omium accepted what it never
+// countersigned. `ck_m1_receipts_origin` makes that an equivalence in the
+// database, so a server act cannot dress up as device-attested.
+//
+// PER-EVENT ATTESTATION. Ordinary events are attested by INCLUSION, at cost
+// O(events/N): the checkpoint's `checkpoint_seq` names the sealed batch and the
+// leaf's Merkle path proves membership. Those two live on the SERVER side of
+// the boundary — the `checkpoint_seq` / `inclusion_path` columns on
+// `mark1.m1p_events` and `m1_receipts.inclusion_path` + `leaf_index` for the
+// per-event receipt classes (07) — and are retrieved via
+// GET /api/v1/receipts/inclusion/{event_id} (08 §3.4). There is deliberately no
+// wire field for them here: a checkpoint announcement is about the batch, and
+// an event that carried its own claimed inclusion proof would be asserting the
+// very thing the verifier must recompute.
+message ReceiptCheckpoint {
+  uint64 checkpoint_seq = 1;   // [P0] per-device gap-free
+  bytes merkle_root = 2;       // [P0] 32 bytes, BLAKE3 over event_id leaves
+  uint32 leaf_count = 3;       // [P0]
+  bytes first_event_id = 4;    // [P1] inclusive leaf range, in event_id order
+  bytes last_event_id = 5;     // [P1]
+  bytes origin_signature = 6;  // [P0] 64 bytes, Ed25519 device key over the
+                               //      domain-prefixed root ("mark1-label-v1\0")
+
+  // [P0] "ed25519:" + sha256(pub)[:16] — derived from the public key, so it
+  // cannot lie (07, m1_server_signing_keys/m1_device_keys). Retired keys stop
+  // signing new receipts and are NEVER unpublished: a receipt signed under an
+  // unpublished key is one nobody can verify, i.e. one we never issued.
+  string key_id = 7;
+}

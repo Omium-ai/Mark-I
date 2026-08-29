@@ -1,0 +1,71 @@
+# DEV ONLY. Never deployed. (13 §1: "deploy/compose/ — DEV ONLY ... never deployed")
+#
+# CI does NOT use this file. Per 12 §11.4, CI provisions the same three stores as native binaries
+# on the runner with M1_REQUIRE_STORES=1, under which a missing DSN is a hard error rather than a
+# skip. This file exists so a developer can get the identical store versions locally with one verb
+# (`just dev-up`), not to become a second, divergent provisioning path.
+#
+# Versions are pinned to what Phase 1 was verified against:
+#   postgres 15 + pgvector 0.8.6   — RDS PG15 parity (09); pgvector is required by the single
+#                                    halfvec HNSW column on memory artifacts (07)
+#   clickhouse 26.7                — the token-event ledger (07)
+#   minio                          — S3-first ingest landing + corpus mirrors (07 §S3 layout).
+#                                    NOTE: MinIO PUT latency shares nothing with S3+KMS. Benchmarks
+#                                    run against this are pipeline-minus-S3 only (ENG-11).
+
+name: mark1-dev
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_PASSWORD: mark1
+      POSTGRES_DB: mark1
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mark1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.7
+    environment:
+      CLICKHOUSE_PASSWORD: mark1
+    ports:
+      - "58123:8123"   # HTTP — the only interface querychoke uses
+      - "59000:9000"   # native
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - chdata:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--password", "mark1", "-q", "SELECT 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":59001"
+    environment:
+      MINIO_ROOT_USER: mark1
+      MINIO_ROOT_PASSWORD: mark1secret
+    ports:
+      - "59090:9000"
+      - "59001:59001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:
+  chdata:
+  miniodata:

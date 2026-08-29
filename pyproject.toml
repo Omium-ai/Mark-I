@@ -1,0 +1,33 @@
+[project]
+name = "omium-mark1-workspace"
+version = "0.1.0"
+requires-python = ">=3.12"
+# Root is not an installable package; it exists so `uv sync` and `uv run` have one anchor.
+
+[tool.uv.workspace]
+members = [
+    "python/adjudicator",
+    "python/intel",
+    "python/shared/mark1_receipts",
+    "proto/gen/python",
+]
+
+[dependency-groups]
+# Codegen toolchain, not runtime. `just gen` drives betterproto's OWN plugin binary out of this
+# environment rather than a BSR remote plugin, because the only betterproto plugin published to
+# the BSR (buf.build/community/danielgtaylor-betterproto) tops out at v1.2.5 — betterproto 1.x
+# codegen — while the runtime this repo pins is 2.0.0b7. Generated 1.x code against a 2.x runtime
+# is a mismatch that surfaces as import errors at service start, not at generate time.
+#
+# This is a stronger pin than a remote tag, not a weaker one: the plugin and the library it
+# generates against are the SAME resolution, locked in the committed uv.lock.
+#
+# The `[compiler]` extra is load-bearing — the plugin hard-fails without black, jinja2 and
+# grpclib, and its own error message tells you so.
+dev = [
+    "betterproto[compiler]>=2.0.0b7",
+]
+
+[tool.uv]
+# One resolution, one uv.lock at repo root, committed. CI installs with --frozen.
+package = false

@@ -1,0 +1,23 @@
+[package]
+name = "mark1-verifier"
+# NOT version.workspace: this is the one artifact published to crates.io, and it
+# carries its own semver from its first public release (13 §9.1).
+version = "0.1.0"
+edition.workspace = true
+license = "Apache-2.0"      # overrides the workspace UNLICENSED — "verify Omium"
+                            # requires the verifier be inspectable (13 §1)
+authors.workspace = true
+rust-version.workspace = true
+description = "Offline verifier for Omium Mark 1 receipt chains, checkpoints and witness heads."
+
+[lints]
+workspace = true
+
+[dependencies]
+mark1-receipt = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# NOTE: nothing else, ever. Offline by construction — no HTTP client, no async
+# runtime, no crypto beyond what mark1-receipt already re-exports. Every added
+# dependency is a line the customer must audit before trusting the verdict.

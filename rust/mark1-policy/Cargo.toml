@@ -1,0 +1,26 @@
+[package]
+name = "mark1-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# UNLICENSED is proprietary AND is not a valid SPDX expression. `publish = false` is what makes
+# that non-negotiable: it stops `cargo publish` in the wrong directory (crates.io is append-only
+# -- yank hides, it does not delete) and it is the condition cargo-deny's `private.ignore` keys
+# off, so the licence gate can pass on our own crates without weakening it for dependencies.
+publish = false
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mark1-receipt = { workspace = true }     # KeyRing: section-split signature + rotation verification
+ciborium = { workspace = true }          # canonical-CBOR bundle decode
+blake3 = { workspace = true }            # prev_hash chaining + transparency-log inclusion proof
+regex = { workspace = true }             # anchor catalog-ID grammar ^[a-z0-9-]+@cat-[0-9]+$ (04 §7.3)
+serde = { workspace = true }
+thiserror = { workspace = true }         # Reject carries M1E-3001/3002/3003/3005
+
+[dev-dependencies]
+proptest = { workspace = true }

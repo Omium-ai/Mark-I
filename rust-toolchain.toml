@@ -1,0 +1,8 @@
+# Pinned to match the rust:1.91-slim-bookworm builder image (13 §1, §8).
+# Edge release triples (13 §2.3) are installed by scripts/bootstrap.sh, not listed
+# here: a `targets` list makes every contributor download five std sets to run
+# `cargo test`.
+[toolchain]
+channel = "1.91"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

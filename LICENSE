@@ -1,0 +1,28 @@
+UNLICENSED — Proprietary and Confidential
+
+Copyright (c) 2026 Omium. All rights reserved.
+
+This software and its source code, documentation, configuration, data files,
+and all other materials in this repository (the "Software") are the
+confidential and proprietary property of Omium.
+
+No license, express or implied, is granted to any person or entity to use,
+copy, modify, merge, publish, distribute, sublicense, sell, reverse engineer,
+or create derivative works of the Software, in whole or in part, except under
+a separate written agreement signed by an authorized representative of Omium.
+
+Unauthorized copying, distribution, or disclosure of the Software by any means
+is strictly prohibited.
+
+EXCEPTION: the standalone offline verifier at tools/verifier/ is licensed
+separately under the Apache License, Version 2.0. See tools/verifier/LICENSE.
+That exception is deliberate: "verify Omium" is only a meaningful claim if the
+verifier is inspectable by the party doing the verifying.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

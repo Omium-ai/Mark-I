@@ -1,0 +1,38 @@
+# Codegen for the three languages from the single m1p source. REMOTE plugins, PINNED —
+# deterministic output is what keeps the freshness gate (tools/ci/gen_fresh.sh) stable.
+# Outputs are COMMITTED under proto/gen/. Run via `just gen` (never bare buf generate:
+# the just recipe also stages rust gen into rust/m1p-wire/gen/).
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/Omium-ai/omium-mark1/proto/gen/go
+plugins:
+  # ---- Go (mark1d, mark1 CLI, controld) — messages only; there is no gRPC in Mark 1 ----
+  - remote: buf.build/protocolbuffers/go:v1.36.6
+    out: gen/go
+    opt: paths=source_relative
+
+  # ---- Python (adjudicator, intel) — betterproto dataclasses per the plan ----
+  #
+  # LOCAL, and deliberately the one exception to "remote, pinned". The only betterproto plugin on
+  # the BSR is buf.build/community/danielgtaylor-betterproto, whose latest version is v1.2.5 —
+  # betterproto 1.x codegen — while the runtime pinned in uv.lock is 2.0.0b7. (The v2.0.0b7 tag
+  # this file originally named does not exist anywhere: `b7` is PEP 440, and buf requires semver,
+  # so `just gen` failed to even parse this file.) Generating 1.x code against a 2.x runtime is a
+  # mismatch that surfaces at service start, not here.
+  #
+  # Running betterproto's OWN plugin binary is therefore the STRONGER pin: plugin and library come
+  # from one resolution in the committed uv.lock, so gen_fresh.sh stays deterministic. `uv run`
+  # rather than a literal .venv path so UV_PROJECT_ENVIRONMENT cannot desync CI from a laptop.
+  # Requires `uv sync` first (scripts/bootstrap.sh does it) and the [compiler] extra in the dev
+  # group — the plugin hard-fails without black/jinja2/grpclib.
+  - local: ["uv", "run", "--frozen", "protoc-gen-python_betterproto"]
+    out: gen/python
+
+  # ---- Rust (m1p-wire) — prost 0.13 line; same pinned plugin as the estate ----
+  - remote: buf.build/community/neoeinstein-prost:v0.4.0
+    out: gen/rust
+    opt:
+      - compile_well_known_types

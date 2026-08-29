@@ -1,0 +1,7 @@
+# Workspace lints (root Cargo.toml) deny unwrap/expect/panic/dbg/print_stdout crate-wide.
+# These two keys exempt #[cfg(test)] code so tests stay ergonomic — the denial is a
+# production-path rule, not a test-style rule.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+avoid-breaking-exported-api = false

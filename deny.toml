@@ -1,0 +1,31 @@
+# deny.toml (root) — cargo-deny. NEW machinery: the estate CI has no cargo-deny (grounding delta 4).
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "MPL-2.0", "CDLA-Permissive-2.0"]
+# Our own proprietary crates carry license = "UNLICENSED", which is neither in the list above nor
+# a valid SPDX expression, so without this the gate fails on us instead of on a dependency.
+# `ignore` applies ONLY to workspace members marked `publish = false` — every proprietary crate
+# is, and the two Apache-2.0 crates (mark1-receipt, mark1-verifier) deliberately are not, so they
+# stay inside the gate. Third-party crates are unaffected: the allow list still binds all of them.
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+deny = [
+    { crate = "opentelemetry",         reason = "CON-005: zero OTel anywhere; telemetry rides M1P (ADR-0005)" },
+    { crate = "opentelemetry_sdk",     reason = "CON-005" },
+    { crate = "opentelemetry-otlp",    reason = "CON-005" },
+    { crate = "tracing-opentelemetry", reason = "CON-005" },
+    { crate = "openssl",               reason = "rustls-only TLS; keeps all five target triples system-lib-free (§2.3)" },
+    { crate = "openssl-sys",           reason = "as above" },
+    { crate = "tonic",                 reason = "no gRPC in Mark 1 (§0.3)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

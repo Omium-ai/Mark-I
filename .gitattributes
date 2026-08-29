@@ -1,0 +1,18 @@
+# LF everywhere. The Windows CI lane checks this repo out and runs POSIX shell gates against it;
+# a CRLF-normalized .sh or .just is a broken build that only reproduces on one OS.
+* text=auto eol=lf
+*.sh    text eol=lf
+justfile text eol=lf
+*.ps1   text eol=crlf
+
+# Committed codegen: never hand-edited, and it should not drown a diff view (§0.2, §5.5).
+proto/gen/**       linguist-generated=true
+rust/m1p-wire/gen/** linguist-generated=true
+
+# Conformance fixtures are evidence, byte-exact. Never normalize them.
+conformance/**     -text
+*.sse              -text
+*.ring             binary
+*.bin              binary
+*.pkg              binary
+*.msi              binary

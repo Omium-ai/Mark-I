@@ -1,0 +1,23 @@
+[package]
+name = "mark1-frames"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# UNLICENSED is proprietary AND is not a valid SPDX expression. `publish = false` is what makes
+# that non-negotiable: it stops `cargo publish` in the wrong directory (crates.io is append-only
+# -- yank hides, it does not delete) and it is the condition cargo-deny's `private.ignore` keys
+# off, so the licence gate can pass on our own crates without weakening it for dependencies.
+publish = false
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }   # SSE data payloads for the four JSON dialects
+thiserror = { workspace = true }
+# NOTE: no HTTP client, no tokio — parsers are synchronous byte-feeders driven by
+# the proxy's tee task (04 §3.2/§4); they never own I/O.

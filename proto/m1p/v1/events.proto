@@ -1,0 +1,365 @@
+// m1p.v1 — capture event families.
+//
+// Transcribed from 07 §3 ("Event families — events.proto"). Four messages
+// written inside 07 §3's block live in sibling files per the 13 §1 tree, not
+// here: CoverageTransition → intelligence.proto, GuardDecision →
+// policy.proto, ReceiptCheckpoint → artifacts.proto, Dropped →
+// envelope.proto. Their field numbers in the Event.body oneof are unchanged.
+//
+// EdgeHealth (bottom of this file) is the one message 07 §3 ratifies without
+// writing out: its field set, cadence and privacy rule are specified once, in
+// 11 §2.3, and this transcription follows 11 rather than 07 on it. It lives
+// here because it is a capture-plane event emitted by the daemon itself, not a
+// verdict, policy or artifact record.
+//
+// Privacy classes used in field comments (07 §3):
+//   [P0] operational    — counts, timings, enum codes, public tool/model
+//                         names. No user content, nothing derived from it.
+//   [P1] pseudonymous   — vendor-issued opaque IDs and per-tenant-HMAC
+//                         digests. Joinable within a tenant, meaningless
+//                         across tenants and to Omium.
+//   [P2] content-derived — never appears in this file. The only P2 carrier is
+//                         EvidenceExcerpt (07 §4), an opt-in class.
+//
+// Every field here is client-supplied; the SERVER-STAMPED band is on the
+// Event envelope (envelope.proto, 07 §2). Enum zero values follow buf
+// STANDARD (*_UNSPECIFIED) and decode as "sender newer than receiver —
+// retain, don't guess".
+
+syntax = "proto3";
+
+package m1p.v1;
+
+// ---------------------------------------------------------------------------
+// Session lifecycle
+// ---------------------------------------------------------------------------
+
+// Opens a session and declares which capture surfaces are live for it. 07 §3.
+message SessionStart {
+  string agent = 1;           // [P0] catalog name: "claudecode" | "codex" | ...
+  string agent_version = 2;   // [P0] runtime-sniffed; gates field-map selection
+  bytes workspace_id = 3;     // [P1] HMAC_tenant(workspace root path), 32 bytes.
+                              //      Never the path itself — paths are content.
+  repeated CapturePath capture_paths = 4;  // [P0] which capture surfaces are live
+}
+
+// Which capture surface produced events for a session. 07 §3.
+enum CapturePath {
+  CAPTURE_PATH_UNSPECIFIED = 0;
+  CAPTURE_PATH_HOOKS = 1;       // hookshim events
+  CAPTURE_PATH_TRANSCRIPT = 2;  // tailer over the agent's transcript files
+  CAPTURE_PATH_PROXY = 3;       // wire proxy tee (API-key regime only)
+}
+
+// Closes a session and states whether its spool was drained. 07 §3.
+message SessionEnd {
+  EndReason reason = 1;    // [P0]
+  uint64 duration_ms = 2;  // [P0] wall-clock session length
+  bool drained = 3;        // [P0] mandatory spool drain completed before exit;
+                           //      false means the next boot replays (07 §6)
+}
+
+// How a session ended. 07 §3.
+enum EndReason {
+  END_REASON_UNSPECIFIED = 0;
+  END_REASON_EXIT = 1;            // clean agent exit
+  END_REASON_CRASH_DETECTED = 2;  // tailer saw the session die without an exit
+  END_REASON_IDLE_TIMEOUT = 3;    // session aged out
+}
+
+// ---------------------------------------------------------------------------
+// Task segmentation — the TVO denominator (contract C1)
+// ---------------------------------------------------------------------------
+
+// Opens a task under task_seg.v1 and records the inputs that segmentation
+// decided on. 07 §3.
+message TaskOpen {
+  // [P0] The versioned, receipted segmentation algorithm that minted this
+  // task_id (e.g. "task_seg.v1"). Stamped on EVERY TaskOpen so any TVO
+  // number can name the denominator rules it was computed under.
+  string task_seg_version = 1;
+
+  // [P1] 16 bytes; set when task_seg merged this task into a predecessor
+  // (follow-up within N turns touching the same files = same task).
+  bytes parent_task_id = 2;
+
+  // [P1] HMAC_tenant over the normalized opening prompt, 32 bytes. Feeds
+  // memory-facet retrieval; the prompt text itself never leaves the machine.
+  bytes prompt_digest = 3;
+
+  // [P1] HMAC_tenant over the sorted touched-file set, 32 bytes. This is the
+  // "same files" input to the task_seg merge rule, carried so merges are
+  // auditable without carrying paths.
+  bytes file_set_digest = 4;
+}
+
+// Closes a task into exactly one denominator class. 07 §3.
+message TaskClose {
+  Resolution resolution = 1;    // [P0] denominator class
+  bytes final_verdict_id = 2;   // [P1] event_id of the closing VerdictEvent;
+                                //      empty iff resolution is UNRESOLVED
+  uint32 turn_count = 3;        // [P0]
+}
+
+// The TVO denominator classes. 07 §3.
+enum Resolution {
+  RESOLUTION_UNSPECIFIED = 0;
+  RESOLUTION_VERDICT = 1;                // closed by a VerdictEvent
+  RESOLUTION_UNRESOLVED_SESSION_END = 2; // session ended without a verdict —
+                                         // a first-class denominator class,
+                                         // never silently excluded
+  RESOLUTION_MERGED_FORWARD = 3;         // task_seg merged this into a successor
+}
+
+// ---------------------------------------------------------------------------
+// Turn / tool activity
+// ---------------------------------------------------------------------------
+
+// One agent turn. 07 §3.
+message Turn {
+  uint32 turn_index = 1;     // [P0] 0-based within the session
+  Initiator initiator = 2;   // [P0] who caused this turn
+}
+
+// Who caused a turn. 07 §3.
+enum Initiator {
+  INITIATOR_UNSPECIFIED = 0;
+  INITIATOR_HUMAN = 1;
+  INITIATOR_AGENT = 2;
+  INITIATOR_GATE_CONTINUATION = 3;  // a Mark 1 gate injected the continuation
+}
+
+// One tool invocation, paired across the agent's pre/post hooks. 07 §3.
+message ToolUse {
+  // [P0/P1] Built-in tool names on the per-agent allow-list pass literally
+  // ("Bash", "Edit", ...); any name NOT on that list (MCP tools can embed
+  // project names) is replaced by HMAC_tenant(name) hex — so unknown names
+  // can't leak content while known ones stay analyzable.
+  string tool_name = 1;
+  string tool_use_id = 2;    // [P1] agent-issued opaque id, joins hook pairs
+  uint64 duration_ms = 3;    // [P0]
+  ToolStatus status = 4;     // [P0]
+}
+
+// Outcome of a tool invocation. 07 §3.
+enum ToolStatus {
+  TOOL_STATUS_UNSPECIFIED = 0;
+  TOOL_STATUS_OK = 1;
+  TOOL_STATUS_ERROR = 2;
+  TOOL_STATUS_TIMEOUT = 3;
+  TOOL_STATUS_DENIED = 4;  // agent permission system refused it
+}
+
+// ---------------------------------------------------------------------------
+// Wire observations (proxy tee — API-key regime only). No bodies, ever.
+// ---------------------------------------------------------------------------
+
+// A request as the proxy saw it leave. 07 §3.
+message ModelRequest {
+  string request_id = 1;    // [P1] vendor-issued
+  string model = 2;         // [P0] as requested (pre-rewrite)
+  string served_model = 3;  // [P0] as forwarded (post-rewrite); equals model
+                            //      when no RouteDecision rewrote it
+  bool stream = 4;          // [P0]
+  uint64 request_bytes = 5; // [P0] on-wire size, post-redaction
+}
+
+// A response as the proxy saw it return. 07 §3.
+message ModelResponse {
+  string request_id = 1;     // [P1] joins to ModelRequest
+  uint32 status_code = 2;    // [P0]
+  uint64 ttfb_ms = 3;        // [P0] time to first byte
+  uint64 duration_ms = 4;    // [P0]
+  uint64 response_bytes = 5; // [P0]
+  string stop_reason = 6;    // [P0] vendor grammar: "end_turn" | "max_tokens" | ...
+}
+
+// ---------------------------------------------------------------------------
+// Usage — the billing fact. One row per (session, message.id, request_id).
+// ---------------------------------------------------------------------------
+
+// 07 §3. Billing-grade durability class (07 §6): blocks on a full spool, never
+// sheds.
+message Usage {
+  // [P1] 32 bytes: HMAC-SHA256 keyed by the tenant's usage-idem key
+  // (HKDF from the tenant HMAC root, label "m1p.usage.idem") over
+  //   session_id(16 raw bytes) || 0x00 || message_id(utf8) || 0x00 || request_id(utf8).
+  // PROTOCOL INVARIANT — see the worked example in 07 §3. The server dedupes
+  // on this key unconditionally; a parser that "already dedupes" does not get
+  // to skip computing it. Streaming rewrites emit up to four Usage events with
+  // four distinct event_ids and ONE identical idem_key; the server keeps the
+  // row with the greatest event_id, which is the cumulative final count.
+  // Ingest rejects a Usage without it (422, 08 §2.4).
+  bytes idem_key = 1;
+
+  string message_id = 2;   // [P1] vendor-issued (Anthropic msg_...)
+  string request_id = 3;   // [P1] vendor-issued
+  string model = 4;        // [P0]
+
+  uint64 input_tokens = 5;                 // [P0]
+  uint64 output_tokens = 6;                // [P0]
+  uint64 cache_creation_input_tokens = 7;  // [P0]
+  uint64 cache_read_input_tokens = 8;      // [P0]
+  string service_tier = 9;                 // [P0] as reported by the vendor
+
+  UsageSource source = 10;  // [P0] provenance of the count
+}
+
+// Where a usage count was observed. Lets the rollup prefer the wire count
+// without double-billing — same idem_key, so it can't. 07 §3.
+enum UsageSource {
+  USAGE_SOURCE_UNSPECIFIED = 0;
+  USAGE_SOURCE_TRANSCRIPT = 1;  // tailer-parsed transcript line
+  USAGE_SOURCE_PROXY_TEE = 2;   // proxy-observed wire usage block
+}
+
+// ---------------------------------------------------------------------------
+// Edge fleet health — ratified by 07 §3, specified by 11 §2.3
+// ---------------------------------------------------------------------------
+
+// The edge's own counters and gauges. This is the ONLY channel by which fleet
+// health reaches Omium: a laptop daemon exposes no metrics endpoint and no
+// Prometheus can route to it (04 §2.11, 11 §0.4), so there is nothing to
+// scrape. It carries SLO-7's gate_read p99 digests and alert A-14
+// (EdgeFleetRegression)'s cohort signals (11 §7, §8, §11).
+//
+// DURABILITY CLASS: diagnostic (07 §6) — drop-newest on a full spool, never
+// blocks a writer, never billing-grade. Its own loss is accounted in Dropped{}
+// like everything else.
+//
+// CADENCE: one event per successful uploader cycle, rate-limited to one per
+// 15 minutes per device (11 §2.3).
+//
+// PRIVACY RULE, NORMATIVE (11 §2.3): counters and gauges only — no code, no
+// paths, no hostnames, no workspace names, and no identifier beyond what
+// capture already carries. Event.session_id MUST be empty: health is
+// per-device, not per-session. tenant_id/device_id are SERVER-STAMPED from the
+// verified token. The only strings in the whole tree are version strings,
+// which are release-artifact identifiers. `conf_schema_closed_field_set`
+// (12 §3.6) asserts this field set — this message and all ten below it —
+// stays closed, by diffing the buf descriptor against a committed golden:
+// a new field that could carry content is a privacy regression, not a
+// feature, and it must arrive as a reviewed diff line, never by accretion.
+message EdgeHealth {
+  ProcessHealth mark1d = 1;         // [P0] the daemon itself
+  ProcessHealth cortexd = 2;        // [P0] summed across workspace children
+  ProcessHealth proxy = 3;          // [P0] unset when no proxy is attached
+  SpoolHealth spool = 4;            // [P0]
+  UplinkHealth uplink = 5;          // [P0]
+  BundleHealth bundle = 6;          // [P0]
+  GateHealth gate = 7;              // [P0]
+  ProxyLatency proxy_latency = 8;   // [P0]
+  ShimHealth shim = 9;              // [P0]
+  CortexHealth cortex = 10;         // [P0]
+
+  // [P0] semver of the emitting mark1d build. The A-14 cohort key: release
+  // health is judged cohort-vs-cohort because the edge cannot be scraped.
+  string edge_version = 11;
+
+  // [P0] per-dialect parser revisions; mark1-frames versions its five dialects
+  // independently (04 §4).
+  repeated DialectRev dialect_revs = 12;
+}
+
+// Per-process supervision gauges, one instance per supervised binary
+// (11 §2.3, §3.1). `restarts` is the fleet crash-rate signal that exists
+// precisely so no machine ever uploads a stack dump (11 §2.5).
+message ProcessHealth {
+  uint64 rss_bytes = 1;  // [P0] vs the per-binary watchdog ceiling (04 §1.3)
+  uint32 restarts = 2;   // [P0] supervision restarts since enrollment
+  uint64 uptime_s = 3;   // [P0] seconds since this process started
+}
+
+// Spool occupancy and lag (11 §2.3, §3.1). oldest_unacked_age_s is the
+// truthful "how far behind is this device" signal behind alert A-02.
+message SpoolHealth {
+  uint32 segments = 1;  // [P0] live segment count
+
+  // [P0] Occupancy vs the ~2 GiB cap (07 §6). NOT named `bytes`, which is 11
+  // §2.3's key: `bytes` is a protobuf scalar type keyword, and betterproto
+  // (the pinned Python plugin) emits it as a plain class attribute, shadowing
+  // the builtin inside this class body — inert until the first bytes-typed
+  // field lands in this message, then a type annotation that resolves to an
+  // int. Renamed before codegen freezes the JSON name, so 11 §2.3's key reads
+  // `bytes_used` too.
+  uint64 bytes_used = 2;
+
+  uint64 oldest_unacked_age_s = 3;  // [P0] age of the oldest durable-but-unacked record
+}
+
+// Uploader automaton state (11 §2.3, §3.1). The parked aggregate feeds A-02;
+// quarantined > 0 is a poison batch (08 §2.5).
+message UplinkHealth {
+  uint32 parked = 1;          // [P0] batches parked after retry exhaustion
+  uint32 quarantined = 2;     // [P0] batches quarantined by the 4xx rule
+  uint64 last_ack_age_s = 3;  // [P0] seconds since the last 200/202
+}
+
+// Applied policy-bundle provenance and staleness (11 §2.3, §3.1). stale=1
+// means the edge is failing static on built-ins; the fleet count drives A-09.
+message BundleHealth {
+  uint64 seq = 1;    // [P0] applied bundle seq
+  uint64 age_s = 2;  // [P0] seconds since that bundle was published
+  bool stale = 3;    // [P0] max_age breach
+}
+
+// Stop-gate counters and the SLO-7 latency digest (11 §2.3, §3.1, §7 SLO-7,
+// §11 fleet view). Exactly 11 §2.3's field set: the {reads, allows, blocks,
+// timeouts} counters plus the one percentile SLO-7 and A-14 actually read off
+// this message ("gate_read_seconds p99 per device (EdgeHealth digests)").
+message GateHealth {
+  uint64 reads = 1;        // [P0] GateQuery→GateVerdict round trips
+  uint64 allows = 2;       // [P0]
+  uint64 blocks = 3;       // [P0]
+  uint64 timeouts = 4;     // [P0] fail-open allows on gate timeout
+
+  // Field 5 was `read_p50_us`, which no document asks for: nothing reads a
+  // gate median, and 11 §2.3's field set is asserted CLOSED by
+  // `conf_schema_closed_field_set` (12 §3.6), so an unasked-for gauge is a red
+  // build. Reserved in number and name under 07 §1's delete rule — and the
+  // reservation itself is in the golden, so un-reserving 5 is equally red.
+  reserved 5;
+  reserved "read_p50_us";
+
+  uint64 read_p99_us = 6;  // [P0] vs the ≤5 ms budget (04 §2.3, SLO-7)
+}
+
+// Proxy added-latency self-timer digests, not raw samples (11 §2.3, §3.2).
+// The p50 is the ≤1 ms median budget.
+message ProxyLatency {
+  uint64 added_latency_p50_us = 1;  // [P0] microseconds
+  uint64 added_latency_p99_us = 2;  // [P0] microseconds
+}
+
+// Hook-shim hand-offs, counted by mark1d at drain because the shim is a
+// transient process that holds no counters of its own (11 §2.3, §3.3). A
+// rising spill rate is one of A-14's four cohort signals.
+message ShimHealth {
+  uint64 delivered = 1;  // [P0] events handed to the daemon directly
+  uint64 spilled = 2;    // [P0] events written to the sealed spill ring
+}
+
+// cortexd index state, summed across workspaces (11 §2.3, §3.4). A stuck
+// index_clock with filesystem activity means a wedged writer task.
+message CortexHealth {
+  uint64 index_clock = 1;  // [P0] monotone index version
+  uint64 refusals = 2;     // [P0] per-query refusals (stale/scope/failed)
+}
+
+// One dialect parser's revision. The dialect is a closed enum and the revision
+// is a release-artifact string, which is what keeps EdgeHealth's field set
+// closed under 11 §2.3's privacy rule — a map keyed by free text would not.
+message DialectRev {
+  Dialect dialect = 1;  // [P0]
+  string rev = 2;       // [P0] the module's DIALECT_REV (04 §4)
+}
+
+// The five wire dialects mark1-frames parses (04 §4).
+enum Dialect {
+  DIALECT_UNSPECIFIED = 0;
+  DIALECT_ANTHROPIC_SSE = 1;
+  DIALECT_OPENAI_RESPONSES = 2;
+  DIALECT_OPENAI_CHAT = 3;
+  DIALECT_GEMINI = 4;
+  DIALECT_BEDROCK_EVENTSTREAM = 5;
+}

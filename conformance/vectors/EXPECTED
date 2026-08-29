@@ -1,0 +1,17 @@
+# conformance/vectors/EXPECTED — which vector families the cross-language gate REQUIRES.
+#
+# tools/ci/conformance_crosslang.sh refuses to pass when a family listed here has zero files on
+# disk. That is the whole point of the file: "we have no vectors yet" and "our vectors vanished"
+# look identical to a directory scan, and only one of them is acceptable. Listing a family is
+# the commit-time act that arms the gate for it — permanently, since removing a line is a
+# reviewable diff and an empty directory is not.
+#
+# Git does not track empty directories, so absence of a family directory cannot mean anything.
+# This file is the manifest that makes the expectation explicit instead of inferred.
+#
+# One family per line, from: m1pl redact receipt bundle
+# Phasing (13 §1, 12 §3.4): m1pl and redact arrive with C3 (Rust + Go); receipt with C6, which
+# is also when Python joins the gate. Add each line in the SAME commit that lands its vectors.
+#
+# C0 (scaffold): no implementations exist, so no family is due. The list below is empty on
+# purpose and the gate reports exactly that rather than passing quietly.

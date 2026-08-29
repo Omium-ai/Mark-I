@@ -1,0 +1,36 @@
+# Build output
+/target/
+**/target/
+/dist/
+go.work.sum.bak
+
+# Python
+.venv/
+**/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.uv-cache/
+
+# Native store binaries + data provisioned by `just stores-up` (12 §11.4)
+/.stores/
+
+# Local spool / test artifacts. These hold captured session data by definition —
+# they must never be committable.
+/spool/
+**/testdata/tmp/
+*.spool
+*.segment
+mark1-test-*/
+
+# Fuzz corpora are checked in under conformance/vectors/; cargo-fuzz's working dirs are not.
+**/fuzz/artifacts/
+**/fuzz/coverage/
+**/fuzz/target/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

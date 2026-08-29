@@ -1,0 +1,14 @@
+# m1p — the Mark 1 protocol, single source of truth.
+# buf lint + buf breaking run in CI on every PR and fail the build on drift.
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  # No ignore_only blocks. The estate's ignores are grandfathered naming debt in a
+  # brownfield module; m1p is greenfield and starts clean. Adding an ignore here
+  # requires an ADR reference in the same commit.
+breaking:
+  use:
+    - WIRE_JSON

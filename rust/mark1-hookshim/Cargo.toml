@@ -1,0 +1,34 @@
+[package]
+name = "mark1-hookshim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# UNLICENSED is proprietary AND is not a valid SPDX expression. `publish = false` is what makes
+# that non-negotiable: it stops `cargo publish` in the wrong directory (crates.io is append-only
+# -- yank hides, it does not delete) and it is the condition cargo-deny's `private.ignore` keys
+# off, so the licence gate can pass on our own crates without weakening it for dependencies.
+publish = false
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true            # unwrap/expect/panic denied crate-wide; tests exempt via clippy.toml
+
+[dependencies]
+m1p-wire = { workspace = true }
+mark1-redact = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+x25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+zeroize = { workspace = true }
+libc = { workspace = true }
+# NOTE: no tokio, no clap, no config crate — the shim is a synchronous, argument-less,
+# config-less binary by design (04 §5): startup cost is the budget.
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

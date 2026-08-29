@@ -1,0 +1,24 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.go]
+indent_style = tab
+
+# `justfile` has no extension, so the old `[*.{go,just}]` matched it never — and would have been
+# wrong if it had: just requires one indent style per recipe, and every recipe here is 4 spaces.
+[{justfile,*.just}]
+indent_style = space
+indent_size = 4
+
+[*.{yaml,yml,toml,json,md,proto}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false

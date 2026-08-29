@@ -1,0 +1,28 @@
+# One config at root; both services + shared package + gen (gen excluded from lint).
+target-version = "py312"
+line-length = 100
+extend-exclude = ["proto/gen/python"]
+
+[lint]
+select = [
+    "E", "F", "W",     # pycodestyle/pyflakes
+    "I",               # isort
+    "UP",              # pyupgrade
+    "B",               # bugbear
+    "ASYNC",           # blocking-call-in-async — the estate skeleton is async end to end
+    "S",               # bandit subset
+    "T20",             # no print() — services log via configure_logging
+    "TID",             # flake8-tidy-imports — REQUIRED for TID251 below to fire at all.
+                       # Without it the banned-api table is decorative config, and the
+                       # Python half of the no-OTel gate (§7.5) silently enforces nothing.
+]
+ignore = ["S101"]      # asserts are the estate's registry discipline (PROBE_HANDLERS asserts)
+
+[lint.flake8-tidy-imports.banned-api]
+"opentelemetry".msg = "Mark 1 has zero OpenTelemetry (CON-005 / ADR-0005)."
+"crowdkit".msg = "crowd-kit is a TEST ORACLE only (06 §4.5) — import it in tests/, never in app/."
+"pandas".msg = "The numeric surface is numpy-only (06 §4.5); DuckDB/pyarrow own columnar work."
+
+[lint.per-file-ignores]
+"**/tests/**" = ["S", "T20"]
+"**/tests/test_spectral_against_crowdkit.py" = ["TID251"]   # the one sanctioned crowdkit import

@@ -1,0 +1,64 @@
+# The OAuth token-shape canary (12 §3.3, plan §Compliance 1, NFR-SECURITY-005).
+#
+# What it proves: CON-001's tripwire — the classifier that separates OAuth/subscription
+# credentials from API keys still separates them. A miss is a latent LEGAL event, not a bug,
+# so a red here is deliberately louder than a normal test failure.
+#
+# Runs weekly against the COMMITTED corpus in conformance/canary/token-shapes/ (sanitized
+# shapes: prefix, length, alphabet, structural markers — never live values), and on any PR that
+# touches the guard or the classifier.
+#
+# The meta-test that proves the canary can still fail — canary_selftest_detects_planted_miss —
+# needs no wiring here: it is an ordinary Rust test and therefore runs on every PR inside
+# `just test-rust`. A canary that cannot fail is decoration; that is the estate's RLS lesson
+# applied to a test, and it is checked by the same gate that checks everything else.
+name: canary
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"      # Mondays 06:17 UTC
+  pull_request:
+    paths:
+      - "rust/mark1-proxy/src/guard/**"
+      - "conformance/canary/**"
+      - ".github/workflows/canary.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write               # a scheduled miss opens the alarm issue below
+
+jobs:
+  oauth-shape-classifier:
+    name: canary_oauth_shape_classifier
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Classify every recorded shape and every synthetic near-miss
+        run: cargo test -p mark1-proxy --locked canary_oauth_shape_classifier -- --nocapture
+
+      # "One miss = job red = repo-wide CI red." On the scheduled lane there is no PR to turn
+      # red, so the alarm is an issue that stays open until the classifier is fixed. Filed, not
+      # emailed, because the fix is a code change and the record belongs next to the code.
+      - name: Raise the alarm
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TITLE="CANARY RED: OAuth token-shape classifier missed"
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          BODY="The weekly token-shape canary failed on \`${GITHUB_SHA}\`.
+
+          A miss means the classifier no longer distinguishes an OAuth/subscription credential
+          from an API key — CON-001's tripwire. Treat this as a legal-posture incident, not a
+          flaky test: do not merge guard changes until it is green.
+
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label security,canary
+          fi

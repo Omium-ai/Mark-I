@@ -1,0 +1,193 @@
+// proto/m1p/v1/verify.proto
+//
+// Verifier votes, the anti-tamper envelope, and fused verdicts.
+//
+// Message bodies are transcribed from 07 §4 ("Intelligence events"), which is
+// authoritative for every transmitted byte. 13 §1 splits that section's text
+// across two files; this one takes the verification half
+// (AnchorVote, AnchorIntegrity, JudgeVote, RmScore, ConsistencyVote,
+// VerdictEvent) and intelligence.proto takes the rest.
+//
+// Semantics: 06 §2 (verifier/anchor registry, effective-execution hash),
+// 06 §3 (ADJUDICATE — the fusion algorithm and the latent classes),
+// 06 §5 (gold sets and noise certificates), 04 §2.2 (anchor runner and the
+// anti-tamper envelope as computed at origin).
+//
+// Privacy classes, per 07 §3: [P0] operational — counts, timings, enum codes,
+// public tool/model names. [P1] pseudonymous — vendor opaque ids and
+// per-tenant-HMAC digests, joinable within a tenant and meaningless across
+// tenants. [P2] content-derived never appears here; the only P2 carrier is
+// EvidenceExcerpt, an opt-in class.
+//
+// No message in this file carries identity: event_id, session_id, task_id and
+// the server-stamped tenant_id/device_id all live on m1p.v1.Event (07 §2).
+// This file does not import envelope.proto — envelope.proto imports the body
+// files, so the dependency edge runs one way only (buf's
+// PACKAGE_NO_IMPORT_CYCLE is part of STANDARD).
+
+syntax = "proto3";
+
+package m1p.v1;
+
+// EvidenceRecord and EvidenceTier are defined in artifacts.proto (13 §1).
+import "m1p/v1/artifacts.proto";
+
+// `Verdict` is NOT declared here. It lives in artifacts.proto, which is this
+// package's import leaf: ArtifactOutcome needs Verdict and this file needs
+// EvidenceRecord, so declaring Verdict here would make the two files mutually
+// importing — which protobuf forbids and buf STANDARD rejects
+// (PACKAGE_NO_IMPORT_CYCLE). The semantics that govern every use of it in this
+// file are documented on the declaration in artifacts.proto.
+
+// ---------------------------------------------------------------------------
+// Verifier votes (contract C2) — 07 §4
+// ---------------------------------------------------------------------------
+
+// One anchor's (T0 deterministic local verifier's) vote on a task attempt.
+message AnchorVote {
+  string anchor_id = 1;          // [P0] local-catalog id, user-consented
+                                 //      (04 §2.2 consent catalog; bundles can
+                                 //      never name a command, only an id)
+  Verdict vote = 2;              // [P0]
+  EvidenceRecord evidence = 3;   // [P0/P1] E0 always rides with the vote
+  AnchorIntegrity integrity = 4; // [P0/P1] anti-tamper envelope, device-signed
+                                 //         at origin
+}
+
+// The anti-tamper envelope, computed per anchor run and device-signed at
+// origin (04 §2.2 "The anti-tamper envelope"; consumed by 06 §2.4, which
+// re-derives the effective-execution hash
+// blake3(resolved_binary_hash ‖ canonical_args ‖ env_allowlist_hash ‖
+// config_file_hashes ‖ suppression_directive_set) and compares it to the
+// registry row for verifier_id@version).
+//
+// If cortexd is down and no fresh L0 root exists the envelope is INCOMPLETE:
+// the vote is still emitted (fusion is fail-open for availability) but carries
+// tamper-unknown semantics and never feeds certification. Honest degradation
+// beats a fabricated root — so an absent worktree_merkle_root is empty here,
+// never a placeholder.
+message AnchorIntegrity {
+  bytes worktree_merkle_root = 1;      // [P1] BLAKE3 root from cortexd's L0 —
+                                       //      one hash table serves cortex
+                                       //      provenance AND anti-tamper
+                                       //      (04 §6.7). Defeats worktree
+                                       //      mutation between what the agent
+                                       //      edited and what the anchor saw.
+  map<string, bytes> resolved_binary_hashes = 2; // [P0] tool name -> BLAKE3 of
+                                       // the binary actually executed (defeats
+                                       // PATH shims): hashed at the RESOLVED
+                                       // exec path post env-scrub, compared to
+                                       // the consent-time BinaryHash — that is
+                                       // effective-execution hashing, not a
+                                       // glob over the repo (06 §2.4)
+  bytes env_scrub_attestation = 3;     // [P0] hash of the allow-listed env the
+                                       //      anchor ran under — the exact env
+                                       //      map passed to RunSpec. Defeats
+                                       //      env-var tool suppression
+                                       //      (RUFF_NO_CACHE, SKIP=, ...)
+  DiffClassification diff_classification = 4; // [P0] classifier over the task's
+                                       // touched-file set; test-gaming and
+                                       // config-gaming detection input
+  sint32 suppression_directive_delta = 5;     // [P0] change in lint-suppression
+                                       // directive count this attempt (# noqa,
+                                       // // eslint-disable, #[allow], ...) —
+                                       // the cheapest reward-hacking tell.
+                                       // Non-zero ⇒ the vote STANDS but is
+                                       // annotated and fed to the spectral
+                                       // estimator as a feature; suppressions
+                                       // are sometimes legitimate, lying about
+                                       // them is not (06 §2.4)
+  bool tamper = 6;                     // [P0] any integrity check failed;
+                                       //      tampered votes never certify —
+                                       //      06 §2.4 quarantines them from
+                                       //      fusion AND estimation
+}
+
+enum DiffClassification {
+  DIFF_CLASSIFICATION_UNSPECIFIED = 0;
+  DIFF_CLASSIFICATION_NONE = 1;
+  DIFF_CLASSIFICATION_SRC_ONLY = 2;
+  DIFF_CLASSIFICATION_TEST_TOUCHED = 3;
+  DIFF_CLASSIFICATION_CONFIG_TOUCHED = 4;
+  DIFF_CLASSIFICATION_SUPPRESSION_TOUCHED = 5;
+}
+
+// One T1 judge's vote. Default execution is client-side through the customer's
+// own key (06 §6.2), so evidence normally never leaves the machine.
+message JudgeVote {
+  string judge_id = 1;         // [P0] "judge:<name>@<version>" registry key —
+                               //      the estimation unit; a version bump
+                               //      starts a new probation row rather than
+                               //      inheriting a confusion matrix (06 §2.3)
+  Verdict vote = 2;            // [P0]
+  EvidenceTier tier_used = 3;  // [P0] what the judge actually saw
+  bytes rubric_hash = 4;       // [P1] HMAC_tenant of the rubric prefix served
+  JudgeLocus locus = 5;        // [P0]
+}
+
+enum JudgeLocus {
+  JUDGE_LOCUS_UNSPECIFIED = 0;
+  JUDGE_LOCUS_CLIENT_SIDE = 1;  // through the customer's own key — the default
+  JUDGE_LOCUS_CLOUD = 2;        // consent + subprocessor disclosure + region pin
+}
+
+// One T2 learned reward model's scalar score.
+message RmScore {
+  string model_id = 1;             // [P0] "rm:<name>@<version>"
+  double score = 2;                // [P0] raw scalar
+  string calibration_version = 3;  // [P0] mapping used to fold into the ensemble
+}
+
+// Escalation-scoped only (T3 runs and escalation events); excluded from
+// ensemble-size assumptions — consistency votes are not "free" members.
+message ConsistencyVote {
+  Verdict vote = 1;          // [P0]
+  uint32 sample_count = 2;   // [P0] samples drawn
+  double agreement_rate = 3; // [P0] fraction agreeing with vote
+}
+
+// ---------------------------------------------------------------------------
+// Fused verdicts (contracts C3/C5) — 07 §4
+// ---------------------------------------------------------------------------
+
+// The fused outcome. Billing-grade durability class: verdict_event blocks on a
+// full spool rather than shedding (07 §6, "Per-class durability").
+message VerdictEvent {
+  VerdictStage stage = 1;      // [P0] PROVISIONAL from mark1d fusion;
+                               //      CERTIFIED/REVISED from adjudicator-svc
+  Verdict verdict = 2;         // [P0] argmax of posterior, after the error
+                               //      check and the Chow abstention band
+                               //      (06 §3.1 steps 3–4)
+
+  // [P0] EXACTLY 4 entries. FIXED ORDER, and downstream fusion, the four
+  // ClickHouse posterior columns (07 "ClickHouse") and the corpus exporter depend
+  // on it:
+  //
+  //     posterior[0] = satisfied   (VERDICT_SATISFIED = 1)
+  //     posterior[1] = violated    (VERDICT_VIOLATED  = 2)
+  //     posterior[2] = refused     (VERDICT_REFUSED   = 3)
+  //     posterior[3] = error       (VERDICT_ERROR     = 4)
+  //
+  // i.e. posterior[i] is the probability of Verdict value i+1. The arity and
+  // the order are frozen in this wire type (06 §3, "Latent classes"); a
+  // receiver MUST reject a VerdictEvent whose posterior length is not 4 rather
+  // than pad or truncate it.
+  repeated double posterior = 3;
+
+  string noise_cert_id = 4;    // [P0] empty ⇒ status is honestly
+                               //      "uncertified/bootstrapping"; such verdicts
+                               //      never gate memory or corpus admission.
+                               //      The certificate is STAMPED, never
+                               //      consulted for the math (06 §5.4): the
+                               //      math does not change with the status,
+                               //      the claims permitted about it do.
+  uint64 bundle_seq = 5;       // [P0] provenance of the confusion matrices used
+  uint32 vote_count = 6;       // [P0] ensemble members fused
+}
+
+enum VerdictStage {
+  VERDICT_STAGE_UNSPECIFIED = 0;
+  VERDICT_STAGE_PROVISIONAL = 1;  // edge fusion cache — what the stop-gate reads
+  VERDICT_STAGE_CERTIFIED = 2;    // adjudicator, noise-certified
+  VERDICT_STAGE_REVISED = 3;      // slow anchors / re-adjudication overturned it
+}

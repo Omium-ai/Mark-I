@@ -1,0 +1,15 @@
+[project]
+name = "mark1-receipts"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "blake3>=1.0",           # checkpoint Merkle leaves — same hash as the Rust crate, vector-verified
+    "cryptography>=44.0",    # Ed25519 + P-256 verification; signing stays in keys.py's Signer protocol
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mark1_receipts"]
