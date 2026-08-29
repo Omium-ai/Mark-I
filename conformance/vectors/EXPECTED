@@ -13,5 +13,8 @@
 # Phasing (13 §1, 12 §3.4): m1pl and redact arrive with C3 (Rust + Go); receipt with C6, which
 # is also when Python joins the gate. Add each line in the SAME commit that lands its vectors.
 #
-# C0 (scaffold): no implementations exist, so no family is due. The list below is empty on
-# purpose and the gate reports exactly that rather than passing quietly.
+# The list was empty at C0 on purpose (no implementation was due). m1pl armed with its
+# vectors per 13 §11 row C2 — the seed corpus lands with the frame codec, same change.
+m1pl
+redact
+receipt
