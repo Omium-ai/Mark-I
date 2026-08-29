@@ -1,0 +1,14 @@
+{
+  "session_id": "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55",
+  "transcript_path": "/home/devuser/.claude/projects/-home-devuser-workspace-acme-app/3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55.jsonl",
+  "cwd": "/home/devuser/workspace/acme-app",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "./scripts/run-tests.sh",
+    "description": "Run the test suite"
+  },
+  "tool_use_id": "toolu_01SynthFixtureTTTTTTTT",
+  "permission_mode": "default",
+  "prompt_id": "aa000000-0000-4000-8000-000000000102"
+}

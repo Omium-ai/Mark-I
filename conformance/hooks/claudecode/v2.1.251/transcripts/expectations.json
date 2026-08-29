@@ -1,0 +1,151 @@
+{
+  "suite": "conf_hooks_claudecode_2.1.251_replay",
+  "agent": "claudecode",
+  "agent_version": "2.1.251",
+  "idem_key_recipe": "idem_key = HMAC_tenant(session_id, message_id, request_id) — 07 §7 / 08 §5.1; session_id is the PARENT sessionId for subagent streams too (04 §2.1)",
+  "workspace_root": "/home/devuser/workspace/acme-app",
+  "out_of_workspace_streams": [
+    {
+      "file": "transcripts/-home-devuser-workspace-acme-app/9b2d4f60-1e3a-4c58-8a7d-2f5b6c9d0e11.jsonl",
+      "cwd": "/home/devuser/workspace-acme-app",
+      "never_emit_message_id": "msg_01SynthForeignAAAAAAAA",
+      "reason": "munged-dir collision: ReplaceAll('/', '-') maps /home/devuser/workspace-acme-app and /home/devuser/workspace/acme-app to the SAME vendor directory, so this foreign session shares the enabled workspace's transcript dir. Invariant 3 (04 §0.3) + 04 §2.1: its cwd resolves outside the enabled root, so the stream is never tailed and none of its keys ever emit."
+    }
+  ],
+  "streams": [
+    {
+      "file": "transcripts/-home-devuser-workspace-acme-app/3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55.jsonl",
+      "role": "parent",
+      "usage_events": [
+        {
+          "idem_key_inputs": {
+            "session_id": "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55",
+            "message_id": "msg_01SynthFixtureAAAAAAAA",
+            "request_id": "req_01SynthFixtureAAAAAAAA"
+          },
+          "usage": {
+            "input_tokens": 4,
+            "output_tokens": 210,
+            "cache_creation_input_tokens": 2048,
+            "cache_read_input_tokens": 0,
+            "service_tier": "standard"
+          },
+          "model": "claude-fable-5"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55",
+            "message_id": "msg_01SynthFixtureBBBBBBBB",
+            "request_id": "req_01SynthFixtureBBBBBBBB"
+          },
+          "usage": {
+            "input_tokens": 6,
+            "output_tokens": 1042,
+            "cache_creation_input_tokens": 512,
+            "cache_read_input_tokens": 2048,
+            "service_tier": "standard"
+          },
+          "model": "claude-fable-5"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55",
+            "message_id": "msg_01SynthFixtureCCCCCCCC",
+            "request_id": "req_01SynthFixtureCCCCCCCC"
+          },
+          "usage": {
+            "input_tokens": 6,
+            "output_tokens": 95,
+            "cache_creation_input_tokens": 64,
+            "cache_read_input_tokens": 2560,
+            "service_tier": "standard"
+          },
+          "model": "claude-fable-5"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55",
+            "message_id": "msg_01SynthFixtureGGGGGGGG",
+            "request_id": "req_01SynthFixtureGGGGGGGG"
+          },
+          "usage": {
+            "input_tokens": 6,
+            "output_tokens": 150,
+            "cache_creation_input_tokens": 128,
+            "cache_read_input_tokens": 2624,
+            "service_tier": "standard"
+          },
+          "model": "claude-fable-5"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55",
+            "message_id": "msg_01SynthFixtureEEEEEEEE",
+            "request_id": "req_01SynthFixtureEEEEEEEE"
+          },
+          "usage": {
+            "input_tokens": 6,
+            "output_tokens": 77,
+            "cache_creation_input_tokens": 32,
+            "cache_read_input_tokens": 2752,
+            "service_tier": "standard"
+          },
+          "model": "claude-fable-5"
+        }
+      ],
+      "never_emit": [
+        {
+          "message_id": "msg_01SynthFixtureDDDDDDDD",
+          "request_id": "req_01SynthFixtureDDDDDDDD",
+          "reason": "sidechain replay in the parent transcript — 08 §5.1 sidechain rule; the origin stream below owns this key"
+        }
+      ]
+    },
+    {
+      "file": "transcripts/-home-devuser-workspace-acme-app/3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55/subagents/agent-a7f3e2d1c0b9a8765.jsonl",
+      "role": "subagent",
+      "usage_events": [
+        {
+          "idem_key_inputs": {
+            "session_id": "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55",
+            "message_id": "msg_01SynthFixtureDDDDDDDD",
+            "request_id": "req_01SynthFixtureDDDDDDDD"
+          },
+          "usage": {
+            "input_tokens": 9,
+            "output_tokens": 640,
+            "cache_creation_input_tokens": 1024,
+            "cache_read_input_tokens": 0,
+            "service_tier": "standard"
+          },
+          "model": "claude-fable-5"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55",
+            "message_id": "msg_01SynthFixtureFFFFFFFF",
+            "request_id": "req_01SynthFixtureFFFFFFFF"
+          },
+          "usage": {
+            "input_tokens": 9,
+            "output_tokens": 88,
+            "cache_creation_input_tokens": 96,
+            "cache_read_input_tokens": 1024,
+            "service_tier": "standard"
+          },
+          "model": "claude-fable-5"
+        }
+      ],
+      "never_emit": []
+    }
+  ],
+  "overcount_case": {
+    "message_id": "msg_01SynthFixtureBBBBBBBB",
+    "request_id": "req_01SynthFixtureBBBBBBBB",
+    "streamed_lines": 4,
+    "naive_per_line_output_token_sum": 2562,
+    "correct_output_tokens": 1042,
+    "min_overcount_ratio_asserted": 2.0,
+    "why": "NFR-CORRECTNESS-001 / 07 §7: emitting per line is the verified ~2.5x overcount; one Usage per (message.id, requestId), last line wins"
+  }
+}

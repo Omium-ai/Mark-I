@@ -1,0 +1,90 @@
+{
+  "hmac_key_utf8": "conformance-redact-vectors-key",
+  "vectors": {
+    "clean_prose.in": {
+      "outcome": "clean",
+      "note": "Code, prose and version literals; a scanner that flags any of it is over-matching."
+    },
+    "aws_access_key_id.in": {
+      "outcome": "redacted",
+      "substitutions": 1,
+      "classes": ["api_key"],
+      "planted": ["AKIAIOSFODNN7EXAMPLE"],
+      "note": "AWS's own documentation example key — synthetic by construction."
+    },
+    "github_token.in": {
+      "outcome": "redacted",
+      "substitutions": 1,
+      "classes": ["api_key"],
+      "planted": ["ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"],
+      "note": "Token embedded in a remote URL: the span, not the line, is replaced."
+    },
+    "anthropic_api_key.in": {
+      "outcome": "redacted",
+      "substitutions": 1,
+      "classes": ["api_key"],
+      "planted": ["sk-ant-api03-AbCdEf-GhIjKlMnOpQrStUvWx"],
+      "note": "Pins rule priority: the sk-ant- row must claim the FULL span before the broader sk- shape (the hash is HMAC over the whole sk-ant-… span, so a decoder that lets sk- win produces a different token)."
+    },
+    "openai_api_key.in": {
+      "outcome": "redacted",
+      "substitutions": 1,
+      "classes": ["api_key"],
+      "planted": ["sk-AbCdEfGhIjKlMnOpQrStUvWxYz12"],
+      "note": "The broad sk- shape on a non-Anthropic key."
+    },
+    "pem_private_key.in": {
+      "outcome": "redacted",
+      "substitutions": 1,
+      "classes": ["private_key"],
+      "planted": ["MIIEowIBAAKCAQEA7synthetic"],
+      "note": "Multi-line BEGIN…END block is ONE span; text after the footer survives."
+    },
+    "jwt.in": {
+      "outcome": "redacted",
+      "substitutions": 1,
+      "classes": ["oauth_token"],
+      "planted": ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"],
+      "note": "All three JOSE segments are one span; the JWT row outranks the base64 entropy row on the shared eyJ prefix."
+    },
+    "high_entropy_hex.in": {
+      "outcome": "redacted",
+      "substitutions": 1,
+      "classes": ["high_entropy"],
+      "planted": ["9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"],
+      "note": "64 random-looking hex chars over the 3.4 bits/byte floor."
+    },
+    "high_entropy_base64.in": {
+      "outcome": "redacted",
+      "substitutions": 1,
+      "classes": ["high_entropy"],
+      "planted": ["dGhpcyBpc0EvKzlSYW5kb21LZXlNYXRlcmlhbFhZWnF3ZXJ0eXVpb3A3ODkwMTIzNA=="],
+      "note": "Base64 run incl. its = padding is one span, over the 4.8 bits/byte floor."
+    },
+    "low_entropy_hex.in": {
+      "outcome": "clean",
+      "note": "64 hex chars of near-zero entropy: shape matches, the randomness test must reject — a decoder without the entropy leg redacts this and diverges."
+    },
+    "multi_secret.in": {
+      "outcome": "redacted",
+      "substitutions": 2,
+      "classes": ["api_key", "oauth_token"],
+      "planted": [
+        "AKIAIOSFODNN7EXAMPLE",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+      ],
+      "note": "Two secrets, two classes: pins the exact substitution count and offset arithmetic after the first replacement changes the buffer length."
+    },
+    "repeated_secret.in": {
+      "outcome": "redacted",
+      "substitutions": 2,
+      "classes": ["api_key", "api_key"],
+      "planted": ["AKIAIOSFODNN7EXAMPLE"],
+      "note": "Equal secrets produce byte-identical tokens under one key — the in-tenant correlation property (04 §7.1) as bytes."
+    },
+    "already_redacted.in": {
+      "outcome": "clean",
+      "note": "A previous vector's OUTPUT as input: redaction is idempotent, and the token grammar must never itself match a rule (12 §2.4 prop_redact_idempotent, as a frozen vector)."
+    }
+  }
+}

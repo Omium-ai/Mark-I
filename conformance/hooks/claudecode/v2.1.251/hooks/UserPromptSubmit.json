@@ -1,0 +1,9 @@
+{
+  "session_id": "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55",
+  "transcript_path": "/home/devuser/.claude/projects/-home-devuser-workspace-acme-app/3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55.jsonl",
+  "cwd": "/home/devuser/workspace/acme-app",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Now wire it into the fetch path and run the tests.",
+  "prompt_id": "aa000000-0000-4000-8000-000000000102",
+  "permission_mode": "default"
+}

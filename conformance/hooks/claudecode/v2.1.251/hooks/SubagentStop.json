@@ -1,0 +1,11 @@
+{
+  "session_id": "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55",
+  "transcript_path": "/home/devuser/.claude/projects/-home-devuser-workspace-acme-app/3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55.jsonl",
+  "cwd": "/home/devuser/workspace/acme-app",
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_id": "a7f3e2d1c0b9a8765",
+  "agent_type": "general-purpose",
+  "agent_transcript_path": "/home/devuser/.claude/projects/-home-devuser-workspace-acme-app/3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55/subagents/agent-a7f3e2d1c0b9a8765.jsonl",
+  "last_assistant_message": "No gaps found in the retry helper's error handling."
+}

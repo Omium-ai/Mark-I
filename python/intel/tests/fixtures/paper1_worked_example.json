@@ -1,0 +1,45 @@
+{
+  "source": "mark1-research/paper1-tvo.tex — Section 9 'Numerical Illustrations' Table 1 (tab:regimes) and Section 5 Theorem 5.1's zero-parameter validation (both boxed knees of Table 2). These are the PAPERS' numbers, not ours (06 §8.6): the fixture exists to detect silent drift between the papers and the code.",
+  "population": { "p": 0.4, "c": 30000, "D": 150000 },
+  "regimes": [
+    {
+      "name": "no_verifier_human_discovers",
+      "v": 0,
+      "alpha": 1.0,
+      "beta": 1.0,
+      "tvo_tokens": 300000.0
+    },
+    {
+      "name": "llm_judge_auroc_0.537",
+      "v": 6000,
+      "alpha": 0.55,
+      "beta": 0.48,
+      "tvo_tokens": 360000.0,
+      "vs_baseline_pct": 20,
+      "v_star_tokens": -7200.0,
+      "note": "the corrections-log row 06 §8.6 pins: TVO 360.0k / +20%, v* = -7.2k"
+    },
+    {
+      "name": "llm_judge_auroc_0.65",
+      "v": 6000,
+      "alpha": 0.7,
+      "beta": 0.4,
+      "tvo_tokens": 257100.0,
+      "vs_baseline_pct": -14,
+      "v_star_tokens": 18000.0
+    },
+    {
+      "name": "grounded_rubric_auc_0.886",
+      "v": 25000,
+      "alpha": 0.85,
+      "beta": 0.2,
+      "tvo_tokens": 214700.0,
+      "vs_baseline_pct": -28,
+      "v_star_tokens": 54000.0
+    }
+  ],
+  "repair_knees": [
+    { "scale": "function", "rho": 0.3, "gamma": 0.5, "k_star": 2 },
+    { "scale": "repository", "rho": 0.3, "gamma": 0.8, "k_star": 6 }
+  ]
+}

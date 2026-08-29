@@ -1,0 +1,72 @@
+{
+  "accept_min.bin": {
+    "outcome": "accept",
+    "payload_len": 1,
+    "consumed": 10,
+    "note": "Smallest legal frame (07 §5 lower bound: len > 0). Also the designated split-iteration vector — see README §Split iteration."
+  },
+  "accept_two_frames.bin": {
+    "sequence": [
+      { "outcome": "accept", "payload_len": 1, "consumed": 10 },
+      { "outcome": "accept", "payload_len": 3, "consumed": 12 }
+    ],
+    "note": "Two frames in one buffer; distinct payload lengths so an off-by-one in 'consumed' cannot cancel out. Also split-iterated — see README §Split iteration."
+  },
+  "accept_max_len.bin": {
+    "outcome": "accept",
+    "payload_len": 4194304,
+    "consumed": 4194313,
+    "note": "len == M1PL_MAX_FRAME exactly (08 §4.2) — the bound is inclusive; a decoder written as 'len >= MAX' fails here."
+  },
+  "accept_then_reject.bin": {
+    "sequence": [
+      { "outcome": "accept", "payload_len": 1, "consumed": 10 },
+      { "outcome": "reject", "reject_code": "M1E-4002" }
+    ],
+    "note": "Valid frame followed by a full 9-byte garbage header (magic 'XXXX', rest well-formed): accept frame 1, then reject — never silently discard an unparseable tail (12 §3.4 row 6). Never scan forward for the next valid magic (12 §3.4 row 1)."
+  },
+  "accept_then_incomplete_tail.bin": {
+    "sequence": [
+      { "outcome": "accept", "payload_len": 1, "consumed": 10 },
+      { "outcome": "incomplete" }
+    ],
+    "note": "12 §3.4 row 6 literal: valid frame + 3 undecodable bytes. Under the header-buffered decoder model (README §Decoder model) a <9-byte remainder is 'incomplete'; EOF while incomplete is a connection error, not a flush (12 §3.4 row 5) — so the stream-level result is accept-then-error as the doc requires."
+  },
+  "incomplete_header_len1.bin": { "outcome": "incomplete" },
+  "incomplete_header_len2.bin": { "outcome": "incomplete" },
+  "incomplete_header_len3.bin": { "outcome": "incomplete" },
+  "incomplete_header_len4.bin": { "outcome": "incomplete" },
+  "incomplete_header_len5.bin": { "outcome": "incomplete" },
+  "incomplete_header_len6.bin": { "outcome": "incomplete" },
+  "incomplete_header_len7.bin": { "outcome": "incomplete" },
+  "incomplete_header_len8.bin": { "outcome": "incomplete" },
+  "incomplete_payload.bin": {
+    "outcome": "incomplete",
+    "note": "Header complete and valid (len=4) but only 3 payload bytes present. Never surface a partial Event; EOF in this state is an error, not a flush (12 §3.4 row 5)."
+  },
+  "reject_bad_magic.bin": {
+    "outcome": "reject",
+    "reject_code": "M1E-4002",
+    "note": "Magic 'M1Pl' — only the LAST magic byte is wrong (0x6C not 0x4C), rest identical to accept_min.bin, so a 3-byte magic compare fails here. Code per 12 §3.4 row 1."
+  },
+  "reject_ver_00.bin": {
+    "outcome": "reject",
+    "reject_code": "M1E-4003",
+    "note": "ver below the shipped set; no partial-parse fallback (12 §3.4 row 2). Code per 08 §7 error table (version mismatch)."
+  },
+  "reject_ver_02.bin": {
+    "outcome": "reject",
+    "reject_code": "M1E-4003",
+    "note": "ver above the shipped set; no 'try v1 anyway' (12 §3.4 row 2)."
+  },
+  "reject_len_zero.bin": {
+    "outcome": "reject",
+    "reject_code": "M1E-4002",
+    "note": "len == 0 is a desynchronized stream, not an empty Event — the half a decoder written as 'if len > MAX' silently omits (08 §4.2, 12 §3.4 row 3). Header-only file: a zero-length frame has no payload bytes."
+  },
+  "reject_len_over.bin": {
+    "outcome": "reject",
+    "reject_code": "M1E-4002",
+    "note": "len == M1PL_MAX_FRAME + 1. Header-only file BY DESIGN: the decoder must reject from the 9-byte header without seeing, needing, or allocating for any payload byte (12 §3.4 row 4 — 'reject before allocating')."
+  }
+}
