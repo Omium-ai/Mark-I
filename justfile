@@ -174,7 +174,9 @@ fmt:
 
 # Nightly toolchain; smoke duration in CI, long runs by hand or scheduled job.
 fuzz duration="60":
-    cd rust/m1p-wire      && cargo +nightly fuzz run frame_decode  -- -max_total_time={{duration}}
+    # Seed corpus = the frozen vectors (13 §11 row C2), passed as a second read-only dir so
+    # libFuzzer's discoveries land in the local corpus dir, never in conformance/ (12 §3.4: frozen).
+    cd rust/m1p-wire      && mkdir -p fuzz/corpus/frame_decode && cargo +nightly fuzz run frame_decode fuzz/corpus/frame_decode ../../conformance/vectors/m1pl -- -max_total_time={{duration}}
     cd rust/mark1-redact  && cargo +nightly fuzz run admit         -- -max_total_time={{duration}}
     cd rust/mark1-policy  && cargo +nightly fuzz run bundle_decode -- -max_total_time={{duration}}
     cd go/mark1d && go test -fuzz=FuzzSpoolRecordDecode -fuzztime={{duration}}s ./internal/spool
@@ -251,7 +253,54 @@ stores-up:
           | tar -xz -C "$BIN" --strip-components=3 "clickhouse-common-static-${CH_VERSION}/usr/bin/clickhouse"
       fi
       mkdir -p "$ROOT/ch"
-      ( cd "$ROOT/ch" && nohup "$BIN/clickhouse" server >"$ROOT/log/ch.log" 2>&1 & )
+      # 07 §"async_insert" mandates the settings server-side in the m1p_ingest user's profile,
+      # deliberately redundant with chconn's per-connection settings — and chconn's boot refusal
+      # R3 (05 §1.2) now actually PROBES the server-side value on a settings-free connection, so
+      # an unprovisioned store is correctly refused at boot. CH 24.8's compiled-in default is
+      # async_insert=0 (verified), so a bare `clickhouse server` here is a store this repo's own
+      # code must refuse: the lane provisions the profile or it isn't the lane.
+      cat > "$ROOT/ch/config.xml" <<'CHCFG'
+    <clickhouse>
+      <logger><level>warning</level><console>1</console></logger>
+      <listen_host>127.0.0.1</listen_host>
+      <http_port>8123</http_port>
+      <tcp_port>9000</tcp_port>
+      <path>./data/</path>
+      <users_config>users.xml</users_config>
+    </clickhouse>
+    CHCFG
+      cat > "$ROOT/ch/users.xml" <<'CHUSERS'
+    <clickhouse>
+      <profiles>
+        <default>
+          <async_insert>1</async_insert>
+          <wait_for_async_insert>1</wait_for_async_insert>
+        </default>
+        <m1p_ingest>
+          <async_insert>1</async_insert>
+          <wait_for_async_insert>1</wait_for_async_insert>
+        </m1p_ingest>
+      </profiles>
+      <users>
+        <default>
+          <password></password>
+          <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <access_management>1</access_management>
+        </default>
+        <!-- mark1/mark1: local-dev constant like MinIO's minioadmin; never leaves a laptop or runner -->
+        <m1p_ingest>
+          <password>mark1</password>
+          <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>
+          <profile>m1p_ingest</profile>
+          <quota>default</quota>
+        </m1p_ingest>
+      </users>
+      <quotas><default></default></quotas>
+    </clickhouse>
+    CHUSERS
+      ( cd "$ROOT/ch" && nohup "$BIN/clickhouse" server --config-file="$ROOT/ch/config.xml" >"$ROOT/log/ch.log" 2>&1 & )
       # A bare `break`-only wait loop reports success by falling off the end. `just ci` then runs
       # with M1_REQUIRE_STORES=1 against a store that never started, and the failure surfaces as
       # a connection error inside some unrelated test instead of here.

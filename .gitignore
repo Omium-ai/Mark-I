@@ -26,6 +26,7 @@ mark1-test-*/
 
 # Fuzz corpora are checked in under conformance/vectors/; cargo-fuzz's working dirs are not.
 **/fuzz/artifacts/
+**/fuzz/corpus/
 **/fuzz/coverage/
 **/fuzz/target/
 
