@@ -1,0 +1,209 @@
+// Package tailers turns Claude Code transcript streams into Usage events —
+// the edge layer of 07 §7's three-layer dedupe. This layer kills the only
+// duplicates it alone can see: streaming rewrites of one assistant message
+// (the verified ~2.5× overcount) and sidechain re-logs in the parent
+// transcript. One Usage per (message.id, requestId), last line wins pre-emit;
+// a post-emission rewrite with identical numbers is suppressed, one with
+// UPDATED numbers re-emits as a correction under the same idem_key (07 §7:
+// the Usage rollup keeps max(event_id) per idem_key); sidechain lines never
+// emit — all PROTOCOL INVARIANTS (08 §5.1), not parser etiquette.
+package tailers
+
+import (
+	"crypto/hkdf"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/json"
+	"time"
+
+	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
+	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+// Role of a transcript stream. The sidechain rule is role-dependent: a Usage
+// event is attributed to the transcript in which the API call ORIGINATED
+// (08 §5.1) — subagent streams are the origin of their own sidechain-marked
+// lines and do emit; the parent's isSidechain replays never do.
+type Role int
+
+const (
+	RoleParent Role = iota
+	RoleSubagent
+)
+
+// pendingKey implements the dedupe rule as a protocol invariant (04 §2.1).
+type pendingKey struct{ MessageID, RequestID string }
+
+type pendingEntry struct {
+	key pendingKey
+	ev  *m1pv1.Event
+}
+
+// quiesce is 04 §2.1's debounce: a pending entry with no newer line for this
+// long is emitted without waiting for the Stop hook.
+const quiesce = 2 * time.Second
+
+// stream is the per-transcript dedupe state machine, pure over lines so the
+// replay suite drives it without files or clocks.
+type stream struct {
+	role    Role
+	session uuid.UUID // the PARENT session for subagent streams too (04 §2.1)
+	idemKey []byte    // tenant usage-idem key (HKDF from the tenant HMAC root)
+
+	// pending is ordered by first-seen key so emissions match transcript
+	// order; in practice it holds ≤1 entry because a new key flushes the old.
+	pending    []pendingEntry
+	lastLineAt time.Time
+
+	// emitted remembers the last Usage this stream released per key, for the
+	// stream's lifetime. It closes the two post-emission rewrite holes the
+	// pending buffer alone cannot see: a rewrite arriving AFTER the quiesce
+	// flush, and interleaved rewrites (key A, key B flushes A, key A again).
+	// Identical numbers are suppressed — C8's "zero duplicate Usage" at the
+	// edge; UPDATED numbers re-emit under the same idem_key, which 07 §7
+	// supports explicitly: the Usage rollup collapses idem_key keeping
+	// max(event_id), so a later re-emit carrying the cumulative final counts
+	// is correct at-least-once behavior, not a duplicate.
+	// ponytail: grows one Usage per key for the stream's lifetime; an
+	// eviction sweep if transcripts ever hold enough messages to matter.
+	emitted map[pendingKey]*m1pv1.Usage
+}
+
+// txLine is the minimal vendor shape (08 §5.1): the tailer reads ONLY lines
+// whose message carries usage, and must tolerate every unknown sibling field.
+type txLine struct {
+	IsSidechain bool   `json:"isSidechain"`
+	RequestID   string `json:"requestId"`
+	Timestamp   string `json:"timestamp"`
+	Message     *struct {
+		ID    string `json:"id"`
+		Model string `json:"model"`
+		Usage *struct {
+			InputTokens              uint64 `json:"input_tokens"`
+			OutputTokens             uint64 `json:"output_tokens"`
+			CacheCreationInputTokens uint64 `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     uint64 `json:"cache_read_input_tokens"`
+			ServiceTier              string `json:"service_tier"`
+		} `json:"usage"`
+	} `json:"message"`
+}
+
+// consume feeds one transcript line and returns the Usage events this line
+// released: a key newer than a pending one emits the pending entry (04 §2.1
+// trigger 1). Non-usage lines, unparseable noise, and parent-stream sidechain
+// replays release nothing and are never themselves emitted.
+func (s *stream) consume(line []byte, now time.Time) []*m1pv1.Event {
+	s.lastLineAt = now
+	var l txLine
+	if json.Unmarshal(line, &l) != nil {
+		return nil // transcript noise; usage lines are the only contract here
+	}
+	if l.Message == nil || l.Message.Usage == nil || l.Message.ID == "" || l.RequestID == "" {
+		return nil
+	}
+	// PROTOCOL INVARIANT (07 §7 layer 1): sidechain lines in the parent
+	// transcript never emit — the subagent's own stream owns this key.
+	if s.role == RoleParent && l.IsSidechain {
+		return nil
+	}
+	key := pendingKey{l.Message.ID, l.RequestID}
+	ev := s.buildUsage(&l)
+	for i := range s.pending {
+		if s.pending[i].key == key {
+			// Last line wins pre-emit: a streaming rewrite replaces the
+			// pending entry rather than appending (the ~2.5× defense).
+			s.pending[i].ev = ev
+			return nil
+		}
+	}
+	// Post-emission rewrite (07 §7 layer 1, C8 "zero duplicate Usage"): a key
+	// this stream already released re-enters only when its NUMBERS moved — a
+	// byte-identical rewrite (e.g. the post-compaction re-log) is the exact
+	// duplicate this layer exists to kill and emits nothing; changed numbers
+	// re-pend as a correction under the SAME idem_key, which the ledger
+	// resolves by keeping max(event_id) per idem_key (07 §7).
+	if prev, ok := s.emitted[key]; ok && proto.Equal(prev, ev.GetUsage()) {
+		return nil
+	}
+	out := s.flush()
+	s.pending = append(s.pending, pendingEntry{key, ev})
+	return out
+}
+
+// flush emits everything pending, first-seen order — the Stop-hook and
+// shutdown trigger (04 §2.1); quiet() drives the same path on the debounce.
+func (s *stream) flush() []*m1pv1.Event {
+	if len(s.pending) == 0 {
+		return nil
+	}
+	out := make([]*m1pv1.Event, 0, len(s.pending))
+	if s.emitted == nil {
+		s.emitted = map[pendingKey]*m1pv1.Usage{}
+	}
+	for _, p := range s.pending {
+		out = append(out, p.ev)
+		s.emitted[p.key] = p.ev.GetUsage()
+	}
+	s.pending = nil
+	return out
+}
+
+// quiet flushes iff the stream has been line-silent past the 2 s debounce.
+func (s *stream) quiet(now time.Time) []*m1pv1.Event {
+	if len(s.pending) == 0 || now.Sub(s.lastLineAt) < quiesce {
+		return nil
+	}
+	return s.flush()
+}
+
+func (s *stream) buildUsage(l *txLine) *m1pv1.Event {
+	u := l.Message.Usage
+	ev := &m1pv1.Event{
+		SessionId: s.session[:],
+		Body: &m1pv1.Event_Usage{Usage: &m1pv1.Usage{
+			IdemKey:                  IdemKey(s.idemKey, s.session, l.Message.ID, l.RequestID),
+			MessageId:                l.Message.ID,
+			RequestId:                l.RequestID,
+			Model:                    l.Message.Model,
+			InputTokens:              u.InputTokens,
+			OutputTokens:             u.OutputTokens,
+			CacheCreationInputTokens: u.CacheCreationInputTokens,
+			CacheReadInputTokens:     u.CacheReadInputTokens,
+			ServiceTier:              u.ServiceTier,
+			Source:                   m1pv1.UsageSource_USAGE_SOURCE_TRANSCRIPT,
+		}},
+	}
+	// occurred_at is display/skew only (07 §2) — set when the vendor stamped
+	// one, never fabricated.
+	if t, err := time.Parse(time.RFC3339Nano, l.Timestamp); err == nil {
+		ev.OccurredAt = timestamppb.New(t)
+	}
+	return ev
+}
+
+// IdemKey computes the events.proto recipe verbatim: HMAC-SHA256 keyed by the
+// tenant's usage-idem key over
+//
+//	session_id(16 raw bytes) || 0x00 || message_id(utf8) || 0x00 || request_id(utf8).
+//
+// Computed at the edge as a protocol invariant — the server upserts on it
+// unconditionally, so even a tailer bug cannot double-bill (07 §7).
+func IdemKey(usageIdemKey []byte, session uuid.UUID, messageID, requestID string) []byte {
+	mac := hmac.New(sha256.New, usageIdemKey)
+	mac.Write(session[:])
+	mac.Write([]byte{0})
+	mac.Write([]byte(messageID))
+	mac.Write([]byte{0})
+	mac.Write([]byte(requestID))
+	return mac.Sum(nil)
+}
+
+// DeriveUsageIdemKey derives the tenant's usage-idem key from the tenant HMAC
+// root under the events.proto label "m1p.usage.idem". The root itself arrives
+// with enrollment and lives in identity custody (04 §2.9); this is the one
+// derivation between it and the wire.
+func DeriveUsageIdemKey(tenantRoot []byte) ([]byte, error) {
+	return hkdf.Key(sha256.New, tenantRoot, nil, "m1p.usage.idem", 32)
+}
