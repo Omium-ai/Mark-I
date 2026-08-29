@@ -26,15 +26,95 @@ FAILED=0
 THIN=''
 ECOS=''
 HIT=0   # an actual OTel match, as opposed to a coverage failure — they need different advice
+WAIVED=0
+
+# ---------------------------------------------------------------------------
+# D-M (RECONCILIATION; founder-visible like BUILD-10): the ONE waiver.
+#
+# Verified 2026-08-28: EVERY maintained Go ClickHouse client — clickhouse-go/v2
+# (13 §3.4's mandated pin) and ch-go alike — unconditionally package-imports the
+# OpenTelemetry API STUB (`go.opentelemetry.io/otel/trace`: interface types that
+# carry a span some CALLER might put in a context; no collector, no exporter, no
+# goroutine, nothing executes unless the importer constructs a tracer, which
+# depguard makes uncompilable here). So "zero OTel in go.sum" and "a ClickHouse
+# ledger" are unsatisfiable together, and a gate that demands the impossible is
+# a gate someone deletes (this file's own §closure words).
+#
+# The waiver therefore swaps the string proxy for the EXECUTABLE claim on the
+# one file class where the proxy over-reaches. A Go dependency-file hit is
+# waived iff ALL of:
+#   (1) go.mod's otel lines are `// indirect` only — a human typing a direct
+#       otel require is refused, whatever it is;
+#   (2) `go list -deps -test ./...` — the compiled import graph, tests included,
+#       which is what "transitive" actually means for a binary — contains no
+#       package from the SDK/exporter/OTLP/metric/bridge/contrib families;
+#       only the inert API-stub trees (otel/, otel/trace/) may appear;
+#   (3) no first-party .go file imports go.opentelemetry.io — the stub is
+#       reachable from vendor code only.
+# go.sum residue beyond the stub (module-graph entries for otlp exporters etc.
+# that the pruned graph records but nothing builds) is covered by (2): listed
+# hashes that correspond to zero compiled packages are inert by construction.
+# Rust and Python get no waiver — no sanctioned dependency needs one, so a hit
+# there is still someone adding OTel.
+# ---------------------------------------------------------------------------
+FORBIDDEN_OTEL_PKGS='^go\.opentelemetry\.io/(otel/(sdk|exporters|metric|bridge|log)|contrib|auto|proto|collector)'
+
+go_waiver() { # go_waiver <hit-file> — 0 if the hit is the D-M inert stub, 1 = real failure
+  mod=$(dirname "$1")
+  [ "$mod" = "." ] && mod=''   # go.work.sum sits at the root; evaluate every module below
+  command -v go >/dev/null 2>&1 || {
+    echo "       D-M waiver UNPROVABLE: 'go' not found, cannot inspect the compiled graph. Fail-closed."
+    return 1
+  }
+  # (1) direct requires are never waived
+  if [ -f "${mod:-.}/go.mod" ] && grep -E "$PATTERN" "${mod:-.}/go.mod" | grep -v '// indirect$' | grep -q .; then
+    echo "       D-M waiver refused: ${mod:-.}/go.mod carries a DIRECT otel require."
+    return 1
+  fi
+  # (2) the compiled graph, tests included
+  for m in ${mod:-$GO_MODS}; do
+    COMPILED=$( (cd "$m" && GOWORK=off go list -deps -test ./... 2>/dev/null) | grep '^go\.opentelemetry\.io' | sort -u)
+    if echo "$COMPILED" | grep -qE "$FORBIDDEN_OTEL_PKGS"; then
+      echo "       D-M waiver refused: $m COMPILES a non-stub otel package:"
+      echo "$COMPILED" | grep -E "$FORBIDDEN_OTEL_PKGS" | sed 's/^/         /'
+      return 1
+    fi
+  done
+  # (3) no first-party import anywhere in go/
+  if grep -rn --include='*.go' 'go\.opentelemetry\.io' go 2>/dev/null | grep -q .; then
+    echo "       D-M waiver refused: first-party Go source imports go.opentelemetry.io:"
+    grep -rln --include='*.go' 'go\.opentelemetry\.io' go | sed 's/^/         /'
+    return 1
+  fi
+  echo "otel_gate: $1 — otel strings WAIVED under D-M: inert API stub via the sanctioned CH client"
+  echo "           (compiled otel packages, all within the stub trees, none forbidden):"
+  ( cd "${mod:-go/controld}" && GOWORK=off go list -deps -test ./... 2>/dev/null ) \
+    | grep '^go\.opentelemetry\.io' | sort -u | sed 's/^/             /'
+  WAIVED=1
+  return 0
+}
 
 scan() { # scan <file> — 1 if absent, else grep it and record any hit
   if [ ! -f "$1" ]; then
     return 1
   fi
-  if grep -inE "$PATTERN" "$1"; then
-    echo "FAIL: OpenTelemetry package present in $1 (CON-005: zero OTel anywhere)."
-    FAILED=1
-    HIT=1
+  if grep -inE "$PATTERN" "$1" >/dev/null; then
+    case "$1" in
+      *go.mod|*go.sum|go.work.sum)
+        if ! go_waiver "$1"; then
+          grep -inE "$PATTERN" "$1"
+          echo "FAIL: OpenTelemetry package present in $1 (CON-005: zero OTel anywhere)."
+          FAILED=1
+          HIT=1
+        fi
+        ;;
+      *)
+        grep -inE "$PATTERN" "$1"
+        echo "FAIL: OpenTelemetry package present in $1 (CON-005: zero OTel anywhere)."
+        FAILED=1
+        HIT=1
+        ;;
+    esac
   else
     echo "otel_gate: $1 clean (direct+resolved as applicable)"
   fi
@@ -158,8 +238,12 @@ eco_close
 }
 
 if [ "$FAILED" -ne 0 ]; then
-  [ "$HIT" -eq 0 ] ||
+  [ "$HIT" -eq 0 ] || {
     echo "Remove the dependency. Telemetry rides M1P; there is no exception and no feature flag."
+    echo "(The D-M waiver is not an exception to that rule: it covers only the inert API stub"
+    echo " the sanctioned Go ClickHouse client compiles, proven inert from the import graph"
+    echo " above — it can never cover an SDK, an exporter, OTLP, or a first-party import.)"
+  }
   exit 1
 fi
 
@@ -168,6 +252,14 @@ if [ -n "$THIN" ]; then
   echo "           Direct manifests are clean, but a TRANSITIVE otel dep in$THIN passes unseen."
   echo "           §7.5's \"direct and transitive\" claim holds only for the ecosystems whose"
   echo "           lockfiles are listed clean above."
+  exit 0
+fi
+
+if [ "$WAIVED" -ne 0 ]; then
+  # Green and OK are different words (override_pattern_gate's lesson): this run is green
+  # because a waiver held, and the summary line must say so, every time, unmissably.
+  echo "otel_gate: OK WITH D-M WAIVER — rust and python fully clean; go clean except the inert"
+  echo "           otel API stub compiled via the sanctioned ClickHouse client, proven above."
   exit 0
 fi
 
