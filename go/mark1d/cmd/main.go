@@ -22,6 +22,7 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/capture"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
@@ -60,6 +61,11 @@ type config struct {
 }
 
 func main() {
+	// Anchor-sandbox re-exec hook (04 §2.2): when mark1d is spawned as its own
+	// sandbox helper this call applies rlimits + Landlock and execs the anchor,
+	// never returning. It MUST precede flags, logging, everything — the helper
+	// carries its spec in one env var and must touch no daemon state.
+	anchors.MaybeRunHelper()
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	stateDefault := ""
 	if home, err := os.UserHomeDir(); err == nil {

@@ -5,14 +5,17 @@
 package claudecode
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
@@ -34,6 +37,29 @@ func (a *Adapter) Name() string { return "claudecode" }
 
 var versionRe = regexp.MustCompile(`\d+\.\d+\.\d+`)
 
+const (
+	versionSniffTimeout = 5 * time.Second
+	versionSniffCap     = 64 << 10 // a version line is tens of bytes
+)
+
+// capWriter drops everything past remaining bytes — never errors, so a chatty
+// tool is truncated rather than turned into a failed sniff.
+type capWriter struct {
+	w         io.Writer
+	remaining int
+}
+
+func (c *capWriter) Write(p []byte) (int, error) {
+	if c.remaining > 0 {
+		n := min(len(p), c.remaining)
+		if _, err := c.w.Write(p[:n]); err != nil {
+			return len(p), nil
+		}
+		c.remaining -= n
+	}
+	return len(p), nil
+}
+
 // Detect sniffs installation and version at runtime — the version selects the
 // agent_maps field map and an unmapped version must go inert, never guess
 // (08 §5 rule 2; the map check itself lives with internal/policy).
@@ -50,11 +76,20 @@ func (a *Adapter) Detect() (adapters.Detection, error) {
 	if os.Getenv("ANTHROPIC_API_KEY") != "" {
 		d.Regime = adapters.RegimeAPIKey
 	}
-	out, err := exec.Command(bin, "--version").Output()
-	if err != nil {
+	// Bounded sniff: a wedged or chatty `claude --version` must not hang the
+	// daemon's Detect() or buffer without limit. Same class as the anchors
+	// version sniff (internal/anchors/catalog.go) — this one stays unsandboxed
+	// because the binary IS the agent the user is already running, not
+	// repo-supplied code.
+	ctx, cancel := context.WithTimeout(context.Background(), versionSniffTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "--version")
+	var buf bytes.Buffer
+	cmd.Stdout = &capWriter{w: &buf, remaining: versionSniffCap}
+	if err := cmd.Run(); err != nil {
 		return d, nil // installed but unsniffable: no version ⇒ no field map ⇒ inert
 	}
-	d.Version = versionRe.FindString(string(out))
+	d.Version = versionRe.FindString(buf.String())
 	return d, nil
 }
 
