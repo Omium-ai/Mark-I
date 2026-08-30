@@ -82,6 +82,31 @@ func Open(ctx context.Context, o Options) (*Conn, error) {
 	return &Conn{ch: ch, db: o.Database}, nil
 }
 
+// OpenOffboard connects the offboarding-deletion principal. WHY a third
+// principal (07 §"deletion path"): the tenant-erasure mutations are "issued
+// by the offboarding role through the query choke" — a role of its OWN,
+// neither of the two runtime users: m1p_ingest is INSERT-only and answers
+// ACCESS_DENIED to a DELETE (the wave-7 defect: the delete carve-out was
+// routed to it and only the superuser-connected test could not see the
+// refusal), and m1p_query is SELECT-only. No R3 assertion here: R3's subject
+// is the ingest async-insert profile (05 §1.2), and a principal that never
+// inserts would otherwise be refused at boot over a setting its one
+// statement shape cannot use — blocking a legal deletion obligation.
+func OpenOffboard(ctx context.Context, o Options) (*Conn, error) {
+	ch, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{o.Addr},
+		Auth: clickhouse.Auth{Database: o.Database, Username: o.Username, Password: o.Password},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("chconn: open offboard principal %s: %w", o.Addr, err)
+	}
+	if err := ch.Ping(ctx); err != nil {
+		_ = ch.Close()
+		return nil, fmt.Errorf("chconn: offboard principal unreachable %s: %w", o.Addr, err)
+	}
+	return &Conn{ch: ch, db: o.Database}, nil
+}
+
 // MustOpen is boot step 4 (05 §1.1); mismatch ⇒ Fatal, crashloop on purpose.
 func MustOpen(ctx context.Context, o Options) *Conn {
 	c, err := Open(ctx, o)
