@@ -1093,7 +1093,7 @@ zero-OTel rule for Python alone. And `secret_type_gate.sh`'s rule 3 was narrowed
 green there is a leak CI blessed. Narrowing a pattern to silence a false positive, without
 recording that the coverage shrank, is how a control becomes decoration.
 
-### The fifteen cross-document decisions (lead, binding)
+### The sixteen cross-document decisions (lead, binding)
 
 Eight of the 37 were contradictions between frozen documents, which cannot be fixed by editing
 one side. They were decided before repair began so that no two agents could resolve the same
@@ -1116,6 +1116,7 @@ contradiction two different ways:
 | D-M | `otel_gate.sh` gains its ONE waiver: the inert OTel API stub the sanctioned Go ClickHouse client compiles — **founder-visible, like BUILD-10** | Verified 2026-08-28: `clickhouse-go/v2` (13 §3.4's mandated pin) and `ch-go` alike unconditionally package-import `go.opentelemetry.io/otel/trace`, so "zero OTel in `go.sum`" and "a ClickHouse ledger" are jointly unsatisfiable — CON-005 as written demanded the impossible, and a gate demanding the impossible is a gate someone deletes. The waiver replaces the string proxy with the executable claim: `go list -deps -test ./...` shows exactly 8 compiled otel packages, all inside the two API-stub module trees (`otel`, `otel/trace`), zero SDK/exporter/OTLP/metric/bridge/contrib; `go.mod`'s otel lines must be `// indirect`; no first-party `.go` imports the namespace (depguard's rule, re-proven). The summary prints `OK WITH D-M WAIVER`, never plain OK. Rust and Python get no waiver. ADR-0005's guarantee — nothing OTel executes, no OTLP endpoint exists, M1P is the only telemetry fabric — holds exactly as written. |
 | D-N | The fabric control set (`Hello`/`HelloAck`, `GateQuery`/`GateVerdict`, `Flush`/`FlushAck`) is defined in new `proto/m1p/v1/fabric.proto`, transcribed from `08` §4.2's table; `07` §5 gains the pointer | Both docs cited a definition ("defined in m1p.v1, doc 07") that no `.proto` carried, and two build waves hit the hole independently — the shim's gate path and mark1d's Hello handshake were each reported unimplementable against the frozen contract. Additive (`buf lint` clean, new file, no breaking surface); the fields are `08`'s, transcribed, not authored. Control messages never reach the spool, the wire, or `Event.body` — stated in the proto header and in `07` §5. Unblocks `gate.rs` and the handshake for the Phase 2 stop-gate row |
 | D-O | `mark1 verify-receipts`' default network path is the EXPORT round-trip (`/api/v1/receipts/export` + `/keys`), never the paginated §3.4 rows; §3.4's rows gain `server_key_id` additively | The CLI's first implementation aliased §3.4's single `key_id` into the verifier's `device_key_id` — but that surface's `key_id` names the SERVER key, so the default path refused every chain it fetched. Two fixes were possible; both taken for different reasons: the export is DEFINED as byte-loadable by the verifier ("no translation layer"), so it is the auditor path and the CLI's default; and §3.4's rows must still name both keys because one `key_id` cannot serve two roles — the S1 the receipt vectors forbid. `/.well-known/mark1-keys` stays with policydist's key ceremony |
+| D-P | **ENG-01 resolved: bundle zero.** Phase 2's verdict fusion runs on a statically-signed LOCAL bundle — seq = 0, channel `local`, transparency-proof waived at `seq == 0` ONLY (a structural carve-out, never a flag), same decoder and verification order as distribution bundles | Phase 2's gate ("retry loops arrested at the knee") needs confusion matrices, priors and knee params that ship in bundles, and the distribution plane is Phase 3. A second config format would fork the eval path the day before the real bundles arrive; bundle zero exercises the REAL decoder from day one, so Phase 3 changes where bundles come from, not what evaluates them. The waiver being `seq == 0` in code (not configuration) means no operator can widen it under deadline pressure — the override_pattern lesson applied to policy |
 
 **Still not signed, and still blocking:** ADRs 0001/0002/0004/0009; SEC-01; SEC-02 (which gates
 R-03); ENG-01 and ENG-05 scope. No production ClickHouse write may occur before ADR-0001 is
@@ -1494,6 +1495,116 @@ real principals, gates green.
 
 ---
 
+## Fourteenth pass — wave 8 closed, wave 9 opened by the crypto skeptic (2026-08-29/30)
+
+Wave 8 (sandbox + cortexd hardening) closed on its own terms: findings 1–6 verified in the tree
+(pre-exec binary hash, `ExecsRepoCode` flagging, mandatory cBPF AF_UNIX denial, one-way-valve doc
+honesty, eslint ruleId cap, sandboxed version sniff), and findings 7–13 fixed by two Fable agents
+with negative-verified tests each. The Go five: an output-cap breach before arm now retroactively
+kills; `groupKill` takes a mutex + `reaped` flag closing the watchdog/reap race; zero rlimits
+default from `DefaultLimits(ClassSlow)`; consent revocation propagates via a per-run
+`stillConsented` re-read. The best of them is **`helperAssertConfined`** — the reviewer asked for
+a provenance check on the helper, and provenance is spoofable; what landed instead is a POSITIVE
+confinement property (refuse if `/proc/self/uid_map` is the initial-userns line, refuse if ANY
+interface is up including loopback). Asserting the property you actually need beats asserting a
+proxy for it. cortexd's three: M1E-6402 fail-closed ignore load, 0700 store dir with lstat and a
+hard refusal on `mode & 0o077`, and `memory_recall` carrying `preamble` + `fit_arrays`.
+
+**Then the crypto skeptic (Fable, fresh context) found two S1s and turned closure into a repair
+round.** Both were the same disease — a check that reads its own answer from the thing it is
+checking:
+
+1. `app/certs/store.py` `current_cert` had **no `WHERE tenant_id`**, and `insert_cert` never
+   wrote `issued_at`/`expires_at`, so both ORDER BY keys were NULL and an unfiltered `LIMIT 1`
+   served an arbitrary tenant's certificate to any bypass-capable connection. A live probe had
+   tenant B read tenant A's cert through `GET /v1/certs/{tenant_id}/current`.
+2. `rust/mark1-policy` verified the transparency-log inclusion proof against a `root` **read from
+   the bundle itself**. The probe tampered a signed body, recomputed a proof over the tampered
+   leaf, wrote the resulting root into the bundle, and it was ACCEPTED with no signing key.
+   M1E-3003 was decorative at every seq > 0.
+
+**Three lead rulings were required before any of it could be fixed**, because each defect's repair
+needed a contract that did not yet exist. All three are written into the frozen docs as the
+implementers' referee:
+
+- **D-Q — signing input.** `b"mark1-bundle-v1\0" || canonical-CBOR(bundle-sig-input)` over nine
+  fields. Fixes three defects at once: splice ambiguity, an unsigned envelope (backdating
+  `issued_at` revived rotated keys, since key validity was judged against it), and an unbound
+  section name (one key in six rings defeated the section split).
+- **D-R — confusion shape.** 07 said 4×4 with a separate abstention model; 06 said 4×3; Rust and
+  Python had implemented *different models*, so the bundle could not parameterise ADJUDICATE at
+  all. Amended 07 toward 06 (`confusion4x3`, the abstain column subsuming the deleted model) —
+  the cheap direction *and* the correct one, since the 4×4 existed only in `rust/mark1-policy`
+  and 07, with no Go consumer. Rows and `priors` must now sum to 1.0 at decode: a range-only
+  check let all-zero priors through to detonate the Python softmax.
+- **D-S — pinned head.** `verify_and_decode` takes `tlog_head: Option<&TlogHead>`; `None` at
+  seq > 0 is M1E-3003. 05 §4.4 always said "against the PINNED log head" — this signature is what
+  made that sentence executable. The D-P seq-0 waiver is untouched and still enforced both ways.
+
+**Verified by the lead, not accepted on report.** Both S1 fixes were negative-verified by
+reverting them: dropping the tenant predicate yields `assert UUID('933e…') is None` — a foreign
+tenant's certificate row served to a cert-less tenant; stubbing the pinned-head comparison to
+`if false` yields `forged_inclusion_root: negative vector accepted`. Both tests have teeth.
+
+**The vector family went 10 → 23** and now covers all ten `Reject::kind()` values, including the
+two attack vectors above plus `backdated_issued_at`, `too_large`, `outside_validity`,
+`schema_stray_key` and six `non_canonical_*` defect classes. Regeneration is byte-identical
+across runs.
+
+**A gate that was lying is now honest, and the honesty has teeth.** `conformance_crosslang.sh`
+asserted only a global `GO_N > 0`, which the receipt tests alone satisfied while the bundle family
+had **zero** Go coverage. It now checks coverage per family and hard-fails on any uncovered family
+not named in `GO_PENDING` — verified by emptying that variable and watching it exit 1. `bundle` is
+declared pending with a delete-instruction comment, and prints loudly that *the cross-language
+claim does not cover it*. The same correction went into `docs/04-lld-edge.md`, which had claimed
+this crate was consumed by "the conformance-vector-validated Go decoder": **no Go bundle decoder
+exists anywhere in `go/`.** Stated in the doc rather than quietly dropped.
+
+**Two defects the lead put in and the agents caught.** The D-Q hex literal in 07 read
+`h'…76310a00'`, decoding to `mark1-bundle-v1\n\0` — 17 bytes against the prose's 16. A Go twin
+built from the hex would have computed a different signing input than Rust built from the prose,
+and every cross-language signature would have failed; with no Go bundle twin yet, it would have
+sat undetected until Wave B. Also 04 §7.3's fail-static sentence claimed last-known-good
+*persistence* lived in the crate; it does not and should not — the store differs per process, so
+the crate owns only the pure `is_fresh` staleness evaluation. Both corrected.
+
+**The store lane was provisioning its own superuser.** `stores-up` ran `initdb -U mark1`, making
+the store contract's DSN role a cluster superuser — hence BYPASSRLS, hence every tenant-isolation
+assertion in the repo unobservable from the suite built to make it. The `rds_superuser` lesson
+(61 FORCE-RLS tables rendered decorative) re-entering through the test harness, and under the
+justfile's own `M1_REQUIRE_STORES=1` it would have turned `just ci` red. Now bootstraps as
+`m1_bootstrap` and hands the suite a `NOSUPERUSER NOBYPASSRLS` owner — `FORCE ROW LEVEL SECURITY`
+means ownership does not exempt it, which is exactly what makes enforcement observable. A cluster
+built by the old recipe is detected and refused with the reprovision command rather than run
+against a role whose green means nothing.
+
+Also closed: `just test-go`'s reported failure was **not** a code defect — the justfile's default
+DSNs point at the canonical `stores-up` ports while this box runs the stores on high ports. That
+is the documented escape hatch working ("a dev machine can point them at any Postgres it already
+has"). All three Go modules are green against the live stores under `M1_REQUIRE_STORES=1`.
+
+**Deferred with a decision, not forgotten — D-T (`VerdictStage`).** `proto/m1p/v1/verify.proto`
+conflates two orthogonal axes in one enum: pipeline position (PROVISIONAL / adjudicated /
+REVISED) and evidence quality (certified / bootstrapping / uncertified). `VERDICT_STAGE_CERTIFIED`
+sits among the former while asserting the latter, so an adjudicated-but-uncertified verdict has
+**no wire representation**; today's only escape is the field-4 convention "empty cert id ⇒
+uncertified/bootstrapping", which cannot separate bootstrapping from uncertified. Ruling: add a
+separate `CertificationStatus` field rather than overload the stage enum, keeping the existing
+value name (renaming it would break WIRE_JSON). Adding a field/enum value is non-breaking, and
+there are currently **zero** m1p `VerdictEvent` emitters, so it costs nothing — but it lands with
+its first consumer in Wave B, not here, to keep this wave's diff reviewable. 06 §3.1's pseudocode,
+which returned `stage=CERTIFIED` unconditionally and contradicted its own §5.4 prose, now derives
+the stage; the implementation already earns it (CERTIFIED requires a stamped cert AND every fused
+likelihood row measured — a literature-default row is not evidence about this tenant).
+
+**Final, all run by the lead:** cargo workspace all-suites 0 failed, clippy `-D warnings` clean,
+fmt clean; mark1d / mark1 / controld all green against live stores with `M1_REQUIRE_STORES=1`;
+adjudicator 76 passed / 1 honest skip and 106 intel passed; crosslang rust=21 go=71 with 80 vector
+files agreeing and the bundle gap declared; `just gates` green under the D-M waiver with the two
+expected `mark1-proxy` PARTIALs (Phase 3, crate does not exist yet).
+
+---
+
 ## Disposition tracker
 
 | ID | Severity | Resolution | Owner | Status |
@@ -1539,7 +1650,7 @@ real principals, gates green.
 | SEC-13 | S2 | relabel C-16 / C-49 / C-05; audit the whole enforcement column | lead | open |
 | SEC-14 | S3 | purge the registry on revoke, or soften §9.1 | lead | open |
 | SEC-15 | S3 | four small fixes as listed | lead | open |
-| ENG-01 | S1 | **Phase 1 "bundle zero"** — statically signed local bundle, same decoder, `seq = 0` waives the tlog proof | lead | open |
+| ENG-01 | S1 | **Phase 1 "bundle zero"** — statically signed local bundle, same decoder, `seq = 0` waives the tlog proof | lead | **closed by D-P** — implemented in wave 8's `mark1-policy` with the waiver structural at `seq == 0` |
 | ENG-02 | S1 | bound the rewrite window in `04` §3.2 + key-order fixture + state the bench config | lead | open |
 | ENG-03 | S1 | `12` §11.4 wins; rewrite `13`'s `ci` recipe to include `test-integration` under `M1_REQUIRE_STORES=1` | lead | **closed by BUILD-09** — `just ci` now runs `test-integration test-isolation gates conformance` |
 | ENG-04 | S1 | add `session_epoch` (preferred) or persist a `seq` high-water; assert no dup `(session_id, seq)` in `chaos_daemon_kill9` | lead | **closed by D-E** — `m1p.v1` field 6, `m1_ch_001` column, FR-SPINE-001, epoch-bump fixture; ordering executed on the live server (seventh pass) |

@@ -219,9 +219,19 @@ ADJUDICATE(task_id, votes, bundle, cert) -> VerdictEvent
           logp[t] += log P(vote_v | t; bundle)    # abstentions contribute their abstain likelihood
   posterior := softmax(logp)                      # normalize in log space (logsumexp)
 
+  # The stage is EARNED, not asserted. CERTIFIED requires BOTH a stamped certificate and
+  # every fused likelihood row actually measured (spectral / shrunk-global); a row still on
+  # its literature default is not evidence about THIS tenant's verifiers. Weakest input wins,
+  # so a step-0 degenerate verdict — which fuses nothing — can never claim CERTIFIED.
+  # This line used to read `stage=CERTIFIED` unconditionally, which contradicted §5.4 below
+  # and the "degrades faster than it upgrades" rule at §5; the implementation follows §5.
+  stage := CERTIFIED    if cert.status = certified and all_rows_measured(likelihoods)
+        else BOOTSTRAPPING if cert exists
+        else UNCERTIFIED
+
   # Step 3 — the error path
   if posterior[E] > θ_error (D3: 0.5) or infra_dominant(votes):
-      return VerdictEvent(verdict=error, posterior, cert.id)
+      return VerdictEvent(stage, verdict=error, posterior, cert.id)
       # Folding this into `violated` incurs provably unavoidable excess risk (Thm 5.2).
 
   # Step 4 — Chow band (Thm 5.1): abstention strictly dominates every binary folding
@@ -230,7 +240,7 @@ ADJUDICATE(task_id, votes, bundle, cert) -> VerdictEvent
   elif η ≤ A/R:      verdict := violated
   else:              verdict := refused           # η ∈ (A/R, 1 − A/D) — the Chow band
 
-  return VerdictEvent(stage=CERTIFIED, verdict, posterior=[S,V,R,E], noise_cert_id=cert.id)
+  return VerdictEvent(stage, verdict, posterior=[S,V,R,E], noise_cert_id=cert.id)
 ```
 
 Default costs (D4, DESIGN — bundle-overridable per tenant): `A = 1` (a refusal costs one human look), `R = 3` (a false rejection wastes a retry loop), `D = 9` (a false acceptance ships a bad outcome). Band: `(A/R, 1−A/D) = (0.333, 0.889)`. WHY these ratios: they encode "shipping a wrong outcome is 3× worse than blocking a right one, which is 3× worse than asking a human" — a defensible starting asymmetry that the tenant's own `V(task)` economics later refine; any binary folding of the band is strictly dominated regardless of the exact values (Thm 5.1).

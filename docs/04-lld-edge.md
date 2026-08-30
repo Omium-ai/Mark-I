@@ -783,8 +783,29 @@ One signing discipline product-wide: `mark1d.identity` uses this crate's semanti
 /// designed for nanosecond evaluation — no map lookups or string compares on
 /// the gate/route path after decode.
 pub fn verify_and_decode(
-    raw: &[u8], keys: &KeyRing, last_applied_seq: u64,
+    raw: &[u8], keys: &SectionKeys, last_applied_seq: Option<u64>,
+    tlog_head: Option<&TlogHead>,
 ) -> Result<Bundle, Reject>;   // Reject carries M1E-3001/3002/3003/3005
+// SectionKeys, not a single KeyRing: 05 §4.5 splits signing across SIX section
+// key classes, while mark1-receipt's KeyRole is two-valued. SectionKeys is six
+// reused KeyRings — ring membership IS the role, so a `route` key cannot sign
+// `verify` (the key-ROLE binding lesson, applied to bundles).
+// Option<u64>, not u64: D-P makes seq 0 a legal bundle, so a bare u64 cannot
+// express "nothing applied yet" without stealing a legal sequence number.
+// None = boot / no last-known-good.
+//
+// DECISION D-S (lead, binding). `tlog_head` is REQUIRED for seq > 0 and a
+// `None` head at seq > 0 is an M1E-3003 refusal. Without it the inclusion
+// proof verified the audit path against a `root` read from the bundle's OWN
+// `inclusion` map — a self-consistency check, not evidence. Adversarial review
+// tampered a signed bundle's body, recomputed a proof over the tampered leaf,
+// wrote the resulting root into the bundle, and it was ACCEPTED with no
+// signing key involved. 05 §4.4 always said "against the PINNED log head";
+// this signature is what makes that sentence executable. Refusing on a missing
+// head is the correct fail-static behaviour, not an availability risk: an edge
+// with no fresh head keeps its last-known-good bundle rather than accepting an
+// unwitnessed new one. At `seq == 0` the D-P bundle-zero waiver is unchanged —
+// no proof, no head, structurally.
 
 pub struct Bundle {
     pub seq: u64, pub max_age: Duration, pub prev_hash: [u8; 32],
@@ -797,7 +818,9 @@ pub struct Bundle {
 }
 ```
 
-**Any command string fails decode:** the `verify` section's schema has no field where an executable string can live — anchor references are catalog IDs validated against the grammar `^[a-z0-9-]+@cat-[0-9]+$`; a token containing whitespace, a path separator, or a shell metacharacter fails the grammar and rejects the **whole bundle** (`M1E-3005` — invalid is a security event, never applied piecewise). Fail-static behavior (last-known-good persistence, `max_age` → conservative built-ins) is implemented here once and consumed by cortexd, the proxy, and — through the conformance-vector-validated Go decoder — `mark1d`.
+**Any command string fails decode:** the `verify` section's schema has no field where an executable string can live — anchor references are catalog IDs validated against the grammar `[a-z0-9_.-]{1,64}` (normative in 07's CDDL — this doc previously carried a mutually exclusive `@cat-N` form, which no implementation ever spoke); a token containing whitespace, a path separator, or a shell metacharacter fails the grammar and rejects the **whole bundle** (`M1E-3005` — invalid is a security event, never applied piecewise). Fail-static behavior is **split**, and the split is deliberate: the crate owns only the pure part — evaluating a decoded bundle's age against `max_age` and reporting `Fresh | Stale` so a caller past the horizon falls to conservative built-ins. Last-known-good **persistence** is each consumer's, because the store differs per process (cortexd's redb, the proxy's memory-only cache, `mark1d`'s spool-adjacent state) and a crate that opened files would force all three onto one. A single staleness function with no I/O is the part that must not be reimplemented three times; the storage around it is not.
+
+> **Go decoder status (lead, 2026-08-29): NOT BUILT.** Earlier text here claimed this crate was "consumed by … the conformance-vector-validated Go decoder"; no such decoder exists anywhere in `go/`. The bundle vector family has **zero** Go coverage, and `tools/ci/conformance_crosslang.sh` does not catch this because it asserts only a global `GO_N > 0`, which the receipt, redact and TVO-band families already satisfy. Until the Go twin lands (Phase 2 Wave B), `mark1d` consumes policy **through `mark1-policy` only**, and the cross-language guarantee this doc offers for bundles is a guarantee about one implementation, not two. Stated here rather than quietly corrected: a conformance claim that names a second implementation is exactly the kind of decorative control this repo exists not to repeat.
 
 ### 7.4 `m1p-wire` — codegen + M1PL framing
 

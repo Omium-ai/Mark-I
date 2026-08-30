@@ -1,0 +1,23 @@
+{
+  "source": "mark1-research/paper2-verification-without-oracles.tex §9 'Worked Examples' — tab:surface, plus the anchor-veto and event-E rows. The fixture carries the PAPER'S printed numbers, not ours, so this file also detects silent drift between the paper and the code (the 06 §8.6 pattern applied to Paper II — the Phase 2 verification gate).",
+  "prior_satisfied": 0.4,
+  "costs_tokens": { "A": 20000, "R": 45000, "D": 150000 },
+  "band": [0.444, 0.867],
+  "verifiers": {
+    "rubric": { "accept_given_s": 0.85, "accept_given_v": 0.2 },
+    "rrm": { "accept_given_s": 0.75, "accept_given_v": 0.25 },
+    "anchor": { "accept_given_s": 1.0, "accept_given_v": 0.6 }
+  },
+  "surface": [
+    { "pattern": ["accept", "accept", "accept"], "likelihood_ratio": 21.25, "eta": 0.934, "verdict": "satisfied" },
+    { "pattern": ["accept", "reject", "accept"], "likelihood_ratio": 2.361, "eta": 0.612, "verdict": "refused" },
+    { "pattern": ["reject", "accept", "accept"], "likelihood_ratio": 0.938, "eta": 0.385, "verdict": "violated" },
+    { "pattern": ["reject", "reject", "accept"], "likelihood_ratio": 0.104, "eta": 0.065, "verdict": "violated" },
+    { "pattern": ["accept", "accept", "reject"], "likelihood_ratio": 0.0, "eta": 0.0, "verdict": "violated", "note": "anchor veto — perfect-precision rejection forces odds 0 regardless of the other verifiers" },
+    { "pattern": ["accept", "reject", "reject"], "likelihood_ratio": 0.0, "eta": 0.0, "verdict": "violated", "note": "anchor veto" },
+    { "pattern": ["reject", "accept", "reject"], "likelihood_ratio": 0.0, "eta": 0.0, "verdict": "violated", "note": "anchor veto" },
+    { "pattern": ["reject", "reject", "reject"], "likelihood_ratio": 0.0, "eta": 0.0, "verdict": "violated", "note": "anchor veto" }
+  ],
+  "unanimous_posterior_odds": 14.2,
+  "banded_pattern_mass": 0.139
+}

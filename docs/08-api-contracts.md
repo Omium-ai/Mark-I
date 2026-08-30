@@ -233,9 +233,22 @@ GET /api/v1/policy/bundle?channel=stable                 auth: device token
   If-None-Match: "<etag of currently-applied bundle>"
 → 200
   Content-Type: application/cbor          ETag: "t7-stable-000482"
-  X-Mark1-Bundle-Seq: 482                 X-Mark1-Bundle-Sig: <section-split sigs, detached>
-  X-Mark1-Tlog-Proof: <base64 inclusion proof against the log head in /.well-known/mark1-keys>
+  X-Mark1-Bundle-Seq: 482                 X-Mark1-Bundle-Sig: <echo of the in-map sigs>
+  X-Mark1-Tlog-Proof: <echo of the in-map inclusion proof; log head in /.well-known/mark1-keys>
   [canonical-CBOR PolicyBundle v1: verify | route | memory | cortex | gates | agent_maps]
+
+The signatures and the inclusion proof live INSIDE the bundle map (07's CDDL:
+`signatures`, `inclusion`), and the in-map copies are the ONLY ones the edge
+verifies. These three headers are transport-level echoes for cache keying,
+proxy logging, and cheap `seq` triage. A header participates in NO verification
+step: each section signature is over the D-Q signing structure (07), whose every
+field is read from the map, so an edge that trusted a header would be trusting a
+value nothing signed. A header
+disagreeing with the map is therefore ignored rather than an error — it is
+unauthenticated either way. This is what the frozen bundle vectors encode. The
+bundle BODY that `prev_hash` and the tlog leaf commit to is the canonical map
+minus its `inclusion` entry: a leaf cannot commit to the proof of its own
+inclusion.
 → 304 Not Modified                        # ETag matches; nothing to do
 Errors: 401/403 as usual; 404 M1E-3004 (unknown channel).
 Edge rejection is local, not an HTTP error: bad signature (M1E-3001), non-monotonic seq
