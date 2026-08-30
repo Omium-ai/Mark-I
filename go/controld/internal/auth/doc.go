@@ -7,13 +7,13 @@
 // Postgres tenant GUC, the ClickHouse rows — is stamped from what Verify
 // returns.
 //
-// C4 SCOPE. This package ships the Verifier interface plus an HMAC-signed dev
-// implementation. The production token scheme — Ed25519 server-key tokens
-// (stateless verification, 05 §3.3), the OIDC device-code enrollment that
-// mints them (05 §3.1–3.2), and the ≤60 s revocation cache with fail-closed
-// staleness (05 §3.4) — arrives with `enroll` in its own delivery row
-// (WS-6, 14 §Phase-1 row 1.4). The RevocationChecker seam below is where that
-// cache plugs in; the interface, the error taxonomy mapping (M1E-1002 /
-// M1E-1003), and the fail-closed posture are already fixed here so the swap
-// changes an implementation, not a contract.
+// Two implementations share the Verifier seam:
+//   - Ed25519Verifier (token.go) — PRODUCTION, the cmd default: stateless
+//     verification of enroll-minted server-signed tokens (05 §3.3), revocation
+//     through enroll's ≤60 s fail-closed cache (05 §3.4) via the
+//     TenantRevocations seam.
+//   - HMACVerifier (verify.go) — the dev seam, reachable only behind an
+//     explicit AUTH_DEV_MODE=1 with a loud boot log. Same error taxonomy
+//     (M1E-1002 / M1E-1003), same ≤24 h ceiling, same fail-closed posture, so
+//     the two seams teach identical contracts.
 package auth

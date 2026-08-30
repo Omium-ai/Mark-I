@@ -69,7 +69,7 @@ func TestRevokedDevice(t *testing.T) {
 
 type failingRevocations struct{}
 
-func (failingRevocations) IsRevoked(context.Context, uuid.UUID) (bool, error) {
+func (failingRevocations) IsRevoked(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
 	return false, errors.New("cache stale")
 }
 
