@@ -87,7 +87,14 @@ func setupPG(t *testing.T) *pgHarness {
 	t.Cleanup(func() { _ = admin.Close(context.Background()) })
 
 	// The real migrations, in filename order — the tests run against exactly
-	// what prod will execute (05 §7.4).
+	// what prod will execute (05 §7.4). m1_060's GRANTs touch cluster-GLOBAL
+	// role tuples, so concurrent scratch setups across test packages collide
+	// ("tuple concurrently updated"); the migration+role phase serializes on
+	// a cluster advisory lock held on the shared bootstrap session (a Fatal
+	// path releases it when Cleanup closes the session).
+	if _, err := bootstrap.Exec(ctx, `SELECT pg_advisory_lock(7231060)`); err != nil {
+		t.Fatal(err)
+	}
 	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "..", "migrations", "m1_0*.sql"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("migrations not found: %v (%d)", err, len(files))
@@ -110,8 +117,12 @@ func setupPG(t *testing.T) *pgHarness {
 	// m1_060: credentials are injected at cutover, never committed). It
 	// INHERITS controld_app's grants but keeps its own NOBYPASSRLS attribute,
 	// which is the one that matters (BYPASSRLS does not inherit).
-	if _, err := admin.Exec(ctx, fmt.Sprintf(
-		"CREATE ROLE %s LOGIN PASSWORD 'c4test' NOBYPASSRLS NOSUPERUSER; GRANT controld_app TO %s", role, role)); err != nil {
+	_, err = admin.Exec(ctx, fmt.Sprintf(
+		"CREATE ROLE %s LOGIN PASSWORD 'c4test' NOBYPASSRLS NOSUPERUSER; GRANT controld_app TO %s", role, role))
+	if _, uerr := bootstrap.Exec(ctx, `SELECT pg_advisory_unlock(7231060)`); uerr != nil {
+		t.Fatal(uerr)
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -183,33 +194,42 @@ func TestIntegrationOpenRefusesBypassCapableRole(t *testing.T) {
 func TestIntegrationSidefxAndRLS(t *testing.T) {
 	h := setupPG(t)
 	ctx := context.Background()
-	s := sidefx.New(h.db, 1, 8)
+	s := sidefx.New(h.db, nil, nil, 1, 8)
 	t.Cleanup(s.Close)
 
 	t1 := time.Date(2026, 8, 29, 10, 0, 0, 0, time.UTC)
 
 	t.Run("last_seen_upsert_idempotent", func(t *testing.T) {
-		if err := s.ApplyLastSeen(ctx, h.tenantA, h.deviceA, t1); err != nil {
+		if err := s.ApplyLastSeen(ctx, h.tenantA, h.deviceA, t1, "1.2.3"); err != nil {
 			t.Fatal(err)
 		}
 		var got time.Time
+		var edge *string
 		if err := h.admin.QueryRow(ctx,
-			`SELECT last_seen_at FROM m1_devices WHERE id = $1`, h.deviceA).Scan(&got); err != nil {
+			`SELECT last_seen_at, edge_version FROM m1_devices WHERE id = $1`, h.deviceA).Scan(&got, &edge); err != nil {
 			t.Fatal(err)
 		}
 		if !got.Equal(t1) {
 			t.Fatalf("last_seen_at: want %v got %v", t1, got)
 		}
-		// Replaying an OLDER batch must not move the timestamp backwards.
-		if err := s.ApplyLastSeen(ctx, h.tenantA, h.deviceA, t1.Add(-time.Hour)); err != nil {
+		if edge == nil || *edge != "1.2.3" {
+			t.Fatalf("edge_version not stamped from the header (m1_061): %v", edge)
+		}
+		// Replaying an OLDER batch must not move the timestamp backwards, and
+		// replay's empty edge version ("" — the header died with the original
+		// request) must not erase the recorded one.
+		if err := s.ApplyLastSeen(ctx, h.tenantA, h.deviceA, t1.Add(-time.Hour), ""); err != nil {
 			t.Fatal(err)
 		}
 		if err := h.admin.QueryRow(ctx,
-			`SELECT last_seen_at FROM m1_devices WHERE id = $1`, h.deviceA).Scan(&got); err != nil {
+			`SELECT last_seen_at, edge_version FROM m1_devices WHERE id = $1`, h.deviceA).Scan(&got, &edge); err != nil {
 			t.Fatal(err)
 		}
 		if !got.Equal(t1) {
 			t.Fatalf("replay moved last_seen_at backwards: %v", got)
+		}
+		if edge == nil || *edge != "1.2.3" {
+			t.Fatalf("replay erased edge_version: %v", edge)
 		}
 	})
 
@@ -229,7 +249,7 @@ func TestIntegrationSidefxAndRLS(t *testing.T) {
 	t.Run("cross_tenant_write_matches_nothing", func(t *testing.T) {
 		// Tenant A's GUC + tenant B's device: the UPDATE must touch 0 rows —
 		// the exact ingest-arm shape of the tenant-isolation suite (05 §9).
-		if err := s.ApplyLastSeen(ctx, h.tenantA, h.deviceB, t1); err != nil {
+		if err := s.ApplyLastSeen(ctx, h.tenantA, h.deviceB, t1, "9.9.9"); err != nil {
 			t.Fatal(err)
 		}
 		var seen *time.Time

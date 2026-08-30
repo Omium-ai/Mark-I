@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,9 +65,20 @@ func Replay(ctx context.Context, store s3land.Store, ins chproj.Inserter, sfx *s
 				return replayed, fmt.Errorf("ingest: replay %s: %w", key, err)
 			}
 			if sfx != nil && device != uuid.Nil {
-				sfx.Enqueue(tenant, device, day)
+				// The full stage-11 effect set replays too: pending leaves and
+				// checkpoint seals re-derive from the landing objects — the
+				// recovery story the in-memory pending-leaf set depends on.
+				// BLOCKING enqueue: replay is the bulk path that fills the
+				// queues, and a dropped effect here has no later replay to
+				// recover it — backpressure, never drop (05 §2.5).
+				if err := sfx.EnqueueBlocking(ctx, tenant, device, day, sidefx.EffectsFromBatch(&batch, day)); err != nil {
+					return replayed, fmt.Errorf("ingest: replay %s: %w", key, err)
+				}
 			}
 			replayed++
+			if replayed%100 == 0 {
+				log.Printf("ingest: replay progress: %d objects (tenant %s)", replayed, tenantUUID)
+			}
 		}
 	}
 	return replayed, nil
