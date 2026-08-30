@@ -108,8 +108,15 @@ conformance:
 
 # Store-backed suites, incl. the tag-gated Go integration suite. Real stores on EVERY PR
 # (12 §11.4) — no Docker, no testcontainers, no skip-if-absent. Run `just stores-up` first.
+# Per-suite pytest invocations: adjudicator and intel both export a top-level `app`
+# package (06 §1.1); one pytest process caches whichever `app` imports first, so a
+# combined run fails collection on the other suite.
+# pytest exit 5 = nothing collected: no python suite carries `-m integration` marks yet,
+# so an empty selection is "not due", not a store failure (same idiom as
+# tools/ci/conformance_crosslang.sh). Real failures still exit non-5.
 test-integration:
-    uv run --frozen --all-packages -m pytest python/adjudicator/tests python/intel/tests -o asyncio_mode=auto -m integration
+    uv run --frozen --all-packages -m pytest python/adjudicator/tests -o asyncio_mode=auto -m integration || [ $? -eq 5 ]
+    uv run --frozen --all-packages -m pytest python/intel/tests -o asyncio_mode=auto -m integration || [ $? -eq 5 ]
     cd go/controld && go test -tags=integration ./...
 
 # `conformance/tenancy/` carries the specs; its conftest asserts zero skips under
@@ -232,15 +239,40 @@ stores-up:
       elif command -v initdb >/dev/null 2>&1; then PG_BIN="$(dirname "$(command -v initdb)")"
       else echo "stores-up: no PostgreSQL 15 binaries found; set PG_BIN=" >&2; exit 1; fi
     fi
+    # initdb's -U role is a SUPERUSER, and a superuser inherits BYPASSRLS. Bootstrapping as
+    # `mark1` therefore made the store contract's own DSN role bypass-capable, which makes
+    # every tenant-isolation assertion in this repo unobservable from the suite that exists
+    # to make it — the estate's rds_superuser lesson (61 FORCE-RLS tables rendered
+    # decorative), re-imported through the test harness. So: bootstrap as m1_bootstrap and
+    # hand the suite a role that cannot bypass anything.
     if ! "$PG_BIN/pg_isready" -h 127.0.0.1 -p 5432 >/dev/null 2>&1; then
       [ -f "$ROOT/pg/PG_VERSION" ] || {
         mkdir -p "$ROOT/pg"
-        "$PG_BIN/initdb" -D "$ROOT/pg" -U mark1 --auth=trust --encoding=UTF8 >/dev/null
+        "$PG_BIN/initdb" -D "$ROOT/pg" -U m1_bootstrap --auth=trust --encoding=UTF8 >/dev/null
       }
       "$PG_BIN/pg_ctl" -D "$ROOT/pg" -l "$ROOT/log/pg.log" \
         -o "-h 127.0.0.1 -p 5432 -k $ROOT" -w start
-      "$PG_BIN/createdb" -h 127.0.0.1 -p 5432 -U mark1 mark1_test 2>/dev/null || true
     fi
+    # A cluster initialized by the previous recipe has `mark1` as its bootstrap superuser and
+    # no m1_bootstrap at all; stripping that role's own superuser needs a superuser that does
+    # not exist there. Refuse with the remedy rather than silently running the whole store
+    # lane against a role whose green means nothing. `.stores/` is scratch.
+    if "$PG_BIN/psql" -h 127.0.0.1 -p 5432 -U mark1 -d postgres -qtAc \
+         "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user" \
+         2>/dev/null | grep -qx t; then
+      echo "stores-up: this cluster's \`mark1\` role is superuser/BYPASSRLS (initialized by the" >&2
+      echo "  pre-2026-08-30 recipe). Tenant-isolation tests cannot observe RLS through it and" >&2
+      echo "  hard-fail under M1_REQUIRE_STORES=1. Reprovision:  just stores-down && rm -rf .stores/pg && just stores-up" >&2
+      exit 1
+    fi
+    # The suite role: owns the schema it migrates, but NOSUPERUSER NOBYPASSRLS. m1_021 and its
+    # siblings declare FORCE ROW LEVEL SECURITY, so ownership does not exempt it either — which
+    # is precisely what lets `test_rls_isolation_between_tenants` observe real enforcement.
+    "$PG_BIN/psql" -h 127.0.0.1 -p 5432 -U m1_bootstrap -d postgres -qtAc \
+      "SELECT 1 FROM pg_roles WHERE rolname='mark1'" | grep -qx 1 \
+      || "$PG_BIN/psql" -h 127.0.0.1 -p 5432 -U m1_bootstrap -d postgres -v ON_ERROR_STOP=1 -qc \
+           "CREATE ROLE mark1 LOGIN CREATEDB NOSUPERUSER NOBYPASSRLS PASSWORD 'mark1'"
+    "$PG_BIN/createdb" -h 127.0.0.1 -p 5432 -U m1_bootstrap -O mark1 mark1_test 2>/dev/null || true
 
     # --- ClickHouse: one static binary, pinned tarball ---
     if ! curl -fsS "$M1_TEST_CH_DSN" --data-binary "SELECT 1" >/dev/null 2>&1; then

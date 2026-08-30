@@ -1,0 +1,343 @@
+{
+  "_readme": "Frozen bundle-family conformance contract. README.md is normative; this file is the referee; generated once by gen_bundle_vectors.rs (Rust reference implementation).",
+  "expired_key": {
+    "key_id": "ed25519:6473da00b0eff640",
+    "not_after": "2020-01-01T00:00:00Z",
+    "public_hex": "2c848ad8664ee651e4896c13a84a89a2964aca5eb77a8b881e60ded5c81b4e9d",
+    "section": "verify",
+    "seed_hex": "3737373737373737373737373737373737373737373737373737373737373737"
+  },
+  "genesis_prev_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "issued_at_epoch_s": 1787961600,
+  "keys": {
+    "agent_maps": {
+      "key_id": "ed25519:1c861707fb1ffd76",
+      "public_hex": "68f4b6017d0f876a55c80a82b8388a54aad264d367269e2de8be079c935b5f96",
+      "seed_hex": "3636363636363636363636363636363636363636363636363636363636363636"
+    },
+    "cortex": {
+      "key_id": "ed25519:0cc42263abfb7546",
+      "public_hex": "eb2cf13bf7ae3a5f614168a1fb09272d39771ec4b8523727815e466caf8ee163",
+      "seed_hex": "3434343434343434343434343434343434343434343434343434343434343434"
+    },
+    "gates": {
+      "key_id": "ed25519:d90357debe6235c4",
+      "public_hex": "a6d2455ea3a5771aba9fcb037924114c92f9f325049f6b4269e739d9048bb869",
+      "seed_hex": "3535353535353535353535353535353535353535353535353535353535353535"
+    },
+    "memory": {
+      "key_id": "ed25519:6c8f8607dbe87077",
+      "public_hex": "17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+      "seed_hex": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "route": {
+      "key_id": "ed25519:eeec86207f875ff6",
+      "public_hex": "5e212c0980e4b39fc09721134aa02109374edfd260c0d3d03cb501c8d65457a9",
+      "seed_hex": "3232323232323232323232323232323232323232323232323232323232323232"
+    },
+    "verify": {
+      "key_id": "ed25519:24aa2a5589edcb57",
+      "public_hex": "48075a597e721a156e2e0799de5cc0c5324dc6e7eaf1cdd46250868ec53215dd",
+      "seed_hex": "3131313131313131313131313131313131313131313131313131313131313131"
+    }
+  },
+  "schema": "policy_bundle.v1",
+  "signing_input": "D-Q: \"mark1-bundle-v1\\0\" || canonical_cbor({schema, section_name, tenant_id: bstr16, channel, seq, issued_at: tag1(uint), max_age, prev_hash: bstr32, section: bstr(canonical section bytes)}) — covers the whole envelope except `inclusion`",
+  "tenant_id_hex": "0192aa7e000070008000000000000001",
+  "tlog": "RFC 6962 shape, SHA-256: leaf entry = body_sha256 (bundle map minus `inclusion`, canonical bytes); leaf_hash = sha256(0x00 || entry); node = sha256(0x01 || left || right); waived structurally at seq == 0 (D-P). D-S: at seq > 0 the driver MUST hold the per-vector `tlog_head` (null = no head pinned, an M1E-3003 refusal) and the proof root must equal the head's",
+  "vectors": [
+    {
+      "body_sha256_hex": "7e3b8de456b7855e9947eba69f6c66f868100f65c4405c73ffc9e4b2e26341df",
+      "expect": "accept",
+      "file": "bundle_zero.cbor",
+      "file_sha256_hex": "72bc6373004e9ee7e28d6975cf31b0f864399443b1debc8eaea1c2e19e87961b",
+      "last_applied_seq": null,
+      "name": "bundle_zero",
+      "summary": {
+        "agents": 1,
+        "anchors": 2,
+        "channel": "local",
+        "correlation_groups": 1,
+        "exploration_epsilon": 0.0,
+        "issued_at_epoch_s": 1787961600,
+        "knee_rows": 3,
+        "max_age_s": 31536000,
+        "max_consecutive_blocks": 3,
+        "quarantined": 0,
+        "seq": 0,
+        "stop_gate_enabled": true,
+        "verifiers": 3
+      },
+      "tlog_head": null
+    },
+    {
+      "body_sha256_hex": "a24cda32944301b985e59a6e2be768df476ce50ea2bc0cce12863755aab18215",
+      "expect": "accept",
+      "file": "full.cbor",
+      "file_sha256_hex": "2f4a3ea9910a397850e86e9c4790d0f0c5e8505cb88f18381d35b8bdff64acca",
+      "last_applied_seq": 0,
+      "name": "full",
+      "summary": {
+        "agents": 1,
+        "anchors": 2,
+        "channel": "stable",
+        "correlation_groups": 1,
+        "exploration_epsilon": 0.05,
+        "issued_at_epoch_s": 1787961600,
+        "knee_rows": 3,
+        "max_age_s": 86400,
+        "max_consecutive_blocks": 3,
+        "quarantined": 1,
+        "seq": 1,
+        "stop_gate_enabled": true,
+        "verifiers": 3
+      },
+      "tlog_head": {
+        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "tree_size": 1
+      }
+    },
+    {
+      "body_sha256_hex": "2040fb758ae62ef566af5b84afb0a9e305147423fc342ae97699fa0ccdeff475",
+      "expect": "accept",
+      "file": "minimal.cbor",
+      "file_sha256_hex": "249f8f3d4e4bd6d6df4cbd4b64300559bcc24706cb1df62f4a202e407d041d6c",
+      "last_applied_seq": 1,
+      "name": "minimal",
+      "summary": {
+        "agents": 0,
+        "anchors": 0,
+        "channel": "stable",
+        "correlation_groups": 0,
+        "exploration_epsilon": 0.0,
+        "issued_at_epoch_s": 1787961600,
+        "knee_rows": 1,
+        "max_age_s": 3600,
+        "max_consecutive_blocks": 0,
+        "quarantined": 0,
+        "seq": 2,
+        "stop_gate_enabled": false,
+        "verifiers": 0
+      },
+      "tlog_head": {
+        "root_hex": "53fbdbc9c40a0f63f2d8ca423cfa8a82d95c48689fd4a450b333f8e018f8e05b",
+        "tree_size": 3
+      }
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "bad_section_sig.cbor",
+      "file_sha256_hex": "178352dc59860a0d99725cf545a5703f59dd1f034b7ac0593d0604db7d49c116",
+      "kind": "bad_signature",
+      "last_applied_seq": null,
+      "name": "bad_section_sig",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "wrong_key_role.cbor",
+      "file_sha256_hex": "ff2f4efd61c6ea403e9927e04007ef3ee80ca842ade2afdbbccb0cf95069d862",
+      "kind": "unknown_key",
+      "last_applied_seq": null,
+      "name": "wrong_key_role",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "non_canonical.cbor",
+      "file_sha256_hex": "3466d85d221b7bdd6c2ad2143553183186a0e5198f8a2008846873e551747ae3",
+      "kind": "non_canonical",
+      "last_applied_seq": null,
+      "name": "non_canonical",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "non_canonical_indef_map.cbor",
+      "file_sha256_hex": "5091abae0c16d44d8d8cd15f074a572625cd1988966a1223e9ba893c89679d28",
+      "kind": "non_canonical",
+      "last_applied_seq": null,
+      "name": "non_canonical_indef_map",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "non_canonical_indef_text.cbor",
+      "file_sha256_hex": "69c39f67d85800c854967ed17856790d430d686802cc7a61231409b226705b1a",
+      "kind": "non_canonical",
+      "last_applied_seq": null,
+      "name": "non_canonical_indef_text",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "non_canonical_nonminimal_int.cbor",
+      "file_sha256_hex": "4a0fca36f9fe41c528f8211a91cb5a69362f75ae899642294cdcbad4d0f51b68",
+      "kind": "non_canonical",
+      "last_applied_seq": null,
+      "name": "non_canonical_nonminimal_int",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "non_canonical_widened_float.cbor",
+      "file_sha256_hex": "414596145fd4856fdfcb584a5759f3ffddd6f572cbb3c52e7289bd1256d13b73",
+      "kind": "non_canonical",
+      "last_applied_seq": null,
+      "name": "non_canonical_widened_float",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "non_canonical_unsorted_nested.cbor",
+      "file_sha256_hex": "b644a32965cb87deb51f7999efdfb612b89336da49c2bda0ea0e3f44558e36c6",
+      "kind": "non_canonical",
+      "last_applied_seq": null,
+      "name": "non_canonical_unsorted_nested",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "non_canonical_dup_key.cbor",
+      "file_sha256_hex": "6c9b0d628d7a14e441588996a469bb9b2af29a22ba8c96cdb07053e15305cdd8",
+      "kind": "non_canonical",
+      "last_applied_seq": null,
+      "name": "non_canonical_dup_key",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3002",
+      "expect": "reject",
+      "file": "seq_replay.cbor",
+      "file_sha256_hex": "2f4a3ea9910a397850e86e9c4790d0f0c5e8505cb88f18381d35b8bdff64acca",
+      "kind": "seq_replay",
+      "last_applied_seq": 1,
+      "name": "seq_replay",
+      "tlog_head": {
+        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "tree_size": 1
+      }
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "tampered_prev_hash.cbor",
+      "file_sha256_hex": "916cf6377a5ed61198e8e2bb65efaa387ac489df6093c9271711b16587977245",
+      "kind": "prev_hash_mismatch",
+      "last_applied_seq": null,
+      "name": "tampered_prev_hash",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "backdated_issued_at.cbor",
+      "file_sha256_hex": "061098808d3b2823396a073e0ffe64818dea7ba074ce7774258fa03711c5576f",
+      "kind": "bad_signature",
+      "last_applied_seq": 0,
+      "name": "backdated_issued_at",
+      "tlog_head": {
+        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "tree_size": 1
+      }
+    },
+    {
+      "code": "M1E-3003",
+      "expect": "reject",
+      "file": "inclusion_missing.cbor",
+      "file_sha256_hex": "9c22efca183530fbd0e0cc2c0eb58b0a0314d1250b7a3c2c3d347713deb67d54",
+      "kind": "inclusion_invalid",
+      "last_applied_seq": 0,
+      "name": "inclusion_missing",
+      "tlog_head": {
+        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "tree_size": 1
+      }
+    },
+    {
+      "code": "M1E-3003",
+      "expect": "reject",
+      "file": "tlog_head_missing.cbor",
+      "file_sha256_hex": "2f4a3ea9910a397850e86e9c4790d0f0c5e8505cb88f18381d35b8bdff64acca",
+      "kind": "inclusion_invalid",
+      "last_applied_seq": 0,
+      "name": "tlog_head_missing",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3003",
+      "expect": "reject",
+      "file": "forged_inclusion_root.cbor",
+      "file_sha256_hex": "64017690ac4f7c5c4f2887d82a8005422d48ce447c42d82faabdde2369a0470d",
+      "kind": "inclusion_invalid",
+      "last_applied_seq": 0,
+      "name": "forged_inclusion_root",
+      "tlog_head": {
+        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "tree_size": 1
+      }
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "tampered_body_self_proof.cbor",
+      "file_sha256_hex": "389cd7c0f421d97c8e494df0b7a1967456fbd2245cc626f0fa35456baa790fb5",
+      "kind": "bad_signature",
+      "last_applied_seq": 0,
+      "name": "tampered_body_self_proof",
+      "tlog_head": {
+        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "tree_size": 1
+      }
+    },
+    {
+      "code": "M1E-3005",
+      "expect": "reject",
+      "file": "command_string.cbor",
+      "file_sha256_hex": "02e778837ad2e130aed9f70fea88dd433a94fca3dabcf2a20e20dedbb2666985",
+      "kind": "command_string",
+      "last_applied_seq": null,
+      "name": "command_string",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "schema_stray_key.cbor",
+      "file_sha256_hex": "d8190f12f981f742588e3610749905356a547a3d03cace77cd2f894fa5653a82",
+      "kind": "schema",
+      "last_applied_seq": null,
+      "name": "schema_stray_key",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "outside_validity.cbor",
+      "file_sha256_hex": "0aa44c4c7f4ba4d2072969a464df6433921b9ad26cc73d0438d3352a5ec0e4d8",
+      "kind": "outside_validity",
+      "last_applied_seq": null,
+      "name": "outside_validity",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "too_large.cbor",
+      "file_sha256_hex": "697d08213a2e8eed734365b0eaae0e020b3a94940996a6e1a4907d4cf0b6d1a9",
+      "kind": "too_large",
+      "last_applied_seq": null,
+      "name": "too_large",
+      "tlog_head": null
+    }
+  ]
+}
