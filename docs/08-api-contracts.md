@@ -312,8 +312,14 @@ GET /api/v1/receipts?since_seq=800&limit=500              auth: device or operat
           "coverage_transition" | "guard_contamination",
           "payload": "<canonical-json text, verbatim as signed>",
           "device_sig": "ed25519:…", "server_sig": "ed25519:…",
-          "key_id": "ed25519:…", "prev_hash": "…", "this_hash": "…" } … ],
+          "key_id": "ed25519:…", "server_key_id": "ed25519:…",
+          "prev_hash": "…", "this_hash": "…" } … ],
         "chain_head": { "seq": 5121, "hash": "…" } }
+`server_key_id` was added additively (§10.2) once the verifier existed to consume this
+surface: `key_id` names the DEVICE origin key (it rides inside the signed payload) and
+the countersigning server key is a row fact the verifier must resolve per-receipt across
+rotations — one key_id cannot name two keys, and a verifier that guesses which role a
+key served is the S1 the receipt vectors exist to forbid.
 
 GET /api/v1/receipts/checkpoints/{checkpoint_seq}         auth: device or operator token
 → 200 { "checkpoint_seq": 5121, "merkle_root": "…", "leaf_count": 4096,
@@ -773,7 +779,11 @@ Global flags: --json (machine output on stdout; the --json shape is the contract
 ### 7.1 `mark1 enroll`
 
 ```
-mark1 enroll [--tenant <slug>] [--channel stable|canary]
+mark1 enroll --tenant <tenant-uuid> [--channel stable|canary]
+  --tenant is REQUIRED on a fresh enrollment and is the tenant UUID string verbatim:
+  m1_tenants has no slug column and RLS routes on the UUID, so a human-friendly alias
+  would be a second name for the same row that some mapping must own — nothing does.
+  A re-run on an already-enrolled device needs no flag (idempotent, local-only).
 Side effects: generates the device Ed25519 keypair (OS keychain/TPM where available,
   0600 file floor), runs the OIDC device-code flow (§3.1: prints user_code +
   verification_uri, polls at `interval`), persists the enrollment document under
@@ -885,6 +895,12 @@ There is no server round-trip on the critical path: off works with the network d
 ```
 mark1 verify-receipts [--from <export.jsonl|dir>] [--against-witness] [--offline] [--json]
 Wraps the standalone open-source verifier (tools/verifier) — same code, same verdicts.
+Default network path: GET /api/v1/receipts/export + /api/v1/receipts/keys — the export
+is DEFINED as byte-loadable by the verifier with no translation layer, so the CLI's
+job is fetch + orchestrate + honest exit codes, never a fourth crypto implementation.
+(The paginated §3.4 rows serve dashboards and drilldowns; the export serves auditors.)
+/.well-known/mark1-keys arrives with policydist's key ceremony and is NOT this path's
+dependency.
 Validates: hash-chain continuity (per-tenant gap-free seq), both signatures per
   receipt (device origin + server countersign) against the key manifest with key_id
   rotation/cross-signing rules, checkpoint Merkle roots against sampled event

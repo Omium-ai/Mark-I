@@ -1093,7 +1093,7 @@ zero-OTel rule for Python alone. And `secret_type_gate.sh`'s rule 3 was narrowed
 green there is a leak CI blessed. Narrowing a pattern to silence a false positive, without
 recording that the coverage shrank, is how a control becomes decoration.
 
-### The fourteen cross-document decisions (lead, binding)
+### The fifteen cross-document decisions (lead, binding)
 
 Eight of the 37 were contradictions between frozen documents, which cannot be fixed by editing
 one side. They were decided before repair began so that no two agents could resolve the same
@@ -1115,6 +1115,7 @@ contradiction two different ways:
 | D-L | Root `Cargo.toml`: memberless workspace members are **commented out** until each crate's src lands, un-commented in the same change that lands it | `cargo metadata` refuses a member with no target, so `--locked` builds and `Cargo.lock` generation were impossible with all 9 members declared. Stub `lib.rs` files were rejected: an empty crate makes `override_pattern_gate` and `secret_type_gate` report over source that says nothing, which is the decorated-gate failure again. Comments are bracket- and quote-free so `otel_gate.sh`'s member parse stays exact. |
 | D-M | `otel_gate.sh` gains its ONE waiver: the inert OTel API stub the sanctioned Go ClickHouse client compiles — **founder-visible, like BUILD-10** | Verified 2026-08-28: `clickhouse-go/v2` (13 §3.4's mandated pin) and `ch-go` alike unconditionally package-import `go.opentelemetry.io/otel/trace`, so "zero OTel in `go.sum`" and "a ClickHouse ledger" are jointly unsatisfiable — CON-005 as written demanded the impossible, and a gate demanding the impossible is a gate someone deletes. The waiver replaces the string proxy with the executable claim: `go list -deps -test ./...` shows exactly 8 compiled otel packages, all inside the two API-stub module trees (`otel`, `otel/trace`), zero SDK/exporter/OTLP/metric/bridge/contrib; `go.mod`'s otel lines must be `// indirect`; no first-party `.go` imports the namespace (depguard's rule, re-proven). The summary prints `OK WITH D-M WAIVER`, never plain OK. Rust and Python get no waiver. ADR-0005's guarantee — nothing OTel executes, no OTLP endpoint exists, M1P is the only telemetry fabric — holds exactly as written. |
 | D-N | The fabric control set (`Hello`/`HelloAck`, `GateQuery`/`GateVerdict`, `Flush`/`FlushAck`) is defined in new `proto/m1p/v1/fabric.proto`, transcribed from `08` §4.2's table; `07` §5 gains the pointer | Both docs cited a definition ("defined in m1p.v1, doc 07") that no `.proto` carried, and two build waves hit the hole independently — the shim's gate path and mark1d's Hello handshake were each reported unimplementable against the frozen contract. Additive (`buf lint` clean, new file, no breaking surface); the fields are `08`'s, transcribed, not authored. Control messages never reach the spool, the wire, or `Event.body` — stated in the proto header and in `07` §5. Unblocks `gate.rs` and the handshake for the Phase 2 stop-gate row |
+| D-O | `mark1 verify-receipts`' default network path is the EXPORT round-trip (`/api/v1/receipts/export` + `/keys`), never the paginated §3.4 rows; §3.4's rows gain `server_key_id` additively | The CLI's first implementation aliased §3.4's single `key_id` into the verifier's `device_key_id` — but that surface's `key_id` names the SERVER key, so the default path refused every chain it fetched. Two fixes were possible; both taken for different reasons: the export is DEFINED as byte-loadable by the verifier ("no translation layer"), so it is the auditor path and the CLI's default; and §3.4's rows must still name both keys because one `key_id` cannot serve two roles — the S1 the receipt vectors forbid. `/.well-known/mark1-keys` stays with policydist's key ceremony |
 
 **Still not signed, and still blocking:** ADRs 0001/0002/0004/0009; SEC-01; SEC-02 (which gates
 R-03); ENG-01 and ENG-05 scope. No production ClickHouse write may occur before ADR-0001 is
@@ -1367,6 +1368,129 @@ holds no decryption capability, strictly stronger than the wrapped-key prose it 
 **Independent final verification by the lead** (not an agent's tail): gates green (`OK WITH
 D-M WAIVER` + the two expected PARTIALs), crosslang 54 vectors rust=17/go=40/python collected,
 16 Rust suites ok, 10 mark1d + 9 controld Go packages ok, 126 Python tests passed.
+
+---
+
+## Eleventh pass — the loop closes: uplink, enroll, the countersignature, the CLI (2026-08-29)
+
+**The Phase 1 gate ran.** Not a claim — an execution, against real binaries: `controld` booted
+through all four live boot refusals (config, NOBYPASSRLS, async-insert probe, bucket-policy
+probe) against live Postgres, live ClickHouse and a KMS-configured MinIO; `mark1d` booted (and
+first REFUSED a 0755 socket dir — the perm check working); four M1PL frames went over the socket
+→ admission stamped epoch/seq → spool → the uplink drained one batch → S3 landing object
+(SSE-KMS, batch-time key) → ClickHouse rows → the checkpoint's three leaves matched, the device
+origin signature verified, the server countersigned, the chain gained seq=1 with BOTH 64-byte
+signatures → export → **`mark1 verify-receipts --offline` exit 0**, and one flipped payload byte
+exit 5 naming `payload_mismatch`. Honestly not exercised: the shim as the frame writer and the
+tailer as the source (both fixture-proven separately), the enroll HTTP flow (integration-suite
+covered; the device key was seeded), the witness job (bucket unset).
+
+**What landed:** `internal/uplink` (the 08 §2.5 automaton verbatim — full-jitter backoff, park
+after budget, 401-refresh-once, 413 deterministic split, 422 named-event quarantine + one
+remainder pass, batch bytes frozen across retries so re-POSTs stay byte-identical for the
+landing dedupe); `internal/enroll` (the RFC 8628 device-code machine over the tenant's PINNED
+JWKS, pubkey registered at start — the replayed-code defense — single-use approval, Ed25519
+tokens ≤24 h, PoP refresh on single-use nonces, fail-closed revocation cache, operator revoke
+with epoch bump); `internal/receipts` (controld's vector-locked twin — crosslang Go count 40→64;
+`AppendCheckpoint` verifies origin BEFORE countersigning, appends under the locked head);
+`go/mark1` (the full CLI: enroll/enable/status/doctor/report/off/verify-receipts, exit codes per
+08 §7).
+
+**The two S1s, both caught before a user existed:** `mark1 enroll` was dead on arrival — the CLI
+never sent the `tenant` field its own server requires (plus an independent prefix mismatch on
+`hostname_hash`) — proof that stub-tested halves of one contract drift unless one side's tests
+speak the other side's exact wire bytes, which they now do. And the uplink **acked on the HTTP
+status line alone**: any middlebox answering 200 — a hotel captive portal — would have deleted
+billing-grade spool data the server never saw. Now a 2xx must carry the JSON content type AND
+echo the batch_id before `spool.Ack` may run; redirects are refused; portal-HTML/wrong-echo/302
+are pinned as retry-not-ack tests. Also fixed at S2: a refresh rate limiter debited before
+proof-of-possession (free DoS by device_id), the hookshim's off-check failing OPEN with HOME
+unset (now fail-closed like the daemon), 403-revocation grinding the spool into quarantine
+instead of halting capture-local, and a replay-poisoned pending-leaf queue that paged false
+tampering alarms.
+
+**Process incident, recorded:** a fix agent ran `git stash` during lint triage — immediately
+reversed with `git stash pop`, tree verified byte-identical, all suites re-run green, no
+commit/add/push ever executed. The workflow RULES now prohibit `git stash` explicitly.
+
+**Wave 6 (in flight)** closes the ten S3-class findings + the wiring the e2e surfaced: operator
+tenant binding, nonce-flood and body bounds, dev-seam revocation, fingerprint retirement on
+revoke, replay backpressure, the `edge_version` column (new migration — 08 §222 listed a column
+that never existed), the SSE-KMS dev knob (compose MinIO would 503 every landing PUT), D-O's
+both halves, the off→upload 5 s window, 422 double-ride accounting, `workspaces.json` daemon
+wiring, and the 1 MiB admission bound (07 §6 amended: an event the server is contractually bound
+to refuse must never occupy billing-grade spool space).
+
+---
+
+## Twelfth pass — wave 6 closed: all sixteen hardening items landed (2026-08-29)
+
+Compact record; the items are the eleventh pass's list. All nine controld items verified against
+live stores with zero skipped suites (operator tenant binding: a token minted for tenant A
+against a clone-config tenant C gets a uniform 403 + security counter; nonce flood cannot evict
+another device's nonce; every pre-auth body bounded; the dev-auth leg shares the real revocation
+cache; revoke retires fingerprints in-tx; replay applies backpressure, never drops;
+`m1_061_device_edge_version.sql` applied twice cleanly and 08 §222 is now a database fact;
+`S3_DISABLE_SSEKMS` refuses to boot outside `AUTH_DEV_MODE=1`; §3.4 rows carry `server_key_id`).
+All seven edge items landed and are test-named (`TestOffSkipsUploadHalfOfDrain`,
+`TestEnableWorkspaceWhileRunning`, CLI re-enroll under a freshly minted key, tenant-keyed
+hostname HMAC, the D-O export default, 422 exactly-once accounting, the 1 MiB admission bound).
+
+**Process note:** the edge agent stalled 6/6 at the reporting step — but its retries had already
+completed the work; the audit found all seven items in the tree with green tests. A stall kills
+the report, not necessarily the work: AUDIT THE TREE before re-dispatching a "failed" agent.
+The gate's one fix: an EPIPE race in a hookshim fail-closed test (the shim exits before reading
+stdin BY DESIGN on off paths; the harness now tolerates exactly BrokenPipe, nothing else).
+
+---
+
+## Thirteenth pass — wave 7: querychoke + the report surface (2026-08-29, in closure)
+
+Both builders landed and the gate ran the full suite green: `internal/querychoke` (8 read
+templates + exactly the two write carve-outs, all AS DATA, `{{tenant_pred}}` validated at boot —
+the R4 refusal deferred since C4 is now live) and intel's reader/report/rollup (the ADR-0010
+driver behind an explicit flag with the unsigned-ADR warning; the customer-facing
+`GET /api/v1/reports/tvo` determined to be controld's route per `08` §3.3's
+"executed exclusively by controld.query-choke").
+
+**The tenancy skeptic earned its title — nine findings, three S1:** the report handler
+hardcoded a 0.85 floor on the UN-narrowed coverage fraction and skipped every refusal gate
+`report.py` owns, issuing `guarantee_grade: true` wrongly (a wrong number under a guarantee
+banner is the product lying — the exact thing the whole receipt machinery exists to prevent);
+the handler summed across task_seg SERIES, double-counting every ADR-0010 restated day while the
+template's own comment said "never blended"; and intel's rollup driver POSTed the write template
+to the route controld deliberately 403s — the wave-5 stub-drift lesson, again, and now both
+sides' tests must speak each other's exact bytes. Plus: ADR-0010's idempotency layer 2 was
+INERT — `insert_deduplication_token` is a no-op on a non-replicated MergeTree without
+`non_replicated_deduplication_window`, which nothing set; **fixed by the lead in
+`m1_ch_002` and proven live on the pinned 24.8** (duplicate token → 100 stays 100; new token →
+200). Also: five templates missing the `LIMIT 1 BY event_id` dedupe form 05/07 mandate, a
+tenancy negative test that passed vacuously over six of eight templates (the decorative-control
+class, in the very test written to prevent it), the delete carve-out routed to an INSERT-only
+principal, and cost_basis accepted-then-ignored.
+
+**Process:** the wave's fix agent stalled 6/6 with all nine findings in one prompt — the third
+stall of that shape. Standing rule now: fixers get their items ONE AT A TIME with per-item test
+runs, and multi-finding fixes go to a fresh agent with an itemized brief, never a monolith.
+
+**CLOSED (same day).** The itemized repair agent (surviving one mid-run API crash whose work was
+audited and resumed rather than redone) fixed all eight, verified independently by the lead:
+the report handler now runs coverage.py's arithmetic verbatim against the shed-narrowed lower
+edge with report.py's full refusal set (a cross-language golden fixture is asserted by BOTH a Go
+test and an intel pytest, riding crosslang — the two implementations cannot drift); restated
+days use only the max task_seg_version series; the rollup write seam speaks the real internal
+route with a shared body fixture replayed against the real handler from both sides; the
+loss-ledger template filters `dropped_durability_class = 'billing_grade'` with a regex test
+forbidding the event_class mistake forever; all five m1p_events read templates carry
+`LIMIT 1 BY event_id` under a structural tripwire that fails on zero templates swept; the
+tenancy negative now seeds every template's filter surface and fails on zero rows; the delete
+carve-out gets its own `m1p_offboard` principal and the integration rig connects as the REAL
+principals (the INSERT-only-refuses-DELETE negative is pinned live); and `cost_basis=quota` is
+refused naming the D22 seam rather than mislabeled. One honest consequence, founder-visible:
+**`GET /reports/tvo` issues `guarantee_grade: false` unconditionally until a model_prices source
+lands in controld** — a guarantee without a pinned price table would be the lie item 1 existed
+to stop. Final: crosslang rust=17 go=71, 158 python tests, querychoke integration live against
+real principals, gates green.
 
 ---
 
