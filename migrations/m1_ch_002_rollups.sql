@@ -182,7 +182,19 @@ CREATE TABLE IF NOT EXISTS mark1.tvo_tenant_day
 ENGINE = AggregatingMergeTree
 PARTITION BY toYYYYMM(day)
 ORDER BY (tenant_id, day, task_seg_version)
-TTL day + INTERVAL 760 DAY DELETE;
+TTL day + INTERVAL 760 DAY DELETE
+-- Without this setting, `insert_deduplication_token` is a NO-OP on a
+-- non-replicated MergeTree and ADR-0010's idempotency layer 2 is decoration:
+-- a retried rollup insert would land a second block and the additive merge
+-- would double the day. 10_000 block hashes ≈ 27 years of daily job blocks
+-- per table — the window must outlive any plausible retry horizon, and at
+-- ~100 bytes a hash the cost is nothing.
+SETTINGS non_replicated_deduplication_window = 10000;
+
+-- Idempotent-upgrade twin of the SETTINGS clause above: CREATE IF NOT EXISTS
+-- will not re-shape a table that already exists, so a pre-existing dev table
+-- gets the setting here. MODIFY SETTING is itself idempotent.
+ALTER TABLE mark1.tvo_tenant_day MODIFY SETTING non_replicated_deduplication_window = 10000;
 
 -- NO MATERIALIZED VIEW FEEDS tvo_tenant_day, and this is not an omission.
 -- 07 §"Materialized views and rollups" describes all three rollups as MV-fed,
