@@ -49,15 +49,27 @@ fn off() -> bool {
     if std::env::var("MARK1_DISABLE").is_ok_and(|v| v == "1") {
         return true;
     }
-    match home() {
-        // 08 §7.6: the off-marker file every gate/capture path checks first.
-        Some(h) => h.join(".omium/mark1/OFF").exists(),
-        None => false,
+    // 08 §7.6: the off-marker file every gate/capture path checks first. The
+    // check FAILS CLOSED, mirroring mark1d's off.Off exactly: when we cannot
+    // prove the user has not turned capture off — no resolvable home, or a
+    // stat error other than not-exist (EACCES, stale mount, ENOTDIR) — the
+    // answer is OFF. `exists()` would read every stat error as "on", and a
+    // HOME-less or permission-broken environment would keep capturing while
+    // the daemon (correctly parked) believes Mark 1 is off. symlink_metadata,
+    // not metadata: like Lstat, the marker path itself is the fact — a
+    // symlink planted there must not be followed anywhere.
+    let Some(h) = home() else {
+        return true;
+    };
+    match std::fs::symlink_metadata(h.join(".omium/mark1/OFF")) {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
     }
 }
 
-/// `~` — $HOME (unix) / %USERPROFILE% (windows). No home ⇒ no marker, no
-/// spill, no maps cache; the builtin map and the fabric still work.
+/// `~` — $HOME (unix) / %USERPROFILE% (windows). No home ⇒ the off-marker is
+/// unresolvable, and `off()` fails closed on that (08 §7.6): a shim that
+/// cannot find the kill switch must not capture.
 fn home() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

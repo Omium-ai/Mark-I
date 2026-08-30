@@ -95,9 +95,33 @@ impl TestEnv {
         for (k, v) in envs {
             cmd.env(k, v);
         }
+        Self::finish(cmd, stdin_bytes)
+    }
+
+    /// Like `run`, but with no resolvable home at all: the off-marker is then
+    /// unreachable and `off()` must fail closed (08 §7.6).
+    fn run_homeless(&self, stdin_bytes: &[u8]) -> (bool, Vec<u8>, Duration) {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_mark1-hookshim"));
+        cmd.env_remove("MARK1_DISABLE")
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env("XDG_RUNTIME_DIR", self.xdg.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Self::finish(cmd, stdin_bytes)
+    }
+
+    fn finish(mut cmd: Command, stdin_bytes: &[u8]) -> (bool, Vec<u8>, Duration) {
         let started = Instant::now();
         let mut child = cmd.spawn().unwrap();
-        child.stdin.take().unwrap().write_all(stdin_bytes).unwrap();
+        // The shim's off/fail-closed paths exit BEFORE reading stdin (main.rs:
+        // off-check precedes everything, 08 §7.6), so this write can race the
+        // child's exit and get EPIPE. That pipe error IS the behavior under
+        // test, not a harness fault; any other write error is still fatal.
+        if let Err(e) = child.stdin.take().unwrap().write_all(stdin_bytes) {
+            assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "stdin write: {e}");
+        }
         let out = child.wait_with_output().unwrap();
         let wall = started.elapsed();
         let mut chatter = out.stdout;
@@ -264,6 +288,49 @@ fn off_marker_file_is_a_silent_noop() {
     assert!(chatter.is_empty());
     assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
     assert!(!env.ring_path().exists());
+}
+
+#[test]
+fn no_home_fails_closed_silent_noop() {
+    // HOME/USERPROFILE unset ⇒ the off-marker cannot be checked ⇒ OFF
+    // (fail-closed, matching mark1d's off.Off): the fabric socket is still
+    // resolvable via XDG_RUNTIME_DIR, so capturing here would circumvent
+    // `mark1 off` for any agent launched without a home.
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    let rx = env.listen();
+    let (ok, chatter, _wall) = env.run_homeless(&fixture("PreToolUse"));
+    assert!(ok, "off must exit 0");
+    assert!(chatter.is_empty());
+    assert!(
+        rx.recv_timeout(Duration::from_millis(300)).is_err(),
+        "no home ⇒ no capture: the marker check must fail closed"
+    );
+}
+
+#[test]
+fn unreadable_marker_dir_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    // Root ignores directory modes; the EACCES this test needs never happens.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    let dir = env.home.path().join(".omium/mark1");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let rx = env.listen();
+    let (ok, chatter, _wall) = env.run(&fixture("PreToolUse"), &[]);
+    // Restore before asserting so tempdir cleanup can delete the tree.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(ok);
+    assert!(chatter.is_empty());
+    assert!(
+        rx.recv_timeout(Duration::from_millis(300)).is_err(),
+        "a stat error on the marker must read as OFF, exactly like mark1d"
+    );
+    assert!(!env.ring_path().exists(), "and must not spill");
 }
 
 // ---- deadline + spill (04 §5 step 4, §5.4) ----
