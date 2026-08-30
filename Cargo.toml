@@ -14,11 +14,11 @@ members = [
     # no quotes and no square brackets on purpose: otel_gate.sh parses this array with a
     # quote-extracting grep that stops at the first line containing a closing bracket.
     "rust/mark1-redact",
-    # rust/mark1-policy    — un-comment when its src lands (post-R1 bundle plane)
+    "rust/mark1-policy",
     # rust/mark1-frames    — un-comment when its src lands (post-R1 proxy dialects)
     "rust/mark1-hookshim",
     # rust/mark1-proxy     — un-comment when its src lands (post-R1)
-    # rust/cortexd         — un-comment when its src lands (post-R1)
+    "rust/cortexd",
 ]
 # cargo-fuzz crates need nightly and their own profiles; they build via `just fuzz`, not the workspace.
 exclude = [

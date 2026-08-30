@@ -24,7 +24,6 @@ bytes = { workspace = true }
 # --- L0..L3 index stack (04 §6.1) ---
 notify = { workspace = true }
 blake3 = { workspace = true }
-memmap2 = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-python = { workspace = true }
 tree-sitter-rust = { workspace = true }
@@ -38,9 +37,13 @@ zstd = { workspace = true }            # CAS artifact bodies (07 §derived artif
 
 # --- workspace crates ---
 m1p-wire = { workspace = true }        # CortexInjection + L0 root pushes over M1PL
-mark1-policy = { workspace = true }    # the bundle's `cortex` section, fail-static
+# mark1-policy (the bundle's `cortex` section) joins when bundle plumbing lands —
+# Phase 2 runs the 04 §6.4 defaults (2k default / 8k ceiling) as constants.
 
 # --- misc ---
+uuid = { workspace = true }            # UUIDv7 event_id on fabric pushes (07 §2)
+rand = { workspace = true }            # per-boot loopback bearer token (08 §4.5)
+constant_time_eq = { workspace = true } # bearer compare — no timing oracle on the loopback
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,0 +1,29 @@
+# Outside the workspace ([workspace.exclude]): cargo-fuzz needs nightly and its
+# own profiles, so versions are named outright — otel_gate.sh scans this
+# manifest directly since cargo-deny's graph never reaches it.
+[package]
+name = "mark1-policy-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Empty table = standalone root: without it, cargo run from inside this dir
+# walks up, finds the workspace that excludes it, and refuses the package.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mark1-policy = { path = ".." }
+mark1-receipt = { path = "../../mark1-receipt" }
+
+# Target name `bundle_decode` is load-bearing: `just fuzz` runs
+# `cargo +nightly fuzz run bundle_decode`.
+[[bin]]
+name = "bundle_decode"
+path = "fuzz_targets/bundle_decode.rs"
+test = false
+doc = false
+bench = false

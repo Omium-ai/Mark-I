@@ -15,12 +15,19 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-mark1-receipt = { workspace = true }     # KeyRing: section-split signature + rotation verification
-ciborium = { workspace = true }          # canonical-CBOR bundle decode
-blake3 = { workspace = true }            # prev_hash chaining + transparency-log inclusion proof
-regex = { workspace = true }             # anchor catalog-ID grammar ^[a-z0-9-]+@cat-[0-9]+$ (04 §7.3)
-serde = { workspace = true }
+mark1-receipt = { workspace = true }     # KeyRing/KeyEntry + Ed25519 verify: one signing discipline product-wide (04 §7.2)
+ciborium = { workspace = true }          # PolicyBundle CBOR decode; the canonical-form check re-encodes and byte-compares
+# sha2, not blake3: 07's CDDL fixes prev_hash as "SHA-256 of the previous bundle's canonical
+# bytes" and 05 §4.4 fixes tlog leaves as SHA-256(bundle canonical bytes). (This manifest used
+# to name blake3 for both — that comment contradicted 07/05 and the docs win.)
+sha2 = { workspace = true }
+# NO regex: decode.rs deliberately hand-rolls the CDDL productions as byte
+# predicates (no fallible pattern-compile step to launder through a denied
+# `expect` in static init) — a declared-but-unused regex here only pretended
+# otherwise.
 thiserror = { workspace = true }         # Reject carries M1E-3001/3002/3003/3005
 
 [dev-dependencies]
 proptest = { workspace = true }
+serde_json = { workspace = true }        # conformance manifest driving (conf_vectors_bundle)
+anyhow = { workspace = true }            # examples/gen_bundle_vectors error plumbing (workspace lints deny unwrap/expect)
