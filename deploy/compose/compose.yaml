@@ -15,6 +15,17 @@
 
 name: mark1-dev
 
+# WHY: MinIO below has no KMS and refuses SSE-KMS headers, so a controld
+# pointed at this stack fails every landing PUT — permanent ingest 503 —
+# unless it runs with the env under this anchor. S3_DISABLE_SSEKMS is honored
+# ONLY alongside AUTH_DEV_MODE=1 (config refuses to boot otherwise: a prod
+# object landing unencrypted is a legality failure, 05 §2.2 — fail-closed).
+# There is deliberately no controld service in this file (13 §1: stores only);
+# source these when running controld against the stack.
+x-controld-dev-env: &controld-dev-env
+  AUTH_DEV_MODE: "1"
+  S3_DISABLE_SSEKMS: "1"
+
 services:
   postgres:
     image: pgvector/pgvector:pg15
@@ -35,6 +46,13 @@ services:
     image: clickhouse/clickhouse-server:26.7
     environment:
       CLICKHOUSE_PASSWORD: mark1
+      # Dev/test lane only: the querychoke integration suite SQL-provisions
+      # per-scratch principals with the REAL grant shapes (m1p_query
+      # SELECT-only, m1p_ingest INSERT-only, m1p_offboard ALTER DELETE —
+      # 05 §6 / 07 §"deletion path"), so a grant mismatch is a red test
+      # instead of a superuser blind spot. Same capability the justfile
+      # stores-up lane grants its default user (users.xml access_management).
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
       - "58123:8123"   # HTTP — migrations lane + M1_TEST_CH_DSN's URL form
       - "59000:9000"   # native — what chconn actually speaks (clickhouse-go v2's

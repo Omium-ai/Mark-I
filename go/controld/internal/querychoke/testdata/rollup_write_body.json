@@ -1,0 +1,31 @@
+{
+  "_why": "The EXACT bytes intel's driver POSTs to /internal/v1/rollup/tvo_tenant_day (reader.py run_write + rollup.py compute_rollup_rows), locked BOTH ways per the wave-5 lesson (RECONCILIATION.md: stub-tested halves of one contract drift unless one side's tests speak the other side's exact wire bytes). Go: module_test.go TestRollupWriteAcceptsIntelExactBody replays `body` against the real handler. Python: test_tvo_rollup.py test_write_body_matches_the_crosslang_fixture re-derives `body` from `inputs` through the real driver and compares dict-equal. Change either side without the other and one of the two goes red.",
+  "inputs": {
+    "tenant_id": "6b9f0f2e-4c1d-4a4e-8f0a-9d2b7c5e3a10",
+    "day": "2026-08-01",
+    "tvo_task_window": [
+      {"task_id": "8b0c2a4e-1111-4a2b-9c3d-000000000001", "attempt_n": 1, "gen_tokens": 30000, "verifier_tokens": 25000, "fused_verdict": "violated", "verdict_stage": "certified", "task_seg_version": "task_seg.v1", "cost_usd": 0.55},
+      {"task_id": "8b0c2a4e-1111-4a2b-9c3d-000000000001", "attempt_n": 2, "gen_tokens": 12000, "verifier_tokens": 25000, "fused_verdict": "satisfied", "verdict_stage": "certified", "task_seg_version": "task_seg.v1", "cost_usd": 0.37},
+      {"task_id": "8b0c2a4e-1111-4a2b-9c3d-000000000002", "attempt_n": 1, "gen_tokens": 8000, "verifier_tokens": 2000, "fused_verdict": "satisfied", "verdict_stage": "provisional", "task_seg_version": "task_seg.v1", "cost_usd": 0.10}
+    ],
+    "coverage_band": [{"observed_ms": 980000, "bypass_ms": 10000, "disabled_ms": 10000}],
+    "dropped_by_tenant_day": [{"day": "2026-08-01", "dropped_billing": 2, "events_billing_ingested": 998}]
+  },
+  "body": {
+    "job_key": "tvo.rollup_tenant_day:2026-08-01:2026-08-02:3eca862b4209eb4b55df83801f407e47817ad6d0c1e1e1b858441b5239f91875",
+    "tenant_id": "6b9f0f2e-4c1d-4a4e-8f0a-9d2b7c5e3a10",
+    "day": "2026-08-01",
+    "series": "task_seg.v1",
+    "tokens_total": 102000,
+    "cost_usd": 1.02,
+    "tasks_verified": ["8b0c2a4e-1111-4a2b-9c3d-000000000001"],
+    "tasks_unresolved": ["8b0c2a4e-1111-4a2b-9c3d-000000000002"],
+    "retry_loop_tokens": 37000,
+    "reexploration_tokens": 0,
+    "over_model_tokens": 0,
+    "observed_ms": 980000,
+    "bypass_ms": 10000,
+    "disabled_ms": 10000,
+    "dropped_billing": 2
+  }
+}

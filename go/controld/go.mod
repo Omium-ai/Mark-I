@@ -36,10 +36,11 @@ require (
 	github.com/aws/smithy-go v1.22.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
-	github.com/coreos/go-oidc/v3 v3.12.0
+	github.com/coreos/go-oidc/v3 v3.12.0 // tenant-IdP token verification (enroll, 13 §3.4 pin)
 	github.com/fxamacker/cbor/v2 v2.7.0
 	github.com/go-faster/city v1.0.1 // indirect
 	github.com/go-faster/errors v0.7.1 // indirect
+	github.com/go-jose/go-jose/v4 v4.0.2 // pinned-JWKS parsing (05 §10.1 B2); already go-oidc's own jose
 	github.com/google/differential-privacy/go/v3 v3.0.0
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
@@ -59,6 +60,11 @@ require (
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+)
+
+require (
+	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
+	lukechampine.com/blake3 v1.4.1 // indirect
 )
 
 replace github.com/Omium-ai/omium-mark1/proto/gen/go => ../../proto/gen/go
