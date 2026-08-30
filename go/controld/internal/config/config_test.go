@@ -12,9 +12,88 @@ func setRequired(t *testing.T) {
 		"POSTGRES_HOST": "db", "POSTGRES_DB": "mark1",
 		"POSTGRES_APP_USER": "controld_app", "POSTGRES_APP_PASSWORD": "p w%d",
 		"CLICKHOUSE_ADDR": "ch:8123", "CLICKHOUSE_INGEST_PASSWORD": "chp",
-		"S3_INGEST_BUCKET": "mark1-ingest", "AUTH_DEV_TOKEN_HMAC_KEY": "k",
+		"CLICKHOUSE_QUERY_PASSWORD": "chq",
+		"S3_INGEST_BUCKET":          "mark1-ingest",
+		"AUTH_TOKEN_ED25519_SEED":   strings.Repeat("ab", 32), // 32 bytes of hex
+		"SERVER_CHAIN_ED25519_SEED": strings.Repeat("cd", 32), // 32 bytes of hex
 	} {
 		t.Setenv(k, v)
+	}
+}
+
+// The production signing seed is R1-required; only the explicit dev flag
+// (with its own HMAC key) may stand in for it (05 §3.3 / task AUTH_DEV_MODE).
+func TestTokenSeedRequiredUnlessDevMode(t *testing.T) {
+	setRequired(t)
+	t.Setenv("AUTH_TOKEN_ED25519_SEED", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "AUTH_TOKEN_ED25519_SEED") {
+		t.Fatalf("want R1 refusal naming the seed, got %v", err)
+	}
+	t.Setenv("AUTH_DEV_MODE", "1")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "AUTH_DEV_TOKEN_HMAC_KEY") {
+		t.Fatalf("dev mode without an HMAC key must refuse, got %v", err)
+	}
+	t.Setenv("AUTH_DEV_TOKEN_HMAC_KEY", "k")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.AuthDevMode || c.DevTokenHMACKey != "k" || c.TokenSigningSeed != nil {
+		t.Fatalf("dev-mode config wrong: %+v", c)
+	}
+}
+
+// The server CHAIN key seed is R1-required outside dev mode (m1_002: a
+// control plane that cannot countersign cannot accept checkpoint #1), and it
+// is a DIFFERENT key than the token signer — the 05 §4.5 key-class split.
+func TestChainSeedRequiredUnlessDevMode(t *testing.T) {
+	setRequired(t)
+	t.Setenv("SERVER_CHAIN_ED25519_SEED", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SERVER_CHAIN_ED25519_SEED") {
+		t.Fatalf("want R1 refusal naming the chain seed, got %v", err)
+	}
+	t.Setenv("AUTH_DEV_MODE", "1")
+	t.Setenv("AUTH_DEV_TOKEN_HMAC_KEY", "k")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ServerChainSeed != nil {
+		t.Fatalf("dev-mode config wrong: %+v", c)
+	}
+}
+
+// A witness bucket with no tenant list would run an hourly job that
+// witnesses nothing and looks healthy doing it — refused at boot.
+func TestWitnessBucketRequiresTenants(t *testing.T) {
+	setRequired(t)
+	t.Setenv("WITNESS_BUCKET", "mark1-witness")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "WITNESS_TENANTS") {
+		t.Fatalf("want R1 refusal naming WITNESS_TENANTS, got %v", err)
+	}
+	t.Setenv("WITNESS_TENANTS", "11111111-1111-1111-1111-111111111111, 22222222-2222-2222-2222-222222222222")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.WitnessTenants) != 2 || c.WitnessRetain != 8760*time.Hour {
+		t.Fatalf("witness config wrong: %+v", c)
+	}
+}
+
+func TestTokenSeedDecodes(t *testing.T) {
+	setRequired(t)
+	t.Setenv("AUTH_TOKEN_ED25519_SEED", "not-a-seed")
+	if _, err := Load(); err == nil {
+		t.Fatal("garbage seed accepted")
+	}
+	t.Setenv("AUTH_TOKEN_ED25519_SEED", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") // 32 zero bytes, base64
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.TokenSigningSeed) != 32 {
+		t.Fatalf("seed length: %d", len(c.TokenSigningSeed))
 	}
 }
 
@@ -47,6 +126,31 @@ func TestDefaultsAndDerivedDSN(t *testing.T) {
 	}
 	if !strings.Contains(dsn, "p+w%25d") && !strings.Contains(dsn, "p%20w%25d") {
 		t.Fatalf("password not escaped: %s", dsn)
+	}
+}
+
+// S3_DISABLE_SSEKMS is honored ONLY under AUTH_DEV_MODE=1 — anywhere else an
+// unencrypted landing object is a legality failure, so the knob fails CLOSED
+// as a boot refusal (05 §2.2; R1). Typo'd truthy values refuse too: they must
+// not read as intent in either direction.
+func TestDisableSSEKMSOnlyInDevMode(t *testing.T) {
+	setRequired(t)
+	t.Setenv("S3_DISABLE_SSEKMS", "1")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "S3_DISABLE_SSEKMS") {
+		t.Fatalf("SSEKMS disable outside dev mode must refuse boot, got %v", err)
+	}
+	t.Setenv("AUTH_DEV_MODE", "1")
+	t.Setenv("AUTH_DEV_TOKEN_HMAC_KEY", "k")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.S3DisableSSEKMS {
+		t.Fatal("dev-mode SSEKMS disable not honored")
+	}
+	t.Setenv("S3_DISABLE_SSEKMS", "true") // not "1": refuse, don't guess
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "S3_DISABLE_SSEKMS") {
+		t.Fatalf("non-\"1\" truthy value must refuse, got %v", err)
 	}
 }
 

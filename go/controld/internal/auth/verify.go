@@ -40,18 +40,14 @@ type Verifier interface {
 	Verify(ctx context.Context, bearer string) (Claims, error)
 }
 
-// RevocationChecker is where enroll's ≤60 s revocation cache plugs in
-// (05 §3.4). An error return is FAIL-CLOSED by every caller: "propagates
-// eventually" is the fail-open version of a fail-closed requirement.
-type RevocationChecker interface {
-	IsRevoked(ctx context.Context, device uuid.UUID) (bool, error)
-}
-
-// StaticRevocations is the dev/test checker: an explicit set, no staleness
-// (there is nothing to go stale — it IS the authority in dev).
+// StaticRevocations is the TEST checker: an explicit set, no staleness
+// (there is nothing to go stale — it IS the authority in a test). It satisfies
+// the same TenantRevocations seam as enroll's cache so both verifier legs
+// share one revocation shape (05 §0.1: one binary, one revocation posture);
+// the tenant is ignored because the set is device-keyed by construction.
 type StaticRevocations map[uuid.UUID]bool
 
-func (s StaticRevocations) IsRevoked(_ context.Context, device uuid.UUID) (bool, error) {
+func (s StaticRevocations) IsRevoked(_ context.Context, _, device uuid.UUID) (bool, error) {
 	return s[device], nil
 }
 
@@ -73,15 +69,18 @@ type devClaims struct {
 // exactly like the production scheme will check it: exp − iat ≤ 24 h is a
 // design floor (05 §3.3 — a stolen token dies within a day even if every
 // revocation mechanism fails simultaneously), so the dev seam enforces it too
-// rather than teaching tests a laxer contract.
+// rather than teaching tests a laxer contract. Revocation rides the SAME
+// TenantRevocations seam as the production verifier (05 §3.4): a dev-mode leg
+// with an empty revocation set would be a second, laxer revocation posture —
+// the exact bug 05 §0.1 forbids the binary from being able to have.
 type HMACVerifier struct {
 	Key     []byte
-	Revoked RevocationChecker
+	Revoked TenantRevocations
 	// now is swappable for expiry tests only.
 	now func() time.Time
 }
 
-func NewHMACVerifier(key []byte, revoked RevocationChecker) *HMACVerifier {
+func NewHMACVerifier(key []byte, revoked TenantRevocations) *HMACVerifier {
 	return &HMACVerifier{Key: key, Revoked: revoked, now: time.Now}
 }
 
@@ -122,7 +121,7 @@ func (v *HMACVerifier) Verify(ctx context.Context, bearer string) (Claims, error
 	}
 	// Revocation AFTER signature: a forged token must never buy a revocation
 	// lookup, and a genuine one must never skip it (05 §2.1 stage 2 order).
-	revoked, err := v.Revoked.IsRevoked(ctx, device)
+	revoked, err := v.Revoked.IsRevoked(ctx, tenant, device)
 	if err != nil {
 		// Fail closed (05 §3.4): unknown revocation state = not verified.
 		return Claims{}, fmt.Errorf("%w: revocation state unavailable", ErrBadToken)
