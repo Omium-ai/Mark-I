@@ -57,27 +57,63 @@ RS_N=$(echo "$RS_OUT" | awk '/^test result:/ {for (i = 2; i <= NF; i++) if ($i =
 # ---- Go (the parallel decoder: mark1d frame reader + origin-sign mirror, controld ingest) ----
 need go
 GO_N=0
+GO_OUT_ALL=""
 for m in mark1d controld; do
   [ -f "go/$m/go.mod" ] || { echo "conformance: go/$m (absent, skipped)"; continue; }
   echo "conformance: go — go/$m: go test -run ConfVectors ./..."
   GO_OUT=$( (cd "go/$m" && go test -run ConfVectors -v ./...) 2>&1 ) || { echo "$GO_OUT"; echo "FAIL: Go conformance vectors in go/$m"; exit 1; }
   echo "$GO_OUT"
+  GO_OUT_ALL="$GO_OUT_ALL
+$GO_OUT"
   GO_N=$((GO_N + $(echo "$GO_OUT" | grep -c '^=== RUN' || true)))
 done
 
+# ---- per-FAMILY Go coverage. A single global GO_N > 0 lets one family's tests green-light
+# every other family: the receipt tests alone satisfied it while the bundle family had ZERO Go
+# coverage and nothing noticed. Each EXPECTED family must run its OWN Go tests — or be declared
+# pending below, printed loudly. An honest gap beats a green light over nothing. ----
+# bundle: the Go bundle decoder lands with Wave B fusion; DELETE the entry in that same commit.
+GO_PENDING="bundle"
+for fam in $EXPECTED; do
+  # Family → Go test-name token (m1pl→ConfVectorsM1pl, receipt→ConfVectorsReceipt, ...).
+  token=$(printf '%s' "$fam" | awk '{ print toupper(substr($0,1,1)) substr($0,2) }')
+  fam_n=$(printf '%s\n' "$GO_OUT_ALL" | grep -c "^=== RUN.*ConfVectors$token" || true)
+  if [ "$fam_n" -gt 0 ]; then
+    echo "conformance: go — family $fam: $fam_n vector test(s)"
+    continue
+  fi
+  case " $GO_PENDING " in
+    *" $fam "*)
+      echo "conformance: go — family $fam: NO GO TWIN YET (declared pending — Go bundle decoder"
+      echo "              lands with Wave B fusion). Rust is the only implementation locked on"
+      echo "              this family today; the cross-language claim does NOT cover it." ;;
+    *)
+      echo "FAIL: family $fam ran zero Go vector tests (filter ConfVectors$token) — a silently"
+      echo "      uncovered family is a failed gate. Land the Go tests, or declare the family in"
+      echo "      GO_PENDING in the commit that explains why its twin is not due."
+      exit 1 ;;
+  esac
+done
+
 # ---- Python (betterproto + the vendored mark1_receipts package) ----
+# Per-suite invocation (mirrors justfile `test-py`): adjudicator and intel both export a
+# top-level `app` package (06 §1.1), and one pytest process caches whichever `app` imports
+# first — a combined `pytest python` run can never resolve both.
 need uv
-echo "conformance: python — pytest -k conf_vectors"
-PY_N=1
-set +e
-uv run --frozen -m pytest python -o asyncio_mode=auto -k conf_vectors
-PY_RC=$?
-set -e
-case "$PY_RC" in
-  0) ;;
-  5) PY_N=0 ;;  # pytest exit 5 = no tests collected
-  *) echo "FAIL: Python conformance vectors"; exit 1 ;;
-esac
+PY_N=0
+for suite in python/shared/mark1_receipts/tests python/adjudicator/tests python/intel/tests; do
+  [ -d "$suite" ] || continue
+  echo "conformance: python — pytest $suite -k conf_vectors"
+  set +e
+  uv run --frozen -m pytest "$suite" -o asyncio_mode=auto -k conf_vectors
+  PY_RC=$?
+  set -e
+  case "$PY_RC" in
+    0) PY_N=1 ;;
+    5) ;;  # pytest exit 5 = no tests collected in this suite
+    *) echo "FAIL: Python conformance vectors in $suite"; exit 1 ;;
+  esac
+done
 
 echo "conformance: vector tests ran — rust=$RS_N go=$GO_N python_collected=$PY_N"
 
