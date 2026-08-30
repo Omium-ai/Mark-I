@@ -2,10 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -230,5 +235,219 @@ func TestSpillRingDrainAcrossRestart(t *testing.T) {
 	}
 	if !bytes.Equal(recs[0].ID[:16], ev.GetEventId()) {
 		t.Fatal("spooled record is not the spilled event")
+	}
+}
+
+// TestEnableWorkspaceWhileRunning pins the workspaces.json wiring: `mark1
+// enable` writes <state>/workspaces.json while the daemon runs, and the
+// daemon's fsnotify/tick reconcile starts a tailer for the new root WITHOUT a
+// restart — the file, not the --workspace flag, is the live allow-list.
+func TestEnableWorkspaceWhileRunning(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	spoolDir := filepath.Join(dir, "spool")
+	socket := filepath.Join(dir, "sock", "m1p.sock")
+	home := filepath.Join(dir, "home")
+	root := filepath.Join(dir, "ws")
+	for _, d := range []string{stateDir, home, root} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The zero-value adapter resolves ~/.claude via $HOME (08 §5.1).
+	t.Setenv("HOME", home)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- run(slog.New(slog.NewTextHandler(os.Stderr, nil)), config{
+			stateDir: stateDir,
+			spoolDir: spoolDir,
+			socket:   socket,
+			saltHex:  "aa", // arms the tail subsystem (idem-key derivation)
+			offPoll:  10 * time.Millisecond,
+		})
+	}()
+	waitFor(t, "fabric socket (daemon up, no workspaces yet)", func() bool {
+		_, err := os.Stat(socket)
+		return err == nil
+	})
+
+	// A transcript already sits in the derived vendor dir; nothing may tail
+	// it until the root is enabled. Munge mirrors claudecode.TranscriptDir,
+	// over the canonical root (reconcile resolves symlinks before StartTail).
+	canonRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vendorDir := filepath.Join(home, ".claude", "projects", strings.ReplaceAll(canonRoot, "/", "-"))
+	if err := os.MkdirAll(vendorDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	session := "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55"
+	line := `{"type":"assistant","cwd":"` + canonRoot + `","requestId":"req_x","sessionId":"` + session + `","message":{"id":"msg_x","model":"claude-fable-5","usage":{"input_tokens":1,"output_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"service_tier":"standard"}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(vendorDir, session+".jsonl"), []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// `mark1 enable <root>` while the daemon runs: the CLI's file format
+	// (go/mark1/internal/cli.Workspaces), byte-compatible on purpose.
+	ws := `{"version":1,"workspaces":[{"path":"` + canonRoot + `","enabled_at":"2026-08-29T00:00:00Z"}]}`
+	if err := os.WriteFile(filepath.Join(stateDir, "workspaces.json"), []byte(ws), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Live discovery: the tailer persists its cursor after the emitted Usage
+	// flush (04 §2.1) — a cursor file appearing WITHOUT any restart is the
+	// proof. Deadline covers the reconcile tick (2 s) + quiesce debounce (2 s)
+	// + sweep cadence with CI headroom.
+	cursorDir := filepath.Join(stateDir, "cursors")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if ents, err := os.ReadDir(cursorDir); err == nil && len(ents) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tailer never discovered the enabled workspace while running")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned %v, want clean exit", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not exit on SIGTERM")
+	}
+
+	// The spool, reopened cold, holds the transcript's Usage event.
+	sp, err := spool.Open(spool.Config{Dir: spoolDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp.Close()
+	ack, _ := sp.Cursors()
+	recs, _, err := sp.Records(ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("spool holds %d records, want the tailed Usage exactly once", len(recs))
+	}
+	var ev m1pv1.Event
+	if err := proto.Unmarshal(recs[0].Payload, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.GetUsage().GetOutputTokens() != 9 {
+		t.Fatalf("spooled event %v, want the transcript's Usage (output_tokens 9)", &ev)
+	}
+}
+
+// TestOffSkipsUploadHalfOfDrain pins the off→upload window fix: after
+// `mark1 off` cancels the session, the teardown runs the spool-fsync half of
+// the 07 §6 drain but NOT the upload half — an OFF daemon uploads nothing
+// (08 §7.6), so zero HTTP requests land after the marker does. SIGTERM (the
+// daemon stopping, not the user turning capture off) keeps the full Flush.
+func TestOffSkipsUploadHalfOfDrain(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	spoolDir := filepath.Join(dir, "spool")
+	socket := filepath.Join(dir, "sock", "m1p.sock")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-load one billing event so the uplink has something to attempt.
+	sp, err := spool.Open(spool.Config{Dir: spoolDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := uuid.NewV7()
+	session := uuid.MustParse("3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55")
+	payload, err := proto.Marshal(&m1pv1.Event{
+		EventId: id[:], SessionId: session[:], Seq: 1, SessionEpoch: 1,
+		Body: &m1pv1.Event_Usage{Usage: &m1pv1.Usage{IdemKey: make([]byte, 32)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Append(context.Background(), [16]byte(id), spool.ClassBilling, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ingest answers 429 + Retry-After 3600 always: the uplink makes exactly
+	// ONE request per drain attempt, then sleeps out the test's lifetime —
+	// the request COUNT is the deterministic observable.
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Retry-After", "3600")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"M1E-9001","message":"slow down"}}`))
+	}))
+	defer srv.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- run(slog.New(slog.NewTextHandler(os.Stderr, nil)), config{
+			stateDir:    stateDir,
+			spoolDir:    spoolDir,
+			socket:      socket,
+			ingestURL:   srv.URL + "/m1p/v1/ingest",
+			deviceToken: "tok-test",
+			offPoll:     10 * time.Millisecond,
+		})
+	}()
+
+	waitFor(t, "first uplink attempt", func() bool { return requests.Load() == 1 })
+
+	// `mark1 off`: session drains; the upload half must NOT run.
+	marker := filepath.Join(stateDir, "OFF")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "fabric socket removed after off", func() bool {
+		_, err := os.Stat(socket)
+		return os.IsNotExist(err)
+	})
+	// Teardown is complete (socket gone). Give a straggling Flush ample time
+	// to be observed if the gate were missing.
+	time.Sleep(300 * time.Millisecond)
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("HTTP requests after off = %d, want 0 (total 1): an OFF daemon uploads nothing (08 §7.6)", got-1)
+	}
+
+	// `mark1 on`: the retained spool re-attempts (request 2)...
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "uplink attempt after re-enable", func() bool { return requests.Load() == 2 })
+
+	// ...and SIGTERM (not off) keeps the full drain: Flush's single best-effort
+	// attempt is request 3.
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned %v, want clean exit", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon did not exit on SIGTERM")
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("requests after SIGTERM drain = %d, want 3 (signal keeps the upload half)", got)
 	}
 }

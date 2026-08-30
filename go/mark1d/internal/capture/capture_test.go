@@ -181,6 +181,46 @@ func TestQuarantineFailClosed(t *testing.T) {
 	}
 }
 
+// TestAdmissionBound1MiB pins 07 §6's typed-event bound: a 2 MiB event is
+// refused BEFORE spooling with Dropped{LOCAL_QUARANTINE} accounting; a
+// 900 KiB event admits — the 4 MiB fabric/spool bounds are transport headroom,
+// not event legality.
+func TestAdmissionBound1MiB(t *testing.T) {
+	dir := t.TempDir()
+	sp := openSpool(t, filepath.Join(dir, "spool"))
+	a, err := New(sp, Config{EpochPath: filepath.Join(dir, "epoch"), Redact: passRedact})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	big := toolEvent(1)
+	big.GetToolUse().ToolName = string(bytes.Repeat([]byte{'x'}, 2<<20))
+	if err := a.Admit(ctx, big); !errors.Is(err, ErrQuarantined) {
+		t.Fatalf("2 MiB event admitted: %v", err)
+	}
+	ok := toolEvent(1)
+	ok.GetToolUse().ToolName = string(bytes.Repeat([]byte{'x'}, 900<<10))
+	if err := a.Admit(ctx, ok); err != nil {
+		t.Fatalf("900 KiB event refused: %v", err)
+	}
+	if err := sp.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	ack, _ := sp.Cursors()
+	recs, _, err := sp.Records(ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 || len(recs[0].Payload) < 900<<10 {
+		t.Fatalf("spool holds %d records, want exactly the 900 KiB event", len(recs))
+	}
+	drops := a.DrainDropped()
+	if len(drops) != 1 || drops[0].Reason != dropLocalQuarantine ||
+		drops[0].Class != spool.ClassDiagnostic || drops[0].Quantity != 1 {
+		t.Fatalf("drop ledger = %+v, want one Dropped{LOCAL_QUARANTINE, DIAGNOSTIC, 1}", drops)
+	}
+}
+
 // TestDiagnosticShed pins the class split under a full spool: diagnostics
 // shed to ErrShed (accounted in the spool ledger), never silently.
 func TestDiagnosticShed(t *testing.T) {

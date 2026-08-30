@@ -41,6 +41,14 @@ const (
 	dropLocalQuarantine spool.DropReason = 4 // DROP_REASON_LOCAL_QUARANTINE
 )
 
+// maxEventBytes is 07 §6's typed-event admission bound: ingest refuses any
+// single event over 1 MiB (05 §2.1), so admission enforces the same bound
+// BEFORE spooling — an event the server is contractually bound to refuse must
+// not occupy billing-grade spool space and then poison the batch that carries
+// it into quarantine. The 4 MiB fabric-frame/spool-record bounds are TRANSPORT
+// headroom (decoder allocation safety) and deliberately stay wider.
+const maxEventBytes = 1 << 20
+
 // RedactFunc is the admit-to-upload axis seam (04 §2.0): it may rewrite ev in
 // place; any error ⇒ quarantine, never admit-raw. The daemon wires
 // internal/redact's Scanner.RedactEvent — the Go twin validated bit-identical
@@ -150,6 +158,15 @@ func (a *Admitter) Admit(ctx context.Context, ev *m1pv1.Event) error {
 	payload, err := proto.Marshal(ev)
 	if err != nil {
 		return a.quarantine(ev, "marshal: "+err.Error())
+	}
+	// 07 §6 admission bound, measured on the exact bytes ingest would decode
+	// (post-redaction marshal). Accounted as LOCAL_QUARANTINE: 07 §3's row for
+	// an event the edge's own admission chokepoint refused before disk — this
+	// ledger already books every such refusal (malformed envelope, marshal
+	// failure) under it, and QUARANTINED(6) would falsely claim a batch that
+	// left the spool, which this event never entered.
+	if len(payload) > maxEventBytes {
+		return a.quarantine(ev, fmt.Sprintf("event is %d bytes, over the 1 MiB admission bound (07 §6)", len(payload)))
 	}
 	err = a.sp.Append(ctx, eid, class, payload)
 	if errors.Is(err, spool.ErrDiagnosticShed) {
