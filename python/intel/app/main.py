@@ -15,6 +15,8 @@ from fastapi import FastAPI  # noqa: E402
 from app.config import load_settings  # noqa: E402
 from app.db import create_pool  # noqa: E402
 from app.errors import install_exception_handlers  # noqa: E402
+from app.tvo.reader import QuerychokeReader  # noqa: E402
+from app.tvo.routes import router as tvo_router  # noqa: E402
 
 
 @asynccontextmanager
@@ -25,8 +27,11 @@ async def lifespan(app: FastAPI) -> Any:
     settings = load_settings()
     pool = await create_pool(settings)
     http = httpx.AsyncClient(timeout=settings.http_timeout_s)
+    # The one ledger read path (08 §3.3): the querychoke HTTP client, on the lifespan's
+    # shared httpx client. No ClickHouse driver exists in this service (05 §6).
+    tvo_reader = QuerychokeReader(http, settings.querychoke_base_url)
     try:
-        yield {"settings": settings, "pool": pool, "http": http}
+        yield {"settings": settings, "pool": pool, "http": http, "tvo_reader": tvo_reader}
     finally:
         await http.aclose()
         await pool.close()
@@ -34,6 +39,7 @@ async def lifespan(app: FastAPI) -> Any:
 
 app = FastAPI(title="mark1-intel", lifespan=lifespan)
 install_exception_handlers(app)
+app.include_router(tvo_router)
 
 
 @app.get("/healthz")
