@@ -206,7 +206,7 @@ func newHarness(t *testing.T) *harness {
 		device: uuid.New(),
 	}
 	h.proj = chproj.New(h.ins, 1, 100)
-	h.sfx = sidefx.New(h.db, 1, 100)
+	h.sfx = sidefx.New(h.db, nil, nil, 1, 100)
 	h.verifier = auth.NewHMACVerifier(testKey, auth.StaticRevocations{})
 	h.token = auth.Mint(testKey, h.tenant, h.device, time.Hour)
 	m := New(Deps{

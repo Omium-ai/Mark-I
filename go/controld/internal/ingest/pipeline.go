@@ -16,6 +16,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/chproj"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/s3land"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/scanner"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
@@ -250,7 +251,10 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 	// replayed from the landing object, never surfaced to the edge.
 	rows := chproj.RowsFromBatch(&batch, claims.TenantID, claims.DeviceID, receivedAt)
 	m.proj.Enqueue(rows, receivedAt)
-	m.sfx.Enqueue(tenant, claims.DeviceID, receivedAt)
+	// X-Mark1-Edge-Version is recorded, never rejected on (08 §10.1): it
+	// stamps m1_devices.edge_version alongside last_seen_at (m1_061).
+	m.sfx.Enqueue(tenant, claims.DeviceID, receivedAt, r.Header.Get("X-Mark1-Edge-Version"),
+		sidefx.EffectsFromBatch(&batch, receivedAt))
 }
 
 // identityDisagreement applies 08 §2.1's constraint + the envelope's
