@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""trace-check — the requirement->test gate of 12 §10.3.
+
+Four checks, each independently fatal:
+
+  1. the key set of conformance/traceability.yaml equals the requirement IDs in
+     02 §9, parsed from the document itself so the YAML cannot drift from it;
+  2. every mapped evidence ID resolves against something that actually exists --
+     a collected test name, a fuzz target on disk, a document section. This is
+     the teeth: a deleted test orphans its requirement and turns CI red rather
+     than decaying to "TBD";
+  3. the evidence kind matches the Verification column 02 assigns the
+     requirement, so a mechanical requirement cannot be quietly downgraded to a
+     manual procedure;
+  4. every requirement armed by current_phase is FULLY proven -- a `gap:` or
+     `partial:` entry in an armed phase is a failure, in a future phase a report
+     line. Fully, because 02 §9's criteria are multi-clause: the requirement with
+     a real test for clause one and nothing for clause two is the one that reads
+     green while the promise it makes to a customer is unbuilt.
+
+Phase, priority and category are read from 02 rather than copied into the YAML.
+12 §10.2 describes them as fields of the entry; duplicating them would create a
+second place for the phase of a requirement to be wrong, which is the exact
+failure mode this gate exists to close. The YAML therefore carries one thing:
+the mapping.
+
+Evidence grammar -- one flat list per requirement, no empty lists:
+
+  go:TestName                  a Go test, as `go test -list` names it
+  py:test_name                 a pytest node, by its terminal name
+  rust:path::to::test          a libtest name, as `cargo test -- --list` names it
+  fuzz:crate/target            rust/<crate>/fuzz/fuzz_targets/<target>.rs
+  manual:docs/NN-doc.md#anchor a documented procedure, heading must exist
+  gap:reason                   no evidence, stated in the open
+
+`gap:` is inside the same list as everything else on purpose. A requirement with
+no evidence is not an absent key or an empty list -- both of which read as
+oversight and hide in a diff -- it is a line that says so.
+"""
+
+from __future__ import annotations
+
+import argparse
+import functools
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+REQ_DOC = ROOT / "docs/02-requirements.md"
+YAML_PATH = ROOT / "conformance/traceability.yaml"
+
+REQ_ID = r"(?:CON-\d+|(?:FR|NFR)-[A-Z]+-\d+)"
+ROW = re.compile(rf"^\|\s*({REQ_ID})\s*\|")
+# 02 escapes literal pipes inside cells as \| -- splitting on those shifts every
+# column right of the first prose cell that contains one.
+UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
+
+# 02 §9's Verification column -> the evidence prefixes that can satisfy it.
+# A `+` in the column means both sides are required, not either.
+CATEGORY_PREFIXES = {
+    "unit": {"go", "py", "rust"},
+    "conformance": {"go", "py", "rust"},
+    "negative": {"go", "py", "rust"},
+    "chaos": {"go", "py", "rust"},
+    "fuzz": {"fuzz", "go", "py", "rust"},
+    "manual": {"manual"},
+}
+
+# Evidence kinds only. Deliberately not `set(CATEGORY_PREFIXES) | ...`: the category names and
+# the evidence kinds overlap ("fuzz", "manual"), and admitting a category name as a kind would
+# let `unit:whatever` parse, reach resolve()'s fallthrough, and silently count as proof.
+# `gap` and `partial` are not evidence; they are the two shapes an ABSENCE takes, and they are in
+# this set so that stating one is a line in the file rather than a missing line. `partial` exists
+# because 02 §9's acceptance criteria are multi-clause: a requirement can have a real, resolving
+# test for one clause and nothing at all for another, and a schema with only "evidence or gap"
+# forces that case to be written as evidence -- which reports green over an unbuilt clause. That
+# is the exact false-green this gate exists to prevent, so the gate must not be able to commit it.
+PREFIXES = {"go", "py", "rust", "fuzz", "manual", "gap", "partial"}
+UNPROVEN = {"gap", "partial"}
+
+
+class Req:
+    __slots__ = ("rid", "priority", "phase", "category")
+
+    def __init__(self, rid: str, priority: str, phase: int | None, category: str):
+        self.rid, self.priority, self.phase, self.category = rid, priority, phase, category
+
+    @property
+    def required_prefixes(self) -> list[set[str]]:
+        """One set per `+`-joined term; evidence must hit every set."""
+        return [CATEGORY_PREFIXES[t.strip()] for t in self.category.split("+")]
+
+
+def parse_requirements() -> dict[str, Req]:
+    text = REQ_DOC.read_text(encoding="utf-8")
+    section = text.split("## 9. Acceptance criteria table")[1].split("\n## 10")[0]
+    reqs: dict[str, Req] = {}
+    for line in section.splitlines():
+        m = ROW.match(line)
+        if not m:
+            continue
+        cells = [c.strip() for c in UNESCAPED_PIPE.split(line)]
+        rid, priority, holds_by, verification = cells[1], cells[3], cells[5], cells[6]
+        phase = int(holds_by.split()[1]) if holds_by.startswith("Phase ") else None
+        for term in verification.split("+"):
+            if term.strip() not in CATEGORY_PREFIXES:
+                die(f"{rid}: 02 §9 Verification column says {verification!r}, which this gate "
+                    f"cannot map to an evidence kind. Extend CATEGORY_PREFIXES or fix 02.")
+        if rid in reqs:
+            die(f"{rid} appears twice in 02 §9")
+        reqs[rid] = Req(rid, priority, phase, verification)
+    if not reqs:
+        die("parsed zero requirements from 02 §9 -- the table shape changed")
+    return reqs
+
+
+def _run(cmd: list[str], cwd: Path) -> str:
+    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if p.returncode != 0:
+        die(f"collector failed in {cwd.relative_to(ROOT)}: {' '.join(cmd)}\n{p.stderr.strip()}")
+    return p.stdout
+
+
+@functools.cache
+def declared_build_tags() -> list[str]:
+    """The justfile inventory's `#   <tag> -> <recipe>` rows, parsed as build_tag_gate.sh parses
+    them. Derived, not enumerated here: a second hand-written tag list is a second thing to
+    forget, and forgetting it makes a whole tagged suite uncitable rather than merely unrun."""
+    inv, keep = [], False
+    for line in (ROOT / "justfile").read_text().splitlines():
+        if line.startswith("# Build-tag inventory:"):
+            keep = True
+        if keep:
+            inv.append(line)
+        if keep and line.startswith("test-go:"):
+            break
+    tags = {m.group(1) for m in
+            (re.match(r"^#\s+([A-Za-z0-9_.-]+)\s*->", ln) for ln in inv) if m}
+    if not tags:
+        die("justfile build-tag inventory parsed to zero tags -- tag-gated suites would be "
+            "invisible to this gate and every requirement they prove would read as a gap")
+    return sorted(tags)
+
+
+@functools.cache
+def go_tests() -> frozenset[str]:
+    names: set[str] = set()
+    # Untagged AND every declared tag at once. `go test ./...` cannot see a tag-gated file, so
+    # the untagged pass alone under-reports by exactly the suites the tags route elsewhere --
+    # `integration` (8 files in controld, run by `just test-integration`) and, when it lands,
+    # `chaos`. Both passes are unioned because a `!tag` file drops out of the tagged one.
+    variants = [[], ["-tags=" + ",".join(declared_build_tags())]]
+    for mod in ("go/mark1", "go/mark1d", "go/controld"):
+        d = ROOT / mod
+        if not (d / "go.mod").exists():
+            continue
+        for extra in variants:
+            for line in _run(["go", "test", "-list", ".*", *extra, "./..."], d).splitlines():
+                # `go test -list` interleaves bare test names with "ok <pkg>" and
+                # "?  <pkg> [no test files]" summary lines.
+                if re.fullmatch(r"(?:Test|Fuzz|Benchmark|Example)\w*", line.strip()):
+                    names.add(line.strip())
+    return frozenset(names)
+
+
+@functools.cache
+def py_tests() -> frozenset[str]:
+    names: set[str] = set()
+    # Per package, mirroring `just test-py`. A single rootdir over all of `python/` cannot
+    # import them: each package puts its own `app` on the path, so a whole-tree collection
+    # dies on `app.tvo` and would silently under-report the universe.
+    # `conformance/tenancy` is the fourth because a universe is every test CI RUNS, not every
+    # test one recipe runs: it is `just test-isolation`, a required PR check, and leaving it out
+    # made the tenancy suite -- the whole 12 §4 negative story -- structurally uncitable.
+    for pkg in ("python/shared/mark1_receipts/tests", "python/adjudicator/tests",
+                "python/intel/tests", "conformance/tenancy"):
+        out = _run([sys.executable, "-m", "pytest", "--collect-only", "-q",
+                    pkg, "-o", "asyncio_mode=auto"], ROOT)
+        for line in out.splitlines():
+            if "::" in line:
+                # trailing [param] ids collapse to the function name
+                names.add(line.rsplit("::", 1)[1].split("[")[0].strip())
+    return frozenset(names)
+
+
+@functools.cache
+def rust_tests() -> frozenset[str]:
+    out = _run(["cargo", "test", "--workspace", "--locked", "--", "--list"], ROOT / "rust")
+    # libtest --list emits "some::path::test_name: test" (and ": benchmark").
+    return frozenset(m.group(1) for m in
+                     re.finditer(r"^(\S+): (?:test|benchmark)$", out, re.M))
+
+
+def resolve(prefix: str, body: str) -> str | None:
+    """None when the evidence resolves; a human-readable reason when it does not."""
+    if prefix == "go":
+        return None if body in go_tests() else "no such Go test"
+    if prefix == "py":
+        return None if body in py_tests() else "no such pytest test"
+    if prefix == "rust":
+        if body in rust_tests():
+            return None
+        # allow the terminal name when it is unambiguous across the workspace
+        tail = [n for n in rust_tests() if n.rsplit("::", 1)[-1] == body]
+        if len(tail) == 1:
+            return None
+        if len(tail) > 1:
+            return f"ambiguous, matches {len(tail)} tests -- use the full path"
+        return "no such Rust test"
+    if prefix == "fuzz":
+        crate, _, target = body.partition("/")
+        if not target:
+            return "expected crate/target"
+        p = ROOT / "rust" / crate / "fuzz/fuzz_targets" / f"{target}.rs"
+        return None if p.exists() else f"no fuzz target at {p.relative_to(ROOT)}"
+    if prefix == "manual":
+        rel, _, anchor = body.partition("#")
+        p = ROOT / rel
+        if not p.exists():
+            return f"no such document {rel}"
+        if not anchor:
+            return "manual evidence must cite a section anchor"
+        slugs = {re.sub(r"[^a-z0-9]+", "-", h.lower()).strip("-")
+                 for h in re.findall(r"^#+\s+(.*)$", p.read_text(encoding="utf-8"), re.M)}
+        return None if anchor.lower() in slugs else f"no section #{anchor} in {rel}"
+    # Every kind that can constitute proof is handled above. Reaching here means a kind was
+    # added to PREFIXES without a resolver, which must not read as "resolved".
+    raise AssertionError(f"no resolver for evidence kind {prefix!r}")
+
+
+CONTROL_DOC = ROOT / "docs/10-security-threat-model.md"
+TEST_DOC = ROOT / "docs/12-testing-and-quality.md"
+CONTROL_ROW = re.compile(r"^\|\s*(C-\d+)\s*\|")
+# 12 §9 numbers its ten rows by the architecture spec's enforcement points; 10's controls cite
+# the frozen plan's seven. The correspondence is stated in 12 §9's own header paragraph.
+PLAN_TO_SPEC = {1: 1, 2: 2, 3: 3, 4: 5, 5: 6, 6: 7, 7: 10}
+
+
+def check_compliance_matrix() -> tuple[list[str], int]:
+    """12 §10.3 check 4 — the compliance-matrix completeness half.
+
+    12 §9 states the rule: every control row in 10 must have a row there naming a live test.
+    10 grades its own rows, and the grades carry different obligations:
+
+      specified — control and test are both fixed in the frozen docs, so a named test that
+                  does not appear in 12 is a row asserting something untrue. Fatal.
+      partial   — 10 proposed the test and 12 must still grow it. A declared backlog, counted
+                  and printed every run so it cannot quietly become permanent.
+      gap       — no enforcement or no possible test. Must carry `—`, not a test name.
+    """
+    t10 = CONTROL_DOC.read_text(encoding="utf-8")
+    t12 = TEST_DOC.read_text(encoding="utf-8")
+    try:
+        section = re.split(r"\n## 13", t10.split("## 12. Compliance control matrix")[1])[0]
+    except IndexError:
+        die("10 §12's compliance control matrix heading moved -- check 4 cannot run")
+    rows = [[c.strip() for c in UNESCAPED_PIPE.split(line)]
+            for line in section.splitlines() if CONTROL_ROW.match(line)]
+    if not rows:
+        die("parsed zero controls from 10 §12 -- the table shape changed")
+
+    # 12 §9's own row numbers, so a renumbering there is caught rather than assumed.
+    spec_rows = {int(m.group(1)) for m in re.finditer(
+        r"^\|\s*(\d+)\s*\|\s*\*\*",
+        t12.split("## 9. The compliance test matrix")[1].split("\n## 10")[0], re.M)}
+    if len(spec_rows) != 10:
+        die(f"12 §9 parsed to {len(spec_rows)} enforcement points, expected 10")
+
+    failures: list[str] = []
+    backlog = 0
+    cited: set[int] = set()
+    for cid, _control, point, _where, _how, test, status in (
+            (r[1], r[2], r[3], r[4], r[5], r[6], r[7]) for r in rows):
+        m = re.fullmatch(r"Plan (\d)", point) or re.fullmatch(r"Spec §9\.(\d)", point)
+        if not m:
+            failures.append(f"[4] {cid}: enforcement point {point!r} is neither "
+                            f"'Plan N' nor 'Spec §9.N'")
+        else:
+            row = PLAN_TO_SPEC[int(m.group(1))] if point.startswith("Plan") else int(m.group(1))
+            if row not in spec_rows:
+                failures.append(f"[4] {cid}: cites enforcement point {point!r} -> 12 §9 row "
+                                f"{row}, which does not exist")
+            else:
+                cited.add(row)
+
+        if test.startswith("—"):
+            if status != "gap":
+                failures.append(f"[4] {cid}: names no test but is graded {status!r}; "
+                                f"a row with no test is a gap")
+            continue
+        if status == "gap":
+            failures.append(f"[4] {cid}: graded 'gap' yet names {test}; "
+                            f"a gap row must carry '—' and its reason")
+        named = [s.replace("-", "_") for s in re.findall(r"`12/([a-z0-9-]+)`", test)]
+        named += re.findall(r"`([a-z0-9_]+)`", test)
+        for name in named:
+            if name in t12 or name.replace("_", "-") in t12:
+                continue
+            if status == "specified":
+                failures.append(f"[4] {cid}: graded 'specified' but its test {name!r} "
+                                f"appears nowhere in 12")
+            else:
+                backlog += 1
+
+    for row in sorted(spec_rows - cited):
+        failures.append(f"[4] 12 §9 row {row} is an enforcement point no control in 10 cites")
+    return failures, backlog
+
+
+def die(msg: str) -> None:
+    print(f"trace-check: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--skip-collect", action="store_true",
+                    help="skip check 2's test collectors (they build the workspaces)")
+    args = ap.parse_args()
+
+    reqs = parse_requirements()
+    doc = yaml.safe_load(YAML_PATH.read_text(encoding="utf-8"))
+    current_phase = doc["current_phase"]
+    mapping = doc["requirements"]
+
+    failures: list[str] = []
+    gaps_armed: list[str] = []
+    gaps_future: list[str] = []
+
+    # --- check 1: the key set is exactly 02 §9's --------------------------------
+    missing = sorted(set(reqs) - set(mapping))
+    extra = sorted(set(mapping) - set(reqs))
+    for rid in missing:
+        failures.append(f"[1] {rid}: in 02 §9, absent from traceability.yaml")
+    for rid in extra:
+        failures.append(f"[1] {rid}: in traceability.yaml, not a requirement in 02 §9")
+
+    # --- checks 2-4, per requirement -------------------------------------------
+    for rid in sorted(set(reqs) & set(mapping)):
+        req, entries = reqs[rid], mapping[rid]
+        if not isinstance(entries, list) or not entries:
+            failures.append(f"[2] {rid}: needs a non-empty evidence list "
+                            f"(use `gap:<reason>` to declare there is none)")
+            continue
+
+        seen: set[str] = set()
+        for entry in entries:
+            prefix, sep, body = str(entry).partition(":")
+            if not sep or prefix not in PREFIXES:
+                failures.append(f"[2] {rid}: {entry!r} is not <kind>:<body>, "
+                                f"kind one of {sorted(PREFIXES)}")
+                continue
+            seen.add(prefix)
+            if prefix in UNPROVEN:
+                if not body.strip():
+                    failures.append(f"[4] {rid}: `{prefix}:` must name what is unproven")
+                continue
+            if args.skip_collect and prefix in ("go", "py", "rust"):
+                continue
+            why = resolve(prefix, body.strip())
+            if why:
+                failures.append(f"[2] {rid}: {entry!r} -- {why}")
+
+        real = seen - UNPROVEN
+
+        # check 3: evidence kind must match 02's Verification column
+        if real:
+            for allowed in req.required_prefixes:
+                if not (real & allowed):
+                    failures.append(
+                        f"[3] {rid}: 02 §9 verifies this by {req.category!r}, which needs "
+                        f"evidence of kind {sorted(allowed)}; got {sorted(real)}")
+
+        # check 4: an armed phase must be PROVEN, and proven means no clause left open. Keyed on
+        # the presence of an absence rather than on `not real`, because the dangerous case is the
+        # requirement that has both -- real citations AND an unbuilt clause. Reading only `real`
+        # would let those citations vouch for the clause they say nothing about.
+        if seen & UNPROVEN:
+            armed = req.phase is not None and req.phase <= current_phase
+            kind = "partial" if real else "gap"
+            line = (f"{rid} (P{req.priority[1:]}, phase {req.phase or '—'}, "
+                    f"{req.category}) [{kind}]")
+            if armed:
+                gaps_armed.append(line)
+                failures.append(f"[4] {line}: phase {req.phase} is armed "
+                                f"(current_phase={current_phase}) and is not fully proven")
+            else:
+                gaps_future.append(line)
+
+    matrix_failures, backlog = check_compliance_matrix()
+    failures += matrix_failures
+
+    total = len(reqs)
+    def kinds(r: str) -> set[str]:
+        return {str(e).partition(":")[0] for e in mapping.get(r) or []}
+    proven = sum(1 for r in reqs if r in mapping
+                 and (kinds(r) - UNPROVEN) and not (kinds(r) & UNPROVEN))
+    print(f"trace-check: 02 §9 declares {total} requirements; "
+          f"{proven} fully proven, {len(gaps_armed)} armed and unproven, "
+          f"{len(gaps_future)} awaiting their phase (current_phase={current_phase})")
+    print(f"trace-check: 10 §12's control matrix has {backlog} tests it proposes and 12 has "
+          f"not yet grown (rows graded 'partial' -- declared backlog, not failures)")
+    for line in gaps_future:
+        print(f"  pending  {line}")
+    for line in sorted(failures):
+        print(f"  FAIL     {line}")
+
+    if failures:
+        print(f"\ntrace-check: {len(failures)} failures", file=sys.stderr)
+        return 1
+    print("trace-check: ok")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,14 @@
+# conformance/frames/EXPECTED — which dialects the golden-transcript gate REQUIRES.
+#
+# `frames_golden_per_dialect` (12 §3.1) refuses to pass when a dialect listed here has zero
+# `.bytes` fixtures on disk. Same reasoning as conformance/vectors/EXPECTED: git does not
+# track empty directories, so "we have no transcripts yet" and "our transcripts vanished"
+# look identical to a directory scan, and only one of them is acceptable. Listing a dialect
+# is the commit-time act that arms the gate for it.
+#
+# One dialect per line, matching the module name under rust/mark1-frames/src/.
+# Only anthropic_sse is armed: it is the Phase 3 dialect and the only one with a parser.
+# openai_responses, openai_chat, gemini and bedrock_eventstream degrade by design, so a
+# transcript for them would assert nothing about parsing. Add each line in the SAME change
+# that lands both the parser and its fixtures.
+anthropic_sse

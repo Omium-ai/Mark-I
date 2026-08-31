@@ -183,11 +183,40 @@ message VerdictEvent {
                                //      the claims permitted about it do.
   uint64 bundle_seq = 5;       // [P0] provenance of the confusion matrices used
   uint32 vote_count = 6;       // [P0] ensemble members fused
+
+  // [P0] DECISION D-T (lead, binding). Evidence quality is a SEPARATE AXIS from
+  // pipeline position, and conflating them cost us a representable state: an
+  // adjudicated-but-uncertified verdict had no wire form, because
+  // VERDICT_STAGE_CERTIFIED sits among the position values while asserting
+  // quality. The only escape was the field-4 convention ("empty cert id ⇒
+  // uncertified/bootstrapping"), which cannot separate bootstrapping from
+  // uncertified — a distinction 06 §5.4 makes load-bearing, since bootstrapping
+  // verdicts gate sessions while uncertified ones may not feed certification.
+  //
+  // A new field rather than new enum values: adding values to VerdictStage would
+  // have kept the two axes fused and made every consumer switch over a product
+  // of them. Renaming VERDICT_STAGE_CERTIFIED to _ADJUDICATED would be the
+  // honest name but changes the JSON encoding — breaking under WIRE_JSON — so
+  // the name stays and this field carries the truth. Read stage for WHERE the
+  // verdict came from, this for WHAT MAY BE CLAIMED about it.
+  CertificationStatus certification = 7;
 }
 
 enum VerdictStage {
   VERDICT_STAGE_UNSPECIFIED = 0;
   VERDICT_STAGE_PROVISIONAL = 1;  // edge fusion cache — what the stop-gate reads
-  VERDICT_STAGE_CERTIFIED = 2;    // adjudicator, noise-certified
+  VERDICT_STAGE_CERTIFIED = 2;    // adjudicator-emitted. NAME IS HISTORICAL (D-T):
+                                  // this is the "adjudicated" position; whether it
+                                  // is certified lives in `certification`.
   VERDICT_STAGE_REVISED = 3;      // slow anchors / re-adjudication overturned it
+}
+
+// D-T. Degrades faster than it upgrades (06 §5): the WEAKEST input wins, so a
+// verdict fusing even one literature-default likelihood row cannot claim
+// CERTIFIED no matter how good the certificate is.
+enum CertificationStatus {
+  CERTIFICATION_STATUS_UNSPECIFIED = 0;    // not stated — treat as UNCERTIFIED
+  CERTIFICATION_STATUS_UNCERTIFIED = 1;    // no certificate at all
+  CERTIFICATION_STATUS_BOOTSTRAPPING = 2;  // certificate exists, below the D16 gate
+  CERTIFICATION_STATUS_CERTIFIED = 3;      // cert stamped AND every fused row measured
 }
