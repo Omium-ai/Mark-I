@@ -20,7 +20,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
@@ -250,7 +249,7 @@ func payloadJSON(ev *m1pv1.Event) string {
 		return "{}"
 	}
 	body := ref.Get(fd).Message().Interface()
-	b, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(body.(proto.Message))
+	b, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(body)
 	if err != nil {
 		return "{}"
 	}

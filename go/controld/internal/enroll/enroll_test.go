@@ -146,8 +146,11 @@ func TestPacerEnforcesInterval(t *testing.T) {
 func TestBucketLimiter(t *testing.T) {
 	now := time.Now()
 	l := newBucketLimiter(2, time.Hour, func() time.Time { return now })
-	if !l.Allow("ip") || !l.Allow("ip") {
-		t.Fatal("burst within capacity refused")
+	if !l.Allow("ip") {
+		t.Fatal("first burst token refused")
+	}
+	if !l.Allow("ip") {
+		t.Fatal("second burst token refused")
 	}
 	if l.Allow("ip") {
 		t.Fatal("over-capacity allowed")

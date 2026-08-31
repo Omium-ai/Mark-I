@@ -96,6 +96,26 @@ type Config struct {
 	// upgrade. Required outside dev mode: a control plane that cannot
 	// countersign cannot accept checkpoint #1.
 	ServerChainSeed []byte
+	// BUNDLE_SECTION_ED25519_SEED — the 32-byte root seed the six PolicyBundle
+	// section keys are HKDF-derived from (05 §4.5's key-class split; 07's D-Q
+	// signing structure carries section_name, so one key per section is what
+	// makes "a verify-only key cannot sign routes" enforceable). OPTIONAL, on
+	// the WITNESS_BUCKET precedent: unset means policydist SERVES and takes
+	// ACKs but refuses to publish, loudly, at the call. Publication has no
+	// public route (05 §4.1), so an unset seam blocks no request path — and
+	// making it required would refuse boot on every stack that has not been
+	// given a bundle key yet, which is a worse failure than a loud refusal at
+	// the one call site that needs it.
+	//
+	// The transparency-log HEAD key is deliberately NOT a separate seam: 05
+	// §4.4 requires only that head signing use "the update/log key class, not
+	// a bundle section key", and the server CHAIN key above is exactly that
+	// class. Reusing it also keeps m1_server_signing_keys (the FK target for
+	// tlog_signed_heads.key_id) from gaining a key the receipt verifier would
+	// publish as a chain key. Domain prefixes keep the two uses
+	// non-interchangeable.
+	BundleSectionSeed []byte
+
 	// WITNESS_BUCKET — the object-lock bucket the hourly witness job (m1_003)
 	// publishes chain heads to. Empty ⇒ the job does not run (a dev stack
 	// without a witness is honest about it; prod alerting owns the gap).
@@ -185,6 +205,13 @@ func Load() (Config, error) {
 		c.ServerChainSeed = seed
 	} else if !c.AuthDevMode {
 		return Config{}, fmt.Errorf("config: required env SERVER_CHAIN_ED25519_SEED is unset (boot refusal R1, 05 §1.2; m1_002 server chain key)")
+	}
+	if rawSeed := os.Getenv("BUNDLE_SECTION_ED25519_SEED"); rawSeed != "" {
+		seed, err := decodeSeed(rawSeed)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: BUNDLE_SECTION_ED25519_SEED: %w", err)
+		}
+		c.BundleSectionSeed = seed
 	}
 	// The SSE-KMS escape hatch: "" off, "1" on, anything else a refusal — a
 	// typo'd truthy value must not silently leave encryption ON against MinIO

@@ -1,3 +1,5 @@
+//go:build integration
+
 package enroll_test
 
 // DSN-gated Postgres integration (house style, 12 / 05 §7.5): a scratch
@@ -9,7 +11,7 @@ package enroll_test
 // (epoch bump + fail-closed verify), the §3.6 fingerprint registry, and the
 // RLS seams.
 //
-// Gate: M1_TEST_PG_DSN (superuser DSN for scratch setup). Absent ⇒ skip,
+// Gate: M1_MIGRATE_PG_DSN (privileged DSN for scratch setup). Absent ⇒ skip,
 // unless M1_REQUIRE_STORES=1 ⇒ fail.
 
 import (
@@ -47,14 +49,18 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 )
 
+// The privileged DSN: this harness creates its own scratch database and applies
+// the full migration tree, and m1_060 mints a BYPASSRLS role — which PG16 permits
+// only to a role that already holds it. The tests themselves run as the
+// unprivileged role minted below, never as this one.
 func pgDSN(t *testing.T) string {
 	t.Helper()
-	v := os.Getenv("M1_TEST_PG_DSN")
+	v := os.Getenv("M1_MIGRATE_PG_DSN")
 	if v == "" {
 		if os.Getenv("M1_REQUIRE_STORES") == "1" {
-			t.Fatal("M1_TEST_PG_DSN required (M1_REQUIRE_STORES=1) but unset")
+			t.Fatal("M1_MIGRATE_PG_DSN required (M1_REQUIRE_STORES=1) but unset")
 		}
-		t.Skip("M1_TEST_PG_DSN unset; skipping Postgres-backed test")
+		t.Skip("M1_MIGRATE_PG_DSN unset; skipping Postgres-backed test")
 	}
 	return v
 }
@@ -357,7 +363,7 @@ func (h *harness) do(req *http.Request) (int, map[string]any) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)

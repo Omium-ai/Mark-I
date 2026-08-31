@@ -278,7 +278,7 @@ func postForm(ctx context.Context, client *http.Client, endpoint string, form ur
 	if err != nil {
 		return nil, 0, fmt.Errorf("enroll: IdP unreachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, 0, err
