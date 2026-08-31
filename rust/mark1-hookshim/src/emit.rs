@@ -12,8 +12,7 @@ use crate::maps::{EventRule, FieldMap};
 /// nothing: unmapped hook name, unmapped kind, or an unparseable session id
 /// (adapters never guess a field — 08 §5 rule 2).
 pub fn build(map: &FieldMap, payload: &serde_json::Value) -> Option<pb::Event> {
-    let hook = payload.get(&map.event_field)?.as_str()?;
-    let rule = map.events.get(hook)?;
+    let rule = map.rule(payload)?;
     let body = body_for(map, rule, payload)?;
     let session_id = payload
         .get(&map.session_id_field)?

@@ -6,11 +6,18 @@
 //! - a successful decode re-encodes to identical bytes;
 //! - byte-at-a-time feeding agrees with single-shot feeding on every accept
 //!   and on the terminal outcome (the split bug class, README §Split
-//!   iteration, under arbitrary input).
+//!   iteration, under arbitrary input);
+//! - since D-U every payload is a `FabricFrame`, so the typed layer is driven
+//!   too: arbitrary bytes into `feed_frames` (must never panic), and every
+//!   oneof arm — Event AND each control arm — built from the same bytes must
+//!   survive encode → decode identically. Fuzzing only the Event arm would
+//!   leave the handshake and gate dialects, which are the arms an attacker
+//!   reaches first on a fresh connection, untested.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 use m1p_wire::framing::{FrameDecoder, Outcome, HEADER_LEN, MAGIC, VERSION};
+use m1p_wire::pb;
 
 // Terminal outcome + accepted frames, for cross-chunking comparison.
 fn drain(dec: &mut FrameDecoder, accepts: &mut Vec<(Vec<u8>, usize)>) -> Option<String> {
@@ -54,4 +61,56 @@ fuzz_target!(|data: &[u8]| {
     }
     assert_eq!(single_accepts, split_accepts);
     assert_eq!(single_end, split_end);
+
+    // The typed layer over the same bytes: never a panic, only a typed frame
+    // or a FrameError.
+    let _ = FrameDecoder::new().feed_frames(data);
+
+    // Every arm, built from the fuzzer's bytes, must round-trip.
+    let text = String::from_utf8_lossy(data).into_owned();
+    for kind in [
+        pb::fabric_frame::Kind::Event(pb::Event {
+            event_id: data.to_vec(),
+            body: Some(pb::event::Body::Turn(pb::Turn::default())),
+            ..Default::default()
+        }),
+        pb::fabric_frame::Kind::Hello(pb::Hello {
+            component: text.clone(),
+            pid: data.len() as u32,
+            version: text.clone(),
+            session_id: data.to_vec(),
+        }),
+        pb::fabric_frame::Kind::HelloAck(pb::HelloAck {
+            accepted: data.len() % 2 == 0,
+            max_frame: m1p_wire::M1PL_MAX_FRAME,
+            want_ver: data.first().copied().unwrap_or(0) as u32,
+        }),
+        pb::fabric_frame::Kind::GateQuery(pb::GateQuery {
+            task_id: data.to_vec(),
+            gate: (data.len() % 3) as i32,
+            deadline_ms: data.len() as u32,
+        }),
+        pb::fabric_frame::Kind::GateVerdict(pb::GateVerdict {
+            decision: (data.len() % 3) as i32,
+            verdict: (data.len() % 5) as i32,
+            posterior: data.iter().map(|b| f64::from(*b) / 255.0).collect(),
+            reason: text.clone(),
+            evidence_ref: text,
+        }),
+        pb::fabric_frame::Kind::Flush(pb::Flush {}),
+        pb::fabric_frame::Kind::FlushAck(pb::FlushAck {
+            drained: data.len() as u64,
+        }),
+    ] {
+        let frame = pb::FabricFrame { kind: Some(kind) };
+        let mut bytes = Vec::new();
+        // Only the bound can refuse an arm; past it there is nothing to prove.
+        if m1p_wire::encode_control(&frame, &mut bytes).is_err() {
+            continue;
+        }
+        let got = FrameDecoder::new()
+            .feed_frames(&bytes)
+            .expect("a frame this encoder produced must decode");
+        assert_eq!(got, vec![frame]);
+    }
 });

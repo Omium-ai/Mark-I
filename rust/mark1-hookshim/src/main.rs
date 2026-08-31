@@ -8,19 +8,17 @@
 //! Synchronous std only: an async runtime is startup cost with zero
 //! concurrency to spend it on (04 §5, cold-start budget ≤10 ms).
 //!
-//! NOT here, and why: the gate path (`gate.rs`, GateQuery/GateVerdict) and
-//! the `Hello` handshake — 08 §4.2 places those control messages in `m1p.v1`
-//! (doc 07), but the committed proto gen carries no such messages and proto/
-//! is frozen; the observer path is complete without them, and Stop is mapped
-//! as an observer event, which is byte-identical to a gate that answers
-//! allow (fail-open, 08 §5 rule 5). The gate path lands with the proto rev
-//! that defines the control set.
+//! Two dispatch paths, chosen by map data: observer hooks take the 50 ms
+//! fire-and-forget path here, gate hooks take `gate.rs` on the main thread
+//! (it owns the agent-facing deadline and answers on stdout).
 
 use std::io::Read;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 mod emit;
 mod fabric;
+mod gate;
 mod maps;
 mod spill;
 
@@ -102,22 +100,50 @@ fn run(started: Instant) {
         return;
     }
 
-    // Fire-and-forget with the budget timer as the bound (04 §5 step 4):
-    // the fabric attempt runs on a worker so a blocked connect/write can
-    // never hold the agent; at the deadline the main thread spills and
-    // exits, which tears the worker down with the process. A worker that
-    // completes after the spill duplicates the event — event_id is the
-    // server dedupe key (07 §2), so the duplicate collapses at admission.
+    // A gate hook is a gate hook because the map says so (08 §5 rule 1), and
+    // it carries the observer event on the same connection — Stop is both the
+    // stop-gate and a Turn{AGENT} lifecycle event.
+    if let Some((rule, gate)) = map
+        .rule(&payload)
+        .and_then(|r| r.gate.as_ref().map(|g| (r, g)))
+    {
+        gate::run(
+            home().as_deref(),
+            rule,
+            gate,
+            &payload,
+            frame,
+            &event.session_id,
+        );
+        return;
+    }
+    // What is LEFT of the 45 ms, not 45 ms from here: the abandon timer bounds
+    // the whole invocation, startup included (04 §5 step 4).
+    let budget = Duration::from_millis(FABRIC_ABANDON_MS).saturating_sub(started.elapsed());
+    observe(home().as_deref(), frame, &event.session_id, budget);
+}
+
+/// The 50 ms fire-and-forget observer path (04 §5 step 4).
+fn observe(home: Option<&Path>, frame: Vec<u8>, session_id: &[u8], budget: Duration) {
+    // The budget timer is the bound: the fabric attempt runs on a worker so a
+    // blocked connect/handshake can never hold the agent; at the deadline the
+    // main thread spills and exits, which tears the worker down with the
+    // process. A worker that completes after the spill duplicates the event —
+    // event_id is the server dedupe key (07 §2), so it collapses at
+    // admission.
     let worker_frame = frame.clone();
+    let worker_session = session_id.to_vec();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(fabric::send(&worker_frame));
+        let _ = tx.send(fabric::send(&worker_frame, &worker_session, budget));
     });
-    let budget = Duration::from_millis(FABRIC_ABANDON_MS).saturating_sub(started.elapsed());
     match rx.recv_timeout(budget) {
         Ok(Ok(())) => {}
-        // Unreachable daemon or blown deadline: the event is not lost —
-        // sanitized, sealed spill (04 §5.4), drained on next connect.
-        _ => spill::append(home().as_deref(), frame),
+        // Unreachable daemon, refused handshake, or a blown deadline: the
+        // event is not lost — sanitized, sealed spill (04 §5.4), drained on
+        // next connect. Before the handshake existed this arm was
+        // unreachable: write_all succeeded against a socket mark1d was
+        // closing, so every event was lost with Ok(()) and no spill.
+        _ => spill::append(home, frame),
     }
 }
