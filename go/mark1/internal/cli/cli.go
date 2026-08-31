@@ -117,20 +117,20 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name()) // no-op after a successful rename
+	defer func() { _ = os.Remove(tmp.Name()) }() // no-op after a successful rename
 	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	// fsync before rename: a marker that exists but is empty after a crash
 	// still switches the daemon off (stat-only check), but the enrollment
 	// doc and allow-list must never be readable-but-truncated.
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -230,7 +230,7 @@ func (e *Env) NoteAuthRefusal(status int, m1eCode string) {
 	}
 	doc.State = state
 	if err := e.SaveEnrollment(doc); err != nil {
-		fmt.Fprintf(e.Stderr, "mark1: could not record enrollment state %q: %v\n", state, err)
+		_, _ = fmt.Fprintf(e.Stderr, "mark1: could not record enrollment state %q: %v\n", state, err)
 	}
 }
 
@@ -314,7 +314,7 @@ func (e *Env) SaveWorkspaces(ws *Workspaces) error {
 // (0600). The receipted CoverageTransition of 08 §7.2/§7.6 step 4 is signed
 // by the device key inside mark1d's capture pipeline; until that wiring
 // lands the journal keeps the window attributable rather than silent.
-func (e *Env) AppendCoverageTransition(rec map[string]any) error {
+func (e *Env) AppendCoverageTransition(rec map[string]any) (err error) {
 	if err := os.MkdirAll(filepath.Dir(e.CoveragePath()), 0o700); err != nil {
 		return err
 	}
@@ -322,7 +322,13 @@ func (e *Env) AppendCoverageTransition(rec map[string]any) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// A close error on an appended journal is the write's real error surfacing
+	// late; swallowing it would report a transition that never hit the disk.
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -356,7 +362,7 @@ func DaemonReachable(socket string) bool {
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	_ = conn.Close()
 	return true
 }
 
@@ -386,10 +392,14 @@ func (e *Env) EmitError(ee *ExitError) {
 			"ok":    false,
 			"error": map[string]string{"code": code, "message": ee.Msg},
 		}
-		json.NewEncoder(e.Stdout).Encode(obj)
+		if err := json.NewEncoder(e.Stdout).Encode(obj); err != nil {
+			// stdout is gone; the exit code still carries the verdict, but say
+			// so on stderr rather than exiting silently on a lost error object.
+			_, _ = fmt.Fprintln(e.Stderr, "mark1:", ee.Error())
+		}
 		return
 	}
-	fmt.Fprintln(e.Stderr, "mark1:", ee.Error())
+	_, _ = fmt.Fprintln(e.Stderr, "mark1:", ee.Error())
 }
 
 func exitClass(code int) string {

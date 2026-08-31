@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -77,7 +78,7 @@ func enrollStub(t *testing.T, pendings int) (*httptest.Server, *atomic.Int32) {
 		if want := hex.EncodeToString(m.Sum(nil)); trimmed != want {
 			t.Errorf("hostname_hash = %q, want HMAC-SHA256(tenant-uuid, hostname) = %q", trimmed, want)
 		}
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"device_code": "dc-1", "user_code": "WDJB-MJHT",
 			"verification_uri": "https://idp.example/activate",
 			"expires_in":       900, "interval": 0,
@@ -87,16 +88,19 @@ func enrollStub(t *testing.T, pendings int) (*httptest.Server, *atomic.Int32) {
 		var body struct {
 			DeviceCode string `json:"device_code"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("poll body: %v", err)
+			return
+		}
 		if body.DeviceCode != "dc-1" {
 			t.Errorf("poll device_code %q", body.DeviceCode)
 		}
 		if int(polls.Add(1)) <= pendings {
 			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]string{"status": "pending"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "pending"})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status": "active", "device_id": "dev-1", "tenant_id": "ten-1",
 			"device_token": "tok-1", "expires_in": 86400,
 			"server_min_edge": "1.0.0",
@@ -130,7 +134,7 @@ func TestEnrollHappyPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", path, err)
 		}
-		if fi.Mode().Perm() != 0o600 {
+		if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 			t.Fatalf("%s mode %o, want 0600", path, fi.Mode().Perm())
 		}
 	}
@@ -157,7 +161,9 @@ func TestEnrollIdempotentWhenActive(t *testing.T) {
 		t.Fatal("re-enroll hit the server; must be local-only")
 	}
 	var res Result
-	json.Unmarshal(out.Bytes(), &res)
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("idempotent stdout %q: %v", out.String(), err)
+	}
 	if !res.OK || res.DeviceID != "dev-1" {
 		t.Fatalf("idempotent result %+v", res)
 	}
@@ -213,8 +219,12 @@ func deadDocReEnroll(t *testing.T, dead cli.Enrollment) {
 	if bytes.Equal(oldSeed, newSeed) {
 		t.Fatal("device key not rotated: re-presenting the dead identity's key would re-earn the refusal")
 	}
-	if fi, err := os.Stat(env.DeviceKeyPath()); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("rotated key mode/err: %v %v (atomic swap must preserve 0600)", fi.Mode().Perm(), err)
+	fi, err := os.Stat(env.DeviceKeyPath())
+	if err != nil {
+		t.Fatalf("rotated key missing: %v", err)
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Fatalf("rotated key mode %o (atomic swap must preserve 0600)", fi.Mode().Perm())
 	}
 	doc, err := env.LoadEnrollment()
 	if err != nil || doc.State != cli.StateActive || doc.DeviceToken != "tok-1" {
@@ -269,11 +279,11 @@ func mustLoad(t *testing.T, env *cli.Env) *cli.Enrollment {
 func TestEnrollDeniedAtIdP(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/enroll/device/start", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"device_code": "dc", "user_code": "U", "verification_uri": "u", "expires_in": 900, "interval": 0})
+		_ = json.NewEncoder(w).Encode(map[string]any{"device_code": "dc", "user_code": "U", "verification_uri": "u", "expires_in": 900, "interval": 0})
 	})
 	mux.HandleFunc("POST /api/v1/enroll/device/poll", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprint(w, `{"error":{"code":"M1E-1005","message":"denied"}}`)
+		_, _ = fmt.Fprint(w, `{"error":{"code":"M1E-1005","message":"denied"}}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -288,11 +298,11 @@ func TestEnrollDeniedAtIdP(t *testing.T) {
 func TestEnrollExpiredCode(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/enroll/device/start", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"device_code": "dc", "user_code": "U", "verification_uri": "u", "expires_in": 900, "interval": 0})
+		_ = json.NewEncoder(w).Encode(map[string]any{"device_code": "dc", "user_code": "U", "verification_uri": "u", "expires_in": 900, "interval": 0})
 	})
 	mux.HandleFunc("POST /api/v1/enroll/device/poll", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprint(w, `{"error":{"code":"M1E-1004","message":"expired"}}`)
+		_, _ = fmt.Fprint(w, `{"error":{"code":"M1E-1004","message":"expired"}}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

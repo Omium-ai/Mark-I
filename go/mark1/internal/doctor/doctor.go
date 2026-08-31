@@ -1,14 +1,14 @@
 // Package doctor is 08 §7.4: the consented anchor catalog, the fenced-config
-// manifest surface, and environment health — CI-friendly (exit 1 on any
-// failure, 0 all green, 3 not enrolled). The BLAKE3 checksum verification
-// inside fragments belongs to mark1d's §8 apply/revert engine (its manifests
-// carry blake3: hashes and the CLI's pinned dependency set has no blake3 by
-// design, 13 §3.4); doctor reports what it can PROVE from this side —
-// presence, permissions, target existence — and labels the rest unverified
-// rather than green.
+// state of every provisioned fragment, and environment health — CI-friendly
+// (exit 1 on any failure, 0 all green, 3 not enrolled). Fragment
+// classification and repair are the §8 engine itself (go/mark1d/adapters), not
+// a second implementation: a doctor that re-derived what a fence looks like
+// would drift from the apply that wrote it, and both sides' tests would stay
+// green while they disagreed.
 package doctor
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +18,8 @@ import (
 	"runtime"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
 )
 
 type Options struct {
@@ -31,6 +33,7 @@ type Options struct {
 type Report struct {
 	OK        bool       `json:"ok"`
 	Anchors   []Anchor   `json:"anchors"`
+	Agents    []Agent    `json:"agents"`
 	Fragments []Fragment `json:"fragments"`
 	Health    []Check    `json:"health"`
 }
@@ -41,13 +44,29 @@ type Anchor struct {
 	State     string `json:"state,omitempty"`
 }
 
-// Fragment states follow §7.4's vocabulary where provable from manifests
-// alone: MISSING (target file gone) and PRESENT-UNVERIFIED (target exists;
-// OK/USER-EDITED/FRAGMENT-DAMAGED need the §8 checksum walk in mark1d).
+// Agent is one of 08 §5's seven slots. Printing the unimplemented ones is the
+// point: a cursor or codex user should learn Mark 1 does nothing for their
+// agent from the tool, not from silence followed by an empty receipt.
+type Agent struct {
+	Name        string `json:"name"`
+	Implemented bool   `json:"implemented"`
+	Mechanism   string `json:"mechanism,omitempty"`
+	Phase       string `json:"phase,omitempty"`
+}
+
+// Fragment is §7.4's row, in §7.4's own vocabulary: OK | USER-EDITED |
+// FRAGMENT-DAMAGED | MISSING. Lines carries every provisioned line as it sits
+// on disk, so the block we wrote is byte-for-byte diffable from the report
+// itself (FR-AGENT-003) rather than only from the file.
 type Fragment struct {
-	Manifest string `json:"manifest"`
-	Target   string `json:"target"`
-	State    string `json:"state"`
+	Agent     string            `json:"agent"`
+	Mechanism string            `json:"mechanism,omitempty"`
+	Manifest  string            `json:"manifest"`
+	Target    string            `json:"target"`
+	State     string            `json:"state"`
+	Detail    string            `json:"detail,omitempty"`
+	Lines     []claudecode.Line `json:"lines,omitempty"`
+	Fixed     bool              `json:"fixed,omitempty"`
 }
 
 type Check struct {
@@ -63,20 +82,16 @@ func Run(env *cli.Env, opts Options) error {
 		}
 		return cli.Failf(cli.ExitRuntime, "", "reading enrollment: %v", err)
 	}
-	if opts.Fix {
-		// --fix re-applies fragments via the §8 idempotent apply — that
-		// engine lives in mark1d and has not landed. Refusing beats a fix
-		// that rewrites bytes without the manifest discipline.
-		return cli.Failf(cli.ExitRuntime, "", "--fix requires the §8 provisioning engine (mark1d row, not yet landed)")
-	}
-
 	rep := Report{OK: true}
 	rep.Anchors = readAnchors(env)
-	rep.Fragments = scanFragments(env)
+	rep.Agents = roster()
+	rep.Fragments = scanFragments(env, opts)
 	rep.Health = healthChecks(env, opts)
 
 	for _, f := range rep.Fragments {
-		if f.State == "MISSING" {
+		if f.State != string(claudecode.StateOK) && f.State != string(claudecode.StateUserEdited) {
+			// USER-EDITED is healthy: the fragment is intact and the user
+			// changed their own bytes elsewhere, which is theirs to do.
 			rep.OK = false
 		}
 	}
@@ -114,32 +129,70 @@ func readAnchors(env *cli.Env) []Anchor {
 	return catalog.Anchors
 }
 
-func scanFragments(env *cli.Env) []Fragment {
-	matches, _ := filepath.Glob(filepath.Join(env.ProvisionedDir(), "*", "*.manifest.json"))
-	var out []Fragment
-	for _, m := range matches {
-		frag := Fragment{Manifest: m, State: "PRESENT-UNVERIFIED"}
-		data, err := os.ReadFile(m)
-		if err != nil {
-			frag.State = "MISSING"
-			out = append(out, frag)
-			continue
-		}
-		var manifest struct {
-			TargetPath string `json:"target_path"`
-		}
-		if json.Unmarshal(data, &manifest) != nil || manifest.TargetPath == "" {
-			frag.State = "MISSING"
-			out = append(out, frag)
-			continue
-		}
-		frag.Target = manifest.TargetPath
-		if _, err := os.Stat(manifest.TargetPath); err != nil {
-			frag.State = "MISSING"
-		}
-		out = append(out, frag)
+func roster() []Agent {
+	out := make([]Agent, 0, len(adapters.Roster))
+	for _, s := range adapters.Roster {
+		out = append(out, Agent{s.Name, s.Implemented, s.Mechanism, s.Phase})
 	}
 	return out
+}
+
+// scanFragments classifies every provisioned fragment through the §8 engine
+// that wrote it. A fragment with no manifest was never provisioned and gets no
+// row — silence there is accurate, whereas a MISSING row would fail doctor for
+// every user who has not run `mark1 enable` yet.
+func scanFragments(env *cli.Env, opts Options) []Fragment {
+	var out []Fragment
+	if _, err := os.Stat(claudecode.ManifestPath(env.StateDir)); err == nil {
+		out = append(out, inspectClaudeCode(env, opts))
+	}
+	// Any OTHER manifest under <state>/provisioned/ belongs to an agent this
+	// build cannot classify. Listing it beats hiding it: an unclassifiable
+	// fragment is one `mark1 off` will also refuse to revert.
+	matches, _ := filepath.Glob(filepath.Join(env.ProvisionedDir(), "*", "*.manifest.json"))
+	for _, m := range matches {
+		if m == claudecode.ManifestPath(env.StateDir) {
+			continue
+		}
+		out = append(out, Fragment{
+			Agent: filepath.Base(filepath.Dir(m)), Manifest: m,
+			State:  string(claudecode.StateDamaged),
+			Detail: "no adapter in this build can classify or revert this fragment",
+		})
+	}
+	return out
+}
+
+func inspectClaudeCode(env *cli.Env, opts Options) Fragment {
+	st, err := claudecode.Inspect(env.StateDir)
+	f := Fragment{
+		Agent: st.Agent, Mechanism: st.Mechanism, Manifest: st.Manifest,
+		Target: st.Target, State: string(st.State), Detail: st.Detail, Lines: st.Lines,
+	}
+	if err != nil {
+		f.State, f.Detail = string(claudecode.StateDamaged), err.Error()
+		return f
+	}
+	if !opts.Fix || f.Target == "" {
+		return f
+	}
+	// §7.4: --fix re-applies MISSING and repairs FRAGMENT-DAMAGED, and touches
+	// nothing else. OK and USER-EDITED are left strictly alone — rewriting a
+	// healthy fragment because the user moved an unrelated key is the silent
+	// overwrite the whole design refuses.
+	if st.State != claudecode.StateMissing && st.State != claudecode.StateDamaged {
+		return f
+	}
+	res, ferr := claudecode.RepairFragment(f.Target, env.StateDir, "")
+	if ferr != nil {
+		f.Detail = fmt.Sprintf("--fix failed: %v", ferr)
+		return f
+	}
+	f.Fixed = res.Changed
+	if after, aerr := claudecode.Inspect(env.StateDir); aerr == nil {
+		f.State, f.Detail, f.Lines = string(after.State), after.Detail, after.Lines
+	}
+	return f
 }
 
 func healthChecks(env *cli.Env, opts Options) []Check {
@@ -212,22 +265,42 @@ func retentionCheck(opts Options) Check {
 
 func renderHuman(w io.Writer, r *Report) {
 	if len(r.Anchors) == 0 {
-		fmt.Fprintln(w, "anchors       no catalog derived yet")
+		_, _ = fmt.Fprintln(w, "anchors       no catalog derived yet")
 	}
 	for _, a := range r.Anchors {
-		fmt.Fprintf(w, "anchor        %s consented=%v %s\n", a.ID, a.Consented, a.State)
+		_, _ = fmt.Fprintf(w, "anchor        %s consented=%v %s\n", a.ID, a.Consented, a.State)
+	}
+	for _, a := range r.Agents {
+		if a.Implemented {
+			_, _ = fmt.Fprintf(w, "agent         %-12s mechanism %s\n", a.Name, a.Mechanism)
+		} else {
+			_, _ = fmt.Fprintf(w, "agent         %-12s not implemented (phase %s)\n", a.Name, a.Phase)
+		}
 	}
 	if len(r.Fragments) == 0 {
-		fmt.Fprintln(w, "fragments     none provisioned")
+		_, _ = fmt.Fprintln(w, "fragments     none provisioned")
 	}
 	for _, f := range r.Fragments {
-		fmt.Fprintf(w, "fragment      %s -> %s [%s]\n", f.Manifest, f.Target, f.State)
+		_, _ = fmt.Fprintf(w, "fragment      %s -> %s [%s] %s\n", f.Agent, f.Target, f.State, f.Detail)
+		// Every provisioned line, one line each: a user must be able to see
+		// exactly what we put in their file without opening it, and nine
+		// pretty-printed blocks is a thing nobody reads. The --json Lines keep
+		// the on-disk bytes verbatim, so the byte-for-byte diff (FR-AGENT-003)
+		// is still available where a diff tool can use it.
+		for _, l := range f.Lines {
+			var buf bytes.Buffer
+			if json.Compact(&buf, []byte(l.Value)) != nil {
+				buf.Reset()
+				buf.WriteString(l.Value)
+			}
+			_, _ = fmt.Fprintf(w, "  %-24s %s\n", l.Pointer, buf.String())
+		}
 	}
 	for _, c := range r.Health {
 		state := "OK"
 		if !c.OK {
 			state = "FAIL"
 		}
-		fmt.Fprintf(w, "health        %-22s %-4s %s\n", c.Name, state, c.Detail)
+		_, _ = fmt.Fprintf(w, "health        %-22s %-4s %s\n", c.Name, state, c.Detail)
 	}
 }
