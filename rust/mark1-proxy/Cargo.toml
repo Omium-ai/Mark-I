@@ -29,7 +29,6 @@ futures = { workspace = true }
 # --- upstream TLS (04 §3.4: pools keyed (upstream, credential-identity)) ---
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 webpki-roots = { workspace = true }
 
 # --- workspace crates ---

@@ -4,6 +4,15 @@ version = "0.1.0"
 requires-python = ">=3.12"
 # Root is not an installable package; it exists so `uv sync` and `uv run` have one anchor.
 
+# `--strict-markers` is the point: `-m integration` routes the store-backed suites to the one
+# CI job with real stores, so a typo'd or unregistered mark must fail collection rather than
+# quietly select nothing and report a green run over zero tests.
+[tool.pytest.ini_options]
+addopts = "--strict-markers"
+markers = [
+    "integration: requires the real stores from `just stores-up`; run by `just test-integration`, deselected by `just test-py`",
+]
+
 [tool.uv.workspace]
 members = [
     "python/adjudicator",

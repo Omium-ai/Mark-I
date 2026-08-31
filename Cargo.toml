@@ -15,9 +15,9 @@ members = [
     # quote-extracting grep that stops at the first line containing a closing bracket.
     "rust/mark1-redact",
     "rust/mark1-policy",
-    # rust/mark1-frames    — un-comment when its src lands (post-R1 proxy dialects)
+    "rust/mark1-frames",
     "rust/mark1-hookshim",
-    # rust/mark1-proxy     — un-comment when its src lands (post-R1)
+    "rust/mark1-proxy",
     "rust/cortexd",
 ]
 # cargo-fuzz crates need nightly and their own profiles; they build via `just fuzz`, not the workspace.
@@ -59,7 +59,6 @@ futures = "0.3"
 #     (aws-lc-rs complicates Windows/macOS cross-builds for zero benefit here) ---
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
-rustls-pemfile = "2.2"
 webpki-roots = "1.0"
 
 # --- proto + framing (committed gen; 0.13 line pinned to the neoeinstein-prost 0.4.0 plugin output) ---

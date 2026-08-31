@@ -21,3 +21,9 @@ serde_json = { workspace = true }   # SSE data payloads for the four JSON dialec
 thiserror = { workspace = true }
 # NOTE: no HTTP client, no tokio — parsers are synchronous byte-feeders driven by
 # the proxy's tee task (04 §3.2/§4); they never own I/O.
+
+[dev-dependencies]
+# Integration tests are a separate crate, so the golden-transcript runner cannot reach the
+# library's own deps; it needs its own handles to read the `.expected.json` snapshots.
+serde = { workspace = true }
+serde_json = { workspace = true }

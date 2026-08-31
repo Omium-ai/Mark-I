@@ -74,6 +74,12 @@ keywords = ["postgres://", "postgresql://", "clickhouse://", "redis://", "s3://"
     '''omium[_-]?dev[_-]?password''',
     '''://mark1:mark1@''',
     '''://placeholder:placeholder@''',
+    # House convention for integration tests: the DSN password is the module
+    # name + "test" (enrolltest, policydisttest, …), pointing at a scratch
+    # database the test creates and drops, sslmode=disable, local store only.
+    # Rule-scoped rather than file-scoped, so a real credential anywhere in
+    # those same tests still trips.
+    '''://[^\s:/@]+:[a-z]+test@''',
     '''(?i)://[^\s]*:(password|postgres|secret|changeme|example)@''',
   ]
 
@@ -127,6 +133,36 @@ paths = [
   # mark1-redact before they are ever written (04 §7.1).
   '''(^|/)conformance/frames/''',
   '''(^|/)conformance/hooks/''',
+
+  # --- The secret scanners' own test corpora. Same argument as token-shapes:
+  # a detector cannot be tested without inputs that look exactly like what it
+  # detects, so these files red the scanner BY CONSTRUCTION, and a permanently
+  # red scanner is one nobody reads — which is how gitleaks came to have never
+  # run on this repo at all (D-BA). Per-FILE, never per-directory: the
+  # neighbouring source in these packages is scanned normally.
+  #
+  # All 33 matches were read individually before this was written (D-BF). Every
+  # one is a documented example (`AKIAIOSFODNN7EXAMPLE` is AWS's own docs key),
+  # an alphabet run (`ghp_abcdefghijklmnop…`, `sk_live_abcdefghij…`), or a PEM
+  # header over a `qqqq`/`xxx` body. Zero live credentials in 82 commits.
+  #
+  # THE HAZARD, stated so the next reader weighs it: these are the likeliest
+  # files for someone to paste a REAL secret into — "let me check the scanner
+  # catches this one." That paste would now be invisible here. Adding a file to
+  # this list is a security decision, not a lint fix.
+  '''(^|/)rust/mark1-redact/src/tests\.rs$''',
+  # The OAuth token-shape canary corpus (plan §1, 12 §3.3) — the same corpus the
+  # conformance/canary/token-shapes/ entry above was written for, except the
+  # implementation put it in Rust source as a `const` array rather than in
+  # conformance/. Samples are alphabet runs (`AaBbCc…`) and jwt.io's documented
+  # example JWT. This file failing the scanner would create pressure to weaken
+  # the canary, which is the one corpus that must never be sanitized.
+  '''(^|/)rust/mark1-proxy/src/guard/shape\.rs$''',
+  '''(^|/)rust/mark1-redact/benches/throughput\.rs$''',
+  '''(^|/)go/controld/internal/ingest/scanner/scanner_test\.go$''',
+  # Plants one synthetic AWS key in a ServiceTier field to prove the pre-egress
+  # scanner quarantines the batch rather than shipping it.
+  '''(^|/)go/controld/internal/ingest/pipeline_test\.go$''',
 ]
 
 regexes = [

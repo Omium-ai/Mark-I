@@ -6,13 +6,28 @@ all-features = true
 yanked = "deny"
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "MPL-2.0", "CDLA-Permissive-2.0"]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "CDLA-Permissive-2.0"]
+# MPL-2.0 was allowed here and matched nothing. It is file-level copyleft: shipping an MPL crate
+# in the edge binary carries a source-disclosure obligation the rest of this list does not, so a
+# standing allowance would let the first one in silently. Same rule as the `notify` exception
+# below — arrive, then get looked at. Re-add scoped if a specific crate justifies it.
 # Our own proprietary crates carry license = "UNLICENSED", which is neither in the list above nor
 # a valid SPDX expression, so without this the gate fails on us instead of on a dependency.
 # `ignore` applies ONLY to workspace members marked `publish = false` — every proprietary crate
 # is, and the two Apache-2.0 crates (mark1-receipt, mark1-verifier) deliberately are not, so they
 # stay inside the gate. Third-party crates are unaffected: the allow list still binds all of them.
 private = { ignore = true }
+
+# notify (cortexd's file watcher) is CC0-1.0, a public-domain dedication that is FSF Free/Libre
+# and strictly more permissive than MIT on copyright — but that grants NO patent rights, which is
+# why some enterprise OSS policies treat CC0 dependencies as a review item. Scoped to this one
+# crate rather than added to `allow` above, so the next CC0 crate to arrive still trips the gate
+# and gets its own look instead of inheriting this decision silently.
+# FOUNDER/COUNSEL: confirm CC0-1.0-without-patent-grant is acceptable for a crate we ship in the
+# edge binary before R1, or swap the watcher.
+[[licenses.exceptions]]
+crate = "notify"
+allow = ["CC0-1.0"]
 
 [bans]
 multiple-versions = "warn"
