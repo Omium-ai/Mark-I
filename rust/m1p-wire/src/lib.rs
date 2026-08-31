@@ -18,6 +18,11 @@ pub mod google {
 }
 
 pub mod m1p {
+    // FabricFrame::Kind (D-U) is ~536 B because its Event arm is, and Event is
+    // the overwhelming majority of frames — boxing it to satisfy
+    // large_enum_variant would add a heap allocation to the hot path to shrink
+    // the arms nobody sends. The lint measures the wrong thing for this shape.
+    #[allow(clippy::large_enum_variant)]
     pub mod v1 {
         // Staged copy of proto/gen/rust/m1p.v1.rs — committed, no build.rs
         // (13 §2.4); gen_fresh.sh fails CI if it drifts from proto/gen.
@@ -29,4 +34,6 @@ pub use m1p::v1 as pb;
 
 pub mod framing;
 
-pub use framing::{encode_frame, FrameDecoder, FrameError, Outcome, M1PL_MAX_FRAME};
+pub use framing::{
+    decode_payload, encode_control, encode_frame, FrameDecoder, FrameError, Outcome, M1PL_MAX_FRAME,
+};

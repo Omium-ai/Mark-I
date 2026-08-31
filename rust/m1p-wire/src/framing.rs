@@ -1,4 +1,7 @@
-//! M1PL/1 framing. Byte layout is 07 §5, verbatim; the len bound is 08 §4.2's
+//! M1PL/1 framing. Byte layout is 07 §5, verbatim; the payload is one
+//! `m1p.v1.FabricFrame` (D-U, 07 §5) — the oneof arm is the Event-vs-control
+//! discriminator, so this module owns the header and the envelope but not the
+//! frame's meaning. The len bound is 08 §4.2's
 //! `M1PL_MAX_FRAME` (D-A). Decoder outcomes and reject codes are frozen by the
 //! `conformance/vectors/m1pl/` manifest (12 §3.4) — accept / incomplete /
 //! reject, nothing else, and reject means the caller closes the connection.
@@ -29,15 +32,25 @@ pub enum FrameError {
     /// empty Event; len > max caps hostile allocation at 4 MiB (08 §4.2).
     #[error("M1E-4002: frame len {0} outside 0 < len <= {M1PL_MAX_FRAME}")]
     BadLength(u32),
-    /// A well-framed payload that is not a decodable Event means the writer is
-    /// broken or the stream desynchronized on a frame boundary; 08 §7 pins no
-    /// dedicated code, so it closes as the M1E-4002 protocol error.
-    #[error("M1E-4002: payload is not a decodable m1p.v1.Event: {0}")]
+    /// A well-framed payload that is not a decodable FabricFrame means the
+    /// writer is broken or the stream desynchronized on a frame boundary;
+    /// 08 §7 pins no dedicated code, so it closes as the M1E-4002 protocol
+    /// error.
+    #[error("M1E-4002: payload is not a decodable m1p.v1.FabricFrame: {0}")]
     Payload(#[from] prost::DecodeError),
-    /// Encode side of the same bound: an Event that frames to len == 0 or
+    /// A structurally decodable FabricFrame carrying the wrong thing: no
+    /// oneof arm at all (D-U's discriminator missing — proto3 would otherwise
+    /// let unknown fields pass as a silently-ignored frame), or a control arm
+    /// where the reader is draining an event stream. Both are dialect
+    /// breaches, so both close as M1E-4002 — the same answer mark1d's
+    /// `unwrap` gives (go/mark1d/internal/fabric/session.go).
+    #[error("M1E-4002: FabricFrame {0}")]
+    Envelope(&'static str),
+    /// Encode side of the same bound: a frame that encodes to len == 0 or
     /// len > max may never reach the wire (07 §5 — excerpts travel as
-    /// multipart attachments, never over the fabric).
-    #[error("M1E-4002: event encodes to {0} bytes, unframeable under 0 < len <= {M1PL_MAX_FRAME}")]
+    /// multipart attachments, never over the fabric). len == 0 is reachable
+    /// only from a FabricFrame with no oneof arm set.
+    #[error("M1E-4002: frame encodes to {0} bytes, unframeable under 0 < len <= {M1PL_MAX_FRAME}")]
     Unframeable(usize),
     #[error("M1E-4002: encode failed: {0}")]
     Encode(#[from] prost::EncodeError),
@@ -146,37 +159,84 @@ impl FrameDecoder {
     /// rejects also leave the buffer as-is, so the reject stays sticky across
     /// calls rather than resyncing on attacker-chosen bytes (12 §3.4 row 1).
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<pb::Event>, FrameError> {
+        self.feed_frames(bytes)?
+            .into_iter()
+            .map(|f| match f.kind {
+                Some(pb::fabric_frame::Kind::Event(ev)) => Ok(ev),
+                // A control arm reached a caller draining events: the fabric
+                // is request-reply only for the component that asked (08
+                // §4.3), so this is the peer speaking a dialect this reader
+                // does not — close, exactly like mark1d's default arm.
+                _ => Err(FrameError::Envelope("carries a control arm, not an Event")),
+            })
+            .collect()
+    }
+
+    /// The typed surface D-U makes possible: every payload is one
+    /// `FabricFrame`, so the oneof arm IS the frame kind. Same accept /
+    /// incomplete / reject model and same deferred-error rule as `feed`.
+    pub fn feed_frames(&mut self, bytes: &[u8]) -> Result<Vec<pb::FabricFrame>, FrameError> {
         self.push(bytes);
         if let Some(e) = self.deferred.take() {
             return Err(e);
         }
-        let mut events = Vec::new();
+        let mut frames = Vec::new();
         loop {
             let err = match self.next_frame() {
-                Outcome::Accept { payload, .. } => match pb::Event::decode(payload.as_slice()) {
-                    Ok(ev) => {
-                        events.push(ev);
+                Outcome::Accept { payload, .. } => match decode_payload(&payload) {
+                    Ok(f) => {
+                        frames.push(f);
                         continue;
                     }
-                    Err(e) => FrameError::Payload(e),
+                    Err(e) => e,
                 },
-                Outcome::Incomplete { .. } => return Ok(events),
+                Outcome::Incomplete { .. } => return Ok(frames),
                 Outcome::Reject(e) => e,
             };
-            if events.is_empty() {
+            if frames.is_empty() {
                 return Err(err);
             }
             self.deferred = Some(err);
-            return Ok(events);
+            return Ok(frames);
         }
     }
 }
 
-/// Encode one Event as an M1PL/1 frame appended to `out` (04 §7.4). The
-/// encoder enforces the same bound as the decoder so an unframeable Event
-/// fails at the writer, not as a peer's connection close.
+/// One M1PL payload → the FabricFrame it must be (D-U). An arm-less frame is
+/// an ERROR, not an empty frame: proto3 skips unknown fields, so without this
+/// check a payload of nothing but unknown tags would decode "successfully"
+/// into a frame that says nothing and be silently ignored.
+pub fn decode_payload(payload: &[u8]) -> Result<pb::FabricFrame, FrameError> {
+    let frame = pb::FabricFrame::decode(payload)?;
+    if frame.kind.is_none() {
+        return Err(FrameError::Envelope("carries no oneof arm"));
+    }
+    Ok(frame)
+}
+
+/// Encode one Event as an M1PL/1 frame appended to `out` (04 §7.4). Since D-U
+/// the payload is the wrapping `FabricFrame`, not the bare Event — every
+/// existing caller keeps this signature and gets the dialect mark1d requires.
 pub fn encode_frame(ev: &pb::Event, out: &mut Vec<u8>) -> Result<(), FrameError> {
-    let len = ev.encoded_len();
+    // ponytail: one Event clone per frame to reach an owned oneof arm. The
+    // shim encodes one event per process and Event is a flat ~536 B struct
+    // with three small heap fields; hand-rolling the arm's tag+varint prefix
+    // is the upgrade path if a batching writer ever measures it.
+    encode_control(
+        &pb::FabricFrame {
+            kind: Some(pb::fabric_frame::Kind::Event(ev.clone())),
+        },
+        out,
+    )
+}
+
+/// Encode any FabricFrame — the control arms (Hello/GateQuery/Flush and their
+/// replies) have no hot path, so they pay the generic route. The encoder
+/// enforces the same bound as the decoder so an unframeable frame fails at
+/// the writer, not as a peer's connection close; an arm-less frame encodes to
+/// zero bytes and is refused here, mirroring `decode_payload`.
+pub fn encode_control(frame: &pb::FabricFrame, out: &mut Vec<u8>) -> Result<(), FrameError> {
+    let len = frame.encoded_len();
     if len == 0 || len > M1PL_MAX_FRAME as usize {
         return Err(FrameError::Unframeable(len));
     }
@@ -185,6 +245,6 @@ pub fn encode_frame(ev: &pb::Event, out: &mut Vec<u8>) -> Result<(), FrameError>
     out.push(VERSION);
     // Cast is lossless: len <= M1PL_MAX_FRAME just above.
     out.extend_from_slice(&(len as u32).to_le_bytes());
-    ev.encode(out)?;
+    frame.encode(out)?;
     Ok(())
 }
