@@ -178,20 +178,26 @@ omium-mark1/
 │   │   ├── Cargo.toml               # workspace member; depends only on mark1-receipt + serde/clap
 │   │   ├── LICENSE                  # Apache-2.0 — "verify Omium" requires the verifier be inspectable
 │   │   └── src/main.rs
+│   ├── trace-check                  # 12 §10.3 — requirement → test gate; its own `just` recipe and
+│   │                                #   its own CI job, because it is built to go red on an unproven
+│   │                                #   requirement and that signal must not share a lane
 │   └── ci/                          # the custom mechanical gates, each a small POSIX script
 │       ├── otel_gate.sh             # §7.5 — lockfile scans, all three languages
 │       ├── secret_type_gate.sh      # §7.5 — the Secret<T> grep gate
 │       ├── override_pattern_gate.sh # 04 §3.1(4) — no guard-override cfg/flag names in mark1-proxy
+│       ├── build_tag_gate.sh        # §7.5 — every Go build tag documented in the justfile inventory
 │       ├── contracts_sync_check.sh  # §10.3 — contract diff ⇒ 07/08 must be in the same PR
 │       ├── conformance_crosslang.sh # runs shared vectors through Rust + Go + Python implementations
 │       └── gen_fresh.sh             # §5.5 — buf generate && git diff --exit-code proto/gen rust/m1p-wire/gen
 │
 ├── conformance/                     # fixtures are DATA, versioned with the code that must pass them
 │   ├── frames/<dialect>/<vendor-version>/*.sse       # golden SSE transcripts, byte-exact passthrough + parse snapshots
-│   ├── hooks/<agent>@<pinned-version>/*.json         # hook fixtures; an adapter slot opens only when its spike fixture lands
+│   ├── hooks/<agent>/<pinned-version>/*.json         # hook fixtures; an adapter slot opens only when its spike fixture lands
 │   ├── canary/token-shapes/                           # OAuth token-shape corpus for the weekly classifier canary
-│   ├── vectors/{m1pl,redact,receipt,bundle}/          # cross-language vectors: Rust↔Go↔Python must agree bit-identically
-│   └── tenancy/                                       # tenant-isolation negative-test specs (PG, CH, memory API, S3 prefixes)
+│   ├── vectors/{m1pl,redact,receipt,bundle,fusion}/   # cross-language vectors: the implementations must agree bit-identically
+│   │                                                  #   (fusion is Go↔Python only — ADJUDICATE has no Rust twin, 06 §3)
+│   ├── tenancy/                                       # tenant-isolation negative-test specs (PG, CH, memory API, S3 prefixes)
+│   └── traceability.yaml                              # 12 §10.2 — every 02 §9 requirement → the tests that prove it
 │
 ├── deploy/
 │   ├── helm/                        # estate shape: one YAML per cloud service (controld, adjudicator, intel) + values
@@ -420,7 +426,7 @@ Three service modules plus the generated-contracts module. The estate predates `
 
 ```
 // go.work
-go 1.25.0
+go 1.25.14
 
 use (
     ./go/controld
@@ -454,6 +460,8 @@ go 1.25.0
 require google.golang.org/protobuf v1.36.11
 ```
 
+The `go` directive here is the one that reads `1.25.0` while every other module and `go.work` read `1.25.14`, and that is not drift: buf emits this file, so the line says what the generator writes, not what the toolchain pin is. A hand-edit would be reverted by the next `just gen` and `gen_fresh.sh` would then fail on a file nobody remembers touching. It is a language-version floor, not a toolchain selector, so it constrains nothing the pinned toolchain does not already satisfy.
+
 ### 3.4 Service `go.mod` files — pins written out
 
 `go/mark1d/go.mod`:
@@ -461,17 +469,17 @@ require google.golang.org/protobuf v1.36.11
 ```
 module github.com/Omium-ai/omium-mark1/go/mark1d
 
-go 1.25.0
+go 1.25.14
 
 require (
     github.com/Omium-ai/omium-mark1/proto/gen/go v0.0.0
     github.com/fsnotify/fsnotify v1.9.0           // transcript discovery watchers (04 §2.1)
-    github.com/fxamacker/cbor/v2 v2.7.0           // Go parallel PolicyBundle decoder (04 §2.6)
     github.com/google/uuid v1.6.0                 // UUIDv7 (RFC 9562)
     github.com/klauspost/compress v1.18.0         // zstd batch compression (04 §2.5)
-    github.com/zalando/go-keyring v0.2.6          // key custody ladder, cgo-free (04 §2.9 — the cgo tax stays dead)
+    golang.org/x/crypto v0.37.0                   // spill-ring unseal: the X25519 + ChaCha20-Poly1305 twin of spill.rs (04 §5.4)
     golang.org/x/sys v0.42.0                      // unix/windows syscall surface (fabric perms, statfs, job objects)
     google.golang.org/protobuf v1.36.11
+    lukechampine.com/blake3 v1.4.1                // checkpoint Merkle (04 §7.2 names BLAKE3; stdlib has none — pure Go, cgo-free)
 )
 
 replace github.com/Omium-ai/omium-mark1/proto/gen/go => ../../proto/gen/go
@@ -484,25 +492,25 @@ Notable absences, each deliberate: **no crc32c module** — `hash/crc32` with th
 ```
 module github.com/Omium-ai/omium-mark1/go/mark1
 
-go 1.25.0
+go 1.25.14
 
 require (
-    github.com/Omium-ai/omium-mark1/proto/gen/go v0.0.0
+    github.com/Omium-ai/omium-mark1/go/mark1d v0.0.0  // adapters/ ONLY — see below
     github.com/spf13/cobra v1.9.1                 // 7 subcommands with flags/help; the one boring choice
-    github.com/zalando/go-keyring v0.2.6          // enroll writes the device key through the same custody ladder
-    golang.org/x/oauth2 v0.25.0                   // OIDC device-code flow client side (08 §3.1)
-    google.golang.org/protobuf v1.36.11
 )
 
 replace github.com/Omium-ai/omium-mark1/proto/gen/go => ../../proto/gen/go
+replace github.com/Omium-ai/omium-mark1/go/mark1d => ../mark1d
 ```
+
+**The CLI imports the daemon module, and only for `adapters/`** (D-BD). This looks like a layering violation and is the opposite: the 08 §8 fence engine has three callers — `enable` applies the fragment, `doctor` classifies it, `off` reverts it — and **all three must work with the daemon down**, so the algorithm cannot live behind the socket. A second copy is the worse option, not the safer one: a revert implemented twice silently *under*-reverts, and each copy's own byte-equality test keeps passing while the two disagree about what a fence is. The import is narrow by construction — nothing under `go/mark1d/internal/` is reachable — and it is the reason this module carries the forward-pinned indirects (`fsnotify`, `blake3`, `klauspost/*`) that a CLI would otherwise have no business holding. Those pins stay — and they did: `go mod tidy` was scheduled into the CI-green wave rather than run mid-phase (a tidy that moves a pin under an unverified CI is a change nobody can attribute), and when it ran there, every forward-pinned indirect survived. What did not survive were three *direct* requires for code that was never written — `go-keyring` in both modules, `x/oauth2` here, `fxamacker/cbor` in the daemon — each carrying a comment naming the feature it implemented, and none of them imported by a single file (D-CF). The lesson is narrower than "dead deps": with no `tools.go` blank import, an unused pin is not a pin. It survives until the next `tidy` and no longer, so a comment promising it will be there for a future rung is promising something the toolchain will not honour. `go mod tidy -diff` now runs per module in `lint-go`, which makes the honest state — no pin ahead of an import — the only representable one.
 
 `go/controld/go.mod`:
 
 ```
 module github.com/Omium-ai/omium-mark1/go/controld
 
-go 1.25.0
+go 1.25.14
 
 require (
     github.com/Omium-ai/omium-mark1/proto/gen/go v0.0.0
@@ -518,7 +526,6 @@ require (
     github.com/jackc/pgx/v5 v5.7.5                        // pgxpool + tenant-GUC AfterConnect (05 §7.2)
     github.com/klauspost/compress v1.18.0                 // zstd ingest decompression
     github.com/prometheus/client_golang v1.19.0           // estate pin; pod-annotation scraping
-    golang.org/x/oauth2 v0.25.0
     google.golang.org/protobuf v1.36.11
 )
 
@@ -529,7 +536,7 @@ replace github.com/Omium-ai/omium-mark1/proto/gen/go => ../../proto/gen/go
 
 ### 3.5 Go build/test discipline
 
-- `CGO_ENABLED=0` for all three modules, always — cross-compiles for the CLI/daemon matrix and static distroless images fall out for free. `go-keyring` is pure Go; nothing in the closure needs cgo. CI asserts it (`go env CGO_ENABLED` check in `ci.yml`) so a cgo dependency cannot sneak in as a transitive default.
+- `CGO_ENABLED=0` for all three modules, always — cross-compiles for the CLI/daemon matrix and static distroless images fall out for free. Nothing in the closure needs cgo. CI asserts it (`go env CGO_ENABLED` check in `ci.yml`) so a cgo dependency cannot sneak in as a transitive default; the constraint binds hardest on the custody ladder's future keychain/TPM rungs, where the obvious libraries are cgo wrappers, so whichever one is chosen must be pure Go.
 - Tests: stdlib `testing` + native `go test -fuzz` for the spool record decoder and fabric frame reader (plan §Critical-files 3). No testify, no mocks framework — the estate writes table tests against interfaces, and so does Mark 1.
 - `govulncheck ./...` per module is a required CI gate — **new machinery**; the estate CI lacks it (grounding delta 4), and NFR-SECURITY-004 requires it in Mark 1's own CI.
 
@@ -858,6 +865,7 @@ gates:
     tools/ci/otel_gate.sh
     tools/ci/secret_type_gate.sh
     tools/ci/override_pattern_gate.sh
+    tools/ci/build_tag_gate.sh
 
 fmt:
     cargo fmt --all
@@ -1119,6 +1127,8 @@ unknown-git = "deny"
 This is a grep gate by design, not a poor cousin of the type system: the type system enforces the property *inside* the compiler's view; the grep refuses the diffs that would change what the compiler is asked to enforce.
 
 **3. The guard-override pattern gate** (`tools/ci/override_pattern_gate.sh`, 04 §3.1 step 4). Ripgrep over `rust/mark1-proxy/` failing on any `cfg(feature = ...)`, env-var read (`env::var`, `option_env!`), or clap attribute whose identifier matches `(?i)(bypass|override|allow_unprovisioned|skip_guard|insecure|no_guard)`. Together with 12's negative test ("no code path forwards an unprovisioned credential"), this makes "no override path exists in the binary" a two-sided claim: the test proves the binary that exists refuses; the gate refuses the source patterns that would build a different binary.
+
+**4. The build-tag gate** (`tools/ci/build_tag_gate.sh`, D-CB). `go test ./...` cannot see a tag-gated file, so a build tag is the one edit that removes a whole suite from a run while leaving every recipe, every job name and every exit code unchanged. The justfile carries an inventory against exactly that; it listed `integration` and `chaos` and named no platform tag at all, missing nine tagged files at HEAD (six `unix`, three `linux`), which is how most of `mark1d`'s suite stayed invisible to `go (windows-2022)` with nothing red anywhere. This gate extracts the distinct tag tokens from `go/**/*.go` and fails on any that the inventory does not name. The direction is deliberate and is the whole point: it derives the set **from the tree** and checks the prose against it, never the reverse, so renaming or moving a tagged file changes nothing and only a genuinely new tag can fail it. It also refuses to run if the inventory block is missing — comparing against nothing would otherwise pass.
 
 ### 7.6 `.pre-commit-config.yaml`
 
@@ -1457,7 +1467,7 @@ The plan's nine "Critical files, in build order" as an actual commit sequence. E
 | **C5** | `migrations/m1_001…` (tenants/devices, receipt chain per `ro_012` template + `key_id`/checkpoint columns, verifier registry, certs, artifacts, contributions, ε ledger, bundles, gold sets — 07's DDL) + `scripts/migrate-db.sh` + **`docs/adr/0001-clickhouse-ordering-key.md` signed** | migration idempotency check (apply twice); **`conformance/tenancy/` RLS negative tests** (the `*_app` NOBYPASSRLS discipline, mechanically un-repeatable) | `just migrate` twice = no-op; RLS negative suite proves cross-tenant reads impossible as the app roles; **the one irreversible ADR is signed before any production write** |
 | **C6** | `python/shared/mark1_receipts` (vendored `canonical.py`/`keys.py` + `checkpoint.py`) + `conformance/vectors/receipt/` + the Go origin-sign mirror in `mark1d/internal/identity` | Python CI (ruff, pytest, pip-audit); receipt vectors join `conformance_crosslang.sh` — **three languages now locked together** | one vector set produces identical canonical bytes, hashes, and verifiable dual signatures in Python, Rust, and Go |
 | **C7** | `tools/verifier` (Rust, Apache-2.0): chain walk, checkpoint Merkle + inclusion paths, dual-sig + KeyRing rotation verification, witness-head cross-check, offline by construction | verifier e2e in CI: build a chain via C3–C6 components **with no server running**, verify it | the sales claim is demonstrable: `mark1-verifier verify --chain … --witness …` passes offline; any single tampered byte fails with a named defect |
-| **C8** | `rust/mark1-hookshim` (off-check-first, maps-as-data, spill ring) + `go/mark1d/adapters/claudecode` + `internal/tailers` (sidechain dedupe as protocol invariant) + `conformance/hooks/claudecode@<pinned>/` fixtures | hook-fixture replay suite; shim cold-start bench (≤10 ms) + 50 ms deadline test; `secret_type_gate` now covers the shim's redact link | recorded Claude Code sessions replay through shim+tailer → spool → ingest with zero duplicate `Usage` (the ~2.5× overcount defense proven by fixture); daemon-down replay via spill ring works |
+| **C8** | `rust/mark1-hookshim` (off-check-first, maps-as-data, spill ring) + `go/mark1d/adapters/claudecode` + `internal/tailers` (sidechain dedupe as protocol invariant) + `conformance/hooks/claudecode/<pinned>/` fixtures | hook-fixture replay suite; shim cold-start bench (≤10 ms) + 50 ms deadline test; `secret_type_gate` now covers the shim's redact link | recorded Claude Code sessions replay through shim+tailer → spool → ingest with zero duplicate `Usage` (the ~2.5× overcount defense proven by fixture); daemon-down replay via spill ring works |
 | **C9** | `python/intel` skeleton + **`app/tvo/` in full** (closed forms, engine, deterministic waste taxonomy, coverage metric, report) + `in_0NN` migrations | TVO golden test: output must match the hand-computed Paper I worked example; coverage-floor refusal test (`M1E-5004`) | **the Phase 1 gate**: end-to-end certified usage events from a real session, TVO computed, verifiable offline by the customer — dogfood week starts |
 | **R1** | first `edge/v0.1.0` tag (no new code) | `release.yml`: 5-triple build, signing/notarization, **SBOM + SLSA attestation** (the last two new-vs-estate gates turn on) | `mark1 verify-release` validates signature + provenance on a dogfood laptop; ring 0 manifest committed |
 

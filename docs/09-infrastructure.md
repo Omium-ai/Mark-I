@@ -232,6 +232,8 @@ The platform runs the default `postgres15` family unmodified; Mark 1 needs a cus
 
 **pgvector** ships with RDS PG15 (verified in `modules/rds`'s own header — "no special parameter group needed"). Enablement is one migration statement, `CREATE EXTENSION IF NOT EXISTS vector;`, owned by the migrations dir (07 defines the single `halfvec` HNSW column on memory artifacts — the only vector case in Mark 1).
 
+Two constraints ride on that statement, and neither is visible from the statement itself. **pgvector is not a *trusted* extension** — `vector.control` carries no `trusted = true` — so `CREATE EXTENSION` requires a superuser, not merely a database owner. On RDS that is satisfied because the migration Job runs as the master user; anywhere the migration runs as an unprivileged role, **the platform must supply the extension and the migration's `IF NOT EXISTS` is a no-op**. And the version floor is **0.7**, not "whatever the distro packages": `halfvec` did not exist before it, and Ubuntu noble's archive stops at 0.6.0. `deploy/compose` and the native `stores-up` lane both pin **0.8.6** (PGDG); RDS PG15 is above the floor.
+
 ### 3.3 Roles and connections
 
 The RLS lesson is the estate's hardest-won fact: 61 FORCE-RLS tables were decorative because every service connected as the master user, which inherits `rds_superuser` → effective BYPASSRLS. Mark 1 enforces the fix **from day one, structurally**:

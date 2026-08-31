@@ -789,8 +789,10 @@ offset  size  field
 5       4     len     u32 little-endian, length of payload in bytes.
                       BOUND: len ≤ 4_194_304 (4 MiB). len == 0 or
                       len > bound ⇒ protocol error, close the connection.
-9       len   payload one encoded m1p.v1.Event
+9       len   payload one encoded m1p.v1.FabricFrame (D-U)
 ```
+
+- **D-U (lead, binding): the payload is one serialized `m1p.v1.FabricFrame`** — a oneof over `Event` and the D-N control set. This line previously said "one encoded m1p.v1.Event" while §4.2's control table rode the same stream; proto3 bytes are not self-describing, so both ends would have had to invent the Event-vs-control discriminator independently — the D-N hole class again. `Event` holds field 1 (the common case pays the smallest tag). `mark1d` unwraps and spools the **inner Event bytes**, so §6's record layout is unchanged and control messages stay structurally unspoolable: admission takes the Event, not the frame.
 
 - **The bound exists for the decoder, not the data.** No typed `m1p.v1` event approaches 4 MiB (excerpt payloads travel as HTTPS multipart attachments, never over the fabric), so the bound costs nothing — and it makes the maximum allocation from any single corrupt or hostile length byte provably 4 MiB instead of 4 GiB. The frame decoder in `m1p-wire` is a CI fuzz target; a bounded `len` is what makes that fuzzing meaningful memory-safety evidence rather than an OOM lottery.
 - Little-endian because it matches every target architecture's native order and the spool record framing (§6), so one codepath serves both.
@@ -3268,6 +3270,38 @@ policy-bundle = {
 
 section-name = "verify" / "route" / "memory" / "cortex" / "gates" / "agent_maps"
 
+; DECISION D-BF (lead, binding). `transparency-proof` was REFERENCED by the
+; envelope above and never DEFINED — the one field carrying the whole
+; "verify Omium rather than trust Omium" claim had no wire form in this
+; document. Both decoders therefore invented one, which is how two independent
+; implementations come to agree on something neither of them read from a spec.
+; The rule below is exactly what `mark1-policy::verify_and_decode` enforces:
+; four keys, `strict_keys`, no extras and no omissions.
+transparency-proof = null / {
+    leaf_index: uint,                  ; 0-based index of this bundle's leaf in the log
+    tree_size:  uint,                  ; size of the tree the proof targets
+    path:       [* bstr .size 32],     ; RFC 6962 audit path, leaf upward; empty is legal for a single-leaf tree
+    root:       bstr .size 32,         ; MUST equal the edge's PINNED head root — see below
+}
+
+; Three properties the CDDL cannot express, all enforced by the decoder:
+;
+;   a. `null` is legal at `seq == 0` AND NOWHERE ELSE. Bundle zero is local and
+;      pre-log (D-P), and the carve-out is a literal `0` in the match, never a
+;      configuration flag. At `seq > 0` a null or absent proof rejects with
+;      M1E-3003.
+;   b. THE LEAF IS THE BUNDLE BODY: SHA-256 over the canonical map MINUS its
+;      `inclusion` entry. A transparency-log leaf cannot commit to the proof of
+;      its own inclusion, so `inclusion` is also the one envelope field the
+;      D-Q signing structure below excludes.
+;   c. `root` IS CHECKED, NOT TRUSTED (D-S). It must equal the root of the head
+;      the edge has independently pinned; a proof that merely reproduces the
+;      root it shipped with proves nothing, and verifying against a
+;      bundle-supplied root is precisely what made M1E-3003 decorative before
+;      D-S. No pinned head at `seq > 0` ⇒ refuse and keep last-known-good;
+;      `tree_size` equality is subsumed by root equality but is compared
+;      separately so a mismatched checkpoint is NAMED rather than walked.
+
 signature = {
     key_id:  tstr,                     ; "ed25519:" + hex(sha256(pub)[..8])
     sig:     bstr .size 64,            ; over the D-Q signing structure below — NOT a bare concatenation
@@ -3394,7 +3428,19 @@ cpvs-row = { task_class: tstr, model_id: tstr, p_pass: float, tokens_est: uint }
 knee-table = {
     cost_basis: "usd" / "quota",       ; DUAL basis: usd = tokens×price+verifier spend (API-key tenants);
                                        ; quota = rate-limit-window fraction × wall-clock shadow price (subscription tenants)
-    rows: [+ { n: uint, c_n: float }], ; c(n) at attempt n; gate stops when p̂_LCB(n)·V(task) ≤ c(n)
+    rows: [+ { n: uint, c_n: float, ? p_lcb: float }],
+                                       ; c(n) at attempt n; gate stops when p̂_LCB(n)·V(task) ≤ c(n).
+                                       ; DECISION D-Z (lead, binding): p_lcb IS the wire source of
+                                       ; 04 §2.3's p̂_LCB(n) — the policy compiler's lower confidence
+                                       ; bound on P(success at attempt n) for this table's task class.
+                                       ; It was named by 04 and by the knee inequality but carried by
+                                       ; NO frozen surface (CPVS p_pass is per (task_class, model),
+                                       ; not attempt-indexed), so KneeState had no way to be populated
+                                       ; from a bundle. OPTIONAL, deliberately: the 23 frozen bundle
+                                       ; vectors predate it and stay valid, and a compiler that has
+                                       ; not fitted a row yet must be able to say so. ABSENT ⇒ the
+                                       ; knee is not evaluable at that n ⇒ Stop = false. Never stop on
+                                       ; missing data — the posture matrix's first row.
     v_default: float,                  ; V(task) fallback when no task-class estimate exists
 }
 

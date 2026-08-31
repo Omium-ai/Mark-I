@@ -72,6 +72,7 @@ Each entry carries `tlog_head` (D-S): the pinned log head the driving caller hol
 | `bundle_zero` | accept | D-P's Phase 2 fixture: seq 0, channel `local`, genesis prev_hash, null inclusion, fusion ON with literature-default 4×3 confusion matrices (D-R)/priors + the normative syntactic∪tests correlation group |
 | `full` | accept | all six sections with every optional field, seq 1 on `stable`, single-leaf tlog proof targeting the pinned head |
 | `minimal` | accept | smallest CDDL-admissible sections, seq 2, prev_hash chained to `full`'s body hash, 3-leaf tlog proof (non-trivial audit path) |
+| `knee_p_lcb` | accept | D-Z's OPTIONAL knee-row `p_lcb`, in all three states (absent / 0.0 / 0.75) in one table: both decoders once had it out of their optional key set, which made every bundle able to arm the knee governor an `M1E-3001` |
 | `bad_section_sig` | M1E-3001 / bad_signature | one corrupted section signature rejects the whole bundle |
 | `wrong_key_role` | M1E-3001 / unknown_key | verify section signed by the (published) gates key: a key only answers for its OWN section class |
 | `outside_validity` | M1E-3001 / outside_validity | verify section signed by the published-but-rotated-out key (`expired_key`, not_after 2020): windows are enforced against the SIGNED issued_at |

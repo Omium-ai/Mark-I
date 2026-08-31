@@ -283,17 +283,240 @@ package verdict
 // gate paths — structurally, the gate cannot compute.
 type Fuser struct {
     m BundleMatrices // confusion matrices, priors, correlation groups
-    // (syntactic ∪ {tests} as its own group), abstention models — all from
-    // the bundle's verify section; nothing here is edge-invented.
+    // (syntactic ∪ {tests} as its own group) — all from the bundle's verify
+    // section; nothing here is edge-invented. D-R: there is NO separate
+    // abstention model — each confusion4x3 row's third (abstain) column IS
+    // the abstention likelihood, consumed by an EXPLICIT abstain vote (D-V).
 }
 
 // Fuse: log-space naive Bayes. Votes are first collapsed WITHIN each
 // correlation group (group-majority with the group's joint confusion row),
 // then treated as independent ACROSS groups:
 //   score(v) = log prior(v) + Σ_g log P(collapsed_vote_g | v)
-// Absent/abstaining members contribute their abstention likelihood, not
-// silence. Output posterior[4] is softmax(score), ordered
-// [satisfied, violated, refused, error].
+//
+// DECISION D-V (lead, binding). SILENCE IS NOT AN OBSERVATION. This clause
+// previously read "absent/abstaining members contribute their abstention
+// likelihood, not silence"; that is now reversed. Fuse multiplies likelihoods
+// ONLY over members that actually voted. An explicit abstain vote consumes the
+// confusion4x3 abstain column; absence consumes nothing at all. Rationale:
+// under the fast/slow split below, absence overwhelmingly means "has not run
+// yet", not "ran and could not decide" — synthesising an abstain column for
+// every not-yet-reported slow anchor makes the PROVISIONAL posterior a
+// function of which anchors happen to be slow, and was measured flipping a
+// real verdict to VIOLATED, i.e. blocking a developer on evidence nobody
+// gathered. Informative missingness is a genuine effect, but modelling it
+// needs a missingness model the bundle does not carry; it must never be
+// smuggled in through the abstain column. This makes the edge agree with
+// 06 §3.1, which iterates received votes — the two implementations must now
+// agree on identical (bundle, votes), in the precise sense D-AC fixes below.
+//
+// DECISION D-W (lead, binding). Every deterministic tie-break in group
+// collapse — accept branch, reject branch, all-abstain branch — resolves to
+// the LEXICALLY SMALLEST verifier id. Reject and all-abstain already did on
+// both sides; the accept branch did not, and the two implementations picked
+// opposite members on equal likelihood ratios, producing different wire
+// posteriors from one input.
+//
+// DECISION D-X (lead, binding). A vote from a verifier the bundle does not
+// list contributes NO likelihood — the signed bundle is the sole source of
+// fusion parameters at the edge, and a hardcoded per-kind default is exactly
+// the "edge-invented" the struct comment above forbids. It is not silently
+// discarded either: the unknown voter is counted in Cached for accounting.
+// The adjudicator's calibrated per-kind fallback is legitimate ONLY on the
+// certification path, where no bundle exists, and any fusion that consumed a
+// fallback row is at best BOOTSTRAPPING (D-T), never CERTIFIED.
+//
+// DECISION D-AB (lead, binding). MEMBERSHIP GATES COVERAGE, NOT ONLY
+// LIKELIHOOD. The D1 evidence-coverage count is incremented ONLY for votes
+// that survive the membership filter — a verifier the bundle does not list,
+// or lists as quarantined, contributes neither a likelihood term nor a unit
+// of coverage. Both implementations independently took the permissive reading
+// (count first, filter second), and the referee generator replicated it, so
+// the conformance family ratified the bug instead of catching it. Measured
+// consequence: a task whose only LISTED verifier abstains answers
+// ALLOW/REFUSED at coverage 0; adding one vote from an UNLISTED verifier
+// turns it into a BLOCK whose posterior is provably unchanged — an unknown
+// party unlocking a block while contributing zero evidence. Coverage is the
+// difference between ALLOW and BLOCK, so it is exactly the quantity D-X's
+// principle must govern: the signed bundle is the sole source of truth about
+// who counts. D-X fixed the likelihood and was silent on coverage; this
+// closes it. Quarantined is not a weaker unknown — it is an explicit
+// distrust, and must be at least as excluded.
+//
+// DECISION D-AC (lead, binding). D-V's literal "bit-identical" requirement is
+// WITHDRAWN and replaced, because it is not achievable: Go's pure-Go
+// math.Log/math.Exp and CPython's platform libm differ by up to 1 ULP, and
+// 8 of 17 fusion vectors were measured differing in the last bit. Shipping
+// our own transcendentals to close a 2.2e-16 gap is not a cost this buys.
+// The binding requirement is now TWO clauses:
+//   (a) posteriors agree within 1e-12 absolute — the referee tolerance the
+//       conformance family already enforces per-language; and
+//   (b) the DERIVED VERDICT is identical, tested BETWEEN the two languages
+//       and not merely between each language and a manifest. Clause (b) had
+//       no test at all, which is why the divergence shipped.
+// (b) does not follow from (a) for free: the Chow comparison is a threshold
+// at exactly eta = 1/3, and a 1-ULP difference straddles it. Three of 57
+// swept constructions flipped — with ROUND NUMBERS (priors 0.4, c 0.3), not
+// adversarial ones — the edge answering VIOLATED where the cloud answered
+// REFUSED, i.e. the fail-closed divergence D-V exists to kill. Therefore both
+// implementations round the posterior before the Chow comparison, by exactly
+// this rule so that no third reading is possible:
+//     p_cmp[i] = floor(p[i] * 1e12 + 0.5) / 1e12
+// half-away-from-zero on a non-negative value, NOT the language's native
+// round() (Python's is banker's, Go's is not). The REPORTED posterior on the
+// wire stays unrounded; only the comparison is quantised. This does not make
+// divergence impossible — it makes it require the two values to straddle a
+// 1e-12 grid line rather than a single ULP — and clause (b)'s cross-language
+// test is the backstop that would catch the residue.
+//
+// DECISION D-AK (lead, binding, 2026-08-30). D-AC's QUANTISATION IS WITHDRAWN.
+// It was treating the symptom, and its own closing sentence conceded as much.
+// A pre-release review swept the residue D-AC predicted and found it: of 27
+// constructions built to sit on the grid line, EIGHT flipped verdict, in both
+// directions, one of them a single verifier with priors [0.4,0.4,0.1,0.1]. All
+// 21 frozen fusion vectors sit off that set, so clause (b) — the backstop —
+// was green throughout. A backstop that cannot see the failure it was posted
+// to catch is the decorative-control disease in test form.
+//
+// Rounding cannot fix this, and neither can the obvious repair of rounding to
+// an INTEGER count and comparing in int64: the integer is still derived from
+// the transcendental, so a 1-ULP difference in p still lands n on either side
+// of the boundary. Every variant of "round, then compare" only relocates the
+// straddle set.
+//
+// THE ROOT CAUSE IS THE TRANSCENDENTALS, AND THEY ARE REMOVABLE. IEEE-754
+// mandates correctly-rounded results for + - * / and sqrt; it mandates nothing
+// for exp and log. Those four operations are therefore bit-identical across Go
+// and CPython on identical inputs in identical order, and exp/log are the only
+// reason this fusion is not. Log-space buys underflow headroom and nothing
+// else here. So:
+//
+//   1. Fuse by DIRECT MULTIPLICATION of likelihoods — no Log, no Exp anywhere
+//      on the verdict path.
+//   2. Prevent underflow EXACTLY: whenever all four class masses fall below
+//      2^-512, multiply all four by 2^512. Scaling by a power of two is exact
+//      in IEEE-754 (it shifts the exponent, touching no mantissa bit) and it
+//      cancels in the normalisation, so determinism is preserved with zero
+//      error introduced. This is what log-space was actually protecting, and
+//      it protects it without leaving the exactly-rounded operations.
+//   3. Compare by CROSS-MULTIPLICATION, never division: the Chow branch is
+//      u_S * R <= A * total, not u_S/total <= A/R.
+//   4. Go only: the spec permits fusing x*y+z into an FMA, which would make Go
+//      disagree with itself across architectures. Every intermediate on this
+//      path is bound through an explicit float64(...) conversion, which the Go
+//      spec requires to round. A test asserting a known product must be part
+//      of the fix, because this hazard is invisible on amd64.
+//   5. SUMMATION ORDER IS FIXED, not only product order. `total` is a sum of
+//      four doubles and + is correctly rounded but NOT associative, so the
+//      normaliser is accumulated in class-index order [satisfied, violated,
+//      refused, error] in both implementations. Clause 1 without clause 5 is
+//      the same defect one operator over.
+//
+// Two properties that look like exceptions and are not. Subnormals: a class
+// mass may still lose precision when a SIBLING mass is large enough to hold
+// the rescale off. That costs accuracy on a posterior already ~1e-170 from
+// the leader — and it costs no DETERMINISM, because subnormal multiplication
+// and its rounding are IEEE-mandated too. We require identity, not accuracy,
+// and identity survives where accuracy does not. Exact zero: a zero
+// likelihood annihilates its class and stays annihilated through any rescale,
+// which is the arithmetically correct reading of "this verifier assigns this
+// class probability zero" and matches what log-space encoded as -inf.
+//
+// Bit-identity — D-V's original requirement — is thereby RESTORED, by deleting
+// the cause rather than rounding around it. Clause (a)'s 1e-12 tolerance and
+// clause (b)'s cross-language verdict test both stay, now as regression
+// guards on a property that holds exactly rather than as the primary defence.
+// The reported posterior is the same bit-identical value; there is no longer a
+// "comparison" copy distinct from the wire copy.
+//
+// Iteration order over correlation groups is SORTED BY GROUP ID, never map
+// order: float products are not associative, and 06 §3's cross-implementation
+// conformance is exact under D-AK.
+//
+// DECISION D-AO (lead, binding, 2026-08-30). AMENDS D-AK CLAUSES 2, 3 AND 5.
+// Wave D implemented D-AK and a serial review then broke it. Three amendments,
+// each from a demonstration, not an argument.
+//
+// (a) CLAUSE 5 WAS ONE LEVEL TOO SHALLOW, AND THIS IS THE PASS'S REAL LESSON.
+//     Clause 5 fixed the ORDER of the summation. The defect was the
+//     ALGORITHM. CPython's built-in sum() over floats has used Neumaier
+//     compensated summation since 3.12; Go's fold is plain sequential. Both
+//     visit the same four elements in the same order and disagree by an ulp:
+//     sum([0.1]*10) is exactly 1.0, the fold is 0x1.fffffffffffffp-1. On the
+//     failing vector that single ulp in `total` IS the verdict. Seven of 25
+//     vectors diverged; one flipped.
+//     IEEE-754 pins BINARY +. It says nothing about an n-ary reduction, and a
+//     language's standard-library reduction is free to compensate — CPython's
+//     started to, in a point release. THE RULE: only IEEE-754-mandated binary
+//     operations may appear on the verdict path. No library reduction, on
+//     either leg, ever — `sum()`, `math.fsum`, `numpy.sum`, `slices` helpers
+//     are all banned here by name. Accumulate in an explicit loop.
+//     Note what happened: D-AK removed exp/log because they are unmandated,
+//     and left in place a reduction that is unmandated for exactly the same
+//     reason. The audit was run against a list of functions instead of
+//     against the property, so it caught the members it had thought of.
+//
+// (b) CLAUSE 2's FIXED 2^-512 THRESHOLD IS INSUFFICIENT; RESCALE FROM THE
+//     DATA. With max(u) pinned near 2^-512 only ~154 decimal orders remain
+//     above the smallest subnormal, so a single 1e-300 likelihood exhausts
+//     the headroom and the mass underflows to hard zero — demonstrated on the
+//     `extreme_log_scores` vector under every placement of the fixed pair.
+//     Renormalise before each clique multiply by the leader's own exponent:
+//     frexp(max(u)) then ldexp(x, -exp2), which Go and CPython both provide
+//     with identical semantics. This is the same exact mechanism — a
+//     power-of-two shift, no mantissa bit touched, cancelling in both the
+//     normalisation and the cross-multiplied comparison — with the shift
+//     taken from the data instead of guessed in advance. Clause 2's INTENT
+//     survives; its constant does not.
+//
+// (c) CLAUSE 3's JUSTIFICATION WAS WRONG, THOUGH ITS CONCLUSION STANDS.
+//     "Never divide ⇒ exact" overstates: IEEE-754 mandates correct rounding
+//     for ÷ too, so division was never the determinism risk — both forms are
+//     bit-portable. The real difference is accuracy, and it is
+//     threshold-dependent. Measured over 300k boundary samples against an
+//     exact-rational oracle: at the satisfied threshold cross-multiplication
+//     is wrong 35,616 times against division's 57,384 (division must first
+//     round the DERIVED constant 1 − A/D); at the violated threshold with D4
+//     costs division is wrong 0 times against cross-multiplication's 22,682
+//     (there A/R is exactly representable and division rounds once, the
+//     cross-product twice). Cross-multiplication remains the rule — it needs
+//     no derived constant, it is scale-invariant under (b)'s rescale, and it
+//     wins the case that recurs — but it is chosen on accuracy, not on
+//     determinism, and `u_s * R` rounds like anything else.
+//
+// DECISION D-AP (lead, binding, 2026-08-30). BIT-IDENTITY GETS A CONTROL OR
+// STOPS BEING CLAIMED. The fusion family compared each leg to the manifest
+// within a 1e-12 tolerance — roughly four orders looser than an ulp at these
+// magnitudes — and compared the two legs only by VERDICT NAME. So five of the
+// six live cross-language divergences were green, and the sixth was red only
+// because it happened to cross a Chow boundary. The claim was true by
+// assertion and never by test: the sixteenth pass's disease, in the one
+// family written to cure it.
+// `conformance_crosslang.sh` now dumps BOTH legs' posteriors as hex and diffs
+// them. Cross-leg equality is asserted between the legs, never against the
+// manifest — which resolves the tension Wave D hit head-on: an exact-rational
+// oracle rounds ONCE and any float implementation rounds per multiply, so an
+// independent generator and a bit-comparable manifest are mutually exclusive.
+// We keep the independent generator and move the bit-assertion to where both
+// operands are floats.
+//
+// DECISION D-AQ (lead, binding, 2026-08-30). AT A CONSTRUCTED BOUNDARY, THE
+// EXACT-RATIONAL ORACLE IS NOT AUTHORITATIVE ON THE VERDICT. A vector built
+// to sit ON the Chow threshold can have an exact rational answer that no
+// float64 evaluation reaches — `chow_boundary_eta_exactly_one_minus_a_over_d`
+// is exactly this, and after D-AO(a) BOTH legs agree on `refused` while the
+// oracle says `satisfied`. Agreement was the property under test and the
+// vector was reporting it as failure.
+// A generator that places a case within a few ulps of a threshold marks it
+// `boundary: true`. Boundary vectors assert CROSS-LEG IDENTITY of posterior
+// and verdict, and do not assert the verdict against the rational oracle.
+// Interior vectors assert both. A family that cannot tell "the two legs
+// disagree" from "float cannot represent the exact answer here" is reporting
+// one number for two different failures.
+//
+// Output posterior[4] is the normalised mass vector — mass[i] / total under
+// D-AK, NOT softmax(score); there is no score and no exp on this path any
+// more. Ordered [satisfied, violated, refused, error].
 func (f *Fuser) Fuse(taskID TaskID, votes []AnchorVote) m1pv1.VerdictEvent
 
 // Cache is what gates read. A lock-free snapshot: writers publish via
@@ -317,6 +540,13 @@ type Reader interface{ Get(TaskID) (Cached, bool) }
 **Fast/slow split:** fast anchors refresh the cache on the PostToolUse debounce; slow anchors (opt-in tests) complete asynchronously and publish `VerdictEvent{REVISED}` — the cache entry is superseded and a next-turn hook-context correction is queued for the shim (08 §5.1 PostToolUse row). A gate that fired on the provisional verdict before the revision is correct by contract, not a bug: that is what PROVISIONAL means, and the REVISED event repairs the ledger.
 
 **Knee evaluation at the gate:** stop when `p̂_LCB(n)·V(task) ≤ c(n)`, `c(n)` under the bundle's `cost_basis` (`usd` | `quota`). Evaluated at cache-publish time and stored in `KneeState`, so the gate read stays a lookup. Local hard caps are checked in the gate handler itself, before the cache read and after the off-check: `MARK1_DISABLE=1`/`mark1 off` first (invariant 2), then ≤3 consecutive blocks per task, then the hourly block ceiling (`M1E-5002` ⇒ allow).
+
+> **DECISION D-Y (lead, binding) — what resets the consecutive-block streak.**
+> The streak resets on **any cache publish for that task** (new evidence, whether `PROVISIONAL` refresh or `REVISED`), and on task close. It does **not** reset on an allow. "Consecutive" means consecutive blocks *on the same evidence*: three blocks in a row without the agent producing anything that moves the verdict is a stuck loop the cap exists to break, and the moment new evidence lands it is no longer the same situation. Recorded because the cap short-circuits **before** the cache read (the order above is normative and unchanged), so an allow can never carry a reset — without a publish-side reset the cap degrades to "three blocks per task per daemon lifetime" and per-task blocking is permanently dead after the third.
+>
+> **D-Y(b) — `n` below the knee table's first row.** `Stop` is **false**, always. You cannot be past the knee before the first attempt exists, and clamping up to row 1 evaluates attempt-1 economics for attempt 0. Absent rows are not conservative defaults; they are absent.
+>
+> **D-Y(c) — `deadline_ms == 0`.** Proto3 cannot distinguish "zero" from "unset", so `0` means **unspecified**, never "already expired". The daemon applies its own 5 ms cache-read budget and answers normally. Reading 0 as expired silently disables gating for any writer that forgets the field while accounting the result as timeouts — a product feature quietly off, with telemetry that says everything is fine.
 
 **Failure posture: fail-static then fail-open.** No bundle matrices (never received, or `max_age` exceeded) ⇒ conservative built-ins: gates answer allow, verdicts flagged `stale_cert` (`M1E-3006`). Cache miss for a task ⇒ `GateVerdict{ALLOW}` + `Dropped{gate_timeout}` accounting (`M1E-5001`). A verdict subsystem failure can never block a developer.
 
@@ -526,10 +756,20 @@ The request path, in order, before a single byte goes upstream:
 
 1. **Off-check.** `MARK1_DISABLE=1` / off-marker ⇒ the proxy is a pure pass-through this request… except it is not even that: `mark1 off` detaches the proxy (reverts the base-URL fragment), so in practice traffic no longer arrives. The in-binary check exists for the race window.
 2. **`M1-Cred-Ref` presence.** Every request must carry `M1-Cred-Ref: <ref-id>` naming a credential that `mark1d` provisioned **after `Detect()==apikey`**. Absent header ⇒ `403 M1E-8001`. The header is injected by the provisioned agent config fragment, so a legitimate client always has it.
-3. **HMAC fingerprint match to enrollment.** The guard holds a registry `ref-id → HMAC-SHA256 fingerprint` recorded at provisioning. It extracts the actual credential from the request (`x-api-key` / `Authorization`), computes the HMAC under the device-local guard key, and compares constant-time to the enrollment fingerprint. Unknown ref, mismatch, or any parse ambiguity ⇒ **`403 M1E-8001`**, and a sampled `GuardDecision{REFUSED, reason_code:"unprovisioned_cred"}` is emitted with its `sample_rate` — refusal is provable, not asserted.
+3. **HMAC fingerprint match to enrollment.** The guard holds a registry `ref-id → HMAC-SHA256 fingerprint` recorded at provisioning. It extracts the actual credential from the request (`x-api-key` / `Authorization`), computes the HMAC under the device-local guard key, and compares constant-time to the enrollment fingerprint. Unknown ref, mismatch, or any parse ambiguity ⇒ **`403 M1E-8001`**, and a `GuardDecision{REFUSED, reason_code:"unprovisioned_cred"}` is emitted with its `sample_rate` — refusal is provable, not asserted.
+
+    > **DECISION D-AJ (lead, binding, 2026-08-30) — refusals are never sampled; `sample_rate = 1.0` on the REFUSED arm, always.** No document stated a rate for either arm, and "sampled" appeared here unqualified. The asymmetry is not a tuning preference: **the refusal record IS the evidence for the legal claim.** A guard that refuses OAuth traffic 100% of the time but records 1% of those refusals can demonstrate a *policy* and never a *practice* — and the one refusal that matters in a dispute is precisely the one sampling dropped. Volume is not an argument here either, because a refusal is by construction rare: the provisioned agent config always carries a valid `M1-Cred-Ref`, so a refusal means something is already wrong. The FORWARD arm is the high-volume one and stays sampled — bundle-tunable, default `0.01` — because it is ordinary product telemetry rather than proof of a promise. The bundle may raise the forward rate and **may not lower the refusal rate**; a `verify` section that tries fails decode, the same way it cannot name a command string.
 4. **No override path is compiled into the binary.** There is no env var, config key, CLI flag, bundle section, or debug build feature that causes forwarding of an unprovisioned credential. The negative test in 12 proves no code path forwards one; a grep gate rejects any `cfg`/flag whose name matches an override pattern in this crate. WHY this severity: the alternative — an "operator escape hatch" — converts a legal guarantee into a policy, and policies get overridden under deadline pressure.
 5. **Shape-inspection tripwire (secondary signal).** A classifier over credential shape (API-key grammar vs OAuth token grammar). A provisioned credential that classifies OAuth-shaped ⇒ refuse + P1 (the provisioning path has a bug). The weekly token-shape canary in CI fails on any classifier miss — the classifier is allowed to age only loudly.
 6. **Upstream-subscription-marker kill path (tertiary, on the response).** `response/` scans upstream response headers/shape for subscription-billing markers. A hit means an OAuth credential got through everything — the P0 case — and triggers, in order: **session kill** (client connection closed, all further requests for that session refused), **config rollback** (`mark1d` instructed over the fabric to revert the base-URL fragment immediately, so the very next agent request bypasses the proxy entirely), and a **per-event-receipted `oauth_contamination` event** (`M1E-8002`, one of C13's per-event receipt kinds). Nothing about this path is rate-limited or sampled.
+
+> **DECISION D-AI (lead, binding, 2026-08-30) — the P0 kill path had no wire, and gets `ContaminationAlert = 10`.** Step 6 and §9.4's state machine both say `mark1d` is "instructed over the fabric" to revert the base-URL fragment. `FabricFrame` (`proto/m1p/v1/fabric.proto`) has exactly seven arms — Event, Hello, HelloAck, GateQuery, GateVerdict, Flush, FlushAck — and `internal/fabric/session.go` hard-codes that set, rejecting anything else. **The single most severe action the proxy can take is the one action it has no way to express.** This is the D-N hole class a third time: a behaviour named in prose by two documents and carried by no frozen surface.
+>
+> The arm is **one-way, and the proxy never awaits a reply.** A P0 kill that blocks on a daemon round-trip is a P0 kill that a hung daemon can veto. The proxy closes the session and refuses every subsequent request for it on its own authority; the frame is notification, not permission. If `mark1d` is unreachable the fragment stays pointed at the proxy — which now refuses everything for that session, so the failure direction is closed, and the `oauth_contamination` receipt spills locally for the next drain rather than being lost.
+>
+> **Oneof tag allocation, recorded here once so two build rows cannot collide:** `8 = ContextQuery`, `9 = ContextReply` (D-AE), `10 = ContaminationAlert` (this ruling). All three are additive and land in a single regen when the Phase 3/4 rows build — no mid-wave proto edit.
+>
+> **Refuted, so it is not raised a fourth time:** `Hello.component` being a free `string` rather than an enum is **not** an oversight. `fabric.proto` states the reason in place — "Free text, not an enum: a new writer must be able to introduce itself before the daemon's release knows its name." `"mark1-proxy"` is accepted by decision, not by omission.
 
 ### 3.2 Hot path and the tee
 
@@ -537,7 +777,15 @@ The request path, in order, before a single byte goes upstream:
 
 **Tee-on-clone, from an explicit field allow-list:** the tee task is handed a struct built field-by-field — method, path, requested/served model, byte counts, timings, status — plus response chunks via a bounded channel for `mark1-frames` parsing. **Never a request clone**: `Request::clone()` (or any wholesale copy) would carry headers, and headers carry credentials; the allow-list is the compile-visible proof that the tee cannot see a secret.
 
-**The tee provably cannot hold a client write:** the client-facing forward loop `try_send`s chunks to the tee channel (cap 1024 × 64 KiB) and **never awaits it**. Channel full ⇒ the chunk is not teed, parsing degrades for that stream (`mark1-frames` reports `ParseDegraded`), transport-level `ModelRequest/Response` counters still emit, and the client byte stream proceeds untouched. The 12 chaos suite (upstream stall, mid-stream reset, slow client) asserts zero client-visible deltas with the tee saturated.
+**The tee provably cannot hold a client write:** the client-facing forward loop `try_send`s chunks to the tee channel and **never awaits it**. Channel full ⇒ the chunk is not teed, parsing degrades for that stream (`mark1-frames` reports `ParseDegraded`), transport-level `ModelRequest/Response` counters still emit, and the client byte stream proceeds untouched. The 12 chaos suite (upstream stall, mid-stream reset, slow client) asserts zero client-visible deltas with the tee saturated.
+
+> **DECISION D-AH (lead, binding, 2026-08-30) — the tee channel is bounded in BYTES, not in slots.** This paragraph and §9's backpressure table both read "cap 1024 × 64 KiB", which is **64 MiB against this component's ≤35 MB RSS budget** (§3.4). The two numbers cannot both be honoured, and the slot-denominated one is the wrong shape regardless.
+>
+> Note what does *not* fix it: making the channel carry refcounted `Bytes` handles instead of copies. Handles are O(1) to clone and cost ~16 bytes each, so the slot array becomes free — but the handles keep the underlying buffers **alive**, and the retained bytes were always the budget, never the slot array. Zero-copy removes a duplicate; it does not remove retention. A stalled tee holding 1024 handles to 64 KiB chunks pins 64 MiB just as surely as a copying one.
+>
+> **The bound is therefore `TEE_INFLIGHT_MAX = 8 MiB` of retained chunk bytes, admission-tested per chunk: `try_send` fails when the chunk would carry in-flight bytes past the ceiling, and the chunk is dropped exactly as an over-capacity slot would be.** Chunk *count* becomes irrelevant, which is the point — an upstream that emits many small SSE frames and one that emits few large ones now cost the same ceiling instead of differing by three orders of magnitude. 8 MiB against 35 MB leaves the remainder for rustls buffers, pools and parser state, and it makes `bench_proxy_latency_rss` a check of an arithmetic claim rather than a hope.
+>
+> WHY this is a ruling and not an implementation note: a bound stated in slots is only a memory bound if every slot has a known maximum size, and nothing in the frozen docs bounds an upstream chunk. The slot form silently delegates the RSS budget to the upstream's framing choices.
 
 ### 3.3 Credential custody in the binary
 
@@ -619,7 +867,7 @@ rust/mark1-hookshim/src/
 2. Read stdin JSON; select the field map for `(agent, sniffed version)`. No map ⇒ emit nothing speculative; write a `Dropped{UNSUPPORTED_AGENT_VERSION}` marker via the fabric if reachable, exit 0.
 3. Map to an `m1p.v1.Event`; stamp `event_id`.
 4. **Observer events (the 50 ms fire-and-forget path):** connect (≤100 ms), write frame (≤250 ms deadline), exit 0. Any failure ⇒ spill (§5.4) and exit 0. Total wall budget **≤50 ms @ the shim's own deadline timer** — the timer, not hope, is what bounds it: at 45 ms the shim abandons the fabric attempt and spills.
-5. **Gate events (bounded deadlines):** send `GateQuery{deadline_ms}` where `deadline_ms` = the agent's configured hook timeout − 10 ms (the shim, not the daemon, owns the agent-facing deadline — 08 §4.4). Reply → the vendor-schema response (e.g. Claude Code `{"decision":"block", …}`, 08 §5.1). Timeout/unreachable ⇒ **return allow** (fail-open, `M1E-5001`) and record `Dropped{gate_timeout}` via spill.
+5. **Gate events (bounded deadlines):** send `GateQuery{deadline_ms}` where `deadline_ms` = the map's `gate.budget_ms` − `SHIM_MARGIN_MS`, i.e. **250 − 10 = 240 ms** (the shim, not the daemon, owns the agent-facing deadline — 08 §4.4). The budget is *not* the agent's configured hook timeout, which 08 §4.4 bounds only from above: a wedged daemon held to the vendor timeout costs 31.4 s per turn against 217 ms for an *absent* one, so the failure mode that matters — half-dead Mark 1, 145× worse than no Mark 1, on the hook that fires at every turn end — is created by spending the whole ceiling. 250 ms is fifty times the ≤5 ms cache read §2.3 specifies this gate to be (D-AU). Reply → the vendor-schema response (e.g. Claude Code `{"decision":"block", …}`, 08 §5.1). Timeout/unreachable ⇒ **return allow** (fail-open, `M1E-5001`) and record `Dropped{gate_timeout}` via spill.
 
 **Cold-start budget:** ≤10 ms to first syscall-after-setup @ measured in the 12 bench — achieved by being static (no dynamic linker surprises), parsing no config (maps are pre-compiled binary, mmap-read), and initializing no runtime (no tokio; the shim is synchronous — an async runtime is startup cost with zero concurrency to spend it on).
 
@@ -688,7 +936,47 @@ One **writer task** owns all index mutation (L0→L2 pipeline above) — the sin
 
 ### 6.4 The budgeted session-start map
 
-Precomputed at index settle (not at query time): PPR over L2 seeded by the live recent-edit set, files ranked, per-file symbol signatures emitted richest-first, then **binary search over inclusion depth** until the rendering fits the token budget (default 2k, ceiling 8k, bundle-tunable via the `cortex` section). Served on `SessionStart` as a read (10 s hook deadline is comfortable because assembly already happened). Every serve emits `CortexInjection{root_hash, index_clock, token_budget, tokens_used}`.
+Precomputed at index settle (not at query time): PPR over L2 seeded by the live recent-edit set, files ranked, per-file symbol signatures emitted richest-first, then **binary search over inclusion depth** until the rendering fits the token budget (default 2k, ceiling 8k, bundle-tunable via the `cortex` section) — but see **D-AF** (08 §5.1): on the claudecode hook surface the vendor's 10,000-character `additionalContext` cap binds first, making the effective ceiling **2,500 tokens** there and the fit predicate a conjunction of both limits. The 8k ceiling is reachable only on a surface whose delivery channel is not character-capped. Served on `SessionStart` as a read (10 s hook deadline is comfortable because assembly already happened). Every serve emits `CortexInjection{root_hash, index_clock, token_budget, tokens_used}`.
+
+> **DECISION D-AE (lead, binding, 2026-08-30) — the `mark1d → shim` transport is a PULL on the
+> existing fabric socket.** Two reconciliation passes recorded this as an honest BLOCKED: this
+> section and 08 §5.1 both promise the map on `SessionStart`, and no document named the channel.
+> It is named here.
+>
+> **The map is pulled by the shim, never pushed to it.** §6.7 has cortexd *pushing* the L0 root to
+> mark1d, and `Hello.component` already enumerates `cortexd` with an empty `session_id` for exactly
+> that ("session-less writers (cortexd push maps)"). The symmetric push onward to the shim is not
+> merely unspecified, it is impossible: **the shim is a per-exec hook process that does not exist
+> until the hook fires.** There is nothing to push to. cortexd pushes to mark1d because mark1d is
+> long-lived; the shim pulls from mark1d because it is not.
+>
+> The channel is therefore the M1PL fabric socket the shim already opens, with two new
+> `FabricFrame` arms — `ContextQuery = 8` / `ContextReply = 9` — symmetric in every respect with
+> `GateQuery`/`GateVerdict`. That reuse is the whole point: one socket, one Hello handshake, one
+> framing, one fail-open posture, one place where a session is bound to a connection.
+>
+> Four binding properties:
+>
+> 1. **mark1d stores, it does not assemble.** It holds the latest `MapRender` per workspace,
+>    replaced on each cortexd push, and serves the bytes. The same discipline the gate has (04
+>    §2.3: a cache READ, never a computation) — cortexd owns the budget binary search and is the
+>    only process that may run it.
+> 2. **`ContextQuery` carries no session id and no workspace id.** D-AA (§9.2) governs: the
+>    connection's `Hello` bound the session, and the session determines the workspace. A shim
+>    cannot ask for another session's map because it has no field in which to ask.
+> 3. **Every failure is an empty injection.** Cold index, no map yet, cortexd down, deadline
+>    expired, malformed reply ⇒ the shim exits 0 with no output — byte-identical to Mark 1 being
+>    absent, which is the same promise the gate makes. A session start is never delayed and never
+>    fails because Mark 1 has nothing to say. Accounted `Dropped{fabric_unavailable, DIAGNOSTIC}`
+>    per §6.6, because an uncounted silent degradation is indistinguishable from a product that
+>    does nothing.
+> 4. **The 10 s hook deadline is not the fabric deadline.** The shim states its own budget the same
+>    way it does for the gate (08 §4.4: the hook budget minus the 10 ms margin), and D-Y(c) applies
+>    unchanged — 0 means unspecified, never expired.
+>
+> Implementation is a Phase 4 build row, not a mid-wave edit: the two oneof arms are an additive
+> change to frozen `fabric.proto` requiring a regen, and the regen lane is already red pending the
+> D-T/D-U commit. The contract is settled here so the row can be built without re-litigating it.
 
 ### 6.5 MCP surface
 
@@ -821,6 +1109,10 @@ pub struct Bundle {
 **Any command string fails decode:** the `verify` section's schema has no field where an executable string can live — anchor references are catalog IDs validated against the grammar `[a-z0-9_.-]{1,64}` (normative in 07's CDDL — this doc previously carried a mutually exclusive `@cat-N` form, which no implementation ever spoke); a token containing whitespace, a path separator, or a shell metacharacter fails the grammar and rejects the **whole bundle** (`M1E-3005` — invalid is a security event, never applied piecewise). Fail-static behavior is **split**, and the split is deliberate: the crate owns only the pure part — evaluating a decoded bundle's age against `max_age` and reporting `Fresh | Stale` so a caller past the horizon falls to conservative built-ins. Last-known-good **persistence** is each consumer's, because the store differs per process (cortexd's redb, the proxy's memory-only cache, `mark1d`'s spool-adjacent state) and a crate that opened files would force all three onto one. A single staleness function with no I/O is the part that must not be reimplemented three times; the storage around it is not.
 
 > **Go decoder status (lead, 2026-08-29): NOT BUILT.** Earlier text here claimed this crate was "consumed by … the conformance-vector-validated Go decoder"; no such decoder exists anywhere in `go/`. The bundle vector family has **zero** Go coverage, and `tools/ci/conformance_crosslang.sh` does not catch this because it asserts only a global `GO_N > 0`, which the receipt, redact and TVO-band families already satisfy. Until the Go twin lands (Phase 2 Wave B), `mark1d` consumes policy **through `mark1-policy` only**, and the cross-language guarantee this doc offers for bundles is a guarantee about one implementation, not two. Stated here rather than quietly corrected: a conformance claim that names a second implementation is exactly the kind of decorative control this repo exists not to repeat.
+>
+> **Superseded 2026-08-30 (Wave B): BUILT.** `go/mark1d/internal/policy` is the Go twin — hand-rolled canonical CBOR, all frozen bundle vectors passing, `GO_PENDING` in `conformance_crosslang.sh` now empty and the per-family assertion hard-failing. The paragraph above stands as the record of what an unqualified conformance claim was covering before it.
+>
+> **DECISION D-AD (lead, binding) — a decoder may not reject a key the frozen CDDL permits.** Both twins agreed with each other and disagreed with the schema: `decode.go`'s and `decode.rs`'s `strictKeys`/`strict_keys` for a knee row list `["n","c_n"]` with an EMPTY optional set, so the `? p_lcb` that 07 §7 declares (D-Z) is refused as an unknown key. Consequences, in order of severity: a bundle authored to the frozen CDDL is structurally rejected with `M1E-3005` and the daemon falls back to `Builtins()` with `Stale=true`; no bundle can therefore carry `p_lcb`; `FromBundle` leaves `PLCB` permanently nil; and `kneeFor` can only ever return `Stop=false` — **the knee governor cannot fire in production at all**, so 04 §2.3's at-the-knee ALLOW is unreachable code. `p_lcb` joins the optional-key set in both decoders, and a new bundle vector carrying it joins the frozen family so the gap cannot reopen. The general rule this instance illustrates: *two implementations agreeing is not evidence they are right* — it is exactly the failure mode a cross-language conformance gate is structurally unable to see, and it is why the vector families must be generated from the schema rather than captured from whichever twin ran first.
 
 ### 7.4 `m1p-wire` — codegen + M1PL framing
 
@@ -872,7 +1164,7 @@ The pattern is uniform and deliberate: **every mutable thing has exactly one wri
 | capture → spool writer | 1024 events | billing-grade: sender **blocks** (backpressure chain: spool full → capture → fabric read stop → writer spill). diagnostics: shed + `Dropped{SPOOL_SHED}` |
 | anchor work queue | 16 | coalesce per `(task, anchor)` — only the newest request matters; nothing queues twice |
 | verdict recompute trigger | 1 (latest-wins) | debounce by design; fusion over stale votes is corrected by the next trigger |
-| proxy tee channel | 1024 × 64 KiB chunks | `try_send` drop — parse degrades, client stream untouched (§3.2) |
+| proxy tee channel | 8 MiB retained chunk bytes (D-AH — bytes, never slots) | `try_send` drop — parse degrades, client stream untouched (§3.2) |
 | cortexd notify → writer | 4096 fs events | overflow ⇒ full-rescan scheduled + stale refusals (§6.6) |
 | shim → fabric | n/a (one frame per exec) | deadline ⇒ spill ring (§5.4) |
 
@@ -925,6 +1217,55 @@ stateDiagram-v2
     CLOSED_UNRESOLVED --> [*]
 ```
 
+> **DECISION D-AA (lead, binding) — how a gate query acquires its task id, and why `TaskID{}` is a sentinel and never an address.**
+>
+> The state machine above says `task_seg.v1` mints `task_id` **in the daemon**, and R-4 keeps it off the client wire, so the hookshim — a fresh per-exec process — cannot know it. It therefore sends `GateQuery.task_id` empty, correctly refusing to fabricate one. No document said what the daemon does with that, and the built daemon did the one unsafe thing: `copy(task[:], q.GetTaskId())` over an empty slice yields the all-zero `TaskID`, which was then used as a real map key for the verdict cache, the consecutive-block streak and the hourly ceiling. Every session on the machine collapsed into that one bucket. Demonstrated against the assembled daemon: session A votes VIOLATED; session B — separate connection, separate session id, **zero votes of its own** — is answered `BLOCK / VERDICT_VIOLATED` carrying A's posterior and A's evidence. One developer's failing task blocks a different developer's unrelated one, and D-Y's "streak resets on any publish *for the task*" resets it for everyone.
+>
+> The binding rule, in three parts:
+>
+> 1. **An all-zero `TaskID` is a sentinel meaning "unresolved", never an address.** No cache entry, no streak counter and no ceiling counter may ever be stored under it, in any language. A lookup that arrives at the sentinel is a **miss** — which is `M1E-5001` and therefore ALLOW, the correct fail-open direction.
+> 2. **An empty `GateQuery.task_id` resolves through the connection's session.** The M1PL connection is session-scoped and its session id is authenticated in the `Hello` handshake (08 §4.3), so the daemon — which is the party that mints task ids — resolves *the currently open task of that session* and answers under it. If the session has no open task, part 1 applies and the answer is ALLOW.
+> 3. **A non-empty `task_id` is honoured as sent, but only within its session.** A writer may name a task explicitly; it may not name another session's task. Cross-session naming is a miss, not a lookup.
+>
+> This is a missing cross-document contract being written down, not a policy invention: 04 §9.2 and 08 §5.1 both promise the daemon mints the id, and neither named the channel by which a per-exec hook process reaches it. The channel is the session, and it was already on the wire.
+
+> **DECISION D-AL (lead, binding, 2026-08-30) — the all-zero SESSION id is a sentinel too. D-AA, one axis over.**
+> D-AA closed the all-zero *task* id and the code says so in a comment — "the all-zero value is D-AA's 'unresolved' sentinel and is never a key here." It is never a **task** key. It is, today, a live **session** key. `Hello.session_id` is optional (08 §4.3 writes it `session_id?`, and cortexd legitimately sends none), `internal/fabric/session.go` accepts the handshake and leaves the session id all-zero, and `taskseg`'s `Observe`/`TaskFor` guard only the *length*. Every session-less connection therefore shares one bucket with a real, addressable open task. A pre-release probe drove three raw connections against the assembled daemon: connection B, whose `Hello` carried no `session_id` and which had cast no vote at all, was **BLOCKed on connection A's evidence**. The gate blocked a developer on a stranger's verdict.
+>
+> **Binding, both axes, both languages: a session id of all zeros is "no authenticated session", never an address.** `Observe` returns without segmenting; `TaskFor` misses ⇒ `M1E-5001` ⇒ ALLOW. The same holds for `capture`'s per-session sequence counter. The general rule, stated once because this is the third instance: *an identifier that has a legal "absent" encoding must be rejected as a map key at every level it appears, not only at the level where it was first noticed.* A sentinel closed on one axis is not closed.
+
+> **DECISION D-AM (lead, binding, 2026-08-30) — `ToolUse` gains path digests, and this is a frozen-proto change made deliberately, because without it the product's headline metric cannot work.**
+> ADR-0002 R2 requires a MERGE to satisfy BOTH proximity (≤3 assistant turns) AND ≥1 overlapping HMAC-salted path digest. `proto/m1p/v1/events.proto`'s `ToolUse` carries exactly `tool_name`, `tool_use_id`, `duration_ms`, `status` — **no path of any kind**. The overlap predicate can therefore never be satisfied, R2 MERGE can never fire, and every user prompt opens a fresh denominator entry. Measured on one realistic session: two `TaskOpen`, two `TaskClose`, both `RESOLUTION_UNRESOLVED_SESSION_END`, zero verified outcomes — **100% of the TVO denominator is `unresolved`**, while the gate was simultaneously serving a fused VIOLATED verdict off the cache. This is precisely the "retry loop counted as three cheap outcomes" the ADR exists to prevent, and it means every TVO number we could quote today is computed over a denominator that never merges.
+>
+> `repeated bytes path_digests = 5` is added to `ToolUse` — **digests, never paths**, HMAC-salted per tenant exactly as C4's evidence rule requires, so this expands no privacy surface. The change is additive and `buf breaking` at WIRE_JSON permits it. Landing it is a build row with its regen, not a mid-wave edit.
+>
+> **R3's half needs no proto change and is the cheaper cut:** the fused `VerdictEvent` is produced and cached but never admitted as an `Event`, so `taskseg`'s only path to `RESOLUTION_VERDICT` has no producer at all. Emitting it at publish time closes that half on its own.
+>
+> Related, and an S1 the moment R3 is wired: the segmenter's verdict arm ignores `ev.GetTaskId()` and closes `ss.cur`, having possibly just minted a fresh empty task — so the task that did the work is laundered into `unresolved` and the credit lands on an empty one. The verdict must resolve its target from its own `task_id` within the session's tasks.
+
+> **DECISION D-AN (lead, binding, 2026-08-30) — three gate-scoping corrections.**
+> **(a) The hourly block ceiling is PER SESSION.** It is currently a bare `uint32` with no key at all, so one session burning 30 blocks silently disables gating for every other session on the machine for the rest of the hour. The fail direction is ALLOW so no developer is harmed, which is exactly why it would have survived indefinitely — a control that degrades to decorative without ever failing loudly. The docs say "an hourly block ceiling" without a scope; the scope is now stated.
+> **(b) `RLIMIT_AS` is the wrong knob for the anchor sandbox, and this is a field defect, not a test defect.** 512 MiB of *address space* is not 512 MiB of memory: thread-per-core allocators reserve address space proportional to core count, so on a 16-core host `ruff` is SIGKILLed and the anchor returns `VERDICT_ERROR`. The verify plane is therefore inert on exactly the hardware developers use, and the only reason we know is that the Phase 2 milestone test refused to run and said why. The cap moves to `RLIMIT_DATA`/cgroup `memory.max` as the sandbox's own doc comment already intended.
+> **(c) A BLOCK reason may not state an inequality that was never evaluated.** The reason string is a template — `"p̂_LCB %.3f · V %.2f > c(n) %.2f"` — emitted on the `VIOLATED && !Stop` branch, but `Stop` is false in three cases that are *not* "the inequality holds": `p_lcb` absent (D-Z), `n` below the first knee row (D-Y(b)), and an empty knee table. In all three it prints `0.000 · 10.00 > 0.50`, which is arithmetically false, and it reintroduces the exact "absent collapses to certainly-hopeless" reading that `frombundle.go` is explicit it must never take. When the knee is not evaluable the reason says so and carries no numbers.
+
+> **DECISION D-AR (lead, binding, 2026-08-30) — LEDGER CLOSURE IS NOT GATE LIFETIME, and conflating them is what D-AM broke.** Wiring R3 made the gate stop working. The chain, observed on a real session over the real fabric socket: a slow anchor publishes `REVISED VIOLATED` → the emitted `VerdictEvent` reaches the segmenter → the task closes with `RESOLUTION_VERDICT` and is marked not-live → the shim's gate query carries an empty `task_id` by design (D-AA) → `TaskFor` requires a *live* `ss.cur` → miss → `M1E-5001 no open task`, ALLOW. The daemon never BLOCKed once, with a `VERDICT_VIOLATED` sitting in the cache for the whole run. **D-AM traded the stop-gate's ability to act on the strongest evidence class we have — build, vet, test — for the denominator, and it fails toward allow, so nothing complained.**
+>
+> The fix is to stop treating one event as two things. **A verdict RESOLVES a task for the ledger and leaves it ADDRESSABLE for the gate** until the session ends or a new task opens. These are different lifetimes and always were; `live` was doing double duty. `TaskFor`'s sentinel path falls back to `ss.cur` whenever one exists, verdicted or not — closure is performed by `closeTask`, so the denominator is untouched.
+>
+> This also settles what `CLOSED_VERDICT` means, which the review correctly flagged as a decision and not a bug: it means *the ledger has its answer*, *never* "the agent may now stop." Reading it the other way makes the product's central claim false by design — and note that the gate wants the verdict for precisely the reason the segmenter wants it. Both consumers were right; the state was overloaded.
+>
+> Consequence, and it must land in the same change: because R3 reopens a task under the same `task_id`, a reopened task inherits its pre-close consecutive-block streak, and a streak already at the cap short-circuits the next gate query to ALLOW at step 3 — *before* the cache read — so the new attempt runs entirely ungated on stale state. `ResetTask` is documented to reset "on any cache publish **and on task close**" and has exactly one caller, the publish. Close must call it.
+
+> **DECISION D-AS (lead, binding, 2026-08-30) — `unresolved` means NO VERDICT, never "no slow anchor ran".** `VERDICT_STAGE_CERTIFIED` has two consumers and zero producers anywhere in the tree, and `REVISED` is reachable only from a consented *slow* anchor. So on any install where the user has not run consent, or any workspace where `Derive` finds no slow anchor, the denominator is still 100% `RESOLUTION_UNRESOLVED_SESSION_END` — D-AM's attribution is correct and its *reachability* was the defect. Verified: with a slow anchor the spool shows `final_verdict_id` matching the `VerdictEvent`'s `event_id`, credited to the task that did the work; without one, nothing resolves.
+>
+> At task close, a verdict present in the cache at **any** stage closes the task with `RESOLUTION_VERDICT`, and the stage is recorded alongside it. A `ruff`-only `PROVISIONAL` is a weak verified outcome, not a non-outcome, and the instrument that reports its weakness already exists — the D-X/D-AB coverage band, which the estate's standing discipline requires on every number we quote. Suppressing the measurement instead of banding it loses the observation and reports the loss as `unresolved`, which is the one value that cannot be distinguished from "we were not there."
+>
+> The phantom `CERTIFIED` branch is deleted rather than left as a to-do: two consumers and no producer make the code read as though it has two adjudicated paths when it has one, and every future reader pays for that.
+
+> **DECISION D-AT (lead, binding, 2026-08-30) — the handshake may not accept a session it will then discard.** D-AL closed the all-zero session at every *consumer* — capture quarantines, `Observe` segments nothing, `TaskFor` misses, `Gate.resolve` rejects before any counter is keyed — and a review confirmed each one genuinely closed rather than decoratively. What is not closed is *entry*: a `Hello` whose `session_id` is missing, wrong-length, or explicitly sixteen zero bytes still receives `HelloAck{Accepted: true}`, after which everything it sends is silently dropped. Defence in depth is intact; the handshake is lying. Reject at `Hello` with the handshake error code, citing 08 §4.3. **Fourth appearance of one disease: the sentinel is now closed on the producer axis as well as every consumer axis, which is the shape D-AL's own rule asked for and did not get.**
+
+> **DECISION D-AU (lead, binding, 2026-08-30) — the shim gate budget is 250 ms; the doc and the e2e guard move to meet it.** Three artefacts disagreed: the shipped map says 250, the Go e2e test hardcodes 29,990, and 04 §2.3's prose still says "the agent's configured hook timeout − 10 ms". The Rust rationale wins on the merits — a wedged daemon at the vendor's hook timeout costs 31.4 s per turn against 217 ms for an *absent* one, so a half-dead Mark 1 would be 145× worse than no Mark 1, on the hook that fires at every turn end. 250 ms is fifty times the ≤5 ms cache read this gate is specified to be, which is slack enough. **The hardcoded Go constant is not the defect and does not go away** — it exists so a silent map edit cannot move the number, and it did its job: it caught this one. It is re-pinned at 250 and stays hardcoded.
+
 ### 9.3 Enrollment — the edge-local view (server machine is 08 §3.1; not restated)
 
 ```mermaid
@@ -974,13 +1315,13 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     [*] --> RECEIVED : client request arrives
-    RECEIVED --> NOOP_FORWARD : off-marker present / pass through untouched (race window only; off normally detaches the proxy)
     RECEIVED --> REFUSED : no M1-Cred-Ref (M1E-8001) / 403; sampled GuardDecision{REFUSED}
     RECEIVED --> FP_CHECK : M1-Cred-Ref present
     FP_CHECK --> REFUSED : unknown ref OR HMAC mismatch (M1E-8001) / 403; sampled receipt — NO override path exists
     FP_CHECK --> TRIPWIRE : fingerprint matches enrollment
     TRIPWIRE --> REFUSED : credential shape classifies OAuth / 403 + P1 (provisioning bug); canary CI guards the classifier
     TRIPWIRE --> FORWARDING : shape consistent with apikey / bytes-forward; tee try_send; pool (upstream, credential-identity)
+    TRIPWIRE --> NOOP_FORWARD : shape ok AND off-marker present / same ticket with observe=false; race window only, off normally detaches the proxy
     FORWARDING --> MARKER_SCAN : upstream response streaming / response/ scans for subscription markers
     MARKER_SCAN --> DONE : no marker / GuardDecision{FORWARDED} (sampled)
     MARKER_SCAN --> CONTAMINATION : subscription marker (M1E-8002) / KILL session + ROLLBACK base-URL fragment via fabric + per-event-receipted oauth_contamination P0
@@ -988,6 +1329,8 @@ stateDiagram-v2
     DONE --> [*]
     CONTAMINATION --> [*]
 ```
+
+**`off` does not short-circuit the guard, and the diagram used to say it did** (D-BE). The edge into `NOOP_FORWARD` hangs off `TRIPWIRE`, not `RECEIVED`: `Guard::decide` threads `off` all the way to the last statement, so an unverifiable guard, a missing `M1-Cred-Ref`, an unknown ref, an ambiguous credential, a fingerprint mismatch and an OAuth-shaped credential all still **refuse** with the off-marker set. That is a stronger property than the old edge described — `mark1 off` cannot be used as a guard bypass — and it is asserted directly (`provenance.rs`: `assert_refused(&g, &wrong, Cause::FingerprintMismatch, /*off=*/true)`). `NOOP_FORWARD` reaches the same `ForwardTicket` as `FORWARDING` with `observe = false`; whether the state survives at all is SEC-01, a founder decision.
 
 ---
 

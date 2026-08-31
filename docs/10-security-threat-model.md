@@ -529,7 +529,7 @@ The proxy forwards only credentials `mark1d` provisioned after `Detect()==apikey
 |---|---|---|---|---|---|---|
 | C-01 | Provenance guard: `M1-Cred-Ref` + constant-time HMAC fingerprint match; unknown ⇒ 403 `M1E-8001` | Plan 1 | §3.3–3.4, `mark1-proxy` request path | runtime | `12/guard-no-forward-path` | specified |
 | C-02 | No override: no env var, flag, config, or bundle path forwards an unprovisioned credential | Plan 1 | §3.4 step 4, proxy crate + CI grep gate | CI | `12/guard-no-forward-path` + grep gate | specified |
-| C-03 | Shape tripwire refuses OAuth-shaped provisioned credentials (P1); classifier ages loudly | Plan 1 | §3.4 step 5, §3.6, `conformance/` fixtures | CI | `12/canary-token-shape` (weekly + per proxy PR) | specified |
+| C-03 | Shape tripwire refuses OAuth-shaped provisioned credentials (P1); classifier ages loudly | Plan 1 | §3.4 step 5, §3.6, `conformance/` fixtures | CI | `12/canary-oauth-shape-classifier` + `12/canary-selftest-detects-planted-miss` (weekly + per proxy PR) | specified |
 | C-04 | Contamination kill path: session kill → config rollback → per-event receipt (`M1E-8002`) | Plan 1 | §3.4 step 6, `response/` + `mark1d` | runtime | `12/guard-contamination-killpath` | specified |
 | C-05 | Provable refusal: sampled `GuardDecision` in the chain + server-side fingerprint registration | Plan 1 | §3.7, receipts plane, `POST /enroll/fingerprints` | receipted | `12/guard-refusal-receipted` | partial |
 | C-06 | "The binary we audited": reproducible builds + SLSA bind the legal claim to shipped artifacts | Plan 1 | §3.9, §8.3, release pipeline | CI | `12/release-repro-byte-compare` | partial |
@@ -545,7 +545,7 @@ Credentials pass by reference, cannot be formatted or serialized, are zeroized, 
 | C-09 | Tee is a field allow-list built field-by-field, never a request clone — headers structurally unreachable | Plan 2 | §4.1, proxy tee task | compile-time | `12/tee-allowlist-no-headers` | partial |
 | C-10 | `RLIMIT_CORE=0` + `PR_SET_DUMPABLE=0` before any credential load; per-OS deltas per `04` §11.6 | Plan 2 | §4.1, proxy `main` boot order | runtime | `12/proxy-nondumpable-boot-order` | partial |
 | C-11 | Gateway by-reference per-request fetch, zeroize-on-drop, no persistence path in code | Plan 2 | §4.1, §2.5, gateway mode | runtime | `12/gateway-cred-never-persisted` (filesystem-diff assertion) | partial |
-| C-12 | Log output credential-free under error injection | Plan 2 | §4.2, proxy logging path — review-enforced today | policy | `12/proxy-no-secret-in-logs` (proposed; until it lands this row is review-only) | gap |
+| C-12 | Log output credential-free under error injection | Plan 2 | §4.2, proxy logging path — review-enforced today | policy | `12/proxy-no-secret-in-logs` (proposed; until it lands this row is review-only) | partial |
 | C-13 | Pools keyed `(upstream, credential-identity)`; no identity masking, no cross-credential h2 sharing | Plan 2 | §4.1, §2.4, proxy pool | runtime | `12/proxy-pool-identity-keying` | partial |
 | C-14 | Bedrock observe-only until customer-held re-signing hardens; never `WIRE_ENFORCED` | Plan 2 | §2.5, route decision | runtime | `12/bedrock-observe-only` | partial |
 | C-15 | Secret-manager reference scoping — the customer's IAM on their own manager | Plan 2 | §2.5, documented in `09` | policy | — (customer-side; shared responsibility, labeled as such) | gap |
@@ -585,7 +585,7 @@ Tenant identity comes only from verified token claims; violation is unconstructi
 |---|---|---|---|---|---|---|
 | C-29 | PG: FORCE RLS + `NOBYPASSRLS` `controld_app` + NULLIF GUC + `pg.TenantDB`; boot refusal R2 + per-connection assert | Plan 5 | §6.2, `controld` + migrations | runtime | `test_rls_cross_tenant_denied`, `test_app_role_nobypassrls`, `test_rls_unset_guc_matches_nothing` | specified |
 | C-30 | Worker-role `BYPASSRLS` confined to five enumerated cross-tenant-by-specification paths | Plan 5 | §6.2, import-graph test | CI | `test_worker_role_confinement` | specified |
-| C-31 | ClickHouse querychoke: tenant-less query unconstructible; ops reads need unreachable `OpsScope` | Plan 5 | §6.2, `querychoke` builder | compile-time | `12/querychoke-live-cross-read` + template fuzz (§6.3) | specified |
+| C-31 | ClickHouse querychoke: tenant-less query unconstructible; ops reads need unreachable `OpsScope` | Plan 5 | §6.2, `querychoke` builder | compile-time | `12/neg-ch-cross-tenant-zero-rows` + `12/neg-ch-no-second-principal` + template fuzz (§6.3) | specified |
 | C-32 | S3: per-tenant KMS keys + bucket-policy deny on mismatched-key PUTs — the deny must *fire*, not just exist (R6 checks existence) | Plan 5 | §6.2, bucket policy + boot refusal R6 | runtime | `negative_s3_cross_tenant_put_denied` | partial |
 | C-33 | Envelope identity distrusted: token-stamped tenancy, disagreement ⇒ 403 + page | Plan 5 | §2.2, `controld.ingest` | runtime | `negative_envelope_tenant_spoof_rejected` | specified |
 | C-34 | Per-tenant HMAC salts make low-entropy digests cross-tenant uncorrelatable | Plan 5 | §2.3, §5.4, `mark1d.identity` + server | runtime | `12/digest-salt-separation` | partial |
@@ -648,9 +648,9 @@ The chain is checkable by the customer without any Omium server, and Omium canno
 
 | ID | Control | Enforcement point | Where implemented (doc §, component) | How enforced | Test in 12 | Status |
 |---|---|---|---|---|---|---|
-| C-59 | Dual signatures (device origin + server chain), `key_id`'d, rotation cross-signed via `KeyRing` | Spec §9.9 | §9.1, `mark1-receipt` | receipted | `12/verifier-e2e-offline` (Phase 1 gate) | specified |
+| C-59 | Dual signatures (device origin + server chain), `key_id`'d, rotation cross-signed via `KeyRing` | Spec §9.9 | §9.1, `mark1-receipt` | receipted | `12/conf-verifier-offline` (Phase 1 gate) | specified |
 | C-60 | Hourly external witness anchoring; a forged head is witness-detectable ≤1 h | Spec §9.9 | §9.1, §2.2, tlog + witness | runtime | `12/witness-head-hourly` | partial |
-| C-61 | Open-source offline verifier validates a chain with the Omium server offline | Spec §9.9 | §2.2, `tools/verifier` | CI | `12/verifier-e2e-offline` | specified |
+| C-61 | Open-source offline verifier validates a chain with the Omium server offline | Spec §9.9 | §2.2, `tools/verifier` | CI | `12/conf-verifier-offline` | specified |
 | C-62 | Receipt tables append-only (DB triggers) | Spec §9.9 | §6.3, migrations | runtime | `test_append_only_receipts` | specified |
 | C-63 | Ack only after S3 landing — the ack *is* the durability claim | Spec §9.9 | §2.2, `controld.ingest` | runtime | `chaos_s3_outage_no_false_ack` | specified |
 | C-64 | Update key ≠ bundle key; boot refusal R5 enforces distinctness forever | Spec §9.9 | §8.3, §9.1, `controld` boot | runtime | `12/boot-refusal-key-distinctness` | partial |
