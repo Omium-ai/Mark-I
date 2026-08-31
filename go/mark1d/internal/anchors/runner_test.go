@@ -39,24 +39,6 @@ func (f *fakeSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error) 
 }
 func (f *fakeSandbox) FSConfined() bool { return f.confined }
 
-type fakeEmitter struct {
-	mu     sync.Mutex
-	events []*m1pv1.Event
-}
-
-func (f *fakeEmitter) Admit(ctx context.Context, ev *m1pv1.Event) error {
-	f.mu.Lock()
-	f.events = append(f.events, ev)
-	f.mu.Unlock()
-	return nil
-}
-
-func (f *fakeEmitter) all() []*m1pv1.Event {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]*m1pv1.Event(nil), f.events...)
-}
-
 // enabledRuff derives + consents the fixture ruff entry so the runner sees a
 // legitimate Enabled row (the only legal provenance).
 func enabledRuff(t *testing.T) (CatalogEntry, string) {

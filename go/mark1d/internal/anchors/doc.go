@@ -114,8 +114,10 @@
 //     precondition; CatalogEntry.ExecsRepoCode): "static analysis" describes
 //     their argv, not the code their own config makes them run.
 //     Sandbox.FSConfined reports which regime is live. cgroup caps
-//     (memory.max, pids.max) are not applied in this phase — RLIMIT_AS
-//     stands in for memory.
+//     (memory.max, pids.max) are not applied in this phase — RLIMIT_DATA
+//     stands in for memory. It caps committed private anonymous memory, which
+//     is the thing memory.max means; RLIMIT_AS would cap address space, which
+//     a per-core allocator reserves far past what it ever commits.
 //
 // The runner registry mirrors the estate's PROBE_HANDLERS discipline
 // (recovery-orchestrator app/verify/probes.py, adopted per 06 §2.1): a map of

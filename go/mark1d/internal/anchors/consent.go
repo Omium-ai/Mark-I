@@ -135,11 +135,11 @@ func saveConsent(path string, f consentFile) error {
 		return err
 	}
 	if _, err := tf.Write(b); err != nil {
-		tf.Close()
+		_ = tf.Close()
 		return err
 	}
 	if err := tf.Sync(); err != nil {
-		tf.Close()
+		_ = tf.Close()
 		return err
 	}
 	if err := tf.Close(); err != nil {

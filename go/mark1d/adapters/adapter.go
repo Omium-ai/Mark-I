@@ -48,6 +48,34 @@ type Adapter interface {
 	Surfaces() []CaptureSurface
 }
 
+// Slot is one row of the adapter registry 08 §5 enumerates.
+type Slot struct {
+	Name string
+	// Mechanism is 08 §8's A (owned file) or B (fenced fragment) — and is set
+	// ONLY where code exists. 08 §8 says which mechanism an agent uses is
+	// agent_maps bundle data; hard-coding a guess for a slot whose config
+	// location is still `UNVERIFIED — spike gates this adapter slot` is exactly
+	// the invented field map the package rules forbid, so those rows say so.
+	Mechanism string
+	// Implemented is whether provisioning this agent does anything at all.
+	Implemented bool
+	Phase       string // 08 §5's phase, so "not yet" carries a when
+}
+
+// Roster is the seven slots of 08 §5, in section order, and the honest state
+// of each. `mark1 doctor` prints the whole list: a user of codex or cursor
+// should learn Mark 1 does nothing for their agent from the tool, not from
+// silence followed by a missing receipt.
+var Roster = []Slot{
+	{"claudecode", "B", true, "1"}, // strict-JSON settings, no include mechanism
+	{"codex", "", false, "2"},
+	{"gemini", "", false, "3"},
+	{"opencode", "", false, "4"},
+	{"copilot", "", false, "5"},
+	{"cursor", "", false, "5"},
+	{"crush", "", false, "roadmap"},
+}
+
 // Tail is the transcript-capture lifecycle an adapter exposes when its Usage
 // source is transcripts (claudecode in the subscription regime, 08 §5.1).
 // Run blocks until ctx ends, then drains.
