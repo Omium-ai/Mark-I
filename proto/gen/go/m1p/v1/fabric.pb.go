@@ -138,6 +138,203 @@ func (GateDecision) EnumDescriptor() ([]byte, []int) {
 	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{1}
 }
 
+// DECISION D-U (lead, binding). The payload of EVERY M1PL frame is one
+// serialized FabricFrame. 07 §5 and 08 §4.2 always said the payload is "an
+// Event, or a control message" — but proto3 bytes are not self-describing, so
+// without a carried discriminator both ends of the fabric would have to guess
+// (or worse, invent independent conventions — the exact hole that produced
+// D-N). This oneof IS that sentence made executable. The M1PL header
+// (magic|ver|len) is untouched; the fabric is an "internal" tier surface
+// (08 §1), both ends ship in one signed package, and nothing is deployed —
+// this change is the cheapest it will ever be.
+//
+// Event keeps field 1: it is the overwhelming majority of frames and field 1
+// costs the smallest tag. mark1d unwraps and spools the INNER Event bytes —
+// the spool record layout (07 §6) does not change, and control messages
+// remain structurally unspoolable: there is no oneof arm a spool record can
+// carry, because admission takes the Event, not the frame.
+// TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
+// next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, cortex
+// pull, Phase 4), 10 = ContaminationAlert (defined below). 8 and 9 are
+// reserved by this note and by the ruling ledger, not yet by a field.
+type FabricFrame struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Kind:
+	//
+	//	*FabricFrame_Event
+	//	*FabricFrame_Hello
+	//	*FabricFrame_HelloAck
+	//	*FabricFrame_GateQuery
+	//	*FabricFrame_GateVerdict
+	//	*FabricFrame_Flush
+	//	*FabricFrame_FlushAck
+	//	*FabricFrame_ContaminationAlert
+	Kind          isFabricFrame_Kind `protobuf_oneof:"kind"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FabricFrame) Reset() {
+	*x = FabricFrame{}
+	mi := &file_m1p_v1_fabric_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FabricFrame) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FabricFrame) ProtoMessage() {}
+
+func (x *FabricFrame) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_fabric_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FabricFrame.ProtoReflect.Descriptor instead.
+func (*FabricFrame) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *FabricFrame) GetKind() isFabricFrame_Kind {
+	if x != nil {
+		return x.Kind
+	}
+	return nil
+}
+
+func (x *FabricFrame) GetEvent() *Event {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_Event); ok {
+			return x.Event
+		}
+	}
+	return nil
+}
+
+func (x *FabricFrame) GetHello() *Hello {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_Hello); ok {
+			return x.Hello
+		}
+	}
+	return nil
+}
+
+func (x *FabricFrame) GetHelloAck() *HelloAck {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_HelloAck); ok {
+			return x.HelloAck
+		}
+	}
+	return nil
+}
+
+func (x *FabricFrame) GetGateQuery() *GateQuery {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_GateQuery); ok {
+			return x.GateQuery
+		}
+	}
+	return nil
+}
+
+func (x *FabricFrame) GetGateVerdict() *GateVerdict {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_GateVerdict); ok {
+			return x.GateVerdict
+		}
+	}
+	return nil
+}
+
+func (x *FabricFrame) GetFlush() *Flush {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_Flush); ok {
+			return x.Flush
+		}
+	}
+	return nil
+}
+
+func (x *FabricFrame) GetFlushAck() *FlushAck {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_FlushAck); ok {
+			return x.FlushAck
+		}
+	}
+	return nil
+}
+
+func (x *FabricFrame) GetContaminationAlert() *ContaminationAlert {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_ContaminationAlert); ok {
+			return x.ContaminationAlert
+		}
+	}
+	return nil
+}
+
+type isFabricFrame_Kind interface {
+	isFabricFrame_Kind()
+}
+
+type FabricFrame_Event struct {
+	Event *Event `protobuf:"bytes,1,opt,name=event,proto3,oneof"`
+}
+
+type FabricFrame_Hello struct {
+	Hello *Hello `protobuf:"bytes,2,opt,name=hello,proto3,oneof"`
+}
+
+type FabricFrame_HelloAck struct {
+	HelloAck *HelloAck `protobuf:"bytes,3,opt,name=hello_ack,json=helloAck,proto3,oneof"`
+}
+
+type FabricFrame_GateQuery struct {
+	GateQuery *GateQuery `protobuf:"bytes,4,opt,name=gate_query,json=gateQuery,proto3,oneof"`
+}
+
+type FabricFrame_GateVerdict struct {
+	GateVerdict *GateVerdict `protobuf:"bytes,5,opt,name=gate_verdict,json=gateVerdict,proto3,oneof"`
+}
+
+type FabricFrame_Flush struct {
+	Flush *Flush `protobuf:"bytes,6,opt,name=flush,proto3,oneof"`
+}
+
+type FabricFrame_FlushAck struct {
+	FlushAck *FlushAck `protobuf:"bytes,7,opt,name=flush_ack,json=flushAck,proto3,oneof"`
+}
+
+type FabricFrame_ContaminationAlert struct {
+	ContaminationAlert *ContaminationAlert `protobuf:"bytes,10,opt,name=contamination_alert,json=contaminationAlert,proto3,oneof"`
+}
+
+func (*FabricFrame_Event) isFabricFrame_Kind() {}
+
+func (*FabricFrame_Hello) isFabricFrame_Kind() {}
+
+func (*FabricFrame_HelloAck) isFabricFrame_Kind() {}
+
+func (*FabricFrame_GateQuery) isFabricFrame_Kind() {}
+
+func (*FabricFrame_GateVerdict) isFabricFrame_Kind() {}
+
+func (*FabricFrame_Flush) isFabricFrame_Kind() {}
+
+func (*FabricFrame_FlushAck) isFabricFrame_Kind() {}
+
+func (*FabricFrame_ContaminationAlert) isFabricFrame_Kind() {}
+
 // First frame on every connection (08 §4.3 step 2: any other first frame ⇒
 // close M1E-4003). mark1d replies HelloAck or closes.
 type Hello struct {
@@ -150,8 +347,16 @@ type Hello struct {
 	// The writer's own semver, for `mark1 doctor` correlation — never an
 	// admission criterion (rejection authority belongs to the M1PL ver byte).
 	Version string `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
-	// 16-byte session UUIDv7 when the writer is session-bound (shim, tailer);
-	// empty for session-less writers (cortexd push maps).
+	// 16-byte session UUIDv7. REQUIRED, non-zero, from every writer (D-AT): this
+	// is the attribution key for everything the connection goes on to send, so a
+	// writer without one is a writer whose events attribute to nothing. Missing,
+	// wrong-length or all-zero ⇒ the daemon closes with M1E-4003.
+	//
+	// This field previously read "empty for session-less writers (cortexd push
+	// maps)". That sanctioned a writer the daemon accepted and then silently
+	// dropped everything from, which is the failure D-AT exists to end. cortexd
+	// is not exempt — it has no session identity yet, so its pushes are refused
+	// and counted until the MCP surface carries one (D-AV).
 	SessionId     []byte `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -159,7 +364,7 @@ type Hello struct {
 
 func (x *Hello) Reset() {
 	*x = Hello{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[0]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -171,7 +376,7 @@ func (x *Hello) String() string {
 func (*Hello) ProtoMessage() {}
 
 func (x *Hello) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[0]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -184,7 +389,7 @@ func (x *Hello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Hello.ProtoReflect.Descriptor instead.
 func (*Hello) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{0}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Hello) GetComponent() string {
@@ -231,7 +436,7 @@ type HelloAck struct {
 
 func (x *HelloAck) Reset() {
 	*x = HelloAck{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[1]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -243,7 +448,7 @@ func (x *HelloAck) String() string {
 func (*HelloAck) ProtoMessage() {}
 
 func (x *HelloAck) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[1]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -256,7 +461,7 @@ func (x *HelloAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HelloAck.ProtoReflect.Descriptor instead.
 func (*HelloAck) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{1}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *HelloAck) GetAccepted() bool {
@@ -299,7 +504,7 @@ type GateQuery struct {
 
 func (x *GateQuery) Reset() {
 	*x = GateQuery{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[2]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -311,7 +516,7 @@ func (x *GateQuery) String() string {
 func (*GateQuery) ProtoMessage() {}
 
 func (x *GateQuery) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[2]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -324,7 +529,7 @@ func (x *GateQuery) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateQuery.ProtoReflect.Descriptor instead.
 func (*GateQuery) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{2}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GateQuery) GetTaskId() []byte {
@@ -367,7 +572,7 @@ type GateVerdict struct {
 
 func (x *GateVerdict) Reset() {
 	*x = GateVerdict{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[3]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -379,7 +584,7 @@ func (x *GateVerdict) String() string {
 func (*GateVerdict) ProtoMessage() {}
 
 func (x *GateVerdict) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[3]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -392,7 +597,7 @@ func (x *GateVerdict) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateVerdict.ProtoReflect.Descriptor instead.
 func (*GateVerdict) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{3}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GateVerdict) GetDecision() GateDecision {
@@ -442,7 +647,7 @@ type Flush struct {
 
 func (x *Flush) Reset() {
 	*x = Flush{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -454,7 +659,7 @@ func (x *Flush) String() string {
 func (*Flush) ProtoMessage() {}
 
 func (x *Flush) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -467,7 +672,7 @@ func (x *Flush) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Flush.ProtoReflect.Descriptor instead.
 func (*Flush) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{4}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{5}
 }
 
 type FlushAck struct {
@@ -481,7 +686,7 @@ type FlushAck struct {
 
 func (x *FlushAck) Reset() {
 	*x = FlushAck{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -493,7 +698,7 @@ func (x *FlushAck) String() string {
 func (*FlushAck) ProtoMessage() {}
 
 func (x *FlushAck) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -506,7 +711,7 @@ func (x *FlushAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FlushAck.ProtoReflect.Descriptor instead.
 func (*FlushAck) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{5}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *FlushAck) GetDrained() uint64 {
@@ -516,11 +721,108 @@ func (x *FlushAck) GetDrained() uint64 {
 	return 0
 }
 
+// proxy → mark1d, ONE-WAY (D-AI). 04 §3.1 step 6's config rollback: an upstream
+// subscription-billing marker means an OAuth credential reached the wire — the
+// CON-001 P0 — and the base-URL fragment must stop pointing at the proxy before
+// the agent's next request.
+//
+// The proxy NEVER awaits a reply. It has already killed the session and will
+// refuse every subsequent request for it on its own authority; this frame is
+// notification, not permission, because a P0 kill that blocks on a daemon
+// round-trip is a P0 kill a hung daemon can veto. If mark1d is unreachable the
+// fragment stays pointed at a proxy that now refuses everything for the session,
+// so the failure direction is closed.
+//
+// Deliberately carries no evidence. Control messages are non-durable by scope
+// (this file's header): evidence fields here would be evidence that is thrown
+// away. The provable record is the GuardDecision event + its per-event
+// `guard_contamination` receipt (policy.proto, 07 §11), which takes the durable
+// path. This frame carries only what mark1d needs to act.
+type ContaminationAlert struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 16-byte session UUIDv7, same bytes as Hello.session_id — what to attribute
+	// the resulting CoverageTransition{BYPASS} to.
+	SessionId []byte `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// The M1-Cred-Ref that transited. mark1d issued it at provisioning, so this
+	// is what resolves to the agent + workspace whose fragment must be reverted;
+	// session_id alone does not identify a config file.
+	CredRef string `protobuf:"bytes,2,opt,name=cred_ref,json=credRef,proto3" json:"cred_ref,omitempty"`
+	// GuardDecision.reason_code's closed edge-emitted vocabulary (policy.proto);
+	// "oauth_marker" is its only current member here. Present so `mark1 doctor`
+	// can state why a fragment reverted — a silent rollback is unexplainable.
+	ReasonCode    string `protobuf:"bytes,3,opt,name=reason_code,json=reasonCode,proto3" json:"reason_code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ContaminationAlert) Reset() {
+	*x = ContaminationAlert{}
+	mi := &file_m1p_v1_fabric_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ContaminationAlert) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ContaminationAlert) ProtoMessage() {}
+
+func (x *ContaminationAlert) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_fabric_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ContaminationAlert.ProtoReflect.Descriptor instead.
+func (*ContaminationAlert) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ContaminationAlert) GetSessionId() []byte {
+	if x != nil {
+		return x.SessionId
+	}
+	return nil
+}
+
+func (x *ContaminationAlert) GetCredRef() string {
+	if x != nil {
+		return x.CredRef
+	}
+	return ""
+}
+
+func (x *ContaminationAlert) GetReasonCode() string {
+	if x != nil {
+		return x.ReasonCode
+	}
+	return ""
+}
+
 var File_m1p_v1_fabric_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"\n" +
-	"\x13m1p/v1/fabric.proto\x12\x06m1p.v1\x1a\x16m1p/v1/artifacts.proto\"p\n" +
+	"\x13m1p/v1/fabric.proto\x12\x06m1p.v1\x1a\x16m1p/v1/artifacts.proto\x1a\x15m1p/v1/envelope.proto\"\xa9\x03\n" +
+	"\vFabricFrame\x12%\n" +
+	"\x05event\x18\x01 \x01(\v2\r.m1p.v1.EventH\x00R\x05event\x12%\n" +
+	"\x05hello\x18\x02 \x01(\v2\r.m1p.v1.HelloH\x00R\x05hello\x12/\n" +
+	"\thello_ack\x18\x03 \x01(\v2\x10.m1p.v1.HelloAckH\x00R\bhelloAck\x122\n" +
+	"\n" +
+	"gate_query\x18\x04 \x01(\v2\x11.m1p.v1.GateQueryH\x00R\tgateQuery\x128\n" +
+	"\fgate_verdict\x18\x05 \x01(\v2\x13.m1p.v1.GateVerdictH\x00R\vgateVerdict\x12%\n" +
+	"\x05flush\x18\x06 \x01(\v2\r.m1p.v1.FlushH\x00R\x05flush\x12/\n" +
+	"\tflush_ack\x18\a \x01(\v2\x10.m1p.v1.FlushAckH\x00R\bflushAck\x12M\n" +
+	"\x13contamination_alert\x18\n" +
+	" \x01(\v2\x1a.m1p.v1.ContaminationAlertH\x00R\x12contaminationAlertB\x06\n" +
+	"\x04kind\"p\n" +
 	"\x05Hello\x12\x1c\n" +
 	"\tcomponent\x18\x01 \x01(\tR\tcomponent\x12\x10\n" +
 	"\x03pid\x18\x02 \x01(\rR\x03pid\x12\x18\n" +
@@ -544,7 +846,13 @@ const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"\fevidence_ref\x18\x05 \x01(\tR\vevidenceRef\"\a\n" +
 	"\x05Flush\"$\n" +
 	"\bFlushAck\x12\x18\n" +
-	"\adrained\x18\x01 \x01(\x04R\adrained*M\n" +
+	"\adrained\x18\x01 \x01(\x04R\adrained\"o\n" +
+	"\x12ContaminationAlert\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\fR\tsessionId\x12\x19\n" +
+	"\bcred_ref\x18\x02 \x01(\tR\acredRef\x12\x1f\n" +
+	"\vreason_code\x18\x03 \x01(\tR\n" +
+	"reasonCode*M\n" +
 	"\bGateKind\x12\x19\n" +
 	"\x15GATE_KIND_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eGATE_KIND_STOP\x10\x01\x12\x12\n" +
@@ -569,27 +877,38 @@ func file_m1p_v1_fabric_proto_rawDescGZIP() []byte {
 }
 
 var file_m1p_v1_fabric_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_m1p_v1_fabric_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_m1p_v1_fabric_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_m1p_v1_fabric_proto_goTypes = []any{
-	(GateKind)(0),       // 0: m1p.v1.GateKind
-	(GateDecision)(0),   // 1: m1p.v1.GateDecision
-	(*Hello)(nil),       // 2: m1p.v1.Hello
-	(*HelloAck)(nil),    // 3: m1p.v1.HelloAck
-	(*GateQuery)(nil),   // 4: m1p.v1.GateQuery
-	(*GateVerdict)(nil), // 5: m1p.v1.GateVerdict
-	(*Flush)(nil),       // 6: m1p.v1.Flush
-	(*FlushAck)(nil),    // 7: m1p.v1.FlushAck
-	(Verdict)(0),        // 8: m1p.v1.Verdict
+	(GateKind)(0),              // 0: m1p.v1.GateKind
+	(GateDecision)(0),          // 1: m1p.v1.GateDecision
+	(*FabricFrame)(nil),        // 2: m1p.v1.FabricFrame
+	(*Hello)(nil),              // 3: m1p.v1.Hello
+	(*HelloAck)(nil),           // 4: m1p.v1.HelloAck
+	(*GateQuery)(nil),          // 5: m1p.v1.GateQuery
+	(*GateVerdict)(nil),        // 6: m1p.v1.GateVerdict
+	(*Flush)(nil),              // 7: m1p.v1.Flush
+	(*FlushAck)(nil),           // 8: m1p.v1.FlushAck
+	(*ContaminationAlert)(nil), // 9: m1p.v1.ContaminationAlert
+	(*Event)(nil),              // 10: m1p.v1.Event
+	(Verdict)(0),               // 11: m1p.v1.Verdict
 }
 var file_m1p_v1_fabric_proto_depIdxs = []int32{
-	0, // 0: m1p.v1.GateQuery.gate:type_name -> m1p.v1.GateKind
-	1, // 1: m1p.v1.GateVerdict.decision:type_name -> m1p.v1.GateDecision
-	8, // 2: m1p.v1.GateVerdict.verdict:type_name -> m1p.v1.Verdict
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	10, // 0: m1p.v1.FabricFrame.event:type_name -> m1p.v1.Event
+	3,  // 1: m1p.v1.FabricFrame.hello:type_name -> m1p.v1.Hello
+	4,  // 2: m1p.v1.FabricFrame.hello_ack:type_name -> m1p.v1.HelloAck
+	5,  // 3: m1p.v1.FabricFrame.gate_query:type_name -> m1p.v1.GateQuery
+	6,  // 4: m1p.v1.FabricFrame.gate_verdict:type_name -> m1p.v1.GateVerdict
+	7,  // 5: m1p.v1.FabricFrame.flush:type_name -> m1p.v1.Flush
+	8,  // 6: m1p.v1.FabricFrame.flush_ack:type_name -> m1p.v1.FlushAck
+	9,  // 7: m1p.v1.FabricFrame.contamination_alert:type_name -> m1p.v1.ContaminationAlert
+	0,  // 8: m1p.v1.GateQuery.gate:type_name -> m1p.v1.GateKind
+	1,  // 9: m1p.v1.GateVerdict.decision:type_name -> m1p.v1.GateDecision
+	11, // 10: m1p.v1.GateVerdict.verdict:type_name -> m1p.v1.Verdict
+	11, // [11:11] is the sub-list for method output_type
+	11, // [11:11] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_fabric_proto_init() }
@@ -598,13 +917,24 @@ func file_m1p_v1_fabric_proto_init() {
 		return
 	}
 	file_m1p_v1_artifacts_proto_init()
+	file_m1p_v1_envelope_proto_init()
+	file_m1p_v1_fabric_proto_msgTypes[0].OneofWrappers = []any{
+		(*FabricFrame_Event)(nil),
+		(*FabricFrame_Hello)(nil),
+		(*FabricFrame_HelloAck)(nil),
+		(*FabricFrame_GateQuery)(nil),
+		(*FabricFrame_GateVerdict)(nil),
+		(*FabricFrame_Flush)(nil),
+		(*FabricFrame_FlushAck)(nil),
+		(*FabricFrame_ContaminationAlert)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_m1p_v1_fabric_proto_rawDesc), len(file_m1p_v1_fabric_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -266,10 +266,10 @@ type BundleAck struct {
 	// `policy_bundles.body_sha256` (07) and as leafed into the transparency log
 	// (05 §4.4: "leaves are SHA-256(bundle canonical bytes)"). Carried raw rather
 	// than as an algorithm-prefixed string so the ACK cannot disagree with the
-	// catalog about encoding. NOTE: 08 §3.2 renders this JSON field as
-	// "blake3:…" while 07 and 05 both specify SHA-256 — a documented
-	// disagreement about the algorithm LABEL only; the field is 32 bytes either
-	// way and the label is out-of-band.
+	// catalog about encoding. 08 §3.2 once rendered this JSON field as "blake3:…"
+	// against 07 and 05's SHA-256; that divergence is closed — the label is
+	// "sha256:" everywhere, and it stays out-of-band because the field is 32 raw
+	// bytes regardless of what any renderer calls them.
 	BundleHash []byte `protobuf:"bytes,3,opt,name=bundle_hash,json=bundleHash,proto3" json:"bundle_hash,omitempty"`
 	// "applied" | "rejected" | "partial" (08 §3.2, 05 §4.3). Empty or
 	// unrecognised is not an ACK and is rejected rather than defaulted, because

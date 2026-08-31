@@ -160,8 +160,10 @@ type VerdictStage int32
 const (
 	VerdictStage_VERDICT_STAGE_UNSPECIFIED VerdictStage = 0
 	VerdictStage_VERDICT_STAGE_PROVISIONAL VerdictStage = 1 // edge fusion cache — what the stop-gate reads
-	VerdictStage_VERDICT_STAGE_CERTIFIED   VerdictStage = 2 // adjudicator, noise-certified
-	VerdictStage_VERDICT_STAGE_REVISED     VerdictStage = 3 // slow anchors / re-adjudication overturned it
+	VerdictStage_VERDICT_STAGE_CERTIFIED   VerdictStage = 2 // adjudicator-emitted. NAME IS HISTORICAL (D-T):
+	// this is the "adjudicated" position; whether it
+	// is certified lives in `certification`.
+	VerdictStage_VERDICT_STAGE_REVISED VerdictStage = 3 // slow anchors / re-adjudication overturned it
 )
 
 // Enum value maps for VerdictStage.
@@ -205,6 +207,61 @@ func (x VerdictStage) Number() protoreflect.EnumNumber {
 // Deprecated: Use VerdictStage.Descriptor instead.
 func (VerdictStage) EnumDescriptor() ([]byte, []int) {
 	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{2}
+}
+
+// D-T. Degrades faster than it upgrades (06 §5): the WEAKEST input wins, so a
+// verdict fusing even one literature-default likelihood row cannot claim
+// CERTIFIED no matter how good the certificate is.
+type CertificationStatus int32
+
+const (
+	CertificationStatus_CERTIFICATION_STATUS_UNSPECIFIED   CertificationStatus = 0 // not stated — treat as UNCERTIFIED
+	CertificationStatus_CERTIFICATION_STATUS_UNCERTIFIED   CertificationStatus = 1 // no certificate at all
+	CertificationStatus_CERTIFICATION_STATUS_BOOTSTRAPPING CertificationStatus = 2 // certificate exists, below the D16 gate
+	CertificationStatus_CERTIFICATION_STATUS_CERTIFIED     CertificationStatus = 3 // cert stamped AND every fused row measured
+)
+
+// Enum value maps for CertificationStatus.
+var (
+	CertificationStatus_name = map[int32]string{
+		0: "CERTIFICATION_STATUS_UNSPECIFIED",
+		1: "CERTIFICATION_STATUS_UNCERTIFIED",
+		2: "CERTIFICATION_STATUS_BOOTSTRAPPING",
+		3: "CERTIFICATION_STATUS_CERTIFIED",
+	}
+	CertificationStatus_value = map[string]int32{
+		"CERTIFICATION_STATUS_UNSPECIFIED":   0,
+		"CERTIFICATION_STATUS_UNCERTIFIED":   1,
+		"CERTIFICATION_STATUS_BOOTSTRAPPING": 2,
+		"CERTIFICATION_STATUS_CERTIFIED":     3,
+	}
+)
+
+func (x CertificationStatus) Enum() *CertificationStatus {
+	p := new(CertificationStatus)
+	*p = x
+	return p
+}
+
+func (x CertificationStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CertificationStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_m1p_v1_verify_proto_enumTypes[3].Descriptor()
+}
+
+func (CertificationStatus) Type() protoreflect.EnumType {
+	return &file_m1p_v1_verify_proto_enumTypes[3]
+}
+
+func (x CertificationStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CertificationStatus.Descriptor instead.
+func (CertificationStatus) EnumDescriptor() ([]byte, []int) {
+	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{3}
 }
 
 // One anchor's (T0 deterministic local verifier's) vote on a task attempt.
@@ -631,8 +688,24 @@ type VerdictEvent struct {
 	// consulted for the math (06 §5.4): the
 	// math does not change with the status,
 	// the claims permitted about it do.
-	BundleSeq     uint64 `protobuf:"varint,5,opt,name=bundle_seq,json=bundleSeq,proto3" json:"bundle_seq,omitempty"` // [P0] provenance of the confusion matrices used
-	VoteCount     uint32 `protobuf:"varint,6,opt,name=vote_count,json=voteCount,proto3" json:"vote_count,omitempty"` // [P0] ensemble members fused
+	BundleSeq uint64 `protobuf:"varint,5,opt,name=bundle_seq,json=bundleSeq,proto3" json:"bundle_seq,omitempty"` // [P0] provenance of the confusion matrices used
+	VoteCount uint32 `protobuf:"varint,6,opt,name=vote_count,json=voteCount,proto3" json:"vote_count,omitempty"` // [P0] ensemble members fused
+	// [P0] DECISION D-T (lead, binding). Evidence quality is a SEPARATE AXIS from
+	// pipeline position, and conflating them cost us a representable state: an
+	// adjudicated-but-uncertified verdict had no wire form, because
+	// VERDICT_STAGE_CERTIFIED sits among the position values while asserting
+	// quality. The only escape was the field-4 convention ("empty cert id ⇒
+	// uncertified/bootstrapping"), which cannot separate bootstrapping from
+	// uncertified — a distinction 06 §5.4 makes load-bearing, since bootstrapping
+	// verdicts gate sessions while uncertified ones may not feed certification.
+	//
+	// A new field rather than new enum values: adding values to VerdictStage would
+	// have kept the two axes fused and made every consumer switch over a product
+	// of them. Renaming VERDICT_STAGE_CERTIFIED to _ADJUDICATED would be the
+	// honest name but changes the JSON encoding — breaking under WIRE_JSON — so
+	// the name stays and this field carries the truth. Read stage for WHERE the
+	// verdict came from, this for WHAT MAY BE CLAIMED about it.
+	Certification CertificationStatus `protobuf:"varint,7,opt,name=certification,proto3,enum=m1p.v1.CertificationStatus" json:"certification,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -709,6 +782,13 @@ func (x *VerdictEvent) GetVoteCount() uint32 {
 	return 0
 }
 
+func (x *VerdictEvent) GetCertification() CertificationStatus {
+	if x != nil {
+		return x.Certification
+	}
+	return CertificationStatus_CERTIFICATION_STATUS_UNSPECIFIED
+}
+
 var File_m1p_v1_verify_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_verify_proto_rawDesc = "" +
@@ -744,7 +824,7 @@ const file_m1p_v1_verify_proto_rawDesc = "" +
 	"\x0fConsistencyVote\x12#\n" +
 	"\x04vote\x18\x01 \x01(\x0e2\x0f.m1p.v1.VerdictR\x04vote\x12!\n" +
 	"\fsample_count\x18\x02 \x01(\rR\vsampleCount\x12%\n" +
-	"\x0eagreement_rate\x18\x03 \x01(\x01R\ragreementRate\"\xe5\x01\n" +
+	"\x0eagreement_rate\x18\x03 \x01(\x01R\ragreementRate\"\xa8\x02\n" +
 	"\fVerdictEvent\x12*\n" +
 	"\x05stage\x18\x01 \x01(\x0e2\x14.m1p.v1.VerdictStageR\x05stage\x12)\n" +
 	"\averdict\x18\x02 \x01(\x0e2\x0f.m1p.v1.VerdictR\averdict\x12\x1c\n" +
@@ -753,7 +833,8 @@ const file_m1p_v1_verify_proto_rawDesc = "" +
 	"\n" +
 	"bundle_seq\x18\x05 \x01(\x04R\tbundleSeq\x12\x1d\n" +
 	"\n" +
-	"vote_count\x18\x06 \x01(\rR\tvoteCount*\xf4\x01\n" +
+	"vote_count\x18\x06 \x01(\rR\tvoteCount\x12A\n" +
+	"\rcertification\x18\a \x01(\x0e2\x1b.m1p.v1.CertificationStatusR\rcertification*\xf4\x01\n" +
 	"\x12DiffClassification\x12#\n" +
 	"\x1fDIFF_CLASSIFICATION_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18DIFF_CLASSIFICATION_NONE\x10\x01\x12 \n" +
@@ -770,7 +851,12 @@ const file_m1p_v1_verify_proto_rawDesc = "" +
 	"\x19VERDICT_STAGE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19VERDICT_STAGE_PROVISIONAL\x10\x01\x12\x1b\n" +
 	"\x17VERDICT_STAGE_CERTIFIED\x10\x02\x12\x19\n" +
-	"\x15VERDICT_STAGE_REVISED\x10\x03B\x8d\x01\n" +
+	"\x15VERDICT_STAGE_REVISED\x10\x03*\xad\x01\n" +
+	"\x13CertificationStatus\x12$\n" +
+	" CERTIFICATION_STATUS_UNSPECIFIED\x10\x00\x12$\n" +
+	" CERTIFICATION_STATUS_UNCERTIFIED\x10\x01\x12&\n" +
+	"\"CERTIFICATION_STATUS_BOOTSTRAPPING\x10\x02\x12\"\n" +
+	"\x1eCERTIFICATION_STATUS_CERTIFIED\x10\x03B\x8d\x01\n" +
 	"\n" +
 	"com.m1p.v1B\vVerifyProtoP\x01Z9github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1;m1pv1\xa2\x02\x03MXX\xaa\x02\x06M1p.V1\xca\x02\x06M1p\\V1\xe2\x02\x12M1p\\V1\\GPBMetadata\xea\x02\aM1p::V1b\x06proto3"
 
@@ -786,40 +872,42 @@ func file_m1p_v1_verify_proto_rawDescGZIP() []byte {
 	return file_m1p_v1_verify_proto_rawDescData
 }
 
-var file_m1p_v1_verify_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_m1p_v1_verify_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
 var file_m1p_v1_verify_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_m1p_v1_verify_proto_goTypes = []any{
-	(DiffClassification)(0), // 0: m1p.v1.DiffClassification
-	(JudgeLocus)(0),         // 1: m1p.v1.JudgeLocus
-	(VerdictStage)(0),       // 2: m1p.v1.VerdictStage
-	(*AnchorVote)(nil),      // 3: m1p.v1.AnchorVote
-	(*AnchorIntegrity)(nil), // 4: m1p.v1.AnchorIntegrity
-	(*JudgeVote)(nil),       // 5: m1p.v1.JudgeVote
-	(*RmScore)(nil),         // 6: m1p.v1.RmScore
-	(*ConsistencyVote)(nil), // 7: m1p.v1.ConsistencyVote
-	(*VerdictEvent)(nil),    // 8: m1p.v1.VerdictEvent
-	nil,                     // 9: m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
-	(Verdict)(0),            // 10: m1p.v1.Verdict
-	(*EvidenceRecord)(nil),  // 11: m1p.v1.EvidenceRecord
-	(EvidenceTier)(0),       // 12: m1p.v1.EvidenceTier
+	(DiffClassification)(0),  // 0: m1p.v1.DiffClassification
+	(JudgeLocus)(0),          // 1: m1p.v1.JudgeLocus
+	(VerdictStage)(0),        // 2: m1p.v1.VerdictStage
+	(CertificationStatus)(0), // 3: m1p.v1.CertificationStatus
+	(*AnchorVote)(nil),       // 4: m1p.v1.AnchorVote
+	(*AnchorIntegrity)(nil),  // 5: m1p.v1.AnchorIntegrity
+	(*JudgeVote)(nil),        // 6: m1p.v1.JudgeVote
+	(*RmScore)(nil),          // 7: m1p.v1.RmScore
+	(*ConsistencyVote)(nil),  // 8: m1p.v1.ConsistencyVote
+	(*VerdictEvent)(nil),     // 9: m1p.v1.VerdictEvent
+	nil,                      // 10: m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
+	(Verdict)(0),             // 11: m1p.v1.Verdict
+	(*EvidenceRecord)(nil),   // 12: m1p.v1.EvidenceRecord
+	(EvidenceTier)(0),        // 13: m1p.v1.EvidenceTier
 }
 var file_m1p_v1_verify_proto_depIdxs = []int32{
-	10, // 0: m1p.v1.AnchorVote.vote:type_name -> m1p.v1.Verdict
-	11, // 1: m1p.v1.AnchorVote.evidence:type_name -> m1p.v1.EvidenceRecord
-	4,  // 2: m1p.v1.AnchorVote.integrity:type_name -> m1p.v1.AnchorIntegrity
-	9,  // 3: m1p.v1.AnchorIntegrity.resolved_binary_hashes:type_name -> m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
+	11, // 0: m1p.v1.AnchorVote.vote:type_name -> m1p.v1.Verdict
+	12, // 1: m1p.v1.AnchorVote.evidence:type_name -> m1p.v1.EvidenceRecord
+	5,  // 2: m1p.v1.AnchorVote.integrity:type_name -> m1p.v1.AnchorIntegrity
+	10, // 3: m1p.v1.AnchorIntegrity.resolved_binary_hashes:type_name -> m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
 	0,  // 4: m1p.v1.AnchorIntegrity.diff_classification:type_name -> m1p.v1.DiffClassification
-	10, // 5: m1p.v1.JudgeVote.vote:type_name -> m1p.v1.Verdict
-	12, // 6: m1p.v1.JudgeVote.tier_used:type_name -> m1p.v1.EvidenceTier
+	11, // 5: m1p.v1.JudgeVote.vote:type_name -> m1p.v1.Verdict
+	13, // 6: m1p.v1.JudgeVote.tier_used:type_name -> m1p.v1.EvidenceTier
 	1,  // 7: m1p.v1.JudgeVote.locus:type_name -> m1p.v1.JudgeLocus
-	10, // 8: m1p.v1.ConsistencyVote.vote:type_name -> m1p.v1.Verdict
+	11, // 8: m1p.v1.ConsistencyVote.vote:type_name -> m1p.v1.Verdict
 	2,  // 9: m1p.v1.VerdictEvent.stage:type_name -> m1p.v1.VerdictStage
-	10, // 10: m1p.v1.VerdictEvent.verdict:type_name -> m1p.v1.Verdict
-	11, // [11:11] is the sub-list for method output_type
-	11, // [11:11] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	11, // 10: m1p.v1.VerdictEvent.verdict:type_name -> m1p.v1.Verdict
+	3,  // 11: m1p.v1.VerdictEvent.certification:type_name -> m1p.v1.CertificationStatus
+	12, // [12:12] is the sub-list for method output_type
+	12, // [12:12] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_verify_proto_init() }
@@ -833,7 +921,7 @@ func file_m1p_v1_verify_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_m1p_v1_verify_proto_rawDesc), len(file_m1p_v1_verify_proto_rawDesc)),
-			NumEnums:      3,
+			NumEnums:      4,
 			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
