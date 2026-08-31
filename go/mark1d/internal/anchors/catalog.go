@@ -312,8 +312,8 @@ func ExecHash(e CatalogEntry) []byte {
 	part := func(b []byte) {
 		var n [8]byte
 		binary.LittleEndian.PutUint64(n[:], uint64(len(b)))
-		h.Write(n[:])
-		h.Write(b)
+		_, _ = h.Write(n[:])
+		_, _ = h.Write(b)
 	}
 	part(e.BinaryHash)
 	part([]byte(e.ToolVersion))

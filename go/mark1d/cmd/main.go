@@ -1,8 +1,13 @@
 // mark1d — the edge daemon. C8 wires the capture path: fabric UDS listener →
 // capture admission → spool (single writer), plus the claudecode transcript
 // tailer for one enabled workspace, plus the uplink drain (04 §2.5) when an
-// ingest endpoint is configured. Supervision of children, anchors, verdict
-// and policy remain their own rows (04 §2); nothing here fakes them.
+// ingest endpoint is configured, plus the 04 §2.3 verdict plane: the fusion
+// Engine (sole cache writer), the anchor-vote tee that feeds it, and the Gate
+// the fabric answers GateQuery from — fed by the 04 §2.2 anchor plane, whose
+// scheduler is subscribed to the live ToolUse stream here, plus the 04 §9.4
+// policy-bundle client (FR-POLICY-004): custody, ETag poll + SSE hint, verify,
+// and the atomic matrices swap into the verdict plane. Supervision of children
+// remains its own row (04 §2); nothing here fakes it.
 package main
 
 import (
@@ -19,10 +24,13 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/bundle"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/capture"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
@@ -30,7 +38,9 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spill"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/tailers"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/taskseg"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/uplink"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
 
@@ -44,6 +54,13 @@ var version = "0.0.0-dev"
 // (one stat of a missing file).
 const spillDrainEvery = 30 * time.Second
 
+// dropGateTimeout is m1p.v1.DROP_REASON_GATE_TIMEOUT (envelope.proto = 5),
+// numbered here for the same reason capture numbers LOCAL_QUARANTINE locally:
+// spool.DropReason mirrors the proto enum and only names the rows it raises
+// itself. Class is diagnostic — a fail-open gate answer loses no billable
+// event, it loses a decision (11 §2.3's ledger line).
+const dropGateTimeout spool.DropReason = 5
+
 type config struct {
 	stateDir  string
 	spoolDir  string
@@ -55,9 +72,23 @@ type config struct {
 	// ≤24 h device tokens into identity custody when it lands (04 §2.9).
 	ingestURL   string
 	deviceToken string
+	// policyURL/policyChannel drive the 08 §3.2 bundle client. An empty URL
+	// leaves fetching off — the daemon still loads its persisted
+	// last-known-good and still ages it out at max_age, which is the whole of
+	// FR-POLICY-005's blackhole case.
+	policyURL     string
+	policyChannel string
 	// offPoll paces the 08 §7.6 marker checks; a test seam only — the check
 	// itself has no off switch.
 	offPoll time.Duration
+	// matrices overrides the policy-apply seam for the verdict plane (04
+	// §9.4): the verify+route slice of the applied bundle. Set, it pins the
+	// boot matrices and the bundle client publishes nothing over them — a test
+	// seam. Unset (the shipped path) the bundle client owns this: it boots on
+	// last-known-good, or on verdict.Builtins() when there is none, which is
+	// the fail-static posture (gates allow, verdicts flagged stale_cert
+	// M1E-3006) and not an error state.
+	matrices *verdict.BundleMatrices
 }
 
 func main() {
@@ -78,11 +109,17 @@ func main() {
 	flag.StringVar(&cfg.workspace, "workspace", "", "additive workspace root to tail besides <state-dir>/workspaces.json (mark1 enable writes the file)")
 	flag.StringVar(&cfg.saltHex, "tenant-salt", "", "hex tenant HMAC root for Usage idem_key derivation; DEV SEAM — enrollment delivers the real root into identity custody (04 §2.9)")
 	flag.StringVar(&cfg.ingestURL, "ingest-url", "", "full URL of POST /m1p/v1/ingest; empty leaves the uplink off (capture-local-only)")
-	flag.StringVar(&cfg.deviceToken, "device-token", "", "bearer device token for ingest; DEV SEAM — enrollment issues the real one (08 §3.1)")
+	flag.StringVar(&cfg.deviceToken, "device-token", "", "bearer device token for ingest and policy; DEV SEAM — enrollment issues the real one (08 §3.1)")
+	flag.StringVar(&cfg.policyURL, "policy-url", "", "control-plane ORIGIN for policy distribution (08 §3.2/§3.5 hang /api/v1/policy/{bundle,stream,ack} and /.well-known/mark1-keys off it); empty leaves fetching off, last-known-good still runs")
+	flag.StringVar(&cfg.policyChannel, "policy-channel", "stable", "policy rollout channel (08 §3.2)")
 	flag.Parse()
 	cfg.offPoll = time.Second
 
-	if err := run(log, cfg); err != nil {
+	// The signal set lives here, not in run(): a test that drives the daemon
+	// needs a stopper that is not a process-wide SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, log, cfg); err != nil {
 		log.Error("mark1d exiting", "err", err)
 		os.Exit(1)
 	}
@@ -93,7 +130,7 @@ func main() {
 // gate re-arms across `mark1 off`/`mark1 on` cycles, because the supervisor's
 // KeepAlive/Restart=on-failure restarts this process while the user has
 // Mark 1 off, and a restart that captures anyway circumvents the kill switch.
-func run(log *slog.Logger, cfg config) error {
+func run(ctx context.Context, log *slog.Logger, cfg config) error {
 	if cfg.stateDir == "" {
 		return errors.New("mark1d: --state-dir required (no resolvable home)")
 	}
@@ -110,9 +147,6 @@ func run(log *slog.Logger, cfg config) error {
 	if cfg.offPoll <= 0 {
 		cfg.offPoll = time.Second
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	for {
 		if off.Off(cfg.stateDir) {
@@ -143,13 +177,14 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 
 	// The tenant usage-idem key gates tailing (ingest 422s a Usage without
 	// idem_key, 08 §2.4) — flag-validated up front, before any I/O.
-	var idemKey []byte
+	var idemKey, tenantRoot []byte
 	if cfg.saltHex != "" {
-		salt, err := hex.DecodeString(cfg.saltHex)
-		if err != nil || len(salt) == 0 {
+		root, err := hex.DecodeString(cfg.saltHex)
+		if err != nil || len(root) == 0 {
 			return errors.New("mark1d: --tenant-salt must be non-empty hex")
 		}
-		idemKey, err = tailers.DeriveUsageIdemKey(salt)
+		tenantRoot = root
+		idemKey, err = tailers.DeriveUsageIdemKey(root)
 		if err != nil {
 			return err
 		}
@@ -186,6 +221,154 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		return err
 	}
 
+	// The bundle client (04 §9.4, FR-POLICY-004) — constructed INSIDE the
+	// session so an OFF daemon fetches no policy either (08 §7.6), and
+	// constructed here because its boot posture is the verdict plane's boot
+	// argument. New does disk custody only: a control plane that is down (or
+	// absent) costs the daemon nothing at boot.
+	bc, err := bundle.New(bundle.Config{
+		StateDir:    cfg.stateDir,
+		BaseURL:     cfg.policyURL,
+		Channel:     cfg.policyChannel,
+		Token:       cfg.deviceToken,
+		EdgeVersion: version,
+		Log:         log,
+	})
+	if err != nil {
+		_ = sp.Close()
+		return err
+	}
+
+	// The verdict plane (04 §2.3), always on — with no bundle, no anchor vote
+	// and no cache entry it answers every gate with allow, which is a normal
+	// state and not an error. blocks is shared by exactly two writers: the
+	// gate handler (RecordBlock) and the Engine's publish (ResetTask, D-Y).
+	matrices := bc.Matrices()
+	if cfg.matrices != nil {
+		matrices = *cfg.matrices
+	}
+	blocks := verdict.NewBlocks()
+	eng := verdict.NewEngine(matrices, blocks, nil)
+	// The anchor plane (04 §2.2) is the SOURCE half of the verdict plane: with
+	// no runner nothing ever produces an AnchorVote, so the cache is never
+	// written and every gate answers M1E-5001 allow. The catalog is locally
+	// derived and user-consented; no worktree, no consent or no sandbox all
+	// reduce to the same posture — run nothing, stay fail-open.
+	// The scratch root must EXIST before the first run: the sandbox mkdtemps a
+	// per-run HOME inside it, and a missing root fails every run — including
+	// derivation's version sniff, which silently empties ToolVersion and drifts
+	// the entry out of consent.
+	scratch := filepath.Join(cfg.stateDir, "anchor-scratch")
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		_ = sp.Close()
+		return err
+	}
+	sb := anchors.NewSandbox(scratch)
+	worktree := anchorWorktree(cfg)
+	var enabled []anchors.CatalogEntry
+	if worktree != "" {
+		rep, derr := anchors.Doctor(sb, worktree, anchors.ConsentPath(cfg.stateDir))
+		if derr != nil {
+			// An unreadable consent store must never read as consent
+			// (consent.go), so the catalog stays empty and nothing runs.
+			log.Error("mark1d: anchor catalog unavailable; no anchor will run", "worktree", worktree, "err", derr)
+		} else {
+			enabled = rep.Enabled
+		}
+	}
+	// The anchor→fusion tee. It wraps the ONE Admitter, so a vote reaches
+	// fusion through the same door it reaches the spool through — no second
+	// transport, no second vote shape (04 §2.3's recompute loop).
+	votes := anchors.NewVotes(adm, eng, enabled)
+
+	// task_seg.v1 (ADR-0002): the daemon is the party that mints task ids, so
+	// the segmenter sits on the admission path the events arrive on, and D-AA's
+	// resolver is the one channel by which a gate query or a vote acquires one.
+	segKey, err := taskseg.DeriveKey(tenantRoot)
+	if err != nil {
+		_ = sp.Close()
+		return err
+	}
+	seg := taskseg.New(segKey)
+	votes.TaskFor = seg.TaskFor
+	// D-AR: the streak resets on close as well as on publish. Without this a task
+	// reopened under the same id (R3) inherits its pre-close streak, and a streak
+	// at the cap short-circuits the next gate query to ALLOW *before* the cache
+	// read — the new attempt runs entirely ungated on the old attempt's state.
+	seg.OnClose = func(t taskseg.TaskID) { blocks.ResetTask(verdict.TaskID(t)) }
+	// D-AS: at close, a verdict at ANY stage resolves the task. Without this the
+	// denominator is 100% unresolved on every install with no consented SLOW
+	// anchor, since REVISED is the only stage anything else produces.
+	seg.Verdict = func(t taskseg.TaskID) (*m1pv1.VerdictEvent, bool) {
+		c, ok := eng.Reader().Get(verdict.TaskID(t))
+		if !ok {
+			return nil, false
+		}
+		return c.Verdict, true
+	}
+	// D-AM(R3): an adjudicated verdict becomes an Event here, which is the only
+	// way a task ever closes RESOLUTION_VERDICT instead of aging out unresolved.
+	// The verdict is admitted BEFORE the segmenter sees it: capture mints its
+	// event_id, so the TaskClose can name it in final_verdict_id.
+	eng.Emit = func(ctx context.Context, ve *m1pv1.VerdictEvent, task verdict.TaskID) {
+		sid, ok := seg.SessionFor(task)
+		if !ok {
+			return // no session owns it: no scope to admit under (R4)
+		}
+		ev := &m1pv1.Event{
+			SessionId: sid[:], TaskId: task[:],
+			OccurredAt: timestamppb.Now(),
+			Body:       &m1pv1.Event_VerdictEvent{VerdictEvent: ve},
+		}
+		if err := adm.Admit(ctx, ev); err != nil && !perEventLoss(err) {
+			log.Error("verdict admit", "err", err)
+			return
+		}
+		for _, te := range seg.Observe(ev, nil) {
+			if err := adm.Admit(ctx, te); err != nil && !perEventLoss(err) {
+				log.Error("task close admit", "err", err)
+			}
+		}
+	}
+	// Started only once Emit is wired: a recompute goroutine that outran the
+	// wiring would publish adjudicated verdicts nobody records.
+	engDone := make(chan struct{})
+	go func() {
+		defer close(engDone)
+		eng.Run(ctx)
+	}()
+	// Policy apply, wired only once the Engine exists and never when a test
+	// pinned the matrices: SetBundle is the atomic.Pointer swap the recompute
+	// goroutine loads per job, so an applied bundle reaches fusion without a
+	// restart. Started after Apply is set — the client publishes on its first
+	// freshness tick, and a publish into a nil Apply would be lost.
+	if cfg.matrices == nil {
+		bc.Apply = eng.SetBundle
+	}
+	bundleDone := make(chan struct{})
+	go func() {
+		defer close(bundleDone)
+		bc.Run(ctx)
+	}()
+
+	// The runner emits through the tee, so its vote lands in the spool AND in
+	// fusion by the one path. outputHMACKey stays nil without a tenant root:
+	// EvidenceRecord.output_hmac degrades to absent, never to an unkeyed hash.
+	var sched *anchors.Scheduler
+	if len(enabled) > 0 {
+		var outKey []byte
+		if len(tenantRoot) > 0 {
+			if outKey, err = anchors.DeriveOutputHMACKey(tenantRoot); err != nil {
+				_ = sp.Close()
+				return err
+			}
+		}
+		runner := anchors.NewRunner(sb, votes, outKey, false)
+		sched = anchors.NewScheduler(runner, enabled, anchors.ConsentPath(cfg.stateDir), worktree, log)
+		sched.Start(ctx)
+		log.Info("mark1d: anchor plane armed", "worktree", worktree, "anchors", len(enabled))
+	}
+
 	// Spill keypair + drain (04 §5.4): the daemon mints the device X25519
 	// keypair — private half in its own custody, public half materialized for
 	// the shim — and replays the ring through the same admission path on
@@ -207,12 +390,48 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	if err != nil {
 		cancel() // stop the drain loop before its spool goes away
 		<-drainDone
+		<-engDone
+		<-bundleDone
 		_ = sp.Close()
 		return err
 	}
-	srv := fabric.NewServer(adm.AdmitBytes, func(err error) bool {
-		return errors.Is(err, capture.ErrShed) || errors.Is(err, capture.ErrQuarantined)
-	})
+	srv := fabric.NewServer(func(ctx context.Context, payload []byte) error {
+		ev := &m1pv1.Event{}
+		if err := proto.Unmarshal(payload, ev); err != nil {
+			// Capture owns the quarantine ledger for an undecodable payload;
+			// re-entering through its own door keeps that accounting single-site.
+			return adm.AdmitBytes(ctx, payload)
+		}
+		// Segmentation runs BEFORE admission so a vote or gate query riding the
+		// same connection already resolves to the task this event opened, and
+		// TaskOpen precedes the event that opened it in the spool.
+		// ponytail: nil files — no wire body carries tool paths into the daemon
+		// (ToolUse has no path field), so R2's overlap predicate cannot fire yet.
+		for _, te := range seg.Observe(ev, nil) {
+			if err := adm.Admit(ctx, te); err != nil && !perEventLoss(err) {
+				return err
+			}
+		}
+		// The PostToolUse trigger (04 §2.2), keyed by the task the segmenter
+		// just resolved: a run whose vote could not be filed against a real
+		// task would be evidence D-AA drops on arrival, so an unresolved
+		// session schedules nothing rather than running an anchor for nobody.
+		if sched != nil && ev.GetToolUse() != nil && len(ev.GetSessionId()) == 16 {
+			var sid [16]byte
+			copy(sid[:], ev.GetSessionId())
+			if task, ok := seg.TaskFor(sid, [16]byte{}); ok {
+				sched.NoteToolUse(sid, task)
+			}
+		}
+		return votes.Admit(ctx, ev)
+	}, perEventLoss)
+	// The GateQuery route is constructed with eng.Reader() — a verdict.Reader,
+	// the only verdict surface with no method that computes (04 §2.3).
+	gate := fabric.NewGate(eng.Reader(), blocks, cfg.stateDir)
+	gate.TaskFor = seg.TaskFor
+	gate.OnDropped = func(string) { adm.AccountDropped(dropGateTimeout, spool.ClassDiagnostic, 1) }
+	srv.SetGate(gate)
+	srv.SetContaminationHandler(contaminationRollback{log: log})
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- srv.Serve(ctx, l) }()
 	log.Info("mark1d up", "version", version, "epoch", adm.Epoch(), "socket", cfg.socket, "spool", cfg.spoolDir)
@@ -223,6 +442,8 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		_ = l.Close()
 		cancel()
 		<-drainDone
+		<-engDone
+		<-bundleDone
 		_ = sp.Close()
 		return err
 	}
@@ -295,7 +516,9 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	if err := <-tailDone; err != nil {
 		log.Error("tail drain", "err", err)
 	}
-	<-drainDone // ctx is done; the ring drain stops before its spool closes
+	<-drainDone  // ctx is done; the ring drain stops before its spool closes
+	<-engDone    // the fusion goroutine holds no resource; joined so it cannot outlive the session
+	<-bundleDone // same: the policy client owns only its own HTTP client
 	if err := <-upDone; err != nil {
 		log.Error("uplink", "err", err)
 	}
@@ -314,6 +537,28 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		}
 	}
 	return sp.Close()
+}
+
+// perEventLoss names the two admission outcomes that are an accounted loss of
+// ONE event rather than a failure of the path that carried it: the connection
+// (or the publish that produced it) lives on.
+func perEventLoss(err error) bool {
+	return errors.Is(err, capture.ErrShed) || errors.Is(err, capture.ErrQuarantined)
+}
+
+// anchorWorktree picks the one worktree the anchor catalog is derived from.
+// ponytail: one scheduler over the first enabled root — nothing on the wire
+// says which workspace a session belongs to, so a per-workspace scheduler would
+// have no way to pick between them; revisit when Hello carries a cwd.
+func anchorWorktree(cfg config) string {
+	if cfg.workspace != "" {
+		return cfg.workspace
+	}
+	roots, err := tailers.LoadWorkspacesFile(filepath.Join(cfg.stateDir, "workspaces.json"))
+	if err != nil || len(roots) == 0 {
+		return ""
+	}
+	return roots[0]
 }
 
 // wsReloadTick paces the workspaces.json reconcile between fsnotify events —
@@ -416,7 +661,7 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 	w, werr := fsnotify.NewWatcher()
 	var events chan fsnotify.Event
 	if werr == nil {
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 		_ = w.Add(cfg.stateDir) // the CLI renames into the dir; watch the dir, not the file
 		events = make(chan fsnotify.Event)
 		go func() {
@@ -472,4 +717,36 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 			reconcile()
 		}
 	}
+}
+
+// contaminationRollback is the daemon half of the CON-001 P0 kill path
+// (D-AI, 04 §3.1 step 6). The proxy has already closed the session and already
+// refuses every later request for it; the daemon's one job is the config
+// rollback, so the agent's NEXT request bypasses the proxy entirely.
+//
+// It does not roll anything back, and that is the honest state, not an
+// oversight (D-BC). Step 6 reverts "the base-URL fragment" — the fenced
+// ANTHROPIC_BASE_URL fragment that points an agent at the proxy. Nothing in
+// this repo writes that fragment yet: `adapters/claudecode` provisions the
+// HOOKS fragment (provisioned/claudecode/hooks.manifest.json) and nothing
+// else. Calling the hooks revert here would tear out capture while leaving the
+// proxy pointer — which does not exist — untouched: a rollback that undoes the
+// wrong thing, in the wrong direction, on the one path where being wrong is a
+// legal event rather than a bug.
+//
+// So this logs, loudly and attributably, and the gap stays visible. That is a
+// deliberate choice over the two alternatives: leaving the handler nil (the
+// frame is accepted and vanishes — a P0 that arrives and is silently discarded)
+// and wiring the wrong revert. When base-URL fragment provisioning lands, the
+// revert call goes here and this comment goes away.
+type contaminationRollback struct{ log *slog.Logger }
+
+func (c contaminationRollback) OnContamination(session [16]byte, credRef, reasonCode string) {
+	c.log.Error("OAUTH CONTAMINATION — P0",
+		"code", "M1E-8002",
+		"session", hex.EncodeToString(session[:]),
+		"cred_ref", credRef,
+		"reason", reasonCode,
+		"rollback", "UNAVAILABLE: no base-URL fragment is provisioned (D-BC)",
+		"operator_action", "unset ANTHROPIC_BASE_URL for this agent before its next request")
 }

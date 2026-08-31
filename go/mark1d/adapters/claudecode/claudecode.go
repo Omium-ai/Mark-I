@@ -1,7 +1,7 @@
 // Package claudecode is the Phase-1 adapter (04 §2.10): transcript-dir
-// resolution and tailer lifecycle over internal/tailers. Hook provisioning is
-// the hookshim row's concern — the shim registers itself via 08 §8 fenced
-// fragments; C8 acceptance is the transcript replay, which needs no hooks.
+// resolution, tailer lifecycle over internal/tailers, and the 08 §8 fenced
+// settings fragment (fragment.go) that registers §5.1's nine hook handlers —
+// the Stop gate and the SessionStart injection among them.
 package claudecode
 
 import (
@@ -23,14 +23,26 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/tailers"
 )
 
-// ErrNotProvisioned: hook-fragment provisioning ships with mark1-hookshim
-// (04 §5, 08 §8). Returning it beats a no-op nil that would claim hooks are
-// registered when they are not.
-var ErrNotProvisioned = errors.New("claudecode: hook provisioning lands with the hookshim row (08 §8)")
-
 type Adapter struct {
-	// Home overrides $HOME for transcript-dir resolution (test seam).
+	// Home overrides $HOME for transcript-dir and settings resolution (test seam).
 	Home string
+	// StateDir is mark1d's state root (04 §2) — where Provision writes the
+	// 08 §8.2 manifest. Empty falls back to ~/.omium/mark1, which is only safe
+	// for the read-only surfaces; anything that provisions MUST set it to the
+	// same root `mark1 off` globs, or the manifest lands somewhere off cannot
+	// find and the fence outlives the uninstall. `mark1 enable` sets it; the
+	// daemon leaves it empty because it only ever tails.
+	StateDir string
+	// ShimPath overrides 08 §8.1's command string for a non-default install.
+	ShimPath string
+}
+
+// home resolves the `~` every path below hangs off.
+func (a *Adapter) home() (string, error) {
+	if a.Home != "" {
+		return a.Home, nil
+	}
+	return os.UserHomeDir()
 }
 
 func (a *Adapter) Name() string { return "claudecode" }
@@ -83,7 +95,7 @@ func (a *Adapter) Detect() (adapters.Detection, error) {
 	// repo-supplied code.
 	ctx, cancel := context.WithTimeout(context.Background(), versionSniffTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "--version")
+	cmd := exec.CommandContext(ctx, bin, "--version") //nolint:gosec // G204: bin is LookPath("claude") — the operator's own PATH, no shell
 	var buf bytes.Buffer
 	cmd.Stdout = &capWriter{w: &buf, remaining: versionSniffCap}
 	if err := cmd.Run(); err != nil {
@@ -93,8 +105,60 @@ func (a *Adapter) Detect() (adapters.Detection, error) {
 	return d, nil
 }
 
-func (a *Adapter) Provision(ws adapters.Workspace, m adapters.Maps) error {
-	return ErrNotProvisioned
+// Provision applies the 08 §8 mechanism-B fragment (fragment.go) to the user's
+// EXISTING ~/.claude/settings.json, registering §5.1's nine handlers through
+// the shim. ErrNoTarget when the file does not exist and ErrDamaged when a
+// human edited inside our pointers are both returned as-is: they are states
+// `mark1 doctor` reports, not failures to retry.
+//
+// ws and m are unused by design. The hook config is user-scoped (Surfaces()),
+// so registration is once per machine, not once per enabled workspace — the
+// shim's own workspace scoping does the rest. And no vendor field name is ever
+// baked into the fragment: the shim loads agent_maps itself, which is what lets
+// a rename ship as a bundle push with no reprovision (FR-AGENT-001).
+func (a *Adapter) Provision(adapters.Workspace, adapters.Maps) error {
+	_, err := a.Apply()
+	return err
+}
+
+// Apply is Provision carrying the §8.3 result back. The daemon calls
+// Provision (the adapters.Adapter shape) and discards it; `mark1 enable` needs
+// it, because §7.2's "unchanged state exits 0 silently" is a promise only a
+// caller that can tell a no-op from a write is able to keep.
+func (a *Adapter) Apply() (ApplyResult, error) {
+	target, state, err := a.paths()
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	return ApplyFragment(target, state, a.ShimPath)
+}
+
+// Repair is `mark1 doctor --fix` (08 §7.4): re-apply a MISSING fragment,
+// rewrite a FRAGMENT-DAMAGED one. It is the same write Provision performs with
+// exactly one bit different, so there is no second definition of the fence to
+// drift — and like Provision it touches nothing outside the recorded pointers.
+func (a *Adapter) Repair() (ApplyResult, error) {
+	target, state, err := a.paths()
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	return RepairFragment(target, state, a.ShimPath)
+}
+
+// paths resolves the mechanism-B fence target — the ONE user-owned file Claude
+// Code reads hook config from — and the manifest root. See StateDir: an empty
+// one resolves to ~/.omium/mark1 here, so a provisioning caller running under
+// a non-default root must set it or the manifest and `mark1 off` diverge.
+func (a *Adapter) paths() (target, state string, err error) {
+	home, err := a.home()
+	if err != nil {
+		return "", "", err
+	}
+	state = a.StateDir
+	if state == "" {
+		state = filepath.Join(home, ".omium", "mark1")
+	}
+	return filepath.Join(home, ".claude", "settings.json"), state, nil
 }
 
 func (a *Adapter) Surfaces() []adapters.CaptureSurface {
@@ -108,13 +172,9 @@ func (a *Adapter) Surfaces() []adapters.CaptureSurface {
 // where <munged-cwd> is the absolute cwd with '/' replaced by '-'. The
 // primary source (hook payloads' transcript_path) arrives with the shim.
 func (a *Adapter) TranscriptDir(cwd string) (string, error) {
-	home := a.Home
-	if home == "" {
-		var err error
-		home, err = os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
+	home, err := a.home()
+	if err != nil {
+		return "", err
 	}
 	abs, err := filepath.Abs(cwd)
 	if err != nil {
