@@ -51,13 +51,61 @@ func TestListenRejectsBadPerms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	fi, err := os.Lstat(filepath.Join(dir, "m1p.sock"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fi.Mode().Perm() != 0o600 {
 		t.Fatalf("socket mode %o, want 0600", fi.Mode().Perm())
+	}
+}
+
+// fabric_symlink_refusal (04 §10). Listen removes a stale socket so a dead daemon cannot
+// wedge the next boot, and that remove is the whole reason the check above it has to be
+// Lstat: under Stat a symlink reports its TARGET's type, so one planted at the socket path
+// and pointed at a live socket elsewhere would read as "stale, ours to clear". The refusal
+// is what keeps the daemon from operating on a path it does not own.
+//
+// The assertion is therefore two-part. Refusing is half; the other half is that the planted
+// object is still there afterwards, because "we refused" and "we deleted the attacker's
+// symlink and then refused" are the same error string and very different behaviours.
+func TestListenRefusesSymlinkAtSocketPath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sock")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(dir, "m1p.sock")
+
+	// The target is a REAL listening socket, not a regular file, and that is the only version
+	// of this test that can fail: against a regular file Stat and Lstat both report "not a
+	// socket" and refuse identically, so the test would pass under the bug it exists to catch.
+	// Pointed at a live socket, Stat reports ModeSocket and the stale-socket branch claims it.
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	victim, err := net.Listen("unix", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = victim.Close() }()
+	if err := os.Symlink(target, sock); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err := Listen(sock)
+	if err == nil {
+		_ = l.Close()
+		t.Fatal("Listen accepted a symlink at the socket path; 04 §10 fabric_symlink_refusal requires refusal")
+	}
+
+	fi, err := os.Lstat(sock)
+	if err != nil {
+		t.Fatalf("Listen refused but removed the symlink it refused: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("path is now mode %v, want the planted symlink untouched", fi.Mode())
+	}
+	if _, terr := os.Stat(target); terr != nil {
+		t.Fatalf("symlink target was followed and destroyed: %v", terr)
 	}
 }
 
@@ -82,32 +130,63 @@ func startDaemon(t *testing.T, dir string) (path string, sp *spool.Spool, adm *c
 	srv = NewServer(adm.AdmitBytes, func(err error) bool {
 		return errors.Is(err, capture.ErrShed) || errors.Is(err, capture.ErrQuarantined)
 	})
-	go srv.Serve(context.Background(), l)
-	t.Cleanup(func() { l.Close(); srv.Close() })
+	go func() { _ = srv.Serve(context.Background(), l) }()
+	t.Cleanup(func() { _ = l.Close(); srv.Close() })
 	return path, sp, adm, srv
 }
 
-func frameEvent(t *testing.T, w io.Writer, session byte, out uint64) {
-	t.Helper()
-	sid := make([]byte, 16)
-	sid[0] = session
-	b, err := proto.Marshal(&m1pv1.Event{
-		SessionId: sid,
-		Body:      &m1pv1.Event_Usage{Usage: &m1pv1.Usage{IdemKey: make([]byte, 32), OutputTokens: out}},
+// TestHandshakeDeadlineReclaimsSilentPeers pins both halves of the bound: a
+// peer that connects and never sends its 08 §4.3 Hello is reclaimed, and a
+// peer that completed the handshake is not — mark1d outlives every agent
+// session, so a deadline that kept running would sever the long-lived writers
+// the fabric exists to carry.
+func TestHandshakeDeadlineReclaimsSilentPeers(t *testing.T) {
+	dir := t.TempDir()
+	sp, err := spool.Open(spool.Config{Dir: filepath.Join(dir, "spool")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sp.Close() }()
+	adm, err := capture.New(sp, capture.Config{
+		EpochPath: filepath.Join(dir, "epoch"),
+		Redact:    func(*m1pv1.Event) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteFrame(w, b); err != nil {
+	l, err := Listen(filepath.Join(dir, "run", "m1p.sock"))
+	if err != nil {
 		t.Fatal(err)
 	}
-}
+	srv := NewServer(adm.AdmitBytes, nil)
+	srv.HandshakeTimeout = 150 * time.Millisecond // set before Serve: read per connection
+	go func() { _ = srv.Serve(context.Background(), l) }()
+	t.Cleanup(func() { _ = l.Close(); srv.Close() })
 
-func readEOF(t *testing.T, c net.Conn) {
-	t.Helper()
-	c.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
-		t.Fatalf("connection not closed, read err = %v", err)
+	silent, err := net.Dial("unix", filepath.Join(dir, "run", "m1p.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = silent.Close() }()
+	readClosed(t, silent) // says nothing, ever
+
+	live, err := net.Dial("unix", filepath.Join(dir, "run", "m1p.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = live.Close() }()
+	hello(t, live)
+	time.Sleep(3 * srv.HandshakeTimeout)
+	if err := live.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = live.Read(make([]byte, 1))
+	if errors.Is(err, io.EOF) {
+		t.Fatal("handshake deadline severed an established session")
+	}
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		t.Fatalf("established session: want an idle read timeout, got %v", err)
 	}
 }
 
@@ -122,14 +201,15 @@ func TestServeFramesAndReject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
-	frameEvent(t, c, 1, 210)
-	frameEvent(t, c, 1, 1042)
+	defer func() { _ = c.Close() }()
+	hello(t, c)
+	writeEvent(t, c, 1, 210)
+	writeEvent(t, c, 1, 1042)
 	// The reject case: bad magic desynchronizes the stream ⇒ close.
 	if _, err := c.Write([]byte{'M', '1', 'P', 'X', 0x01, 4, 0, 0, 0, 1, 2, 3, 4}); err != nil {
 		t.Fatal(err)
 	}
-	readEOF(t, c) // EOF is also the barrier: both good frames were admitted first
+	readClosed(t, c) // the hangup is also the barrier: both good frames were admitted first
 
 	if err := sp.Sync(); err != nil {
 		t.Fatal(err)
@@ -150,20 +230,24 @@ func TestServeFramesAndReject(t *testing.T) {
 		t.Fatalf("admitted event lost its stamp: %+v", &ev)
 	}
 
-	// A malformed EVENT on intact framing is per-event: quarantined,
-	// accounted, and the connection stays open.
+	// A malformed EVENT inside an intact FabricFrame is per-event:
+	// quarantined, accounted, and the connection stays open.
 	c2, err := net.Dial("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c2.Close()
-	if err := WriteFrame(c2, []byte{0xff, 0xff, 0xff, 0xff}); err != nil {
+	defer func() { _ = c2.Close() }()
+	hello(t, c2)
+	garbageEvent := append([]byte{0x0a, 0x04}, 0xff, 0xff, 0xff, 0xff) // field 1 (event), 4 garbage bytes
+	if err := WriteFrame(c2, garbageEvent); err != nil {
 		t.Fatal(err)
 	}
-	frameEvent(t, c2, 2, 7)
+	writeEvent(t, c2, 2, 7)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		sp.Sync()
+		if err := sp.Sync(); err != nil {
+			t.Fatalf("spool sync: %v", err)
+		}
 		recs, _, _ = sp.Records(ack)
 		if len(recs) == 3 {
 			break
@@ -185,12 +269,15 @@ func TestEndToEndRecoveryScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frameEvent(t, c, 3, 640)
-	frameEvent(t, c, 3, 88)
+	hello(t, c)
+	writeEvent(t, c, 3, 640)
+	writeEvent(t, c, 3, 88)
 	// Bad-magic reject as the processing barrier, then shut the daemon down.
-	c.Write([]byte("XXXXXXXXX"))
-	readEOF(t, c)
-	c.Close()
+	if _, err := c.Write([]byte("XXXXXXXXX")); err != nil {
+		t.Fatalf("writing the bad-magic barrier: %v", err)
+	}
+	readClosed(t, c)
+	_ = c.Close()
 	srv.Close()
 	if err := sp.Close(); err != nil { // shutdown drain: forced fsync (07 §6)
 		t.Fatal(err)
@@ -200,7 +287,7 @@ func TestEndToEndRecoveryScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sp2.Close()
+	defer func() { _ = sp2.Close() }()
 	ack, _ := sp2.Cursors()
 	recs, _, err := sp2.Records(ack)
 	if err != nil {
