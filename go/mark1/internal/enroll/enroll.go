@@ -83,7 +83,7 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 			return env.Emit(Result{OK: true, DeviceID: doc.DeviceID, TenantID: doc.TenantID,
 				State: state, ExpiresIn: int(time.Until(doc.TokenExpiresAt).Seconds())},
 				func(w io.Writer) {
-					fmt.Fprintf(w, "already enrolled: device %s (tenant %s, state %s)\n", doc.DeviceID, doc.TenantID, state)
+					_, _ = fmt.Fprintf(w, "already enrolled: device %s (tenant %s, state %s)\n", doc.DeviceID, doc.TenantID, state)
 				})
 		} else {
 			priorState = state
@@ -115,7 +115,7 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 	var err error
 	if priorState != "" {
 		if !env.Quiet && !env.JSON {
-			fmt.Fprintf(env.Stdout, "previous enrollment is %s — re-enrolling with a new device key\n", priorState)
+			_, _ = fmt.Fprintf(env.Stdout, "previous enrollment is %s — re-enrolling with a new device key\n", priorState)
 		}
 		pub, err = rotateDeviceKey(env)
 	} else {
@@ -155,8 +155,8 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 	}
 
 	if !env.Quiet && !env.JSON {
-		fmt.Fprintf(env.Stdout, "To enroll this device, visit:\n\n    %s\n\nand enter code: %s\n\n", start.VerificationURI, start.UserCode)
-		fmt.Fprintf(env.Stdout, "Waiting for approval (expires in %ds)...\n", start.ExpiresIn)
+		_, _ = fmt.Fprintf(env.Stdout, "To enroll this device, visit:\n\n    %s\n\nand enter code: %s\n\n", start.VerificationURI, start.UserCode)
+		_, _ = fmt.Fprintf(env.Stdout, "Waiting for approval (expires in %ds)...\n", start.ExpiresIn)
 	}
 
 	poll, err := pollUntilActive(ctx, env, start)
@@ -187,7 +187,7 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 	return env.Emit(Result{OK: true, DeviceID: poll.DeviceID, TenantID: poll.TenantID,
 		State: cli.StateActive, ExpiresIn: poll.ExpiresIn},
 		func(w io.Writer) {
-			fmt.Fprintf(w, "enrolled: device %s (tenant %s)\n", poll.DeviceID, poll.TenantID)
+			_, _ = fmt.Fprintf(w, "enrolled: device %s (tenant %s)\n", poll.DeviceID, poll.TenantID)
 		})
 }
 
@@ -244,8 +244,9 @@ func pollUntilActive(ctx context.Context, env *cli.Env, start *startResponse) (*
 // state dir, created O_EXCL exactly once — overwriting would orphan every
 // receipt the old key signed), byte-compatible with mark1d's
 // identity.FileCustody so the daemon adopts the same key at its enroll row.
-// ponytail: keychain/TPM rungs (go-keyring is pinned for them) ride the
-// same seam later; the floor is never skipped-below, so it ships first.
+// ponytail: keychain/TPM rungs ride the same seam later; the floor is never
+// skipped-below, so it ships first. No dependency is pinned ahead of them —
+// one was, and it was dead weight `go mod tidy` deleted on sight (D-CF).
 func loadOrCreateDeviceKey(env *cli.Env) (ed25519.PublicKey, error) {
 	path := env.DeviceKeyPath()
 	if fi, err := os.Stat(path); err == nil {
@@ -273,7 +274,7 @@ func loadOrCreateDeviceKey(env *cli.Env) (ed25519.PublicKey, error) {
 		return nil, err
 	}
 	if _, err := f.Write(seed); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	if err := f.Close(); err != nil {
@@ -322,7 +323,7 @@ func postRaw(ctx context.Context, env *cli.Env, path string, body any) ([]byte, 
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, 0, err

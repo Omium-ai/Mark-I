@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
 )
 
 type Options struct {
@@ -33,12 +34,24 @@ type Options struct {
 // receipt chain in mark1d; until that wiring lands the journal entry is the
 // attributable record and the field is absent, never faked.
 type Result struct {
-	OK           bool     `json:"ok"`
-	Scope        string   `json:"scope"`
-	ByteEquality bool     `json:"byte_equality"`
-	Until        string   `json:"until,omitempty"`
-	Daemon       string   `json:"daemon"` // "observed" | "not running" | "still capturing"
-	NotReverted  []string `json:"not_reverted,omitempty"`
+	OK           bool   `json:"ok"`
+	Scope        string `json:"scope"`
+	ByteEquality bool   `json:"byte_equality"`
+	Until        string `json:"until,omitempty"`
+	Daemon       string `json:"daemon"` // "observed" | "not running" | "still capturing"
+	// Reverted is additive to §7.6's shape: byte_equality is one bool for the
+	// whole command, and a user whose file came back surgically rather than
+	// verbatim deserves to know which file and why, not just `false`.
+	Reverted    []Reverted `json:"reverted,omitempty"`
+	NotReverted []string   `json:"not_reverted,omitempty"`
+}
+
+// Reverted is one fragment taken back out, in 08 §8.4's own vocabulary.
+type Reverted struct {
+	Agent        string `json:"agent"`
+	Target       string `json:"target"`
+	Kind         string `json:"kind"` // verbatim | surgical | target-absent
+	ByteEquality bool   `json:"byte_equality"`
 }
 
 // marker is what lands in <state>/OFF. The daemon and shim only stat the
@@ -90,13 +103,18 @@ func Run(env *cli.Env, opts Options) error {
 
 	res.Daemon = verifyDaemonObserved(socket, wasReachable, opts.ObserveGrace)
 
-	// §7.6 step 2: revert every provisioned fragment via the §8 revert
-	// algorithm. The §8 apply/revert engine (blake3 manifests, fence
-	// surgery) lives in mark1d and has not landed; a manifest we cannot
-	// revert is LISTED as partial (exit 1, §7.6) — never silently skipped.
-	// Reverting fragments is defense in depth, not the off mechanism: the
-	// shim hits the marker check and no-ops regardless (08 §8.4 note).
-	res.NotReverted = unrevertedManifests(env)
+	// §7.6 step 2: revert every provisioned fragment through the §8.4 engine
+	// that applied it. A manifest we cannot revert is LISTED as partial
+	// (exit 1, §7.6) — never silently skipped. Reverting is defense in depth,
+	// not the off mechanism: the shim hits the marker check and no-ops
+	// regardless (08 §8.4 note), which is why a failed revert does not stop
+	// the marker from landing above.
+	res.Reverted, res.NotReverted = revertFragments(env)
+	for _, r := range res.Reverted {
+		if !r.ByteEquality {
+			res.ByteEquality = false
+		}
+	}
 	if len(res.NotReverted) > 0 {
 		res.ByteEquality = false
 	}
@@ -112,9 +130,12 @@ func Run(env *cli.Env, opts Options) error {
 	partial := len(res.NotReverted) > 0 || res.Daemon == "still capturing"
 	res.OK = !partial
 	emitErr := env.Emit(res, func(w io.Writer) {
-		fmt.Fprintf(w, "mark1 is OFF (scope: %s, daemon: %s)\n", scope, res.Daemon)
+		_, _ = fmt.Fprintf(w, "mark1 is OFF (scope: %s, daemon: %s)\n", scope, res.Daemon)
+		for _, r := range res.Reverted {
+			_, _ = fmt.Fprintf(w, "reverted      %s %s (%s)\n", r.Agent, r.Target, r.Kind)
+		}
 		for _, p := range res.NotReverted {
-			fmt.Fprintf(w, "NOT REVERTED: %s (run `mark1 doctor`)\n", p)
+			_, _ = fmt.Fprintf(w, "NOT REVERTED: %s (run `mark1 doctor`)\n", p)
 		}
 	})
 	if emitErr != nil {
@@ -150,13 +171,26 @@ func verifyDaemonObserved(socket string, wasReachable bool, grace time.Duration)
 	return "still capturing"
 }
 
-// unrevertedManifests scans <state>/provisioned/<agent>/<fragment>.manifest.json
-// (08 §8.2) for fragments still applied. Today the list doubles as the
-// revert result: anything present is unreverted by definition, because the
-// §8 revert engine has not landed in mark1d.
-func unrevertedManifests(env *cli.Env) []string {
+// revertFragments runs 08 §8.4 for every agent this build can revert, then
+// lists whatever manifest is STILL on disk afterwards. The leftover scan is
+// the honest catch-all: a fragment whose revert failed and a fragment written
+// by an agent no longer in this build are the same problem to the user — a
+// block of ours in their config that `mark1 off` did not take out — and both
+// have to make exit 1.
+func revertFragments(env *cli.Env) (done []Reverted, notReverted []string) {
+	res, err := claudecode.Revert(env.StateDir)
+	switch {
+	case err != nil:
+		// Left for the leftover scan below to list; RefusalCode's states
+		// (a hand-edited fence, an unreadable manifest) travel the same road
+		// as a genuine I/O failure here, because in both cases our lines are
+		// still in the user's file.
+	case res.Kind != "not-provisioned":
+		done = append(done, Reverted{"claudecode", res.Target, res.Kind, res.ByteEquality})
+	}
+
 	matches, _ := filepath.Glob(filepath.Join(env.ProvisionedDir(), "*", "*.manifest.json"))
-	return matches
+	return done, matches
 }
 
 // On is §7.6's inverse (`mark1 on`): remove the marker, journal the enable
@@ -177,9 +211,9 @@ func On(env *cli.Env) error {
 	}
 	return env.Emit(map[string]any{"ok": true, "was_off": removed}, func(w io.Writer) {
 		if removed {
-			fmt.Fprintln(w, "mark1 is ON")
+			_, _ = fmt.Fprintln(w, "mark1 is ON")
 		} else {
-			fmt.Fprintln(w, "mark1 was already on")
+			_, _ = fmt.Fprintln(w, "mark1 was already on")
 		}
 	})
 }

@@ -39,7 +39,7 @@ func tvoStub(t *testing.T, guaranteeGrade bool) *httptest.Server {
 	mux.HandleFunc("GET /api/v1/reports/tvo", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok-1" {
 			w.WriteHeader(http.StatusForbidden)
-			fmt.Fprint(w, `{"error":{"code":"M1E-1001","message":"caller lacks operator role"}}`)
+			_, _ = fmt.Fprint(w, `{"error":{"code":"M1E-1001","message":"caller lacks operator role"}}`)
 			return
 		}
 		if r.URL.Query().Get("window") != "30d" || r.URL.Query().Get("cost_basis") != "auto" {
@@ -55,7 +55,7 @@ func tvoStub(t *testing.T, guaranteeGrade bool) *httptest.Server {
 		if !guaranteeGrade {
 			body["refusal"] = "M1E-5004 coverage below floor"
 		}
-		json.NewEncoder(w).Encode(body)
+		_ = json.NewEncoder(w).Encode(body)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -116,7 +116,9 @@ func TestReportAuthRefused(t *testing.T) {
 	env, _ := enrolledEnv(t, srv.URL)
 	doc, _ := env.LoadEnrollment()
 	doc.DeviceToken = "wrong"
-	env.SaveEnrollment(doc)
+	if err := env.SaveEnrollment(doc); err != nil {
+		t.Fatal(err)
+	}
 	err := Run(context.Background(), env, Options{Window: "30d"})
 	var ee *cli.ExitError
 	if !errors.As(err, &ee) || ee.Code != cli.ExitNotEnrolled || ee.M1E != "M1E-1001" {

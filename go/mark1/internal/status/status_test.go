@@ -67,28 +67,31 @@ func TestStatusReadsLiveSurfaces(t *testing.T) {
 	if err := os.MkdirAll(env.SpoolDir(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(env.SpoolDir(), "seg-0000000000000001.m1s"), make([]byte, 64), 0o600)
-	os.WriteFile(filepath.Join(env.SpoolDir(), "seg-0000000000000002.m1s"), make([]byte, 32), 0o600)
+	for name, size := range map[string]int{"seg-0000000000000001.m1s": 64, "seg-0000000000000002.m1s": 32} {
+		if err := os.WriteFile(filepath.Join(env.SpoolDir(), name), make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// OFF marker active.
 	if err := cli.WriteFileAtomic(env.OffMarkerPath(), []byte(`{"scope":"all"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// A live daemon socket.
 	sockDir, _ := os.MkdirTemp("", "m1")
-	defer os.RemoveAll(sockDir)
+	defer func() { _ = os.RemoveAll(sockDir) }()
 	sock := filepath.Join(sockDir, "s.sock")
 	l, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	go func() {
 		for {
 			c, err := l.Accept()
 			if err != nil {
 				return
 			}
-			c.Close()
+			_ = c.Close()
 		}
 	}()
 
@@ -128,7 +131,9 @@ func TestStatusBundleMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 	var rep Report
-	json.Unmarshal(out.Bytes(), &rep)
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatalf("stdout %q: %v", out.String(), err)
+	}
 	if rep.Bundle == nil || rep.Bundle.Seq != 483 || !rep.Bundle.Stale {
 		t.Fatalf("bundle %+v (age 20m > max_age 10m must be stale — M1E-3006 surface)", rep.Bundle)
 	}
