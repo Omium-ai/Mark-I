@@ -52,7 +52,14 @@ pub struct Shared {
     pub last_call_ms: AtomicU64,
     pub default_budget: u32,
     /// Dropped fabric pushes (08 §4.4: recomputable, counted, never blocking).
+    /// Nobody listening only — a refusal is a different fact and gets its own
+    /// counter below.
     pub fabric_dropped: AtomicU64,
+    /// Pushes mark1d refused with M1E-4003 (08 §4.3). Today that is every push
+    /// against a live daemon: D-AT requires a 16-byte non-zero `session_id`
+    /// and cortexd has no session identity to give until the MCP surface
+    /// carries one (D-AV). Counting it is what makes that gap a number.
+    pub fabric_handshake_refused: AtomicU64,
 }
 
 impl Shared {
@@ -69,6 +76,7 @@ impl Shared {
             last_call_ms: AtomicU64::new(0),
             default_budget: default_budget.clamp(MIN_CALL_TOKENS, MAX_CALL_TOKENS),
             fabric_dropped: AtomicU64::new(0),
+            fabric_handshake_refused: AtomicU64::new(0),
         }
     }
 }

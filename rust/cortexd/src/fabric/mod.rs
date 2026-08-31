@@ -1,13 +1,27 @@
 //! M1PL client → mark1d (04 §6 `fabric.rs`): CortexInjection events + L0 root
-//! pushes. Deadlines per 08 §4.4 — 100 ms connect, 250 ms write. cortexd's
-//! pushes are DROPPABLE by contract (08 §4.4): recomputable, counted as
-//! `Dropped{fabric_unavailable, DIAGNOSTIC}`, never blocking an index pass or
-//! an MCP answer.
+//! pushes. Deadlines per 08 §4.4 — 100 ms connect, then 250 ms for the whole
+//! post-connect exchange. cortexd's pushes are DROPPABLE by contract
+//! (08 §4.4): recomputable, counted, never blocking an index pass or an MCP
+//! answer.
 //!
-//! No Hello handshake is sent: m1p-wire's frozen framing surface (04 §7.4)
-//! encodes/decodes `pb::Event` only — the same shape the hookshim sibling
-//! ships (`mark1-hookshim/src/fabric.rs`). The 08 §4.3 Hello-first rule is a
-//! flagged contradiction for the lead pass, not something to improvise around.
+//! EVERY connection opens with `Hello` and waits for `HelloAck` (08 §4.3
+//! steps 2-3), the same shape the hookshim sibling ships. Not ceremony:
+//! mark1d closes any connection whose first frame is not Hello (M1E-4003),
+//! and `write_all` completes into the kernel buffer of a socket the daemon is
+//! about to close — so without the handshake every push returned `Ok(())`,
+//! nothing was delivered, and `fabric_dropped` read zero. There is no
+//! per-event ack (08 §4.3 step 4), so the HelloAck is the only delivery
+//! evidence this fabric has.
+//!
+//! That handshake is REFUSED today, deliberately. D-AT requires a 16-byte
+//! non-zero `session_id` from every writer; cortexd is a per-WORKSPACE daemon
+//! with no session identity anywhere, and giving it one means the MCP surface
+//! must carry a session per call — an 08 §6 protocol change sequenced for
+//! Phase 2 (D-AV). So cortexd cannot deliver until then. What changes here is
+//! that the loss is a number (`Shared::fabric_handshake_refused`) instead of
+//! a silent success. It is kept apart from `fabric_dropped` on purpose:
+//! "no daemon is listening" and "the daemon refused our identity" are
+//! different facts, and one counter would say neither.
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -51,8 +65,11 @@ pub fn cortex_injection_event(
         .unwrap_or_default();
     pb::Event {
         event_id: uuid::Uuid::now_v7().into_bytes().to_vec(),
-        // seq/session_epoch are assigned by mark1d at admission (07 §2);
-        // session_id is empty for the session-less cortexd writer (07 Hello doc).
+        // seq/session_epoch are assigned by mark1d at admission (07 §2).
+        // session_id stays empty because cortexd has none to put there — the
+        // same gap that gets its Hello refused (D-AV). Not a licence: a
+        // synthetic id would attribute every one of these to a session that
+        // never existed, which is the lie D-AT exists to end.
         seq: 0,
         session_id: Vec::new(),
         task_id: Vec::new(),
@@ -75,8 +92,19 @@ pub fn cortex_injection_event(
     }
 }
 
-/// Fire-and-forget push. Errors are counted (`fabric_dropped`), never raised:
-/// a cortexd push is recomputable by definition (08 §4.4).
+/// Why a push did not land. Two facts, two counters (D-AV): `Unavailable` is
+/// nobody listening; `HandshakeRefused` is mark1d answering M1E-4003, which
+/// until Phase 2 means D-AT rejecting cortexd's session-less Hello.
+#[derive(Debug, thiserror::Error)]
+pub enum PushError {
+    #[error("fabric unavailable: {0}")]
+    Unavailable(#[from] std::io::Error),
+    #[error("M1E-4003: mark1d refused the handshake")]
+    HandshakeRefused,
+}
+
+/// Fire-and-forget push. Errors are counted, never raised: a cortexd push is
+/// recomputable by definition (08 §4.4).
 pub fn spawn_push(shared: &Arc<Shared>, event: pb::Event) {
     let shared = Arc::clone(shared);
     // Called from both the writer thread and MCP tasks; use the ambient
@@ -87,9 +115,12 @@ pub fn spawn_push(shared: &Arc<Shared>, event: pb::Event) {
     };
     handle.spawn(async move {
         if let Err(e) = push(&event).await {
-            let n = shared.fabric_dropped.fetch_add(1, Ordering::Relaxed) + 1;
-            tracing::debug!(error = %e, dropped_total = n,
-                "fabric push dropped (fabric_unavailable, DIAGNOSTIC)");
+            let counter = match e {
+                PushError::HandshakeRefused => &shared.fabric_handshake_refused,
+                PushError::Unavailable(_) => &shared.fabric_dropped,
+            };
+            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::debug!(error = %e, total = n, "fabric push lost (DIAGNOSTIC)");
         }
     });
 }
@@ -109,8 +140,7 @@ pub fn spawn_root_push(shared: &Arc<Shared>, root_hash: [u8; 32], index_clock: u
 }
 
 #[cfg(unix)]
-async fn push(event: &pb::Event) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
+async fn push(event: &pb::Event) -> Result<(), PushError> {
     let mut frame = Vec::new();
     m1p_wire::encode_frame(event, &mut frame)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
@@ -118,26 +148,84 @@ async fn push(event: &pb::Event) -> std::io::Result<()> {
     for path in endpoints() {
         let connect = tokio::net::UnixStream::connect(&path);
         match tokio::time::timeout(CONNECT_DEADLINE, connect).await {
-            Ok(Ok(mut stream)) => {
-                // No per-event ack on the fabric (08 §4.3): a completed write
-                // is a completed send; durability is the spool's job.
-                return tokio::time::timeout(WRITE_DEADLINE, stream.write_all(&frame))
+            // A daemon that answered is the daemon; a refusal from it is an
+            // answer, not a reason to try the fallback endpoint.
+            Ok(Ok(stream)) => {
+                // Handshake and event share ONE budget. Re-spending the write
+                // deadline per step is how the hookshim sibling overran the
+                // deadline it had itself stated.
+                return tokio::time::timeout(WRITE_DEADLINE, deliver(stream, &frame))
                     .await
-                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?;
+                    .unwrap_or_else(|_| {
+                        Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
+                    });
             }
             Ok(Err(e)) => last = e,
             Err(_) => last = std::io::Error::from(std::io::ErrorKind::TimedOut),
         }
     }
-    Err(last)
+    Err(last.into())
 }
 
-/// Windows named-pipe fabric is a Phase-2 platform lane (04 §11.1); until it
-/// lands every push takes the counted-drop path, which is exactly the
-/// specified degraded state (fabric_unavailable, DIAGNOSTIC).
+/// Hello → HelloAck → event on one connection (08 §4.3 steps 2-4).
+#[cfg(unix)]
+async fn deliver(mut stream: tokio::net::UnixStream, event_frame: &[u8]) -> Result<(), PushError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut hello = Vec::new();
+    m1p_wire::encode_control(
+        &pb::FabricFrame {
+            kind: Some(pb::fabric_frame::Kind::Hello(pb::Hello {
+                component: "cortexd".to_owned(),
+                pid: std::process::id(),
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                // Empty until Phase 2 gives cortexd a session (D-AV). D-AT
+                // refuses it, which is the point: a refusal we count beats a
+                // fabricated session id that would misattribute every event.
+                session_id: Vec::new(),
+            })),
+        },
+        &mut hello,
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    stream.write_all(&hello).await?;
+
+    let mut dec = m1p_wire::FrameDecoder::new();
+    // A HelloAck frames to ~20 bytes; nothing else arrives before it.
+    let mut buf = [0u8; 64];
+    loop {
+        // 0 bytes is mark1d's M1E-4003 close reaching us as EOF (08 §4.3
+        // step 2) — the refusal carries no frame, so EOF IS the answer, and
+        // it must never look like a delivery.
+        let n = match stream.read(&mut buf).await? {
+            0 => return Err(PushError::HandshakeRefused),
+            n => n,
+        };
+        let frames = dec
+            .feed_frames(&buf[..n])
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        let Some(f) = frames.into_iter().next() else {
+            continue;
+        };
+        return match f.kind {
+            Some(pb::fabric_frame::Kind::HelloAck(ack)) if ack.accepted => {
+                stream.write_all(event_frame).await.map_err(PushError::from)
+            }
+            // accepted = false is 08 §4.3 step 3's mid-upgrade version refusal.
+            Some(pb::fabric_frame::Kind::HelloAck(_)) => Err(PushError::HandshakeRefused),
+            // Any other arm is a daemon speaking a dialect this client does not.
+            _ => Err(std::io::Error::from(std::io::ErrorKind::InvalidData).into()),
+        };
+    }
+}
+
+/// Windows has no fabric yet, so every push takes the counted-drop path, which
+/// is exactly the specified degraded state (fabric_unavailable, DIAGNOSTIC).
+/// The deferral is unsanctioned: 04 §11.1 assigns no phase and 02:613 makes
+/// NFR-PORTABILITY-002 Phase-1 green-required (D-CA/D-CD).
 #[cfg(not(unix))]
-async fn push(_event: &pb::Event) -> std::io::Result<()> {
-    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+async fn push(_event: &pb::Event) -> Result<(), PushError> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into())
 }
 
 #[cfg(test)]
@@ -145,22 +233,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn event_shape_is_wire_legal() {
+    fn event_frames_as_a_fabric_frame_event_arm() {
         let ev = cortex_injection_event([9u8; 32], 42, 2000, 1234, pb::InjectionChannel::McpPull);
         assert_eq!(ev.event_id.len(), 16);
         assert!(ev.tenant_id.is_empty(), "server-stamped band must be unset");
-        assert!(ev.session_id.is_empty(), "cortexd is a session-less writer");
         let mut frame = Vec::new();
         m1p_wire::encode_frame(&ev, &mut frame).unwrap();
         assert_eq!(&frame[..4], b"M1PL");
+        // D-U: what mark1d's `unwrap` reads as FabricFrame field 1 must be the
+        // Event arm. A bare Event on the wire would put `event_id` in that slot.
+        let mut dec = m1p_wire::FrameDecoder::new();
+        let frames = dec.feed_frames(&frame).unwrap();
+        match frames.first().and_then(|f| f.kind.as_ref()) {
+            Some(pb::fabric_frame::Kind::Event(got)) => assert_eq!(got.event_id, ev.event_id),
+            other => panic!("payload is not a FabricFrame Event arm: {other:?}"),
+        }
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn absent_daemon_is_a_counted_drop_not_a_hang() {
+        // Point both endpoints at an empty dir so a mark1d actually running on
+        // the dev box cannot turn this into the refusal case instead.
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        std::env::set_var("HOME", dir.path());
         let started = std::time::Instant::now();
         let ev = cortex_injection_event([0u8; 32], 1, 0, 0, pb::InjectionChannel::Unspecified);
-        assert!(push(&ev).await.is_err());
+        // Unavailable, NOT HandshakeRefused: nobody is listening, which is the
+        // fact `fabric_dropped` is for.
+        assert!(matches!(push(&ev).await, Err(PushError::Unavailable(_))));
         // Both endpoints refused/absent within the connect deadline each.
         assert!(started.elapsed() < Duration::from_millis(500));
     }
