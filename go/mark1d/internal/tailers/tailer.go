@@ -38,12 +38,12 @@ func newTailer(path, stateDir string, str stream) (*Tailer, error) {
 	}
 	fi, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	id, ok := fileID(fi)
 	if !ok {
-		f.Close()
+		_ = f.Close()
 		return nil, errors.New("tailers: no file identity on this platform")
 	}
 	t := &Tailer{path: path, stateDir: stateDir, str: str, f: f, id: id}
@@ -91,7 +91,7 @@ func (t *Tailer) poll(now time.Time, emit func([]*m1pv1.Event) error) error {
 			if err != nil {
 				return err
 			}
-			t.f.Close()
+			_ = t.f.Close()
 			t.f, t.id, t.off = f, id, 0
 		} else if fi.Size() < t.off {
 			// Truncation: same identity, shorter file ⇒ rewritten in place.
@@ -127,7 +127,7 @@ func (t *Tailer) save(now time.Time) error {
 }
 
 func (t *Tailer) close() {
-	t.f.Close()
+	_ = t.f.Close()
 }
 
 // readLines consumes every complete ('\n'-terminated) line past the cursor.
