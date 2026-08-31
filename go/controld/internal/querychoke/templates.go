@@ -397,10 +397,18 @@ WHERE {{tenant_pred}}`,
 		// for an offboarded tenant are a follow-up to the deletion-path job
 		// (one statement per template; the closed two-name set forbids three
 		// more delete templates without an ADR).
+		//
+		// ALTER TABLE … DELETE, not `DELETE FROM` — 07's deletion path names
+		// the mutation form, and for an erasure obligation the distinction is
+		// the whole point: a lightweight DELETE only sets _row_exists = 0 and
+		// the bytes stay in the part until some later merge, so "deleted" would
+		// be a claim about visibility, not about data. It also demands
+		// ALTER UPDATE(_row_exists) — a strictly WIDER grant than the deletion
+		// role holds, which is how this divergence surfaced.
 		name:    "offboard_delete_tenant",
 		version: "offboard_delete_tenant.v1",
 		write:   true,
-		body:    `DELETE FROM m1p_events WHERE {{tenant_pred}}`,
+		body:    `ALTER TABLE m1p_events DELETE WHERE {{tenant_pred}}`,
 		params:  map[string]paramSpec{},
 		readSet: []string{"m1p_events"},
 		timeout: timeoutReport,

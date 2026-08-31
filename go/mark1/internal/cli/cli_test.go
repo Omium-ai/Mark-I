@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -23,10 +24,10 @@ func TestWriteFileAtomicModeAndContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %o, want 0600", fi.Mode().Perm())
 	}
-	if di, _ := os.Stat(filepath.Join(dir, "sub")); di.Mode().Perm() != 0o700 {
+	if di, _ := os.Stat(filepath.Join(dir, "sub")); runtime.GOOS != "windows" && di.Mode().Perm() != 0o700 {
 		t.Fatalf("parent dir mode %o, want 0700", di.Mode().Perm())
 	}
 	// Overwrite must replace whole content (rename semantics), never append.
@@ -71,7 +72,7 @@ func TestSaveEnrollmentIsPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	fi, _ := os.Stat(env.EnrollmentPath())
-	if fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("enrollment mode %o, want 0600", fi.Mode().Perm())
 	}
 }

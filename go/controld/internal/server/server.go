@@ -28,6 +28,16 @@ type Module interface {
 	Ready(ctx context.Context) error
 }
 
+// Drainer is an OPTIONAL module capability, checked at shutdown. It exists for
+// long-lived responses: http.Server.Shutdown waits for connections to go idle,
+// and an SSE stream never does, so without this a deploy burns the whole drain
+// budget before killing the streams anyway. 05 §1.5 step 2 names the required
+// behaviour for policydist — "close SSE policy streams with a final
+// `event: ping` and connection close" — and this is where it is invoked.
+type Drainer interface {
+	Drain()
+}
+
 // Server is the process's single HTTP front (05 §0.1: one deployment surface).
 type Server struct {
 	mux      *http.ServeMux
@@ -110,6 +120,13 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	s.draining.Store(true)
+	// Readiness is 503 from the line above; long-lived responses get told to
+	// end before Shutdown starts waiting on them (05 §1.5 steps 1–2).
+	for _, m := range s.modules {
+		if d, ok := m.(Drainer); ok {
+			d.Drain()
+		}
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.drain)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {

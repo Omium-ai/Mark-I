@@ -1,3 +1,5 @@
+//go:build integration
+
 package chconn
 
 // DSN-gated ClickHouse integration for boot refusal R3 (05 §1.2): the
@@ -69,7 +71,7 @@ func chNativeEndpoint(t *testing.T) (addr, user, pass string) {
 	if err != nil {
 		t.Fatalf("cannot reach test ClickHouse over M1_TEST_CH_DSN: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("tcp_port probe over M1_TEST_CH_DSN: status %d: %s", resp.StatusCode, body)
