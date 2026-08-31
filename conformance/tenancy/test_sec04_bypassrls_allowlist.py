@@ -51,13 +51,20 @@ import pytest
 # ---------------------------------------------------------------------------
 
 # `local` covers both ways this repo's clusters get built: `just stores-up` runs
-# `initdb -U mark1` (so `mark1` is the bootstrap superuser and no `postgres`
-# role exists), while a container image ships `postgres`. Both names are listed
-# because both are legitimately the migration runner; neither is required to
-# exist. A name that is allowed but absent costs nothing — the assertions below
-# are subset checks, so an unused entry can never turn a red run green.
+# `initdb -U m1_bootstrap` (so `m1_bootstrap` is the bootstrap superuser and no
+# `postgres` role exists), while a container image ships `postgres`. Both names
+# are listed because both are legitimately the migration runner; neither is
+# required to exist. A name that is allowed but absent costs nothing — the
+# assertions below are subset checks, so an unused entry can never turn a red
+# run green.
+#
+# `mark1` was on this list when it was the bootstrap superuser AND the DSN every
+# isolation test connects as — a role that both bypassed RLS and was the subject
+# of every RLS assertion. Splitting the two DSNs (M1_MIGRATE_PG_DSN vs
+# M1_TEST_PG_DSN) is what let it come OFF: this edit narrows the waiver from the
+# suite's own role to a role the suite never connects as.
 SUPERUSER_ALLOWED: dict[str, frozenset[str]] = {
-    "local": frozenset({"postgres", "mark1"}),
+    "local": frozenset({"postgres", "m1_bootstrap"}),
     # RDS PG15: `rdsadmin` is AWS's own and cannot be dropped; the master user
     # holds rds_superuser and runs the Argo migration Job.
     "rds": frozenset({"rdsadmin", "omium_master"}),
