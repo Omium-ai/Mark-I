@@ -2,9 +2,9 @@
 // bound, the Go half of the two-language codec the m1pl conformance vectors
 // freeze (12 §3.4) — plus the unix listener (listener.go) whose read loop
 // wraps the Decoder exactly as shaped: Push what Read returned, drain Next
-// until incomplete, close the connection on any reject. The Windows named
-// pipe and the 08 §4.3 Hello handshake stay later rows (Hello has no
-// m1p.v1 message in the frozen proto yet — nothing to implement against).
+// until incomplete, close the connection on any reject. session.go carries
+// the D-U FabricFrame layer (08 §4.3 handshake, gate.go's GateQuery handler,
+// Flush/FlushAck). The Windows named pipe stays a later row.
 package fabric
 
 import (
@@ -99,9 +99,9 @@ func (d *Decoder) Next() (payload []byte, consumed int, err error) {
 	return payload, total, nil
 }
 
-// WriteFrame frames one encoded m1p.v1.Event onto w. The writer enforces the
-// same bound as the decoder, so an unframeable payload fails here rather than
-// as a peer's connection close (mirrors the Rust encoder's refusal).
+// WriteFrame frames one encoded m1p.v1.FabricFrame onto w (D-U). The writer
+// enforces the same bound as the decoder, so an unframeable payload fails here
+// rather than as a peer's connection close (mirrors the Rust encoder's refusal).
 // Two writes are safe because a fabric connection has exactly one writing
 // goroutine (04 §8.1); nothing interleaves a header with a foreign payload.
 func WriteFrame(w io.Writer, payload []byte) error {

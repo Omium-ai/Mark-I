@@ -113,6 +113,14 @@ func (a *Admitter) Admit(ctx context.Context, ev *m1pv1.Event) error {
 	if ev == nil || ev.GetBody() == nil || len(ev.GetSessionId()) != 16 {
 		return a.quarantine(ev, "malformed envelope")
 	}
+	var sid [16]byte
+	copy(sid[:], ev.GetSessionId())
+	if sid == ([16]byte{}) {
+		// D-AL: session_id is OPTIONAL on the wire, so all-zero is "absent"
+		// encoded as present — it must not become the seq key every
+		// session-less writer on the box shares.
+		return a.quarantine(ev, "all-zero session_id is absent, not an address")
+	}
 	// The 900-band is server-stamped from verified token claims; a non-empty
 	// value here would 403 the WHOLE batch at ingest (07 §2, M1E-8003), so
 	// normalize clears it rather than letting one confused writer poison
@@ -136,8 +144,6 @@ func (a *Admitter) Admit(ctx context.Context, ev *m1pv1.Event) error {
 	// uint64 per session seen; an eviction sweep if long-lived daemons ever
 	// accumulate enough sessions to matter.
 	a.mu.Lock()
-	var sid [16]byte
-	copy(sid[:], ev.GetSessionId())
 	a.seq[sid]++
 	ev.Seq = a.seq[sid]
 	ev.SessionEpoch = a.epoch
@@ -175,10 +181,11 @@ func (a *Admitter) Admit(ctx context.Context, ev *m1pv1.Event) error {
 	return err
 }
 
-// AdmitBytes is the fabric-facing door: one M1PL payload (an encoded
-// m1p.v1.Event, 07 §5) in, the same pipeline. Undecodable payloads are a
-// content failure on an intact framing layer — quarantined and accounted,
-// the connection lives on.
+// AdmitBytes is the fabric-facing door: the INNER Event bytes of one
+// FabricFrame (D-U — fabric unwraps the oneof; these are the exact bytes the
+// writer serialized, so the spool record layout is unchanged) in, the same
+// pipeline. Undecodable payloads are a content failure on an intact framing
+// layer — quarantined and accounted, the connection lives on.
 func (a *Admitter) AdmitBytes(ctx context.Context, payload []byte) error {
 	ev := &m1pv1.Event{}
 	if err := proto.Unmarshal(payload, ev); err != nil {
@@ -279,11 +286,11 @@ func bumpEpoch(path string) (uint32, error) {
 		return 0, err
 	}
 	if _, err := f.WriteString(strconv.FormatUint(next, 10)); err != nil {
-		f.Close()
+		_ = f.Close()
 		return 0, err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return 0, err
 	}
 	if err := f.Close(); err != nil {
