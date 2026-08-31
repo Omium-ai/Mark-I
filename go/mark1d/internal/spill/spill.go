@@ -223,7 +223,15 @@ func (d *Drainer) drainFile(ctx context.Context, path string) error {
 			quarantined++
 			continue
 		}
-		err := d.adm.AdmitBytes(ctx, payload)
+		// Ring records are whole FabricFrames (the shim spills what it would
+		// have written to the socket); AdmitBytes takes the inner Event. The
+		// live path unwraps in session.frame before the handler ever sees it.
+		inner, err := fabric.UnwrapEvent(payload)
+		if err != nil {
+			quarantined++
+			continue
+		}
+		err = d.adm.AdmitBytes(ctx, inner)
 		switch {
 		case err == nil,
 			errors.Is(err, capture.ErrShed),
