@@ -1353,10 +1353,10 @@ pub struct BundleAck {
     /// `policy_bundles.body_sha256` (07) and as leafed into the transparency log
     /// (05 §4.4: "leaves are SHA-256(bundle canonical bytes)"). Carried raw rather
     /// than as an algorithm-prefixed string so the ACK cannot disagree with the
-    /// catalog about encoding. NOTE: 08 §3.2 renders this JSON field as
-    /// "blake3:…" while 07 and 05 both specify SHA-256 — a documented
-    /// disagreement about the algorithm LABEL only; the field is 32 bytes either
-    /// way and the label is out-of-band.
+    /// catalog about encoding. 08 §3.2 once rendered this JSON field as "blake3:…"
+    /// against 07 and 05's SHA-256; that divergence is closed — the label is
+    /// "sha256:" everywhere, and it stays out-of-band because the field is 32 raw
+    /// bytes regardless of what any renderer calls them.
     #[prost(bytes="vec", tag="3")]
     pub bundle_hash: ::prost::alloc::vec::Vec<u8>,
     /// "applied" | "rejected" | "partial" (08 §3.2, 05 §4.3). Empty or
@@ -1630,6 +1630,23 @@ pub struct VerdictEvent {
     /// \[P0\] ensemble members fused
     #[prost(uint32, tag="6")]
     pub vote_count: u32,
+    /// \[P0\] DECISION D-T (lead, binding). Evidence quality is a SEPARATE AXIS from
+    /// pipeline position, and conflating them cost us a representable state: an
+    /// adjudicated-but-uncertified verdict had no wire form, because
+    /// VERDICT_STAGE_CERTIFIED sits among the position values while asserting
+    /// quality. The only escape was the field-4 convention ("empty cert id ⇒
+    /// uncertified/bootstrapping"), which cannot separate bootstrapping from
+    /// uncertified — a distinction 06 §5.4 makes load-bearing, since bootstrapping
+    /// verdicts gate sessions while uncertified ones may not feed certification.
+    ///
+    /// A new field rather than new enum values: adding values to VerdictStage would
+    /// have kept the two axes fused and made every consumer switch over a product
+    /// of them. Renaming VERDICT_STAGE_CERTIFIED to _ADJUDICATED would be the
+    /// honest name but changes the JSON encoding — breaking under WIRE_JSON — so
+    /// the name stays and this field carries the truth. Read stage for WHERE the
+    /// verdict came from, this for WHAT MAY BE CLAIMED about it.
+    #[prost(enumeration="CertificationStatus", tag="7")]
+    pub certification: i32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -1706,8 +1723,11 @@ pub enum VerdictStage {
     Unspecified = 0,
     /// edge fusion cache — what the stop-gate reads
     Provisional = 1,
-    /// adjudicator, noise-certified
+    /// adjudicator-emitted. NAME IS HISTORICAL (D-T):
     Certified = 2,
+    /// this is the "adjudicated" position; whether it
+    /// is certified lives in `certification`.
+    ///
     /// slow anchors / re-adjudication overturned it
     Revised = 3,
 }
@@ -1731,6 +1751,45 @@ impl VerdictStage {
             "VERDICT_STAGE_PROVISIONAL" => Some(Self::Provisional),
             "VERDICT_STAGE_CERTIFIED" => Some(Self::Certified),
             "VERDICT_STAGE_REVISED" => Some(Self::Revised),
+            _ => None,
+        }
+    }
+}
+/// D-T. Degrades faster than it upgrades (06 §5): the WEAKEST input wins, so a
+/// verdict fusing even one literature-default likelihood row cannot claim
+/// CERTIFIED no matter how good the certificate is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CertificationStatus {
+    /// not stated — treat as UNCERTIFIED
+    Unspecified = 0,
+    /// no certificate at all
+    Uncertified = 1,
+    /// certificate exists, below the D16 gate
+    Bootstrapping = 2,
+    /// cert stamped AND every fused row measured
+    Certified = 3,
+}
+impl CertificationStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            CertificationStatus::Unspecified => "CERTIFICATION_STATUS_UNSPECIFIED",
+            CertificationStatus::Uncertified => "CERTIFICATION_STATUS_UNCERTIFIED",
+            CertificationStatus::Bootstrapping => "CERTIFICATION_STATUS_BOOTSTRAPPING",
+            CertificationStatus::Certified => "CERTIFICATION_STATUS_CERTIFIED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CERTIFICATION_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "CERTIFICATION_STATUS_UNCERTIFIED" => Some(Self::Uncertified),
+            "CERTIFICATION_STATUS_BOOTSTRAPPING" => Some(Self::Bootstrapping),
+            "CERTIFICATION_STATUS_CERTIFIED" => Some(Self::Certified),
             _ => None,
         }
     }
@@ -2103,6 +2162,54 @@ impl DropReason {
         }
     }
 }
+/// DECISION D-U (lead, binding). The payload of EVERY M1PL frame is one
+/// serialized FabricFrame. 07 §5 and 08 §4.2 always said the payload is "an
+/// Event, or a control message" — but proto3 bytes are not self-describing, so
+/// without a carried discriminator both ends of the fabric would have to guess
+/// (or worse, invent independent conventions — the exact hole that produced
+/// D-N). This oneof IS that sentence made executable. The M1PL header
+/// (magic|ver|len) is untouched; the fabric is an "internal" tier surface
+/// (08 §1), both ends ship in one signed package, and nothing is deployed —
+/// this change is the cheapest it will ever be.
+///
+/// Event keeps field 1: it is the overwhelming majority of frames and field 1
+/// costs the smallest tag. mark1d unwraps and spools the INNER Event bytes —
+/// the spool record layout (07 §6) does not change, and control messages
+/// remain structurally unspoolable: there is no oneof arm a spool record can
+/// carry, because admission takes the Event, not the frame.
+/// TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
+/// next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, cortex
+/// pull, Phase 4), 10 = ContaminationAlert (defined below). 8 and 9 are
+/// reserved by this note and by the ruling ledger, not yet by a field.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FabricFrame {
+    #[prost(oneof="fabric_frame::Kind", tags="1, 2, 3, 4, 5, 6, 7, 10")]
+    pub kind: ::core::option::Option<fabric_frame::Kind>,
+}
+/// Nested message and enum types in `FabricFrame`.
+pub mod fabric_frame {
+    #[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Kind {
+        #[prost(message, tag="1")]
+        Event(super::Event),
+        #[prost(message, tag="2")]
+        Hello(super::Hello),
+        #[prost(message, tag="3")]
+        HelloAck(super::HelloAck),
+        #[prost(message, tag="4")]
+        GateQuery(super::GateQuery),
+        #[prost(message, tag="5")]
+        GateVerdict(super::GateVerdict),
+        #[prost(message, tag="6")]
+        Flush(super::Flush),
+        #[prost(message, tag="7")]
+        FlushAck(super::FlushAck),
+        #[prost(message, tag="10")]
+        ContaminationAlert(super::ContaminationAlert),
+    }
+}
 /// First frame on every connection (08 §4.3 step 2: any other first frame ⇒
 /// close M1E-4003). mark1d replies HelloAck or closes.
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -2119,8 +2226,16 @@ pub struct Hello {
     /// admission criterion (rejection authority belongs to the M1PL ver byte).
     #[prost(string, tag="3")]
     pub version: ::prost::alloc::string::String,
-    /// 16-byte session UUIDv7 when the writer is session-bound (shim, tailer);
-    /// empty for session-less writers (cortexd push maps).
+    /// 16-byte session UUIDv7. REQUIRED, non-zero, from every writer (D-AT): this
+    /// is the attribution key for everything the connection goes on to send, so a
+    /// writer without one is a writer whose events attribute to nothing. Missing,
+    /// wrong-length or all-zero ⇒ the daemon closes with M1E-4003.
+    ///
+    /// This field previously read "empty for session-less writers (cortexd push
+    /// maps)". That sanctioned a writer the daemon accepted and then silently
+    /// dropped everything from, which is the failure D-AT exists to end. cortexd
+    /// is not exempt — it has no session identity yet, so its pushes are refused
+    /// and counted until the MCP surface carries one (D-AV).
     #[prost(bytes="vec", tag="4")]
     pub session_id: ::prost::alloc::vec::Vec<u8>,
 }
@@ -2192,6 +2307,41 @@ pub struct FlushAck {
     /// the writer's receipt that its stream is durable, not a global counter.
     #[prost(uint64, tag="1")]
     pub drained: u64,
+}
+/// proxy → mark1d, ONE-WAY (D-AI). 04 §3.1 step 6's config rollback: an upstream
+/// subscription-billing marker means an OAuth credential reached the wire — the
+/// CON-001 P0 — and the base-URL fragment must stop pointing at the proxy before
+/// the agent's next request.
+///
+/// The proxy NEVER awaits a reply. It has already killed the session and will
+/// refuse every subsequent request for it on its own authority; this frame is
+/// notification, not permission, because a P0 kill that blocks on a daemon
+/// round-trip is a P0 kill a hung daemon can veto. If mark1d is unreachable the
+/// fragment stays pointed at a proxy that now refuses everything for the session,
+/// so the failure direction is closed.
+///
+/// Deliberately carries no evidence. Control messages are non-durable by scope
+/// (this file's header): evidence fields here would be evidence that is thrown
+/// away. The provable record is the GuardDecision event + its per-event
+/// `guard_contamination` receipt (policy.proto, 07 §11), which takes the durable
+/// path. This frame carries only what mark1d needs to act.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ContaminationAlert {
+    /// 16-byte session UUIDv7, same bytes as Hello.session_id — what to attribute
+    /// the resulting CoverageTransition{BYPASS} to.
+    #[prost(bytes="vec", tag="1")]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    /// The M1-Cred-Ref that transited. mark1d issued it at provisioning, so this
+    /// is what resolves to the agent + workspace whose fragment must be reverted;
+    /// session_id alone does not identify a config file.
+    #[prost(string, tag="2")]
+    pub cred_ref: ::prost::alloc::string::String,
+    /// GuardDecision.reason_code's closed edge-emitted vocabulary (policy.proto);
+    /// "oauth_marker" is its only current member here. Present so `mark1 doctor`
+    /// can state why a fragment reverted — a silent rollback is unexplainable.
+    #[prost(string, tag="3")]
+    pub reason_code: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

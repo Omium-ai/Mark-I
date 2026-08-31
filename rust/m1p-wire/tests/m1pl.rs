@@ -151,6 +151,92 @@ fn conf_vectors_m1pl_split_iteration() {
     }
 }
 
+/// Every FabricFrame arm (D-U) survives encode → frame → decode, and the
+/// decoder hands back the typed arm the writer sent — the round-trip the
+/// hookshim's handshake and gate paths ride on.
+#[test]
+fn frame_roundtrip_every_fabric_arm() {
+    use m1p_wire::pb::fabric_frame::Kind;
+    let arms = vec![
+        Kind::Event(pb::Event {
+            event_id: vec![3u8; 16],
+            body: Some(Body::Turn(Default::default())),
+            ..Default::default()
+        }),
+        Kind::Hello(pb::Hello {
+            component: "mark1-hookshim".into(),
+            pid: 4242,
+            version: "0.1.0".into(),
+            session_id: vec![5u8; 16],
+        }),
+        Kind::HelloAck(pb::HelloAck {
+            accepted: true,
+            max_frame: m1p_wire::M1PL_MAX_FRAME,
+            want_ver: 0,
+        }),
+        Kind::GateQuery(pb::GateQuery {
+            task_id: vec![9u8; 16],
+            gate: pb::GateKind::Stop as i32,
+            deadline_ms: 29_990,
+        }),
+        Kind::GateVerdict(pb::GateVerdict {
+            decision: pb::GateDecision::Block as i32,
+            verdict: pb::Verdict::Violated as i32,
+            posterior: vec![0.02, 0.95, 0.02, 0.01],
+            reason: "two anchors report the build is broken".into(),
+            evidence_ref: "evidence/abc".into(),
+        }),
+        Kind::Flush(pb::Flush {}),
+        Kind::FlushAck(pb::FlushAck { drained: 17 }),
+    ];
+    for kind in arms {
+        let frame = pb::FabricFrame { kind: Some(kind) };
+        let mut bytes = Vec::new();
+        m1p_wire::encode_control(&frame, &mut bytes).unwrap();
+        let mut dec = FrameDecoder::new();
+        let got = dec.feed_frames(&bytes).unwrap();
+        assert_eq!(got, vec![frame], "arm did not survive the round trip");
+    }
+}
+
+/// D-U's discriminator has teeth: a payload of nothing but unknown fields is
+/// structurally a decodable FabricFrame with no arm set. proto3 skips unknown
+/// fields, so without an explicit check that frame would decode "fine" and be
+/// silently ignored — the invisible-loss class this decoder must not have.
+#[test]
+fn empty_fabric_frame_is_a_decode_error() {
+    // Field 15, varint 1 — a tag no FabricFrame arm claims.
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&MAGIC);
+    bytes.push(VERSION);
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&[0x78, 0x01]);
+
+    let mut dec = FrameDecoder::new();
+    let err = dec.feed_frames(&bytes).unwrap_err();
+    assert_eq!(err.code(), "M1E-4002");
+    assert_eq!(
+        m1p_wire::decode_payload(&[0x78, 0x01]).unwrap_err().code(),
+        "M1E-4002"
+    );
+}
+
+/// `feed()` is the event-stream surface (04 §7.4): a control arm arriving
+/// there is the peer speaking a dialect this reader does not.
+#[test]
+fn feed_rejects_a_control_arm() {
+    let mut bytes = Vec::new();
+    m1p_wire::encode_control(
+        &pb::FabricFrame {
+            kind: Some(m1p_wire::pb::fabric_frame::Kind::Flush(pb::Flush {})),
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    let mut dec = FrameDecoder::new();
+    assert_eq!(dec.feed(&bytes).unwrap_err().code(), "M1E-4002");
+}
+
 /// Every `m1p.v1` event family survives encode → frame → decode with
 /// byte-identical payloads (13 §11 row C2's "round-trips every event family").
 #[test]
@@ -188,20 +274,38 @@ fn frame_roundtrip_every_event_family() {
             body: Some(body),
             ..Default::default()
         };
+        // D-U: the payload is the wrapping FabricFrame, and mark1d spools the
+        // INNER Event bytes — so the writer's exact Event encoding must still
+        // appear verbatim inside the payload (07 §5, §6).
         let direct = ev.encode_to_vec();
+        let wrapped = pb::FabricFrame {
+            kind: Some(m1p_wire::pb::fabric_frame::Kind::Event(ev.clone())),
+        }
+        .encode_to_vec();
         let mut framed = Vec::new();
         encode_frame(&ev, &mut framed).unwrap();
-        assert_eq!(framed.len(), HEADER_LEN + direct.len());
+        assert_eq!(framed.len(), HEADER_LEN + wrapped.len());
 
         let mut dec = FrameDecoder::new();
         dec.push(&framed);
         match dec.next_frame() {
             Outcome::Accept { payload, consumed } => {
-                assert_eq!(payload, direct, "payload bytes drifted through framing");
+                assert_eq!(payload, wrapped, "payload bytes drifted through framing");
                 assert_eq!(consumed, framed.len());
-                let back = pb::Event::decode(payload.as_slice()).unwrap();
-                assert_eq!(back, ev);
-                assert_eq!(back.encode_to_vec(), direct, "re-encode not byte-identical");
+                assert!(
+                    payload.windows(direct.len()).any(|w| w == direct),
+                    "the inner Event bytes mark1d spools are not verbatim in the frame"
+                );
+                let back = m1p_wire::decode_payload(&payload).unwrap();
+                assert_eq!(
+                    back.kind,
+                    Some(m1p_wire::pb::fabric_frame::Kind::Event(ev.clone()))
+                );
+                assert_eq!(
+                    back.encode_to_vec(),
+                    wrapped,
+                    "re-encode not byte-identical"
+                );
             }
             other => panic!("round-trip did not accept: {other:?}"),
         }
@@ -270,18 +374,21 @@ fn feed_accepted_events_survive_later_payload_error() {
     assert_eq!(dec.feed(&[]).unwrap_err().code(), "M1E-4002");
 }
 
-/// A default Event encodes to zero bytes, and len == 0 is a protocol error on
-/// the wire (08 §4.2) — the encoder must refuse it rather than emit a frame
-/// every conformant decoder will reject.
+/// An arm-less FabricFrame encodes to zero bytes, and len == 0 is a protocol
+/// error on the wire (08 §4.2) — the encoder must refuse it rather than emit
+/// a frame every conformant decoder will reject. Since D-U this is the ONLY
+/// zero-length payload reachable: a default Event now frames, because its
+/// wrapper still carries the arm tag.
 #[test]
-fn encode_refuses_zero_length_event() {
+fn encode_refuses_arm_less_frame() {
     let mut out = Vec::new();
-    let err = encode_frame(&pb::Event::default(), &mut out).unwrap_err();
+    let err = m1p_wire::encode_control(&pb::FabricFrame::default(), &mut out).unwrap_err();
     assert_eq!(err.code(), "M1E-4002");
     assert!(
         out.is_empty(),
         "refused encode must not leave partial header bytes"
     );
+    encode_frame(&pb::Event::default(), &mut out).expect("the Event arm tag is never zero-length");
 }
 
 proptest! {
