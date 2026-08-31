@@ -58,10 +58,17 @@ func sealRecord(t *testing.T, pub, plaintext []byte, ts time.Time) []byte {
 	return rec
 }
 
-// frame wraps one encoded Event in an M1PL frame (07 §5), what the shim spills.
+// frame builds what the shim actually spills: M1PL(FabricFrame{event}) — the
+// output of m1p_wire::encode_frame, which wraps before it frames
+// (framing.rs:220). Both layers matter: this helper used to emit M1PL(Event),
+// one layer short, and because FabricFrame.event and Event.event_id are both
+// field 1 wiretype 2, the missing layer produced no decode error anywhere —
+// which is how a drain path that lost 100% of spilled events passed its tests.
 func frame(t *testing.T, ev *m1pv1.Event) []byte {
 	t.Helper()
-	payload, err := proto.Marshal(ev)
+	payload, err := proto.Marshal(&m1pv1.FabricFrame{
+		Kind: &m1pv1.FabricFrame_Event{Event: ev},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
