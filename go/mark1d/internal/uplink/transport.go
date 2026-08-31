@@ -76,7 +76,7 @@ func (u *Uplink) post(ctx context.Context, b *outBatch) (*ingestResp, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// A redirect is a middlebox or captive portal answering, never controld
 	// (the client is built to not follow one): network-class, retryable —
 	// neither an ack nor a content verdict the 4xx rule may quarantine on.
