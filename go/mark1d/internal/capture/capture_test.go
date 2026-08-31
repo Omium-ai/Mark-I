@@ -23,7 +23,7 @@ func openSpool(t *testing.T, dir string) *spool.Spool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { sp.Close() })
+	t.Cleanup(func() { _ = sp.Close() })
 	return sp
 }
 
@@ -229,7 +229,7 @@ func TestDiagnosticShed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { sp.Close() })
+	t.Cleanup(func() { _ = sp.Close() })
 	a, err := New(sp, Config{EpochPath: filepath.Join(dir, "epoch"), Redact: passRedact})
 	if err != nil {
 		t.Fatal(err)
@@ -307,5 +307,26 @@ func TestRedactSubstitutionPreSpool(t *testing.T) {
 	}
 	if !sawToken {
 		t.Fatal("no redaction token on disk — the event never landed, so the assertion proved nothing")
+	}
+}
+
+// TestAllZeroSessionIsNotAdmitted is D-AL at the seq authority: session_id is
+// OPTIONAL on the wire, so all-zero is "absent" spelled as present. Admitted, it
+// becomes the one seq counter every session-less writer on the box shares, and
+// (session_epoch, seq) — 07 §2's uniqueness pair — stops being unique.
+func TestAllZeroSessionIsNotAdmitted(t *testing.T) {
+	dir := t.TempDir()
+	a, err := New(openSpool(t, filepath.Join(dir, "spool")), Config{
+		EpochPath: filepath.Join(dir, "epoch"), Redact: passRedact,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := usageEvent(0) // sid[0]=0 over a zeroed 16-byte array: all-zero
+	if err := a.Admit(context.Background(), ev); !errors.Is(err, ErrQuarantined) {
+		t.Fatalf("Admit(all-zero session) = %v, want it quarantined and accounted", err)
+	}
+	if got := a.DrainDropped(); len(got) != 1 || got[0].Quantity != 1 {
+		t.Fatalf("loss ledger %+v, want exactly one accounted drop", got)
 	}
 }

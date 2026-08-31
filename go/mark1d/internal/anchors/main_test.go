@@ -1,13 +1,40 @@
 package anchors
 
 import (
+	"context"
 	"net"
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
+
+// fakeEmitter records what the vote path admitted. It lives in the tag-free
+// file for the reason stated above about extraProbes, inverted: it came from
+// runner_test.go, which is //go:build unix, while votes_test.go — which is not
+// — uses it, so the anchors package did not compile on Windows at all. Nothing
+// about an in-memory slice is platform-specific; only the file it sat in was.
+type fakeEmitter struct {
+	mu     sync.Mutex
+	events []*m1pv1.Event
+}
+
+func (f *fakeEmitter) Admit(_ context.Context, ev *m1pv1.Event) error {
+	f.mu.Lock()
+	f.events = append(f.events, ev)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeEmitter) all() []*m1pv1.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*m1pv1.Event(nil), f.events...)
+}
 
 // probeEnv selects a probe behavior when THIS test binary is exec'd inside the
 // sandbox: the sandbox negatives run the real sandbox against the test binary
@@ -50,7 +77,7 @@ func runProbe(mode string) {
 		if err != nil {
 			os.Exit(1)
 		}
-		conn.Close()
+		_ = conn.Close()
 		os.Exit(0)
 	case "uds":
 		// AF_UNIX probe: a netns denies IP but not pathname unix sockets, so
@@ -59,7 +86,7 @@ func runProbe(mode string) {
 		if err != nil {
 			os.Exit(1)
 		}
-		conn.Close()
+		_ = conn.Close()
 		os.Exit(0)
 	case "write":
 		if err := os.WriteFile(os.Getenv("MARK1_ANCHOR_TEST_PATH"), []byte("escaped"), 0o600); err != nil {
@@ -87,18 +114,31 @@ func runProbe(mode string) {
 	case "sleep":
 		time.Sleep(time.Minute)
 		os.Exit(0)
+	case "memhog":
+		// Memory-cap probe: allocate AND TOUCH far past any sane cap, so the
+		// pages are really committed rather than lazily reserved. Exit 0 iff
+		// every allocation succeeded — the cap test asserts a nonzero exit.
+		var held [][]byte
+		for i := 0; i < 64; i++ {
+			b := make([]byte, 32<<20)
+			for j := 0; j < len(b); j += 4096 {
+				b[j] = 1
+			}
+			held = append(held, b)
+		}
+		os.Exit(len(held) - 64)
 	case "flood":
 		// Output-cap probe: 8 MiB to stdout, far past any test cap.
 		chunk := strings.Repeat("x", 64<<10)
 		for i := 0; i < 128; i++ {
-			os.Stdout.WriteString(chunk)
+			_, _ = os.Stdout.WriteString(chunk)
 		}
 		os.Exit(0)
 	case "env":
 		// Env-scrub probe: print the entire environment, sorted, one per line.
 		env := os.Environ()
 		sort.Strings(env)
-		os.Stdout.WriteString(strings.Join(env, "\n"))
+		_, _ = os.Stdout.WriteString(strings.Join(env, "\n"))
 		os.Exit(0)
 	default:
 		if f, ok := extraProbes[mode]; ok {
