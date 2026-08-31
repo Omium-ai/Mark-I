@@ -21,7 +21,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # Tool pins. A floating tool version is a statement about *time* (13 §9.5).
-  GO_VERSION: "1.25.0"
+  GO_VERSION: "1.25.14"
   GOLANGCI_VERSION: "v2.1.6"
   GOVULNCHECK_VERSION: "v1.1.4"
   PIP_AUDIT_VERSION: "2.9.0"
@@ -40,7 +40,16 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
         with:
           github_token: ${{ github.token }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
       - uses: extractions/setup-just@v2
+      # buf.gen.yaml's betterproto plugin is `uv run --frozen protoc-gen-python_betterproto`
+      # — a LOCAL plugin, deliberately, so plugin and runtime come from one uv.lock
+      # resolution. This job had neither uv nor a synced env, so codegen died at
+      # `exec: "uv": executable file not found` before generating a single file, and the
+      # freshness gate reported that as a failure of the committed gen.
+      - run: just build-py
       - run: just gen-check
       - run: just lint-proto
 
@@ -76,7 +85,10 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2
-      - run: cargo install cargo-deny --locked --version 0.16.4
+      # 0.16.4 could not PARSE the current advisory DB (TOML error in RUSTSEC-2026-0066.md), so
+      # the supply-chain gate was failing before it checked a single crate — a security gate that
+      # is red for a reason unrelated to security is a gate nobody reads.
+      - run: cargo install cargo-deny --locked --version 0.20.2
       - run: just lint-rust
       - run: just test-rust
 
@@ -103,7 +115,29 @@ jobs:
       - run: go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
       - run: just build-go
       - run: just lint-go
+      # cmd/phase2_gate_test.go IS the Phase 2 milestone, and it needs a real anchor binary on
+      # PATH — it refuses to fake one, which is correct. Without ruff it t.Skip()s, the job exits
+      # 0, and the milestone reported success by never running on any leg (D-CG). ruff comes from
+      # uv.lock rather than a pin here, so the anchor is the same one lint-py resolves and there
+      # is no second version to drift.
+      #
+      # ubuntu-only by SUBJECT, not convenience: macOS has no namespace sandbox
+      # (anchors/sandbox_other.go returns UnavailableSandbox, so derivation is empty there
+      # whatever is installed), and windows-2022 never compiles this //go:build unix package.
+      - if: matrix.os == 'ubuntu-24.04'
+        uses: astral-sh/setup-uv@v5
+      - if: matrix.os == 'ubuntu-24.04'
+        run: |
+          uv sync --frozen --all-packages
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      # M1_REQUIRE_STORES turns that skip into a failure. It is the existing gate for exactly this
+      # shape — a suite whose external dependency is absent — and already covers a non-store
+      # binary (receipts/integration_test.go gates `cargo` on it). Every other test that reads it
+      # is //go:build integration, which test-go does not compile, so this changes the behaviour
+      # of precisely one test.
       - run: just test-go
+        env:
+          M1_REQUIRE_STORES: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}
 
   python:
     name: python
@@ -139,6 +173,24 @@ jobs:
       - run: just gates
       - run: just conformance
 
+  # Its own job, not a step in `gates`: 12 §10.3 makes this a required check in its own right,
+  # and it is expected to be red whenever a requirement is unproven. Sharing a job would make
+  # that red indistinguishable from a broken OTel or build-tag gate.
+  trace-check:
+    name: trace-check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: extractions/setup-just@v2
+      - run: just trace-check
+
   fuzz-smoke:
     name: fuzz-smoke
     runs-on: ubuntu-24.04
@@ -169,6 +221,10 @@ jobs:
       # These override the justfile's defaults, so they have to track them exactly — the store
       # contract lives at the top of the justfile and this block is its only other copy.
       M1_TEST_PG_DSN: postgres://mark1:mark1@127.0.0.1:5432/mark1_test
+      # A second, privileged role for migrations only — m1_060 creates a BYPASSRLS role and PG16
+      # lets only a BYPASSRLS role do that, while the suite role must NOT have it or no isolation
+      # test can observe anything. Same split as prod's migration Job vs `*_app`.
+      M1_MIGRATE_PG_DSN: postgres://m1_bootstrap@127.0.0.1:5432/mark1_test
       M1_TEST_CH_DSN: http://127.0.0.1:8123/?database=default
       M1_TEST_S3_ENDPOINT: http://127.0.0.1:9002
       # `just migrate` sends m1_ch_*.sql to a ClickHouse client and refuses to run at all without
@@ -196,8 +252,8 @@ jobs:
         run: just stores-up
       - name: Migrate (idempotency asserted by applying twice)
         run: |
-          just migrate "$M1_TEST_PG_DSN"
-          just migrate "$M1_TEST_PG_DSN"
+          just migrate "$M1_MIGRATE_PG_DSN"
+          just migrate "$M1_MIGRATE_PG_DSN"
       - run: just test-integration
       - run: just test-isolation
       - name: Store logs on failure
@@ -211,10 +267,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GITLEAKS_CONFIG: .gitleaks.toml
+      # The CLI, not gitleaks-action@v2. The action requires a paid license for
+      # organisation repos and fails with `🛑 missing gitleaks license` before
+      # scanning anything — so from the first commit until this change, secret
+      # scanning on this repo had never once executed while the job reported a
+      # red nobody read (D-BA). The CLI is MIT and has no license gate.
+      # Pinned by version AND sha256: an unpinned scanner is a supply-chain hole
+      # in the job whose entire purpose is supply-chain hygiene.
+      - name: gitleaks (full history)
+        run: |
+          set -euo pipefail
+          ver=8.18.4
+          sha=ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d
+          curl -fsSL -o gl.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/gitleaks_${ver}_linux_x64.tar.gz"
+          echo "${sha}  gl.tgz" | sha256sum -c -
+          tar xzf gl.tgz gitleaks
+          # --redact so a real finding does not print the secret into a public log.
+          ./gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
       - name: hadolint every Dockerfile
         run: |
           set -euo pipefail

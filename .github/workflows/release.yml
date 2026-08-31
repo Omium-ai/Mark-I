@@ -22,7 +22,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  GO_VERSION: "1.25.0"
+  GO_VERSION: "1.25.14"
   SYFT_VERSION: "v1.20.0"
   TRIVY_VERSION: "0.58.2"
   NFPM_VERSION: "v2.41.1"
@@ -39,6 +39,7 @@ jobs:
       M1_REQUIRE_STORES: "1"
       # Same store contract as ci.yml's `integration` job and the justfile's defaults; see there.
       M1_TEST_PG_DSN: postgres://mark1:mark1@127.0.0.1:5432/mark1_test
+      M1_MIGRATE_PG_DSN: postgres://m1_bootstrap@127.0.0.1:5432/mark1_test
       M1_TEST_CH_DSN: http://127.0.0.1:8123/?database=default
       M1_TEST_S3_ENDPOINT: http://127.0.0.1:9002
       CLICKHOUSE_HOST: "127.0.0.1"
@@ -58,14 +59,16 @@ jobs:
           github_token: ${{ github.token }}
       - uses: extractions/setup-just@v2
       - run: |
-          cargo install cargo-deny --locked --version 0.16.4
+          # 0.20.2, matching ci.yml: 0.16.4 cannot PARSE the current advisory DB — it dies on a
+          # TOML error in RUSTSEC-2026-0066.md before checking a single crate.
+          cargo install cargo-deny --locked --version 0.20.2
           cargo install cargo-fuzz --locked --version 0.12.0
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           uv tool install "pip-audit==2.9.0"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: just stores-up
-      - run: just migrate "$M1_TEST_PG_DSN"
+      - run: just migrate "$M1_MIGRATE_PG_DSN"
       - run: just ci
 
   # ---------------------------------------------------------------------------

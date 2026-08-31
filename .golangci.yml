@@ -1,6 +1,14 @@
 # golangci-lint v2 config — one file at repo root, all three modules run it (§6.2 lint-go).
 version: "2"
 
+# Without this the seven `//go:build integration` suites are invisible to every linter — tagging
+# a file to route it into `just test-integration` would silently also route it out of the lint
+# gate. They are clean today, which is exactly when to turn this on: the cost is zero now and
+# the alternative is discovering an unlinted corner later, after it has grown one.
+run:
+  build-tags:
+    - integration
+
 linters:
   default: none
   enable:
@@ -40,6 +48,16 @@ linters:
     rules:
       - path: _test\.go
         linters: [gosec, forbidigo]
+
+# Defaults are 50 per linter and 3 per identical message, and the truncation is SILENT: a
+# module with 30 identical `resp.Body.Close` findings reports 3, and fixing those three
+# reveals three more. Every count this gate produced was an undercount, so "the lane is
+# nearly clear" was never a statement anyone could make from its output. A gate that
+# under-reports its own findings is the same failure class as one that passes by never
+# running — 12 §0.3. Unbounded, both here and for anyone running it locally.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
 
 formatters:
   enable:
