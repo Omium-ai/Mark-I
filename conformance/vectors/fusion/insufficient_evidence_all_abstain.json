@@ -1,0 +1,76 @@
+{
+  "doc": "D1 step 0: no non-abstaining verifier \u21d2 degenerate refused, and nothing was fused.",
+  "name": "insufficient_evidence_all_abstain",
+  "priors": [
+    0.55,
+    0.3,
+    0.1,
+    0.05
+  ],
+  "verifiers": {
+    "judge:grounded-rubric": {
+      "confusion": [
+        [
+          0.8,
+          0.15,
+          0.05
+        ],
+        [
+          0.25,
+          0.7,
+          0.05
+        ],
+        [
+          0.2,
+          0.4,
+          0.4
+        ],
+        [
+          0.2,
+          0.4,
+          0.4
+        ]
+      ],
+      "group": "judges",
+      "kind": "judge"
+    },
+    "ruff": {
+      "confusion": [
+        [
+          0.2,
+          0.1,
+          0.7
+        ],
+        [
+          0.2,
+          0.1,
+          0.7
+        ],
+        [
+          0.2,
+          0.1,
+          0.7
+        ],
+        [
+          0.2,
+          0.1,
+          0.7
+        ]
+      ],
+      "group": "syntactic",
+      "kind": "lint"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "refused",
+      "verifier_id": "ruff"
+    },
+    {
+      "tamper": false,
+      "verdict": "refused",
+      "verifier_id": "judge:grounded-rubric"
+    }
+  ]
+}

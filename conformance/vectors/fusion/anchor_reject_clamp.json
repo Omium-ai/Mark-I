@@ -1,0 +1,107 @@
+{
+  "doc": "06 \u00a73.2 counterfactual (a): the anchor's \u03b5_anchor reject column collapses the satisfied mass through the ordinary product \u2014 no special-case branch.",
+  "name": "anchor_reject_clamp",
+  "priors": [
+    0.55,
+    0.3,
+    0.1,
+    0.05
+  ],
+  "verifiers": {
+    "cargo-check-warm": {
+      "confusion": [
+        [
+          0.98,
+          0.02,
+          0.0
+        ],
+        [
+          0.6,
+          0.4,
+          0.0
+        ],
+        [
+          0.5,
+          0.02,
+          0.48
+        ],
+        [
+          0.5,
+          0.02,
+          0.48
+        ]
+      ],
+      "group": "syntactic",
+      "kind": "compile"
+    },
+    "judge:grounded-rubric": {
+      "confusion": [
+        [
+          0.8,
+          0.15,
+          0.05
+        ],
+        [
+          0.25,
+          0.7,
+          0.05
+        ],
+        [
+          0.2,
+          0.4,
+          0.4
+        ],
+        [
+          0.2,
+          0.4,
+          0.4
+        ]
+      ],
+      "group": "judges",
+      "kind": "judge"
+    },
+    "ruff": {
+      "confusion": [
+        [
+          0.2,
+          0.1,
+          0.7
+        ],
+        [
+          0.2,
+          0.1,
+          0.7
+        ],
+        [
+          0.2,
+          0.1,
+          0.7
+        ],
+        [
+          0.2,
+          0.1,
+          0.7
+        ]
+      ],
+      "group": "syntactic",
+      "kind": "lint"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "violated",
+      "verifier_id": "cargo-check-warm"
+    },
+    {
+      "tamper": false,
+      "verdict": "refused",
+      "verifier_id": "ruff"
+    },
+    {
+      "tamper": false,
+      "verdict": "violated",
+      "verifier_id": "judge:grounded-rubric"
+    }
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "doc": "D-X: a voter the bundle does not list contributes no likelihood \u2014 no per-kind default \u2014 and is COUNTED (unknown_voters = 1), never silently dropped. The unlisted INFRA vote is not counted there: unknown_voters counts votes that would otherwise have carried a likelihood, and an infra failure never does.",
+  "name": "unknown_voter",
+  "priors": [
+    0.55,
+    0.3,
+    0.1,
+    0.05
+  ],
+  "verifiers": {
+    "cargo-check-warm": {
+      "confusion": [
+        [
+          0.98,
+          0.02,
+          0.0
+        ],
+        [
+          0.6,
+          0.4,
+          0.0
+        ],
+        [
+          0.5,
+          0.02,
+          0.48
+        ],
+        [
+          0.5,
+          0.02,
+          0.48
+        ]
+      ],
+      "group": "syntactic",
+      "kind": "compile"
+    },
+    "judge:grounded-rubric": {
+      "confusion": [
+        [
+          0.8,
+          0.15,
+          0.05
+        ],
+        [
+          0.25,
+          0.7,
+          0.05
+        ],
+        [
+          0.2,
+          0.4,
+          0.4
+        ],
+        [
+          0.2,
+          0.4,
+          0.4
+        ]
+      ],
+      "group": "judges",
+      "kind": "judge"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "cargo-check-warm"
+    },
+    {
+      "tamper": false,
+      "verdict": "violated",
+      "verifier_id": "judge:grounded-rubric"
+    },
+    {
+      "tamper": false,
+      "verdict": "violated",
+      "verifier_id": "mystery-linter"
+    },
+    {
+      "tamper": false,
+      "verdict": "error",
+      "verifier_id": "mystery-sandbox"
+    }
+  ]
+}

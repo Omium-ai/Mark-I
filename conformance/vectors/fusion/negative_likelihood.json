@@ -1,0 +1,45 @@
+{
+  "doc": "A malformed row (-0.5) contributes ZERO MASS, never a NaN: anything not strictly positive zeroes its class outright. NaN posteriors sail through every downstream comparison and reach the wire.",
+  "name": "negative_likelihood",
+  "priors": [
+    0.55,
+    0.3,
+    0.1,
+    0.05
+  ],
+  "verifiers": {
+    "broken": {
+      "confusion": [
+        [
+          0.8,
+          0.15,
+          0.05
+        ],
+        [
+          0.25,
+          0.7,
+          0.05
+        ],
+        [
+          0.2,
+          -0.5,
+          0.4
+        ],
+        [
+          0.2,
+          0.4,
+          0.4
+        ]
+      ],
+      "group": "judges",
+      "kind": "judge"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "violated",
+      "verifier_id": "broken"
+    }
+  ]
+}

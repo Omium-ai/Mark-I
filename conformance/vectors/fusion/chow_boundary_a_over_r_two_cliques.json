@@ -1,0 +1,76 @@
+{
+  "doc": "The same exact eta = A/R = 1/3, reached through TWO cliques instead of one: the second is uninformative (a flat accept column), so it scales the whole mass vector by one constant and moves eta not at all, while forcing the fusion loop's power-of-two rescale to run between the boundary verifier and the answer. A rescale that touched a mantissa bit, or a group order that was not sorted, moves this off the boundary and flips the verdict.",
+  "name": "chow_boundary_a_over_r_two_cliques",
+  "priors": [
+    0.4,
+    0.4,
+    0.1,
+    0.1
+  ],
+  "verifiers": {
+    "boundary": {
+      "confusion": [
+        [
+          0.04,
+          0.48,
+          0.48
+        ],
+        [
+          0.05,
+          0.47,
+          0.48
+        ],
+        [
+          0.06,
+          0.47,
+          0.47
+        ],
+        [
+          0.06,
+          0.47,
+          0.47
+        ]
+      ],
+      "group": "judges",
+      "kind": "judge"
+    },
+    "flat": {
+      "confusion": [
+        [
+          0.5,
+          0.25,
+          0.25
+        ],
+        [
+          0.5,
+          0.25,
+          0.25
+        ],
+        [
+          0.5,
+          0.25,
+          0.25
+        ],
+        [
+          0.5,
+          0.25,
+          0.25
+        ]
+      ],
+      "group": "rms",
+      "kind": "rm"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "boundary"
+    },
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "flat"
+    }
+  ]
+}

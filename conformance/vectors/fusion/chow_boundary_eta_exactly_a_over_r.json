@@ -1,0 +1,45 @@
+{
+  "doc": "D-AK: posterior[satisfied] is EXACTLY A/R = 1/3, so the rule (eta <= A/R => violated) says violated. Through logsumexp a leg landed within one ulp of 1/3 and which side it landed on was its libm's business, not the rule's - that is how Go and CPython were measured flipping each other's verdict. With the transcendentals gone the fusion is exact IEEE-754 arithmetic and the Chow branch is cross-multiplied (u_S*R <= A*total), so both legs decide this by the rule.",
+  "name": "chow_boundary_eta_exactly_a_over_r",
+  "priors": [
+    0.4,
+    0.4,
+    0.1,
+    0.1
+  ],
+  "verifiers": {
+    "boundary": {
+      "confusion": [
+        [
+          0.04,
+          0.48,
+          0.48
+        ],
+        [
+          0.05,
+          0.47,
+          0.48
+        ],
+        [
+          0.06,
+          0.47,
+          0.47
+        ],
+        [
+          0.06,
+          0.47,
+          0.47
+        ]
+      ],
+      "group": "judges",
+      "kind": "judge"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "boundary"
+    }
+  ]
+}

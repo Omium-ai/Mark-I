@@ -1,0 +1,15 @@
+{
+  "observations": [
+    {
+      "kind": "usage",
+      "message_id": "msg_01CoRRuPt3dDeLtA9xYzQwEr",
+      "model": "claude-opus-5",
+      "input_tokens": 31,
+      "output_tokens": 1,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "service_tier": "standard"
+    }
+  ],
+  "degraded": { "at_byte": 618, "reason": "malformed_event" }
+}

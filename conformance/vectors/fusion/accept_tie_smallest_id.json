@@ -1,0 +1,76 @@
+{
+  "doc": "D-W, accept branch: two accepters in one clique with equal accept LR. Ties resolve to the LEXICALLY SMALLEST id (aaa), where max() would pick zzz.",
+  "name": "accept_tie_smallest_id",
+  "priors": [
+    0.55,
+    0.3,
+    0.1,
+    0.05
+  ],
+  "verifiers": {
+    "aaa": {
+      "confusion": [
+        [
+          0.8,
+          0.1,
+          0.1
+        ],
+        [
+          0.4,
+          0.5,
+          0.1
+        ],
+        [
+          0.2,
+          0.4,
+          0.4
+        ],
+        [
+          0.2,
+          0.4,
+          0.4
+        ]
+      ],
+      "group": "syntactic",
+      "kind": "lint"
+    },
+    "zzz": {
+      "confusion": [
+        [
+          0.8,
+          0.1,
+          0.1
+        ],
+        [
+          0.4,
+          0.5,
+          0.1
+        ],
+        [
+          0.6,
+          0.2,
+          0.2
+        ],
+        [
+          0.6,
+          0.2,
+          0.2
+        ]
+      ],
+      "group": "syntactic",
+      "kind": "lint"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "zzz"
+    },
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "aaa"
+    }
+  ]
+}

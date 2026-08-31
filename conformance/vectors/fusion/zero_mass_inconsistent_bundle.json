@@ -1,0 +1,45 @@
+{
+  "doc": "Every class assigned probability 0 by the votes: a broken bundle, not a verdict. Both implementations must REFUSE (see README \u2014 the cloud raises, the edge has no way to and answers latent error).",
+  "name": "zero_mass_inconsistent_bundle",
+  "priors": [
+    1.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "verifiers": {
+    "veto": {
+      "confusion": [
+        [
+          0.98,
+          0.0,
+          0.02
+        ],
+        [
+          0.6,
+          0.4,
+          0.0
+        ],
+        [
+          0.5,
+          0.05,
+          0.45
+        ],
+        [
+          0.5,
+          0.05,
+          0.45
+        ]
+      ],
+      "group": "syntactic",
+      "kind": "compile"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "violated",
+      "verifier_id": "veto"
+    }
+  ]
+}

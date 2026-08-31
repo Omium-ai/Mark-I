@@ -1,0 +1,107 @@
+{
+  "doc": "D-W, all-abstain branch: a clique where every member abstained collapses to the smallest id; a second clique supplies the D1 coverage.",
+  "name": "all_abstain_tie_smallest_id",
+  "priors": [
+    0.55,
+    0.3,
+    0.1,
+    0.05
+  ],
+  "verifiers": {
+    "aaa": {
+      "confusion": [
+        [
+          0.5,
+          0.3,
+          0.2
+        ],
+        [
+          0.3,
+          0.5,
+          0.2
+        ],
+        [
+          0.3,
+          0.3,
+          0.4
+        ],
+        [
+          0.3,
+          0.3,
+          0.4
+        ]
+      ],
+      "group": "judges",
+      "kind": "judge"
+    },
+    "anchor": {
+      "confusion": [
+        [
+          0.9,
+          0.05,
+          0.05
+        ],
+        [
+          0.4,
+          0.55,
+          0.05
+        ],
+        [
+          0.3,
+          0.2,
+          0.5
+        ],
+        [
+          0.3,
+          0.2,
+          0.5
+        ]
+      ],
+      "group": "syntactic",
+      "kind": "compile"
+    },
+    "zzz": {
+      "confusion": [
+        [
+          0.5,
+          0.3,
+          0.2
+        ],
+        [
+          0.3,
+          0.5,
+          0.2
+        ],
+        [
+          0.1,
+          0.2,
+          0.7
+        ],
+        [
+          0.1,
+          0.2,
+          0.7
+        ]
+      ],
+      "group": "judges",
+      "kind": "judge"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "refused",
+      "verifier_id": "zzz"
+    },
+    {
+      "tamper": false,
+      "verdict": "refused",
+      "verifier_id": "aaa"
+    },
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "anchor"
+    }
+  ]
+}

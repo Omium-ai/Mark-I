@@ -1,0 +1,16 @@
+{
+  "observations": [
+    {
+      "kind": "usage",
+      "message_id": "msg_01ErR0rPaThMi5t3aMbrOkEn",
+      "model": "claude-opus-5",
+      "input_tokens": 88,
+      "output_tokens": 1,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "service_tier": ""
+    },
+    { "kind": "upstream_error", "error_type": "overloaded_error" }
+  ],
+  "degraded": null
+}

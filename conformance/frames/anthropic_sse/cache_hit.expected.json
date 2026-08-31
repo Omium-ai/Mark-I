@@ -1,0 +1,26 @@
+{
+  "observations": [
+    {
+      "kind": "usage",
+      "message_id": "msg_01G9WcTdRbqLpF2mYzKv8Nhs",
+      "model": "claude-haiku-4-5",
+      "input_tokens": 2679,
+      "output_tokens": 3,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "service_tier": "batch"
+    },
+    {
+      "kind": "usage",
+      "message_id": "msg_01G9WcTdRbqLpF2mYzKv8Nhs",
+      "model": "claude-haiku-4-5",
+      "input_tokens": 10682,
+      "output_tokens": 510,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 31337,
+      "service_tier": "batch"
+    },
+    { "kind": "response_end", "stop_reason": "end_turn" }
+  ],
+  "degraded": null
+}

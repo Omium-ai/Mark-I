@@ -1,0 +1,50 @@
+{
+  "doc": "D-AB: the only LISTED verifier abstains, so D1 is unmet and the honest answer is the degenerate refused. The unlisted stranger's reject contributes no likelihood term at all \u2014 counted as coverage it flipped this same input to a BLOCK whose posterior was priors x the abstainer's column, unchanged. Membership gates coverage, not only likelihood.",
+  "name": "unlisted_voter_no_coverage",
+  "priors": [
+    0.55,
+    0.3,
+    0.1,
+    0.05
+  ],
+  "verifiers": {
+    "anchor": {
+      "confusion": [
+        [
+          0.9,
+          0.02,
+          0.08
+        ],
+        [
+          0.55,
+          0.4,
+          0.05
+        ],
+        [
+          0.46,
+          0.04,
+          0.5
+        ],
+        [
+          0.46,
+          0.04,
+          0.5
+        ]
+      ],
+      "group": "syntactic",
+      "kind": "compile"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "refused",
+      "verifier_id": "anchor"
+    },
+    {
+      "tamper": false,
+      "verdict": "violated",
+      "verifier_id": "mystery-judge"
+    }
+  ]
+}

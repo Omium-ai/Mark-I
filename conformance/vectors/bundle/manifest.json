@@ -338,6 +338,30 @@
       "last_applied_seq": null,
       "name": "too_large",
       "tlog_head": null
+    },
+    {
+      "body_sha256_hex": "574dd842fdf6d9d274f0070637f378b99f926320c981cbcc476370f60cdf601f",
+      "expect": "accept",
+      "file": "knee_p_lcb.cbor",
+      "file_sha256_hex": "969228aa886305b12ab98034bf5f7fe3674f25ba17510661a0c41024166a270f",
+      "last_applied_seq": null,
+      "name": "knee_p_lcb",
+      "summary": {
+        "agents": 1,
+        "anchors": 2,
+        "channel": "local",
+        "correlation_groups": 1,
+        "exploration_epsilon": 0.0,
+        "issued_at_epoch_s": 1787961600,
+        "knee_rows": 3,
+        "max_age_s": 31536000,
+        "max_consecutive_blocks": 3,
+        "quarantined": 0,
+        "seq": 0,
+        "stop_gate_enabled": true,
+        "verifiers": 3
+      },
+      "tlog_head": null
     }
   ]
 }

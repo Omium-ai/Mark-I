@@ -27,7 +27,11 @@
         "duration_ms": "duration_ms"
       }
     },
-    "Stop": { "kind": "turn_agent", "fields": {} },
+    "Stop": {
+      "kind": "turn_agent",
+      "gate": { "kind": "stop", "budget_ms": 250 },
+      "fields": { "stop_hook_active": "stop_hook_active" }
+    },
     "SubagentStop": { "kind": "turn_agent", "fields": {} },
     "PreCompact": { "kind": "none", "fields": {} },
     "SessionEnd": { "kind": "session_end", "fields": {} }

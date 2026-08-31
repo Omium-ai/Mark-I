@@ -1,0 +1,45 @@
+{
+  "doc": "The OTHER Chow boundary, which no vector reached: posterior[satisfied] is EXACTLY 1 - A/D = 8/9, so the rule (eta >= 1 - A/D => satisfied) says satisfied. Cross-multiplied this is u_S*D >= (D-A)*total, which is also why the comparison must not be written against the float `1 - A/D`: A/D = 1/9 is not representable, so that subtraction put a second rounding on the threshold itself.",
+  "name": "chow_boundary_eta_exactly_one_minus_a_over_d",
+  "priors": [
+    0.5,
+    0.25,
+    0.125,
+    0.125
+  ],
+  "verifiers": {
+    "boundary-high": {
+      "confusion": [
+        [
+          0.4,
+          0.3,
+          0.3
+        ],
+        [
+          0.05,
+          0.45,
+          0.5
+        ],
+        [
+          0.05,
+          0.45,
+          0.5
+        ],
+        [
+          0.05,
+          0.45,
+          0.5
+        ]
+      ],
+      "group": "judges",
+      "kind": "judge"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "boundary-high"
+    }
+  ]
+}

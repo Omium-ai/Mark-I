@@ -1,0 +1,138 @@
+{
+  "doc": "Four cliques with 1e-300 likelihoods. Direct multiplication drives the mass straight through the smallest subnormal to zero, which is what log-space was actually protecting: the fusion loop buys it back by rescaling the mass vector by an exact POWER OF TWO, which shifts the exponent, touches no mantissa bit and cancels in the normalisation. The posterior must still be a distribution - unrescaled this vector reads as a broken bundle.",
+  "name": "extreme_log_scores",
+  "priors": [
+    0.55,
+    0.3,
+    0.1,
+    0.05
+  ],
+  "verifiers": {
+    "x0": {
+      "confusion": [
+        [
+          1e-300,
+          0.5,
+          0.5
+        ],
+        [
+          2e-300,
+          0.5,
+          0.5
+        ],
+        [
+          3e-300,
+          0.5,
+          0.5
+        ],
+        [
+          4e-300,
+          0.5,
+          0.5
+        ]
+      ],
+      "group": "x0",
+      "kind": "lint"
+    },
+    "x1": {
+      "confusion": [
+        [
+          2e-300,
+          0.5,
+          0.5
+        ],
+        [
+          3e-300,
+          0.5,
+          0.5
+        ],
+        [
+          4e-300,
+          0.5,
+          0.5
+        ],
+        [
+          5e-300,
+          0.5,
+          0.5
+        ]
+      ],
+      "group": "x1",
+      "kind": "lint"
+    },
+    "x2": {
+      "confusion": [
+        [
+          3e-300,
+          0.5,
+          0.5
+        ],
+        [
+          4e-300,
+          0.5,
+          0.5
+        ],
+        [
+          5e-300,
+          0.5,
+          0.5
+        ],
+        [
+          6e-300,
+          0.5,
+          0.5
+        ]
+      ],
+      "group": "x2",
+      "kind": "lint"
+    },
+    "x3": {
+      "confusion": [
+        [
+          4e-300,
+          0.5,
+          0.5
+        ],
+        [
+          5e-300,
+          0.5,
+          0.5
+        ],
+        [
+          6e-300,
+          0.5,
+          0.5
+        ],
+        [
+          7e-300,
+          0.5,
+          0.5
+        ]
+      ],
+      "group": "x3",
+      "kind": "lint"
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "x0"
+    },
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "x1"
+    },
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "x2"
+    },
+    {
+      "tamper": false,
+      "verdict": "satisfied",
+      "verifier_id": "x3"
+    }
+  ]
+}

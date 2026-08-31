@@ -1,0 +1,77 @@
+{
+  "doc": "D-AB, the other half: a verifier the bundle LISTS and quarantines (07) is dropped exactly as an unlisted one is, so an explicitly distrusted verifier cannot unlock a block either. Same shape as unlisted_voter_no_coverage, and it must land on the same answer.",
+  "name": "quarantined_voter_no_coverage",
+  "priors": [
+    0.55,
+    0.3,
+    0.1,
+    0.05
+  ],
+  "verifiers": {
+    "anchor": {
+      "confusion": [
+        [
+          0.9,
+          0.02,
+          0.08
+        ],
+        [
+          0.55,
+          0.4,
+          0.05
+        ],
+        [
+          0.46,
+          0.04,
+          0.5
+        ],
+        [
+          0.46,
+          0.04,
+          0.5
+        ]
+      ],
+      "group": "syntactic",
+      "kind": "compile"
+    },
+    "distrusted-judge": {
+      "confusion": [
+        [
+          0.85,
+          0.1,
+          0.05
+        ],
+        [
+          0.25,
+          0.7,
+          0.05
+        ],
+        [
+          0.2,
+          0.2,
+          0.6
+        ],
+        [
+          0.2,
+          0.2,
+          0.6
+        ]
+      ],
+      "group": "judges",
+      "kind": "judge",
+      "quarantined": true
+    }
+  },
+  "votes": [
+    {
+      "tamper": false,
+      "verdict": "refused",
+      "verifier_id": "anchor"
+    },
+    {
+      "tamper": false,
+      "verdict": "violated",
+      "verifier_id": "distrusted-judge"
+    }
+  ]
+}
