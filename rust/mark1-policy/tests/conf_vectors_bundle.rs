@@ -224,6 +224,21 @@ fn conf_vectors_bundle_every_entry() {
 }
 
 #[test]
+fn conf_vectors_bundle_knee_p_lcb() {
+    // The accept alone only proves the key is tolerated. D-Z needs the three
+    // states to stay distinct through the decode, so assert the values — a
+    // decoder that swallowed p_lcb and dropped it would still accept.
+    let m = manifest();
+    let keys = key_set(&m);
+    let raw = fs::read(dir().join("knee_p_lcb.cbor")).unwrap();
+    let bundle = verify_and_decode(&raw, &keys, None, None).unwrap();
+    let rows = &bundle.route.knee.rows;
+    assert_eq!(rows[0].p_lcb, None, "absent must never become 0.0");
+    assert_eq!(rows[1].p_lcb, Some(0.0));
+    assert_eq!(rows[2].p_lcb, Some(0.75));
+}
+
+#[test]
 fn bundle_staleness_boundary_is_inclusive() {
     // The shared fail-static evaluation (04 §7.3), against the frozen
     // bundle_zero fixture: issued_at 2026-08-29T00:00:00Z, max_age one year.
