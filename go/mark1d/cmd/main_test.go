@@ -1,17 +1,26 @@
+//go:build unix
+
+// Every test in this package drives the assembled daemon through run(), which
+// binds the M1PL fabric — and fabric.Listen has no Windows implementation (07
+// §5's named pipe is unlanded, listener_windows.go refuses by design). So these
+// are unix-tagged for the same reason the code they exercise is: not a coverage
+// choice, a statement about which platforms the daemon currently starts on.
+// They re-arm for Windows the moment the named-pipe row does.
 package main
 
 import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -19,9 +28,19 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spill"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 )
+
+// TestMain is the anchor-sandbox helper stage, exactly as main() runs it: the
+// sandbox re-execs os.Executable(), which under `go test` is THIS binary. With
+// no MaybeRunHelper here every sandboxed anchor run would re-enter the test
+// suite instead of the tool, so the daemon's anchor plane is untestable.
+func TestMain(m *testing.M) {
+	anchors.MaybeRunHelper()
+	os.Exit(m.Run())
+}
 
 // waitFor polls cond up to 5 s — generous against CI jitter; the off-poll in
 // the test config is 10 ms, so a correct daemon settles orders of magnitude
@@ -36,6 +55,31 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// runDaemon starts the real daemon and returns a stopper that cancels only
+// THIS daemon's context. main() owns the signal set for exactly this reason: a
+// test that stopped its daemon with syscall.Kill(os.Getpid(), SIGTERM) killed
+// the whole `go test` process, which is survivable only while no test in the
+// package calls t.Parallel(). Cancellation reaches the same teardown path —
+// the Flush gate reads the OFF marker, never how the context died.
+func runDaemon(t *testing.T, cfg config) func() {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, slog.New(slog.NewTextHandler(os.Stderr, nil)), cfg) }()
+	return func() {
+		t.Helper()
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("run returned %v, want clean exit", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("daemon did not exit on cancellation")
+		}
+	}
 }
 
 // TestOffMarkerGatesDaemon is 08 §7.6 / invariant 2 end to end at the daemon
@@ -56,15 +100,12 @@ func TestOffMarkerGatesDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	done := make(chan error, 1)
-	go func() {
-		done <- run(slog.New(slog.NewTextHandler(os.Stderr, nil)), config{
-			stateDir: stateDir,
-			spoolDir: spoolDir,
-			socket:   socket,
-			offPoll:  10 * time.Millisecond,
-		})
-	}()
+	stop := runDaemon(t, config{
+		stateDir: stateDir,
+		spoolDir: spoolDir,
+		socket:   socket,
+		offPoll:  10 * time.Millisecond,
+	})
 
 	// Parked: the marker was present BEFORE boot, so nothing may touch disk
 	// or bind the fabric (the finding this test pins: a daemon restart while
@@ -104,19 +145,7 @@ func TestOffMarkerGatesDaemon(t *testing.T) {
 		return err == nil
 	})
 
-	// SIGTERM lands in run's NotifyContext (installed by run itself); the
-	// test binary keeps running because the handler owns the signal.
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("run returned %v, want clean exit", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not exit on SIGTERM")
-	}
+	stop()
 }
 
 // TestSpillRingDrainAcrossRestart is C8's "daemon-down replay via spill ring
@@ -136,20 +165,30 @@ func TestSpillRingDrainAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	done := make(chan error, 1)
-	go func() {
-		done <- run(slog.New(slog.NewTextHandler(os.Stderr, nil)), config{
-			stateDir: stateDir,
-			spoolDir: spoolDir,
-			socket:   socket,
-			offPoll:  10 * time.Millisecond,
-		})
-	}()
+	stop := runDaemon(t, config{
+		stateDir: stateDir,
+		spoolDir: spoolDir,
+		socket:   socket,
+		offPoll:  10 * time.Millisecond,
+	})
 
 	pubPath := filepath.Join(stateDir, "spill", "spill.pub")
 	waitFor(t, "spill.pub materialized on first boot", func() bool {
 		b, err := os.ReadFile(pubPath)
 		return err == nil && len(b) == 32
+	})
+
+	// spill.pub is materialized BEFORE the listener binds, so it is not a
+	// proxy for "the daemon is up" — and "socket absent" below is satisfied
+	// by "socket not created yet". Without this wait the whole off/on cycle
+	// could land inside that window: the marker went up and came back down
+	// before the first 10 ms off-poll observed it, the session never
+	// cancelled, and the ring sat undrained until the 30 s tick — 1 run in
+	// ~10, and the test blamed the drain. Wait for the socket to EXIST, so
+	// the negation that follows means what it says.
+	waitFor(t, "fabric socket bound (daemon fully up)", func() bool {
+		_, err := os.Stat(socket)
+		return err == nil
 	})
 
 	// `mark1 off`: the session drains and parks — the daemon-down window.
@@ -182,7 +221,11 @@ func TestSpillRingDrainAcrossRestart(t *testing.T) {
 			ToolUseId: "toolu_01SynthDaemonDownTTTT",
 		}},
 	}
-	payload, err := proto.Marshal(ev)
+	// M1PL(FabricFrame{event}) — what m1p_wire::encode_frame spills. Both
+	// layers, because a bare Event decodes as a frame without complaint.
+	payload, err := proto.Marshal(&m1pv1.FabricFrame{
+		Kind: &m1pv1.FabricFrame_Event{Event: ev},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,24 +250,14 @@ func TestSpillRingDrainAcrossRestart(t *testing.T) {
 		return os.IsNotExist(err)
 	})
 
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("run returned %v, want clean exit", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not exit on SIGTERM")
-	}
+	stop()
 
 	// The spool, reopened cold, holds the spilled event exactly once.
 	sp, err := spool.Open(spool.Config{Dir: spoolDir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sp.Close()
+	defer func() { _ = sp.Close() }()
 	ack, _ := sp.Cursors()
 	recs, _, err := sp.Records(ack)
 	if err != nil {
@@ -257,16 +290,13 @@ func TestEnableWorkspaceWhileRunning(t *testing.T) {
 	// The zero-value adapter resolves ~/.claude via $HOME (08 §5.1).
 	t.Setenv("HOME", home)
 
-	done := make(chan error, 1)
-	go func() {
-		done <- run(slog.New(slog.NewTextHandler(os.Stderr, nil)), config{
-			stateDir: stateDir,
-			spoolDir: spoolDir,
-			socket:   socket,
-			saltHex:  "aa", // arms the tail subsystem (idem-key derivation)
-			offPoll:  10 * time.Millisecond,
-		})
-	}()
+	stop := runDaemon(t, config{
+		stateDir: stateDir,
+		spoolDir: spoolDir,
+		socket:   socket,
+		saltHex:  "aa", // arms the tail subsystem (idem-key derivation)
+		offPoll:  10 * time.Millisecond,
+	})
 	waitFor(t, "fabric socket (daemon up, no workspaces yet)", func() bool {
 		_, err := os.Stat(socket)
 		return err == nil
@@ -312,24 +342,14 @@ func TestEnableWorkspaceWhileRunning(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("run returned %v, want clean exit", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not exit on SIGTERM")
-	}
+	stop()
 
 	// The spool, reopened cold, holds the transcript's Usage event.
 	sp, err := spool.Open(spool.Config{Dir: spoolDir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sp.Close()
+	defer func() { _ = sp.Close() }()
 	ack, _ := sp.Cursors()
 	recs, _, err := sp.Records(ack)
 	if err != nil {
@@ -398,17 +418,14 @@ func TestOffSkipsUploadHalfOfDrain(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	done := make(chan error, 1)
-	go func() {
-		done <- run(slog.New(slog.NewTextHandler(os.Stderr, nil)), config{
-			stateDir:    stateDir,
-			spoolDir:    spoolDir,
-			socket:      socket,
-			ingestURL:   srv.URL + "/m1p/v1/ingest",
-			deviceToken: "tok-test",
-			offPoll:     10 * time.Millisecond,
-		})
-	}()
+	stop := runDaemon(t, config{
+		stateDir:    stateDir,
+		spoolDir:    spoolDir,
+		socket:      socket,
+		ingestURL:   srv.URL + "/m1p/v1/ingest",
+		deviceToken: "tok-test",
+		offPoll:     10 * time.Millisecond,
+	})
 
 	waitFor(t, "first uplink attempt", func() bool { return requests.Load() == 1 })
 
@@ -434,20 +451,51 @@ func TestOffSkipsUploadHalfOfDrain(t *testing.T) {
 	}
 	waitFor(t, "uplink attempt after re-enable", func() bool { return requests.Load() == 2 })
 
-	// ...and SIGTERM (not off) keeps the full drain: Flush's single best-effort
+	// ...and a stop with the marker CLEAR (the daemon stopping, not the user
+	// turning capture off) keeps the full drain: Flush's single best-effort
 	// attempt is request 3.
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+	stop()
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("requests after the shutdown drain = %d, want 3 (a stop that is not `mark1 off` keeps the upload half)", got)
+	}
+}
+
+// TestUnsessionedHelloIsRefusedEntry is D-AT against the assembled daemon.
+//
+// It used to be TestUnsessionedConnectionsDoNotShareAVerdict, and the property
+// it asserted — two session-less connections must not be answered on each
+// other's evidence — is now enforced a layer earlier and is unreachable from
+// here. D-AL closed the all-zero session at every CONSUMER; the handshake was
+// still replying `accepted: true` and then silently discarding everything the
+// connection sent. D-AT closes the producer axis, so there is no accepted
+// session-less connection left to share anything.
+//
+// The assertion moves with the enforcement rather than being deleted: what a
+// caller can still observe end to end is that entry is refused, and refused
+// *audibly* — the failure mode D-AT exists to remove is a daemon that accepts
+// and then drops.
+func TestUnsessionedHelloIsRefusedEntry(t *testing.T) {
+	m := proofMatrices(false)
+	socket, stop := startProofDaemon(t, &m)
+	defer stop()
+
+	c, err := net.Dial("unix", socket)
+	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("run returned %v, want clean exit", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("daemon did not exit on SIGTERM")
+	defer func() { _ = c.Close() }()
+	f := &fabricConn{t: t, c: c}
+	f.send(&m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Hello{Hello: &m1pv1.Hello{
+		Component: "tests", Pid: uint32(os.Getpid()), Version: version, // #nosec G115 -- pid fits
+	}}})
+
+	if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
 	}
-	if got := requests.Load(); got != 3 {
-		t.Fatalf("requests after SIGTERM drain = %d, want 3 (signal keeps the upload half)", got)
+	var buf [1]byte
+	if _, err := c.Read(buf[:]); err == nil {
+		t.Fatalf("the daemon answered a session-less Hello instead of closing (D-AT); first byte %#x", buf[0])
+	} else if errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatal("the daemon neither answered nor closed a session-less Hello — it must refuse audibly, not hang")
 	}
 }
