@@ -106,7 +106,7 @@ func (r *CHRunner) Run(ctx context.Context, q Query) (*Rows, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querychoke: template %s: %w", q.tpl.name, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	cols := rows.Columns()
 	types := rows.ColumnTypes()
