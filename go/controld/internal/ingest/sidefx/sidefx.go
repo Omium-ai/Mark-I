@@ -129,9 +129,13 @@ func EffectsFromBatch(b *m1pv1.Batch, fallbackAt time.Time) []Effect {
 			var root [32]byte
 			copy(root[:], cp.GetMerkleRoot())
 			e.Checkpoint = &receipts.CheckpointEvent{
-				EventID:              id,
-				DeviceKeyID:          cp.GetKeyId(),
-				ClaimedCheckpointSeq: int64(cp.GetCheckpointSeq()),
+				EventID:     id,
+				DeviceKeyID: cp.GetKeyId(),
+				// A device may claim any uint64 here, and >MaxInt64 wraps negative. That is
+				// survivable ONLY because receipts.store rejects unless the claim EQUALS the
+				// tenant's next seq, which is always positive — so every wrapped value fails
+				// closed. Relaxing that equality to a range check makes this narrowing live.
+				ClaimedCheckpointSeq: int64(cp.GetCheckpointSeq()), //nolint:gosec // G115: see above
 				MerkleRoot:           root,
 				LeafCount:            int(cp.GetLeafCount()),
 				OriginSig:            cp.GetOriginSignature(),
