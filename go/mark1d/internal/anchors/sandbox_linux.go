@@ -108,7 +108,7 @@ func (s *LinuxSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error)
 	if err != nil {
 		return RunResult{}, err
 	}
-	defer os.RemoveAll(scratch)
+	defer func() { _ = os.RemoveAll(scratch) }()
 
 	// Final child env: the caller's allow-list plus the sandbox-owned HOME.
 	// Sorted so EffectiveEnv (the attestation input) is deterministic.
@@ -126,7 +126,7 @@ func (s *LinuxSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error)
 	sort.Strings(env)
 
 	// The helper treats a zero rlimit as "skip", so an unset field here would
-	// be an UNCAPPED run — but doc.go states CPU/AS/NOFILE/FSIZE as ENFORCED
+	// be an UNCAPPED run — but doc.go states CPU/DATA/NOFILE/FSIZE as ENFORCED
 	// per run. Default the zeros like Wall/OutputCap below: unset ⇒ default,
 	// never unbounded.
 	lim := spec.Limits
@@ -172,7 +172,7 @@ func (s *LinuxSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error)
 	var stdout, stderr capWriter
 	stdout.budget, stderr.budget = budget, budget
 
-	cmd := exec.Command(self)
+	cmd := exec.Command(self) //nolint:gosec // G204: self is os.Executable() — this is the re-exec helper, not a caller-named binary
 	cmd.Env = []string{helperSpecEnv + "=" + string(specJSON)}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -379,7 +379,7 @@ func MaybeRunHelper() {
 		}
 	}
 	rl(unix.RLIMIT_CPU, spec.CPUSeconds)
-	rl(unix.RLIMIT_AS, spec.MemoryBytes)
+	rl(unix.RLIMIT_DATA, spec.MemoryBytes)
 	rl(unix.RLIMIT_NOFILE, spec.NoFile)
 	rl(unix.RLIMIT_FSIZE, spec.FSizeBytes)
 	// Anchors must never dump core: 04 §11.6 posture, and a core file is a
@@ -501,12 +501,13 @@ func denyUnixSockets() error {
 		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW},
 		{Code: unix.BPF_RET | unix.BPF_K, K: deny},
 	}
-	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]} //nolint:gosec // G115: filter is the fixed literal program above
 	// NO_NEW_PRIVS is a precondition of an unprivileged seccomp filter (and is
 	// set again by applyLandlock — idempotent).
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("no_new_privs: %v", err)
 	}
+	//nolint:gosec // G103: seccomp takes the program by pointer; x/sys ships no wrapper (see the applyLandlock note)
 	if err := unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&prog)), 0, 0); err != nil {
 		return fmt.Errorf("set_seccomp: %v", err)
 	}
@@ -520,20 +521,20 @@ func denyUnixSockets() error {
 func applyLandlock(mask uint64, writable []string) error {
 	attr := unix.LandlockRulesetAttr{Access_fs: mask}
 	fd, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET,
-		uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0)
+		uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0) //nolint:gosec // G103: raw syscall, no wrapper exists
 	if errno != 0 {
 		return fmt.Errorf("create_ruleset: %v", errno)
 	}
-	defer unix.Close(int(fd))
+	defer func() { _ = unix.Close(int(fd)) }()
 	for _, dir := range writable {
 		dfd, err := unix.Open(dir, unix.O_PATH|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return fmt.Errorf("open %s: %v", dir, err)
 		}
-		rule := unix.LandlockPathBeneathAttr{Allowed_access: mask, Parent_fd: int32(dfd)}
+		rule := unix.LandlockPathBeneathAttr{Allowed_access: mask, Parent_fd: int32(dfd)} //nolint:gosec // G115: dfd is a Linux fd, which is int32 by definition
 		_, _, errno = unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE,
-			fd, unix.LANDLOCK_RULE_PATH_BENEATH, uintptr(unsafe.Pointer(&rule)), 0, 0, 0)
-		unix.Close(dfd)
+			fd, unix.LANDLOCK_RULE_PATH_BENEATH, uintptr(unsafe.Pointer(&rule)), 0, 0, 0) //nolint:gosec // G103: raw syscall, no wrapper exists
+		_ = unix.Close(dfd)
 		if errno != 0 {
 			return fmt.Errorf("add_rule %s: %v", dir, errno)
 		}

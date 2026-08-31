@@ -151,7 +151,8 @@ func lineHandler(tool string, cat m1pv1.EvidenceCategory, parse func(string) (di
 			Tool:           tool,
 			DiagnosticCode: code,
 			Category:       cat,
-			Counts:         &m1pv1.EvidenceCounts{Errors: errs, Warnings: warns, FilesAffected: uint32(len(files))},
+			//nolint:gosec // G115: len() of a slice parsed from one tool run, never negative
+			Counts: &m1pv1.EvidenceCounts{Errors: errs, Warnings: warns, FilesAffected: uint32(len(files))},
 		}
 		switch {
 		case res.ExitCode == 0:
@@ -434,8 +435,8 @@ func envAttestation(res RunResult, intended map[string]string) []byte {
 	}
 	h := blake3.New(32, nil)
 	for _, e := range kv {
-		h.Write([]byte(e))
-		h.Write([]byte{0})
+		_, _ = h.Write([]byte(e))
+		_, _ = h.Write([]byte{0})
 	}
 	return h.Sum(nil)
 }

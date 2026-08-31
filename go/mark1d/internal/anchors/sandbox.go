@@ -31,8 +31,12 @@ type Sandbox interface {
 
 // Limits are the per-run resource caps (04 §1.4 row "anchors").
 type Limits struct {
-	CPUSeconds  uint64        // RLIMIT_CPU, soft=hard ⇒ kill at the cap
-	MemoryBytes uint64        // RLIMIT_AS (cgroup memory.max stand-in, doc.go)
+	CPUSeconds uint64 // RLIMIT_CPU, soft=hard ⇒ kill at the cap
+	// RLIMIT_DATA — committed private anonymous memory, the cgroup memory.max
+	// stand-in (doc.go). NOT RLIMIT_AS: address space is not memory, and a
+	// thread-per-core allocator reserves it in proportion to the core count, so
+	// an AS cap kills real toolchains on big hosts without them using the memory.
+	MemoryBytes uint64
 	NoFile      uint64        // RLIMIT_NOFILE
 	FSizeBytes  uint64        // RLIMIT_FSIZE — bounds any single file written
 	Wall        time.Duration // wall-clock SIGKILL of the process group
@@ -47,7 +51,7 @@ func DefaultLimits(c Class) Limits {
 		wall = 600 * time.Second
 	}
 	return Limits{
-		CPUSeconds:  uint64(wall / time.Second),
+		CPUSeconds:  uint64(wall / time.Second), //nolint:gosec // G115: wall is one of the two constants above
 		MemoryBytes: 512 << 20,
 		NoFile:      1024,
 		FSizeBytes:  512 << 20,

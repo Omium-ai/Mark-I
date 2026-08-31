@@ -32,7 +32,7 @@ func init() {
 		if errno != 0 {
 			return 1
 		}
-		unix.Close(int(fd))
+		_ = unix.Close(int(fd))
 		return 0
 	}
 	// rlimit probe: exit 0 iff RLIMIT_FSIZE is finite — i.e. a caller-unset
@@ -55,9 +55,8 @@ func init() {
 
 // probeSpec builds a RunSpec around the test binary. Limits are generous
 // except what the individual test tightens: 0 now defaults from DefaultLimits
-// in Run, so RLIMIT_AS is set explicitly huge — the Go runtime child needs
-// virtual address space unrelated to what's under test, and the 512 MiB
-// default would kill it at exec.
+// in Run, so MemoryBytes is set explicitly huge — no probe but memhog is about
+// the memory cap, and none should ever trip over it.
 func probeSpec(t *testing.T, worktree, mode string, extraEnv map[string]string) RunSpec {
 	t.Helper()
 	self, err := os.Executable()
@@ -94,14 +93,14 @@ func TestSandboxDeniesNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			c.Close()
+			_ = c.Close()
 		}
 	}()
 	// Control: the dial target is genuinely reachable from OUTSIDE the sandbox,
@@ -110,7 +109,7 @@ func TestSandboxDeniesNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Close()
+	_ = c.Close()
 
 	sb := NewSandbox(t.TempDir())
 	spec := probeSpec(t, t.TempDir(), "dial", map[string]string{"MARK1_ANCHOR_TEST_ADDR": ln.Addr().String()})
@@ -134,14 +133,14 @@ func TestSandboxDeniesUnixSockets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			c.Close()
+			_ = c.Close()
 		}
 	}()
 	// Control: reachable from outside the sandbox, so a denial is the sandbox.
@@ -149,7 +148,7 @@ func TestSandboxDeniesUnixSockets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Close()
+	_ = c.Close()
 
 	sb := NewSandbox(t.TempDir())
 	spec := probeSpec(t, t.TempDir(), "uds", map[string]string{"MARK1_ANCHOR_TEST_ADDR": sock})
@@ -274,6 +273,24 @@ func TestSandboxKillsCPUHog(t *testing.T) {
 	}
 	if el := time.Since(start); el > 15*time.Second {
 		t.Fatalf("RLIMIT_CPU did not fire near the 1s cap (took %v — wall timer did the work instead)", el)
+	}
+}
+
+// TestSandboxKillsMemoryHog is the control that the memory cap still bites
+// after it moved off RLIMIT_AS: RLIMIT_DATA bounds committed private anonymous
+// memory, so a child that touches 2 GiB under a 256 MiB cap must not get it.
+// The kernel can be told to only warn (vm ignore_rlimit_data), which would make
+// the cap decorative — this is what notices.
+func TestSandboxKillsMemoryHog(t *testing.T) {
+	sb := NewSandbox(t.TempDir())
+	spec := probeSpec(t, t.TempDir(), "memhog", nil)
+	spec.Limits.MemoryBytes = 256 << 20
+	res, err := runProbeSpec(t, sb, spec)
+	if err != nil {
+		t.Fatalf("run: %v (stderr: %s)", err, res.Stderr)
+	}
+	if res.ExitCode == 0 {
+		t.Fatal("anchor committed 2 GiB under a 256 MiB cap — the memory limit is not enforced")
 	}
 }
 
