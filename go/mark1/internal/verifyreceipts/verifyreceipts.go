@@ -62,7 +62,7 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 	if err != nil {
 		return cli.Failf(cli.ExitRuntime, "", "temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// One enrollment read serves both network fetches; local-only invocations
 	// (--from + --keys) never require it, so verify works fully offline.
@@ -97,6 +97,7 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 		args = append(args, "--json")
 	}
 
+	//nolint:gosec // G204: MARK1_VERIFIER or LookPath — the operator's own PATH, args passed as a slice, no shell
 	cmd := exec.CommandContext(ctx, verifier, args...)
 	cmd.Stdout = env.Stdout // the verifier's report IS our output, verbatim
 	cmd.Stderr = env.Stderr
@@ -143,7 +144,7 @@ func resolveChain(ctx context.Context, env *cli.Env, opts Options, doc *cli.Enro
 	if err != nil {
 		return "", cli.Failf(cli.ExitRuntime, "", "temp chain file: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	for _, m := range matches {
 		data, err := os.ReadFile(m)
 		if err != nil {
@@ -153,8 +154,16 @@ func resolveChain(ctx context.Context, env *cli.Env, opts Options, doc *cli.Enro
 			return "", cli.Failf(cli.ExitRuntime, "", "writing chain: %v", err)
 		}
 		if len(data) > 0 && data[len(data)-1] != '\n' {
-			f.Write([]byte("\n"))
+			if _, err := f.Write([]byte("\n")); err != nil {
+				return "", cli.Failf(cli.ExitRuntime, "", "writing chain: %v", err)
+			}
 		}
+	}
+	// Closed here, not by the defer: the close is where a buffered write finally fails,
+	// and the deferred one reports that only after the verifier has already read a
+	// truncated chain and returned a verdict on it.
+	if err := f.Close(); err != nil {
+		return "", cli.Failf(cli.ExitRuntime, "", "writing chain: %v", err)
 	}
 	return out, nil
 }
@@ -170,13 +179,21 @@ const exportPage = 5000
 // ExportRow — byte-loadable, the round-trip the receipts integration e2e
 // proves — so this function copies bytes and never re-marshals a row: a
 // re-encode could perturb the exact payload text the signatures cover.
-func fetchChain(ctx context.Context, env *cli.Env, doc *cli.Enrollment, tmpDir string) (string, error) {
+func fetchChain(ctx context.Context, env *cli.Env, doc *cli.Enrollment, tmpDir string) (path string, err error) {
 	out := filepath.Join(tmpDir, "chain.jsonl")
 	f, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", cli.Failf(cli.ExitRuntime, "", "temp chain file: %v", err)
 	}
-	defer f.Close()
+	// The close is where a buffered page finally fails to reach disk, and this file is then
+	// handed to the verifier — which would read the truncation as a gap in the chain and name
+	// a receipt defect. Discarding the close error turns a local disk error into the CLI
+	// accusing the operator's own receipts of tampering, so it is promoted to the return.
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			path, err = "", cli.Failf(cli.ExitRuntime, "", "writing chain: %v", cerr)
+		}
+	}()
 
 	// since_seq is EXCLUSIVE (08 §3.4 cursor semantics, shared by the export
 	// route), so the full-chain fetch starts at 0; starting at 1 silently
@@ -284,10 +301,10 @@ func deviceGET(ctx context.Context, env *cli.Env, doc *cli.Enrollment, url strin
 	if err != nil {
 		return nil, cli.Failf(cli.ExitRuntime, "", "fetching %s: %v", url, err)
 	}
-	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusOK:
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized, http.StatusForbidden:
 		code, msg := cli.APIError(resp)
 		env.NoteAuthRefusal(resp.StatusCode, code)
 		return nil, cli.Failf(cli.ExitNotEnrolled, code, "authentication refused: %s", msg)

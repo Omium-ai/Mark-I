@@ -89,7 +89,9 @@ func TestFromFilePassthroughAndVerdicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys := filepath.Join(dir, "keys.json")
-	os.WriteFile(keys, []byte(`{}`), 0o600)
+	if err := os.WriteFile(keys, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Valid chain: verifier exit 0 → ours 0, report passed through verbatim.
 	t.Setenv("MARK1_VERIFIER", fakeVerifier(t, dir, 0))
@@ -119,11 +121,19 @@ func TestFromFilePassthroughAndVerdicts(t *testing.T) {
 func TestFromDirConcatenatesInNameOrder(t *testing.T) {
 	dir := t.TempDir()
 	exp := filepath.Join(dir, "exports")
-	os.MkdirAll(exp, 0o700)
-	os.WriteFile(filepath.Join(exp, "b.jsonl"), []byte(`{"seq":2}`+"\n"), 0o600)
-	os.WriteFile(filepath.Join(exp, "a.jsonl"), []byte(`{"seq":1}`), 0o600) // no trailing newline on purpose
+	if err := os.MkdirAll(exp, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	keys := filepath.Join(dir, "keys.json")
-	os.WriteFile(keys, []byte(`{}`), 0o600)
+	for path, body := range map[string]string{
+		filepath.Join(exp, "b.jsonl"): `{"seq":2}` + "\n",
+		filepath.Join(exp, "a.jsonl"): `{"seq":1}`, // no trailing newline on purpose
+		keys:                          `{}`,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv("MARK1_VERIFIER", fakeVerifier(t, dir, 0))
 	env, _ := testEnv(t, "http://unused.invalid")
 	if err := Run(context.Background(), env, Options{From: exp, Keys: keys, Offline: true}); err != nil {
@@ -150,7 +160,7 @@ func exportStub(t *testing.T, totalRows int) *httptest.Server {
 	authed := func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Header.Get("Authorization") != "Bearer tok-1" {
 			w.WriteHeader(http.StatusForbidden)
-			fmt.Fprint(w, `{"error":{"code":"M1E-1002","message":"bad token"}}`)
+			_, _ = fmt.Fprint(w, `{"error":{"code":"M1E-1002","message":"bad token"}}`)
 			return false
 		}
 		return true
@@ -166,14 +176,14 @@ func exportStub(t *testing.T, totalRows int) *httptest.Server {
 		}
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		for seq := since + 1; seq <= totalRows && seq <= since+limit; seq++ {
-			fmt.Fprint(w, exportLine(seq))
+			_, _ = fmt.Fprint(w, exportLine(seq))
 		}
 	})
 	mux.HandleFunc("GET /api/v1/receipts/keys", func(w http.ResponseWriter, r *http.Request) {
 		if !authed(w, r) {
 			return
 		}
-		fmt.Fprint(w, `{"server_chain_keys":[{"pubkey_hex":"deadbeef","key_id":"srvkey"}],"device_keys":[{"pubkey_hex":"beefdead","key_id":"devkey","tenant_id":"t-1"}]}`)
+		_, _ = fmt.Fprint(w, `{"server_chain_keys":[{"pubkey_hex":"deadbeef","key_id":"srvkey"}],"device_keys":[{"pubkey_hex":"beefdead","key_id":"devkey","tenant_id":"t-1"}]}`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -254,7 +264,7 @@ func TestFetchAuthRefusalStampsEnrollment(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/receipts/export", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprint(w, `{"error":{"code":"M1E-1003","message":"device revoked"}}`)
+		_, _ = fmt.Fprint(w, `{"error":{"code":"M1E-1003","message":"device revoked"}}`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -345,14 +355,18 @@ func vectorExport(t *testing.T, dir string, tamper bool) (chainPath, keysPath st
 		chain.Write(append(line, '\n'))
 	}
 	chainPath = filepath.Join(dir, "chain.jsonl")
-	os.WriteFile(chainPath, chain.Bytes(), 0o600)
+	if err := os.WriteFile(chainPath, chain.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	keys := map[string]any{
 		"server_chain_keys": []map[string]string{{"pubkey_hex": manifest.Keys["server"].PublicHex}},
 		"device_keys":       []map[string]string{{"pubkey_hex": manifest.Keys["device"].PublicHex}},
 	}
 	keysData, _ := json.Marshal(keys)
 	keysPath = filepath.Join(dir, "keys.json")
-	os.WriteFile(keysPath, keysData, 0o600)
+	if err := os.WriteFile(keysPath, keysData, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return chainPath, keysPath
 }
 

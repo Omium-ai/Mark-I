@@ -191,30 +191,30 @@ func renderHuman(w io.Writer, r *Report) {
 	if r.Daemon.Running {
 		daemon = "running"
 	}
-	fmt.Fprintf(w, "mark1d        %s (socket %s)\n", daemon, r.Daemon.Socket)
+	_, _ = fmt.Fprintf(w, "mark1d        %s (socket %s)\n", daemon, r.Daemon.Socket)
 	fresh := "STALE"
 	if r.Enrollment.TokenFresh {
 		fresh = "fresh"
 	}
-	fmt.Fprintf(w, "enrollment    %s device %s tenant %s (token %s)\n",
+	_, _ = fmt.Fprintf(w, "enrollment    %s device %s tenant %s (token %s)\n",
 		r.Enrollment.State, r.Enrollment.DeviceID, r.Enrollment.TenantID, fresh)
 	if len(r.Workspaces) == 0 {
-		fmt.Fprintf(w, "workspaces    none enabled\n")
+		_, _ = fmt.Fprintf(w, "workspaces    none enabled\n")
 	}
 	for _, ws := range r.Workspaces {
-		fmt.Fprintf(w, "workspaces    %s (enabled %s)\n", ws.Path, ws.EnabledAt)
+		_, _ = fmt.Fprintf(w, "workspaces    %s (enabled %s)\n", ws.Path, ws.EnabledAt)
 	}
-	fmt.Fprintf(w, "spool         %d segments / %d bytes, quarantined: %d\n",
+	_, _ = fmt.Fprintf(w, "spool         %d segments / %d bytes, quarantined: %d\n",
 		r.Spool.Segments, r.Spool.Bytes, r.Spool.Quarantined)
 	if r.Bundle == nil {
-		fmt.Fprintf(w, "policy        no bundle applied yet\n")
+		_, _ = fmt.Fprintf(w, "policy        no bundle applied yet\n")
 	} else {
-		fmt.Fprintf(w, "policy        bundle seq %d (%s), age %ds, stale: %v\n",
+		_, _ = fmt.Fprintf(w, "policy        bundle seq %d (%s), age %ds, stale: %v\n",
 			r.Bundle.Seq, r.Bundle.Channel, r.Bundle.AgeS, r.Bundle.Stale)
 	}
 	if r.Off.Active {
-		fmt.Fprintf(w, "off           ACTIVE (scope %s)\n", r.Off.Scope)
+		_, _ = fmt.Fprintf(w, "off           ACTIVE (scope %s)\n", r.Off.Scope)
 	} else {
-		fmt.Fprintf(w, "off           inactive\n")
+		_, _ = fmt.Fprintf(w, "off           inactive\n")
 	}
 }

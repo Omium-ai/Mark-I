@@ -75,7 +75,7 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 	if err != nil {
 		return cli.Failf(cli.ExitRuntime, "", "fetching report: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -106,7 +106,9 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 	// --json passes the server's object through under the global contract's
 	// ok envelope — the CLI adds nothing and hides nothing.
 	var raw map[string]any
-	json.Unmarshal(body, &raw)
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return cli.Failf(cli.ExitRuntime, "", "malformed report body: %v", err)
+	}
 	out := map[string]any{"ok": true, "report": raw}
 
 	if err := env.Emit(out, func(w io.Writer) { renderHuman(w, &tvo) }); err != nil {
@@ -124,16 +126,16 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 }
 
 func renderHuman(w io.Writer, t *TVO) {
-	fmt.Fprintf(w, "tvo           %s (%s basis)\n", t.TVO, t.CostBasis)
-	fmt.Fprintf(w, "coverage      %.2f observed (floor %.2f)\n",
+	_, _ = fmt.Fprintf(w, "tvo           %s (%s basis)\n", t.TVO, t.CostBasis)
+	_, _ = fmt.Fprintf(w, "coverage      %.2f observed (floor %.2f)\n",
 		t.CoverageBand.ObservedFraction, t.CoverageBand.Floor)
-	fmt.Fprintf(w, "waste         retry_loop=%s re_exploration=%s over_model=%s\n",
+	_, _ = fmt.Fprintf(w, "waste         retry_loop=%s re_exploration=%s over_model=%s\n",
 		t.Waste.RetryLoopTokens, t.Waste.ReExplorationTokens, t.Waste.OverModelTokens)
 	if t.GuaranteeGrade {
-		fmt.Fprintln(w, "guarantee     GRADE OK")
+		_, _ = fmt.Fprintln(w, "guarantee     GRADE OK")
 	} else if t.Refusal != "" {
-		fmt.Fprintf(w, "guarantee     REFUSED: %s\n", t.Refusal)
+		_, _ = fmt.Fprintf(w, "guarantee     REFUSED: %s\n", t.Refusal)
 	} else {
-		fmt.Fprintln(w, "guarantee     not guarantee-grade")
+		_, _ = fmt.Fprintln(w, "guarantee     not guarantee-grade")
 	}
 }
