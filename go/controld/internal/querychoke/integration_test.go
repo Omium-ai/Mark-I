@@ -1,3 +1,5 @@
+//go:build integration
+
 package querychoke
 
 // DSN-gated ClickHouse integration: a scratch database gets the REAL
@@ -83,7 +85,7 @@ func chIntEndpoint(t *testing.T) (addr, user, pass string) {
 	if err != nil {
 		t.Fatalf("cannot reach test ClickHouse over M1_TEST_CH_DSN: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("tcp_port probe: status %d: %s", resp.StatusCode, body)

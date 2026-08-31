@@ -1,3 +1,5 @@
+//go:build integration
+
 // DSN-gated Postgres integration for the receipt spine (house style, 12 /
 // 05 §7.5): a scratch database gets the real migrations, a NOBYPASSRLS login
 // role stands in for controld_app, and the tests prove the chain properties
@@ -7,7 +9,7 @@
 // by the ACTUAL mark1-verifier binary (exit 0), then one flipped byte (exit
 // 5, the named defect).
 //
-// Gates: M1_TEST_PG_DSN (superuser DSN for scratch setup); the verifier e2e
+// Gates: M1_MIGRATE_PG_DSN (privileged DSN for scratch setup); the verifier e2e
 // additionally needs cargo. Absent ⇒ skip, unless M1_REQUIRE_STORES=1 ⇒ fail.
 
 package receipts_test
@@ -51,14 +53,18 @@ var (
 	serverSeed = bytes.Repeat([]byte{0x22}, 32)
 )
 
+// The privileged DSN: this harness creates its own scratch database and applies
+// the full migration tree, and m1_060 mints a BYPASSRLS role — which PG16 permits
+// only to a role that already holds it. The tests themselves run as the
+// unprivileged role minted below, never as this one.
 func pgDSN(t *testing.T) string {
 	t.Helper()
-	v := os.Getenv("M1_TEST_PG_DSN")
+	v := os.Getenv("M1_MIGRATE_PG_DSN")
 	if v == "" {
 		if os.Getenv("M1_REQUIRE_STORES") == "1" {
-			t.Fatal("M1_TEST_PG_DSN required (M1_REQUIRE_STORES=1) but unset")
+			t.Fatal("M1_MIGRATE_PG_DSN required (M1_REQUIRE_STORES=1) but unset")
 		}
-		t.Skip("M1_TEST_PG_DSN unset; skipping Postgres-backed test")
+		t.Skip("M1_MIGRATE_PG_DSN unset; skipping Postgres-backed test")
 	}
 	return v
 }
@@ -681,7 +687,7 @@ func TestIntegrationVerifierE2EExportRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			t.Fatal(err)

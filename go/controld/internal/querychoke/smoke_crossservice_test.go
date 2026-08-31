@@ -1,3 +1,11 @@
+//go:build integration
+
+// Without this tag the file compiled into the default build while setupQC/seed/
+// mustTenant — which it needs — did not, so the whole querychoke test package
+// failed to typecheck and confinement/golden-band/templates never ran at all.
+// It needs a live ClickHouse and two seeded tenants, so `integration` is where
+// it belongs, not a copy of the helpers.
+
 package querychoke
 
 // Cross-service smoke (12 §4 posture, over the wave-7 pair): controld's
@@ -117,7 +125,7 @@ func TestIntegrationCrossServiceSmokeTenantIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)

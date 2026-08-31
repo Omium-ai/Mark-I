@@ -96,6 +96,12 @@ func OpenOffboard(ctx context.Context, o Options) (*Conn, error) {
 	ch, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{o.Addr},
 		Auth: clickhouse.Auth{Database: o.Database, Username: o.Username, Password: o.Password},
+		// A mutation is asynchronous by default: Exec would return while the
+		// parts are still being rewritten, and the deletion step is RECEIPTED
+		// (07's deletion path) — signing "deleted" over work that has not
+		// happened yet is the one thing this chain cannot do. 2, not 1, so the
+		// wait covers every replica once this is not a single node.
+		Settings: clickhouse.Settings{"mutations_sync": 2},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("chconn: open offboard principal %s: %w", o.Addr, err)
