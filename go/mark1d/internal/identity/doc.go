@@ -17,11 +17,14 @@
 // Windows TPM/DPAPI → Linux secret-service/TPM2 → 0600 file). Only the
 // floor — FileCustody, the 0600 file under ~/.omium/mark1/ — exists today;
 // the keychain/TPM rungs arrive with the enroll flow (they are provisioning
-// concerns, and there is no enrollment to provision for yet). The go-keyring
-// dependency is already pinned in go.mod for that row. Whatever the rung,
-// the private key never leaves custody: Sign() is the only operation a
-// DeviceKey exposes (04 §2.9, table §8: "key bytes never cross a package
-// boundary").
+// concerns, and there is no enrollment to provision for yet). No library is
+// pinned ahead of that row: one was, and since nothing imported it, it was
+// not a pin at all — `go mod tidy` deleted it the first time it ran (D-CF).
+// Whichever library serves the rung is chosen when the rung is built.
+//
+// Whatever the rung, the private key never leaves custody: Sign() is the
+// only operation a DeviceKey exposes (04 §2.9, table §8: "key bytes never
+// cross a package boundary").
 //
 // Token refresh, revocation handling (OnRevoked, M1E-1003) and the HMAC /
 // X25519 spill key material named by 04 §2.9 belong to the uplink/enroll

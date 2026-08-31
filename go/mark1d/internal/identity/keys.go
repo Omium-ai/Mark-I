@@ -106,7 +106,7 @@ func (f FileCustody) Store(seed []byte) error {
 		return err
 	}
 	if _, err := fh.Write(seed); err != nil {
-		fh.Close()
+		_ = fh.Close()
 		return err
 	}
 	return fh.Close()
