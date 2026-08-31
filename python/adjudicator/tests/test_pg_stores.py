@@ -18,7 +18,7 @@ import asyncpg
 import pytest
 from app.certs.compute import compute_certificate
 from app.certs.store import current_cert, insert_cert
-from app.db import _tenant_guc_reset
+from app.db import _tenant_guc_reset, set_local_tenant
 from app.gold.score import score_agreement
 from app.gold.select import add_members, create_gold_set, freeze_gold_set
 from app.registry.catalog import list_verifiers
@@ -34,10 +34,19 @@ DSN = os.environ.get("M1_TEST_PG_DSN", "")
 # default (the justfile exports the var unconditionally).
 REQUIRE_STORES = os.environ.get("M1_REQUIRE_STORES", "0") == "1"
 
-pytestmark = pytest.mark.skipif(
-    not DSN and not REQUIRE_STORES,
-    reason="M1_TEST_PG_DSN not set (estate skipif idiom; M1_REQUIRE_STORES=0)",
-)
+# `integration` is what ROUTES this module to the one CI job that has a Postgres.
+# Without it the suite was in the worst of both worlds: the storeless `python` job ran
+# it and errored 5 (M1_REQUIRE_STORES defaults to 1, so an unreachable DSN is a hard
+# failure by design), while the `integration` job — which provisions real stores —
+# selected `-m integration` and deselected every test here. The RLS negative tests this
+# repo's tenancy story rests on therefore ran in NO job with a database.
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not DSN and not REQUIRE_STORES,
+        reason="M1_TEST_PG_DSN not set (estate skipif idiom; M1_REQUIRE_STORES=0)",
+    ),
+]
 
 
 @pytest.fixture
@@ -67,18 +76,25 @@ async def pool():
 
 
 async def _mk_tenant(pool: asyncpg.Pool) -> str:
+    """Provisioning, not a tenant-scoped write. m1_001's policy on m1_tenants is
+    WITH CHECK (id = app.tenant_id), so a DB-assigned id can never satisfy it: the uuid
+    is chosen HERE and the GUC set to it before the INSERT. That is the only form the
+    m1_060 `GRANT INSERT ON m1_tenants TO controld_app` is usable in, and the form a
+    real onboarding path must use (RECONCILIATION ENG-05 — nobody has built one yet).
+    The alternative — doing setup as a BYPASSRLS role — is the rds_superuser lesson."""
     tag = f"adjtest-{random.randbytes(4).hex()}"
-    async with pool.acquire() as conn:
+    tenant = uuid4()
+    async with pool.acquire() as conn, conn.transaction():
         org = await conn.fetchval(
             "INSERT INTO m1_organizations (name, primary_domain) VALUES ($1, $2) RETURNING id",
             tag,
             f"{tag}.example",
         )
-        return str(
-            await conn.fetchval(
-                "INSERT INTO m1_tenants (org_id, name) VALUES ($1, $2) RETURNING id", org, tag
-            )
+        await set_local_tenant(conn, str(tenant))
+        await conn.execute(
+            "INSERT INTO m1_tenants (id, org_id, name) VALUES ($1, $2, $3)", tenant, org, tag
         )
+    return str(tenant)
 
 
 async def _mk_judge_verifier(pool: asyncpg.Pool) -> UUID:
@@ -222,9 +238,20 @@ async def test_rls_isolation_between_tenants(pool):
     tenant_b = await _mk_tenant(pool)
     verifier = await _mk_judge_verifier(pool)
     comp = compute_certificate(score_agreement([]))
-    await insert_cert(pool, tenant_a, verifier, "bootstrapping", comp, None)
+    a_cert = await insert_cert(pool, tenant_a, verifier, "bootstrapping", comp, None)
     # Tenant B's read must see NOTHING of tenant A's certificate: absence reads as
     # uncertified — the honest floor, not an error.
     got = await current_cert(pool, tenant_b)
     assert got.status == "uncertified"
     assert got.id is None
+
+    # ...but the assertions above observe the BELT, not the braces: current_cert carries
+    # an explicit WHERE tenant_id, so they stay green with the policy replaced by
+    # USING (true) — measured. Only a predicate-free read can fail when RLS does.
+    async with pool.acquire() as conn:
+        # GUC unset (the pool's setup= RESETs it): the NULLIF form must match NOTHING.
+        assert await conn.fetchval("SELECT count(*) FROM noise_certificates") == 0
+        async with conn.transaction():
+            await set_local_tenant(conn, tenant_b)
+            visible = await conn.fetch("SELECT id FROM noise_certificates")
+    assert a_cert not in {r["id"] for r in visible}
