@@ -464,7 +464,7 @@ pub(crate) fn decode_route(v: &Value) -> Result<RouteSection, Reject> {
     let mut rows = Vec::with_capacity(raw_rows.len());
     for rv in raw_rows {
         let rm = map_of(rv, &kp)?;
-        strict_keys(&rm, &["n", "c_n"], &[], &kp)?;
+        strict_keys(&rm, &["n", "c_n"], &["p_lcb"], &kp)?;
         let c_n = finite(rm["c_n"], &kp)?;
         if c_n < 0.0 {
             return Err(schema(&kp, "c_n must be >= 0")); // a negative cost never arrests a retry
@@ -472,6 +472,7 @@ pub(crate) fn decode_route(v: &Value) -> Result<RouteSection, Reject> {
         rows.push(KneeRow {
             n: uint(rm["n"], &kp)?,
             c_n,
+            p_lcb: rm.get("p_lcb").map(|v| prob(v, &kp)).transpose()?,
         });
     }
     let v_default = finite(km["v_default"], &kp)?;
@@ -779,6 +780,66 @@ mod tests {
             Err(Reject::Schema { .. })
         ));
         assert!(check_channel(&txt("stable"), "bundle.channel").is_ok());
+    }
+
+    #[test]
+    fn d_z_knee_p_lcb_is_optional_and_range_checked() {
+        let txt = |s: &str| Value::Text(s.into());
+        let route = |row: Vec<(Value, Value)>| {
+            Value::Map(vec![
+                (txt("cpvs"), Value::Array(vec![])),
+                (txt("ladders"), Value::Array(vec![])),
+                (
+                    txt("knee"),
+                    Value::Map(vec![
+                        (txt("cost_basis"), txt("usd")),
+                        (txt("rows"), Value::Array(vec![Value::Map(row)])),
+                        (txt("v_default"), Value::Float(1.0)),
+                    ]),
+                ),
+            ])
+        };
+        let base = vec![
+            (txt("n"), Value::Integer(1.into())),
+            (txt("c_n"), Value::Float(0.5)),
+        ];
+        let with = |p: Value| {
+            let mut r = base.clone();
+            r.push((txt("p_lcb"), p));
+            r
+        };
+        // Absent ⇒ None, never 0.0: an unfitted row must not look like a
+        // certainly-hopeless one (D-Z).
+        assert_eq!(
+            decode_route(&route(base.clone())).unwrap().knee.rows[0].p_lcb,
+            None
+        );
+        assert_eq!(
+            decode_route(&route(with(Value::Float(0.0))))
+                .unwrap()
+                .knee
+                .rows[0]
+                .p_lcb,
+            Some(0.0)
+        );
+        assert_eq!(
+            decode_route(&route(with(Value::Float(0.8))))
+                .unwrap()
+                .knee
+                .rows[0]
+                .p_lcb,
+            Some(0.8)
+        );
+        for bad in [
+            Value::Float(1.5),
+            Value::Float(-0.1),
+            Value::Float(f64::NAN),
+        ] {
+            assert!(matches!(
+                decode_route(&route(with(bad))),
+                Err(Reject::Schema { .. })
+            ));
+        }
     }
 
     #[test]

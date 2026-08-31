@@ -688,6 +688,19 @@ pub fn verify_and_decode(
 mod tests {
     use super::*;
 
+    /// The Go twin's canon reader keeps a tag verbatim, so it needed an
+    /// explicit 2/3 guard to land on this kind rather than on `schema`. Pinned
+    /// here so the reject TAXONOMY, not just the decision, stays shared.
+    #[test]
+    fn bignum_tags_are_non_canonical() {
+        for raw in [[0xc2u8, 0x42, 0x01, 0x00], [0xc3u8, 0x42, 0x01, 0x00]] {
+            let e = decode_canonical_checked(&raw).unwrap_err();
+            assert_eq!((e.code(), e.kind()), ("M1E-3001", "non_canonical"));
+        }
+        // Tag 1 is the bundle's own issued_at and must still round-trip.
+        assert!(decode_canonical_checked(&[0xc1, 0x1a, 0x6a, 0x8b, 0xd0, 0x00]).is_ok());
+    }
+
     #[test]
     fn rfc3339_parse_strict() {
         assert_eq!(parse_rfc3339_utc("1970-01-01T00:00:00Z"), Some(0));

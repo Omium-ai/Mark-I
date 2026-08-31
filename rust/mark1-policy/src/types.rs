@@ -212,6 +212,10 @@ pub struct KneeTable {
 pub struct KneeRow {
     pub n: u64,
     pub c_n: f64,
+    /// D-Z: OPTIONAL on the wire, and 0.0 is a legitimate lower bound, so
+    /// absent and zero MUST stay distinguishable — absent means the knee is
+    /// not evaluable at that n (never stop), zero means it always is.
+    pub p_lcb: Option<f64>,
 }
 
 // ── memory / cortex / gates ─────────────────────────────────────────────
