@@ -80,7 +80,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	w, werr := fsnotify.NewWatcher()
 	var events chan fsnotify.Event
 	if werr == nil {
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 		_ = w.Add(m.cfg.Dir) // may not exist yet; the tick retries below
 		events = make(chan fsnotify.Event)
 		go func() {

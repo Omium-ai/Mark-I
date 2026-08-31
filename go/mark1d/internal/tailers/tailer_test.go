@@ -147,7 +147,9 @@ func TestCursorResume(t *testing.T) {
 	if _, err := f.WriteString(usageLine("msg_2", "req_2", 20)); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := tl2.poll(time.Now(), collect(&got2)); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +186,9 @@ func TestPartialLineNotConsumed(t *testing.T) {
 	if _, err := f.WriteString(full[len(full)/2:]); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := tl.poll(time.Now(), collect(&got)); err != nil {
 		t.Fatal(err)
 	}
