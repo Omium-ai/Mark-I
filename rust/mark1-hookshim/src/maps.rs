@@ -34,8 +34,42 @@ pub struct EventRule {
     /// Binary-fixed semantic: which `m1p.v1` body this hook becomes — see
     /// `emit::build`. Unknown kinds map to nothing (never guess, 08 §5).
     pub kind: String,
+    /// Present ⇒ this hook is a gate (04 §5 step 5); absent ⇒ pure observer.
+    /// WHICH hooks gate is bundle data for the same reason the field names
+    /// are: 08 §5.1 makes `Stop` the stop-gate and `SubagentStop`
+    /// observer-only, and that is a vendor fact, not a shim semantic.
+    #[serde(default)]
+    pub gate: Option<GateRule>,
     /// logical name (binary-fixed) → vendor JSON field (bundle data).
     pub fields: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+pub struct GateRule {
+    /// `m1p.v1.GateKind`, named in data: "stop" | "tool".
+    pub kind: String,
+    /// The shim's own wall budget for the whole gate round trip, in ms. 08
+    /// §4.4 bounds it from ABOVE by the fragment's hook timeout minus 10 ms
+    /// (`timeout: 30` for Stop, 08 §5.1) — an upper bound, not the value. The
+    /// value is what the round trip actually costs: 04 §2.3 makes the daemon's
+    /// side a ≤5 ms cache read, so 250 ms is the whole exchange getting what
+    /// 08 §4.4 already grants ONE event write, and 50x the documented read.
+    ///
+    /// Sized this way because the fragment's number is a kill deadline, not a
+    /// budget: at 30 s a daemon that accepts the connection and never answers
+    /// cost 31.4 s per turn end against 217 ms for a daemon that was not
+    /// running at all — a half-dead Mark 1 145x worse than an absent one, on
+    /// the hook that fires every turn. The shim subtracts 08 §4.4's 10 ms
+    /// margin to get the agent-facing deadline it states on the wire.
+    pub budget_ms: u32,
+}
+
+impl FieldMap {
+    /// The rule this payload's hook maps to, or None when the hook is
+    /// unmapped (04 §5 step 2: emit nothing speculative).
+    pub fn rule(&self, payload: &serde_json::Value) -> Option<&EventRule> {
+        self.events.get(payload.get(&self.event_field)?.as_str()?)
+    }
 }
 
 /// The daemon-materialized cache wins over the builtin so a bundle push

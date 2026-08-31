@@ -30,6 +30,38 @@ const SESSION: &str = "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55";
 const DEVICE_SEED: [u8; 32] = [7u8; 32];
 const SEAL_LABEL: &[u8] = b"m1p.spill.seal.v1";
 
+/// How late `Mode::SlowVerdict` answers, past the deadline the shim stated.
+/// Wide on purpose: a debug-build fail-open costs ~0.5 s of wall (spawn plus
+/// the redact ruleset compile the release profile collapses), so the gap
+/// between "the deadline fired" and "the shim waited" has to clear that noise
+/// for the wall assertion to mean anything.
+const LATE_BY: Duration = Duration::from_secs(3);
+
+/// Everything a fail-open invocation costs that is NOT waiting on the fabric:
+/// process spawn, map load, the debug-build redact ruleset compile, and the
+/// sealed spill write. Measured 280-475 ms with the whole suite running in
+/// parallel on one box; 900 ms is roughly 2x the worst of that, which is the
+/// slack a loaded CI runner gets. It is a FIXED cost, so it is added to the
+/// deadline rather than being the whole ceiling — the old flat 1.5 s against a
+/// 50 ms deadline was 30x headroom, and an injected 1 s stall passed it.
+///
+/// ponytail: a constant, not a per-run calibration. If it ever goes flaky,
+/// measure it in-test with one daemon-absent spill run and add the deadline
+/// to THAT.
+const FAIL_OPEN_OVERHEAD: Duration = Duration::from_millis(900);
+
+/// The wall a fail-open is allowed: the deadline the shim itself stated, plus
+/// that fixed overhead. Spending the stated deadline twice (once on the
+/// handshake read, again on a freshly-timed verdict read) must land above it.
+fn fail_open_ceiling(deadline_ms: u64) -> Duration {
+    FAIL_OPEN_OVERHEAD + Duration::from_millis(deadline_ms)
+}
+
+/// The deadline the SHIPPED map makes the shim state for `Stop`: its 250 ms
+/// gate budget minus 08 §4.4's 10 ms margin. Spelled out here so a silent map
+/// edit cannot move it in either direction.
+const STOP_DEADLINE_MS: u64 = 240;
+
 fn fixture(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../conformance/hooks/claudecode/v2.1.251/hooks")
@@ -58,6 +90,39 @@ impl TestEnv {
         self.home.path().join(".omium/mark1/spill/hookshim.ring")
     }
 
+    /// The fail-open gate ledger (04 §5.4 shape): one byte per allowed-by-
+    /// timeout gate, so the file's LENGTH is the count.
+    fn gate_timeouts(&self) -> u64 {
+        self.sidecar("hookshim.gate_timeout")
+    }
+
+    /// The M1E-4003 ledger: one byte per handshake mark1d refused, so a bad
+    /// rollout is countable instead of just a fleet full of spill rings.
+    fn handshake_refusals(&self) -> u64 {
+        self.sidecar("hookshim.handshake_refused")
+    }
+
+    fn sidecar(&self, name: &str) -> u64 {
+        std::fs::metadata(self.home.path().join(".omium/mark1/spill").join(name))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    /// The shipped map with only the Stop gate's budget shrunk, pushed the way
+    /// mark1d would (FR-AGENT-001). The deadline paths are then provable in
+    /// milliseconds instead of the fragment's 30 s — and because the map is
+    /// derived from the committed file rather than retyped, the gate under
+    /// test stays the shipped one.
+    fn install_short_gate_map(&self, budget_ms: u32) {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("maps/claudecode.json");
+        let shipped = std::fs::read_to_string(src).unwrap();
+        let map = shipped.replace("\"budget_ms\": 250", &format!("\"budget_ms\": {budget_ms}"));
+        assert_ne!(map, shipped, "the shipped Stop budget moved; retarget this");
+        let dir = self.home.path().join(".omium/mark1/maps");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("claudecode.bin"), map).unwrap();
+    }
+
     /// Materialize the device spill public key the way mark1d would.
     fn install_spill_pubkey(&self) {
         let device = x25519_dalek::StaticSecret::from(DEVICE_SEED);
@@ -67,19 +132,29 @@ impl TestEnv {
         std::fs::write(dir.join("spill.pub"), device_pub.as_bytes()).unwrap();
     }
 
-    /// Fake daemon: accept one connection, read to EOF, hand the bytes back.
-    fn listen(&self) -> mpsc::Receiver<Vec<u8>> {
+    /// Fake daemon speaking the real dialect (D-U + 08 §4.3): Hello in,
+    /// HelloAck out, then events and gate round-trips.
+    fn listen(&self) -> Daemon {
+        self.listen_as(Mode::Allow)
+    }
+
+    fn listen_as(&self, mode: Mode) -> Daemon {
         std::fs::create_dir_all(self.sock_path().parent().unwrap()).unwrap();
         let listener = UnixListener::bind(self.sock_path()).unwrap();
-        let (tx, rx) = mpsc::channel();
+        let (conn_tx, connected) = mpsc::channel();
+        let (ev_tx, events) = mpsc::channel();
+        let (q_tx, queries) = mpsc::channel();
         std::thread::spawn(move || {
-            if let Ok((mut stream, _addr)) = listener.accept() {
-                let mut buf = Vec::new();
-                let _ = stream.read_to_end(&mut buf);
-                let _ = tx.send(buf);
+            while let Ok((stream, _addr)) = listener.accept() {
+                let _ = conn_tx.send(());
+                serve(stream, mode, &ev_tx, &q_tx);
             }
         });
-        rx
+        Daemon {
+            connected,
+            events,
+            queries,
+        }
     }
 
     /// Run the shim with the given stdin; returns (exit ok, stdout+stderr,
@@ -127,6 +202,173 @@ impl TestEnv {
         let mut chatter = out.stdout;
         chatter.extend_from_slice(&out.stderr);
         (out.status.success(), chatter, wall)
+    }
+}
+
+/// What the fake daemon does once a connection is up. Every mode answers the
+/// handshake honestly except `RefuseHello` and `Mute`, which are the two ways
+/// a daemon can leave a writer believing a completed `write_all` was a
+/// delivery (the F2 silence).
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    /// HelloAck{accepted}, GateQuery answered ALLOW.
+    Allow,
+    /// HelloAck{accepted}, GateQuery answered BLOCK.
+    Block,
+    /// HelloAck{accepted}, then the verdict arrives well past the deadline
+    /// the shim stated in the query.
+    SlowVerdict,
+    /// HelloAck{accepted: false} — 08 §4.3 step 3's mid-upgrade refusal.
+    RefuseHello,
+    /// Reads the Hello and closes without acking — 08 §4.3 step 2's bare
+    /// M1E-4003 close, which reaches the shim as EOF rather than a frame.
+    CloseOnHello,
+    /// Accepts the connection and says nothing, ever. Before the handshake
+    /// this was indistinguishable from a healthy daemon.
+    Mute,
+    /// HelloAck late but inside the deadline, then silence. The shape that
+    /// billed the shim its whole budget twice: once on the handshake read,
+    /// then again on a freshly-timed verdict read.
+    SlowHello,
+}
+
+/// How long `Mode::SlowHello` sits on the handshake before acking. Bigger than
+/// `FAIL_OPEN_OVERHEAD`, so the double-spend it provokes cannot hide inside
+/// the ceiling's slack.
+const HELLO_DELAY: Duration = Duration::from_millis(1_500);
+
+/// A daemon that never accepts, with a starved backlog so the shim's connect
+/// BLOCKS rather than queueing: listen(fd, 0) plus saturating dummy connects.
+/// `UnixStream::connect` has no timeout, so nothing inside the syscall ever
+/// unparks it — only the shim's own deadline can.
+fn starve_backlog(env: &TestEnv) -> UnixListener {
+    std::fs::create_dir_all(env.sock_path().parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(env.sock_path()).unwrap();
+    unsafe {
+        use std::os::unix::io::AsRawFd;
+        assert_eq!(libc::listen(listener.as_raw_fd(), 0), 0);
+    }
+    for _ in 0..8 {
+        let path = env.sock_path();
+        std::thread::spawn(move || {
+            let _ = std::os::unix::net::UnixStream::connect(path);
+        });
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    listener
+}
+
+struct Daemon {
+    connected: mpsc::Receiver<()>,
+    events: mpsc::Receiver<pb::Event>,
+    queries: mpsc::Receiver<pb::GateQuery>,
+}
+
+impl Daemon {
+    fn event(&self) -> pb::Event {
+        self.events.recv_timeout(Duration::from_secs(2)).unwrap()
+    }
+    fn no_event(&self) -> bool {
+        self.events
+            .recv_timeout(Duration::from_millis(300))
+            .is_err()
+    }
+    fn query(&self) -> pb::GateQuery {
+        self.queries.recv_timeout(Duration::from_secs(2)).unwrap()
+    }
+    fn no_query(&self) -> bool {
+        self.queries
+            .recv_timeout(Duration::from_millis(300))
+            .is_err()
+    }
+}
+
+fn write_frame(stream: &mut std::os::unix::net::UnixStream, kind: pb::fabric_frame::Kind) {
+    let mut out = Vec::new();
+    m1p_wire::encode_control(&pb::FabricFrame { kind: Some(kind) }, &mut out).unwrap();
+    let _ = stream.write_all(&out);
+}
+
+fn serve(
+    mut stream: std::os::unix::net::UnixStream,
+    mode: Mode,
+    events: &mpsc::Sender<pb::Event>,
+    queries: &mpsc::Sender<pb::GateQuery>,
+) {
+    if mode == Mode::Mute {
+        // Hold the connection open so the shim sees silence, not EOF.
+        std::thread::sleep(Duration::from_secs(30));
+        return;
+    }
+    let mut dec = FrameDecoder::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        let frames = match dec.feed_frames(&buf[..n]) {
+            Ok(f) => f,
+            Err(e) => panic!("the daemon could not decode what the shim wrote: {e}"),
+        };
+        for frame in frames {
+            match frame.kind.unwrap() {
+                pb::fabric_frame::Kind::Hello(h) => {
+                    if mode == Mode::SlowHello {
+                        std::thread::sleep(HELLO_DELAY);
+                    }
+                    assert_eq!(h.component, "mark1-hookshim");
+                    assert!(h.pid > 0, "Hello must name the writer's pid");
+                    assert!(!h.version.is_empty(), "Hello must carry the crate version");
+                    if mode == Mode::CloseOnHello {
+                        return;
+                    }
+                    write_frame(
+                        &mut stream,
+                        pb::fabric_frame::Kind::HelloAck(pb::HelloAck {
+                            accepted: mode != Mode::RefuseHello,
+                            max_frame: m1p_wire::M1PL_MAX_FRAME,
+                            want_ver: 0,
+                        }),
+                    );
+                    if mode == Mode::RefuseHello {
+                        return;
+                    }
+                }
+                pb::fabric_frame::Kind::Event(ev) => {
+                    let _ = events.send(ev);
+                }
+                pb::fabric_frame::Kind::GateQuery(q) => {
+                    let _ = queries.send(q.clone());
+                    if mode == Mode::SlowHello {
+                        // Whatever is LEFT of the deadline is all the shim may
+                        // spend here — not a fresh copy of it.
+                        std::thread::sleep(Duration::from_secs(30));
+                        return;
+                    }
+                    if mode == Mode::SlowVerdict {
+                        std::thread::sleep(
+                            Duration::from_millis(u64::from(q.deadline_ms)) + LATE_BY,
+                        );
+                    }
+                    write_frame(
+                        &mut stream,
+                        pb::fabric_frame::Kind::GateVerdict(pb::GateVerdict {
+                            decision: if mode == Mode::Block {
+                                pb::GateDecision::Block as i32
+                            } else {
+                                pb::GateDecision::Allow as i32
+                            },
+                            verdict: pb::Verdict::Violated as i32,
+                            posterior: vec![0.02, 0.95, 0.02, 0.01],
+                            reason: "two anchors report the build is broken".into(),
+                            evidence_ref: "evidence/abc123".into(),
+                        }),
+                    );
+                }
+                other => panic!("the shim sent an arm no writer may send: {other:?}"),
+            }
+        }
     }
 }
 
@@ -190,15 +432,14 @@ fn conf_hooks_claudecode_2_1_251_replay() {
         "SessionEnd",
     ] {
         let env = TestEnv::new();
-        let rx = env.listen();
+        let d = env.listen();
         let (ok, chatter, _wall) = env.run(&fixture(name), &[]);
         assert!(ok, "{name}: shim must exit 0");
         assert!(
             chatter.is_empty(),
-            "{name}: observer events produce no output"
+            "{name}: an allowed gate and an observer event both produce no output"
         );
-        let frame = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        let ev = decode_one_event(&frame);
+        let ev = d.event();
         assert_envelope(&ev);
         match (name, ev.body.unwrap()) {
             ("SessionStart", pb::event::Body::SessionStart(b)) => {
@@ -241,14 +482,11 @@ fn conf_hooks_precompact_emits_nothing() {
     // PreCompact maps to kind "none": no committed m1p.v1 body exists for a
     // compaction boundary, and the adapter never guesses (08 §5 rule 2).
     let env = TestEnv::new();
-    let rx = env.listen();
+    let d = env.listen();
     let (ok, chatter, _wall) = env.run(&fixture("PreCompact"), &[]);
     assert!(ok);
     assert!(chatter.is_empty());
-    assert!(
-        rx.recv_timeout(Duration::from_millis(300)).is_err(),
-        "PreCompact must not reach the fabric"
-    );
+    assert!(d.no_event(), "PreCompact must not reach the fabric");
     assert!(!env.ring_path().exists(), "and must not spill");
 }
 
@@ -258,7 +496,7 @@ fn conf_hooks_precompact_emits_nothing() {
 fn off_env_var_is_a_silent_noop() {
     let env = TestEnv::new();
     env.install_spill_pubkey();
-    let rx = env.listen();
+    let d = env.listen();
     let (ok, chatter, _wall) = env.run(&fixture("PreToolUse"), &[("MARK1_DISABLE", "1")]);
     assert!(ok, "off must exit 0");
     assert!(
@@ -266,8 +504,10 @@ fn off_env_var_is_a_silent_noop() {
         "byte-identical agent behavior: no output"
     );
     assert!(
-        rx.recv_timeout(Duration::from_millis(300)).is_err(),
-        "off must produce zero fabric I/O"
+        d.connected
+            .recv_timeout(Duration::from_millis(300))
+            .is_err(),
+        "off must produce zero fabric I/O — not even a connect"
     );
     assert!(
         !env.ring_path().exists(),
@@ -282,11 +522,14 @@ fn off_marker_file_is_a_silent_noop() {
     let marker_dir = env.home.path().join(".omium/mark1");
     std::fs::create_dir_all(&marker_dir).unwrap();
     std::fs::write(marker_dir.join("OFF"), b"").unwrap();
-    let rx = env.listen();
+    let d = env.listen();
     let (ok, chatter, _wall) = env.run(&fixture("PreToolUse"), &[]);
     assert!(ok);
     assert!(chatter.is_empty());
-    assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+    assert!(d
+        .connected
+        .recv_timeout(Duration::from_millis(300))
+        .is_err());
     assert!(!env.ring_path().exists());
 }
 
@@ -298,12 +541,14 @@ fn no_home_fails_closed_silent_noop() {
     // `mark1 off` for any agent launched without a home.
     let env = TestEnv::new();
     env.install_spill_pubkey();
-    let rx = env.listen();
+    let d = env.listen();
     let (ok, chatter, _wall) = env.run_homeless(&fixture("PreToolUse"));
     assert!(ok, "off must exit 0");
     assert!(chatter.is_empty());
     assert!(
-        rx.recv_timeout(Duration::from_millis(300)).is_err(),
+        d.connected
+            .recv_timeout(Duration::from_millis(300))
+            .is_err(),
         "no home ⇒ no capture: the marker check must fail closed"
     );
 }
@@ -320,14 +565,16 @@ fn unreadable_marker_dir_fails_closed() {
     let dir = env.home.path().join(".omium/mark1");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let rx = env.listen();
+    let d = env.listen();
     let (ok, chatter, _wall) = env.run(&fixture("PreToolUse"), &[]);
     // Restore before asserting so tempdir cleanup can delete the tree.
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(ok);
     assert!(chatter.is_empty());
     assert!(
-        rx.recv_timeout(Duration::from_millis(300)).is_err(),
+        d.connected
+            .recv_timeout(Duration::from_millis(300))
+            .is_err(),
         "a stat error on the marker must read as OFF, exactly like mark1d"
     );
     assert!(!env.ring_path().exists(), "and must not spill");
@@ -339,22 +586,8 @@ fn unreadable_marker_dir_fails_closed() {
 fn deadline_blocked_fabric_spills_within_budget() {
     let env = TestEnv::new();
     env.install_spill_pubkey();
-    // A daemon that never accepts, with a starved backlog so the shim's
-    // connect BLOCKS instead of queueing: listen(fd, 0) + saturating dummy
-    // connects. This is the stall the 45 ms abandon timer exists for.
-    std::fs::create_dir_all(env.sock_path().parent().unwrap()).unwrap();
-    let listener = UnixListener::bind(env.sock_path()).unwrap();
-    unsafe {
-        use std::os::unix::io::AsRawFd;
-        assert_eq!(libc::listen(listener.as_raw_fd(), 0), 0);
-    }
-    for _ in 0..8 {
-        let path = env.sock_path();
-        std::thread::spawn(move || {
-            let _ = std::os::unix::net::UnixStream::connect(path);
-        });
-    }
-    std::thread::sleep(Duration::from_millis(50));
+    // This is the stall the 45 ms abandon timer exists for.
+    let listener = starve_backlog(&env);
 
     let (ok, chatter, wall) = env.run(&fixture("PreToolUse"), &[]);
     assert!(ok, "a blocked fabric must still exit 0");
@@ -364,7 +597,7 @@ fn deadline_blocked_fabric_spills_within_budget() {
     // proves the timer fired. The margin above 45 ms is the spill path
     // itself — dominated by the debug-build ruleset compile, which the
     // release profile collapses to single-digit ms.
-    assert!(wall < Duration::from_millis(500), "took {wall:?}");
+    assert!(wall < fail_open_ceiling(45), "took {wall:?}");
     let entries = unseal_ring(&env);
     assert_eq!(entries.len(), 1, "the abandoned event must be in the ring");
     let ev = decode_one_event(&entries[0]);
@@ -374,6 +607,86 @@ fn deadline_blocked_fabric_spills_within_budget() {
         other => panic!("unexpected body {other:?}"),
     }
     drop(listener);
+}
+
+/// F2, the observer half: a completed `write_all` against a socket the daemon
+/// is closing is NOT a delivery. The gate path has the verdict read as its own
+/// evidence; the fire-and-forget path has only the HelloAck (08 §4.3 step 4 —
+/// there is no per-event ack), so without it every observer event was lost
+/// with `Ok(())` returned, nothing spilled, and no `Dropped{}` ever emitted.
+#[test]
+fn observer_event_spills_when_the_handshake_is_refused() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    let _d = env.listen_as(Mode::RefuseHello);
+    let (ok, chatter, _wall) = env.run(&fixture("PreToolUse"), &[]);
+    assert!(ok);
+    assert!(chatter.is_empty());
+    assert_eq!(unseal_ring(&env).len(), 1, "a refused writer must spill");
+    assert_eq!(env.handshake_refusals(), 1, "M1E-4003 must be counted");
+}
+
+/// 08 §4.3 step 2's other shape: the daemon closes instead of acking, so the
+/// refusal arrives as EOF. Same spill, same count — otherwise a rollout that
+/// refuses every handshake is a silent fleet-wide outage.
+#[test]
+fn handshake_closed_without_ack_is_counted() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    let _d = env.listen_as(Mode::CloseOnHello);
+    let (ok, chatter, _wall) = env.run(&fixture("PreToolUse"), &[]);
+    assert!(ok);
+    assert!(chatter.is_empty());
+    assert_eq!(unseal_ring(&env).len(), 1);
+    assert_eq!(env.handshake_refusals(), 1, "M1E-4003 must be counted");
+}
+
+#[test]
+fn observer_event_spills_when_the_daemon_goes_mute() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    // Connection accepted, never a byte back — the shape that is
+    // indistinguishable from a healthy daemon until you wait for an ack.
+    let _d = env.listen_as(Mode::Mute);
+    let (ok, chatter, _wall) = env.run(&fixture("PreToolUse"), &[]);
+    assert!(ok);
+    assert!(chatter.is_empty());
+    assert_eq!(
+        unseal_ring(&env).len(),
+        1,
+        "silence must not lose the event"
+    );
+}
+
+/// Regenerates `go/mark1d/internal/spill/testdata/hookshim.ring` from THIS
+/// build of the shim:
+///
+///     cargo test -p mark1-hookshim --test shim_e2e -- --ignored regenerate
+///
+/// Ignored because it writes into the source tree. The Go drain test that
+/// consumes the file is the only place the two languages meet on the ring's
+/// payload, so a fixture that drifts from the encoder turns that test into a
+/// test of nothing — which is what happened: the committed ring predated
+/// `encode_frame`'s FabricFrame wrap and still held a bare Event, and neither
+/// side noticed, because tag 1 wiretype 2 means an Event and the frame around
+/// it are indistinguishable to a decoder that is handed the wrong one.
+#[test]
+#[ignore = "writes into the source tree; run deliberately after a frame change"]
+fn regenerate_go_spill_fixture() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    // No listener at all: connect fails fast and the event takes the spill path.
+    let (ok, chatter, _wall) = env.run(&fixture("PostToolUse"), &[]);
+    assert!(ok);
+    assert!(chatter.is_empty());
+    assert_eq!(
+        unseal_ring(&env).len(),
+        1,
+        "expected exactly one ring entry"
+    );
+    let dest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../go/mark1d/internal/spill/testdata/hookshim.ring");
+    std::fs::write(&dest, std::fs::read(env.ring_path()).unwrap()).unwrap();
 }
 
 #[test]
@@ -443,6 +756,224 @@ fn spill_overflow_is_counted_not_silent() {
     );
 }
 
+// ---- the stop-gate (04 §5 step 5; 08 §5.1's `Stop` row) ----
+//
+// Every failure mode below must answer ALLOW, and every fail-open answer must
+// be counted: an uncounted fail-open is indistinguishable from a product that
+// silently does nothing (08 §4.4).
+
+#[test]
+fn gate_allow_is_silent_and_states_the_deadline() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    let d = env.listen_as(Mode::Allow);
+    let (ok, chatter, _wall) = env.run(&fixture("Stop"), &[]);
+    assert!(ok);
+    // 08 §5.1's Stop row: at the knee ⇒ "exit 0 with no decision".
+    assert!(chatter.is_empty(), "an allowed gate returns no JSON at all");
+
+    let q = d.query();
+    assert_eq!(q.gate, pb::GateKind::Stop as i32);
+    // 08 §4.4: the SHIM owns the agent-facing deadline — the map's gate budget
+    // minus 10 ms. Never 0, which D-Y(c) reserves for unspecified.
+    assert_eq!(u64::from(q.deadline_ms), STOP_DEADLINE_MS);
+    // Stop is both the gate and a Turn{AGENT} observer event, on one
+    // connection (08 §4.3 step 4).
+    match d.event().body.unwrap() {
+        pb::event::Body::Turn(b) => assert_eq!(b.initiator, pb::Initiator::Agent as i32),
+        other => panic!("unexpected body {other:?}"),
+    }
+    assert!(
+        !env.ring_path().exists(),
+        "a delivered event must not spill"
+    );
+    assert_eq!(env.gate_timeouts(), 0, "a real verdict is not a fail-open");
+}
+
+#[test]
+fn gate_block_emits_the_vendor_block_json() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    let d = env.listen_as(Mode::Block);
+    let (ok, chatter, _wall) = env.run(&fixture("Stop"), &[]);
+    // 08 §5.1: exit 0 + JSON stdout is the only mode; exit 2 is never used.
+    assert!(ok, "a block is exit 0 with JSON, never a nonzero exit");
+    let out: serde_json::Value = serde_json::from_slice(&chatter).unwrap();
+    assert_eq!(out["decision"], "block");
+    let reason = out["reason"].as_str().unwrap();
+    // "<verdict + failure evidence as continuation reason>" — the daemon's
+    // reason, carrying its evidence pointer.
+    assert!(reason.contains("two anchors report the build is broken"));
+    assert!(reason.contains("evidence/abc123"));
+    assert!(
+        out.get("continue").is_none(),
+        "never `continue:false` (08 §5.1)"
+    );
+    assert_eq!(u64::from(d.query().deadline_ms), STOP_DEADLINE_MS);
+    assert!(!env.ring_path().exists());
+    assert_eq!(env.gate_timeouts(), 0);
+}
+
+#[test]
+fn gate_deadline_exceeded_allows_within_budget() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    env.install_short_gate_map(60);
+    let d = env.listen_as(Mode::SlowVerdict);
+    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[]);
+    assert!(ok);
+    assert!(chatter.is_empty(), "a blown deadline is allow, not block");
+    assert_eq!(d.query().deadline_ms, 50, "60 ms budget − 08 §4.4's 10 ms");
+    // The daemon answers LATE_BY past the deadline; the shim answered before.
+    assert!(wall < fail_open_ceiling(50), "took {wall:?}");
+    // The daemon never answered, so it never accounted the event either.
+    assert_eq!(unseal_ring(&env).len(), 1, "the event must reach the ring");
+    assert_eq!(env.gate_timeouts(), 1, "the fail-open must be counted");
+}
+
+#[test]
+fn gate_handshake_refused_allows_and_spills() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    // HelloAck{accepted: false} — 08 §4.3 step 3's mid-upgrade refusal. A
+    // completed write_all is NOT a delivery; only the ack says so.
+    let d = env.listen_as(Mode::RefuseHello);
+    let (ok, chatter, _wall) = env.run(&fixture("Stop"), &[]);
+    assert!(ok);
+    assert!(chatter.is_empty());
+    assert!(
+        d.no_query(),
+        "a refused handshake never carries a GateQuery"
+    );
+    assert_eq!(unseal_ring(&env).len(), 1);
+    assert_eq!(env.gate_timeouts(), 1);
+    assert_eq!(env.handshake_refusals(), 1, "M1E-4003 must be counted");
+}
+
+#[test]
+fn gate_daemon_absent_allows_and_spills() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    // No listener bound at all: connect fails outright.
+    let (ok, chatter, _wall) = env.run(&fixture("Stop"), &[]);
+    assert!(ok, "Mark 1's absence must never block a developer");
+    assert!(chatter.is_empty());
+    assert_eq!(unseal_ring(&env).len(), 1);
+    assert_eq!(env.gate_timeouts(), 1);
+}
+
+#[test]
+fn gate_mute_daemon_allows_within_budget() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    env.install_short_gate_map(60);
+    // Connection accepted, then silence forever — the F2 shape: before the
+    // handshake this was indistinguishable from a healthy daemon and the
+    // event vanished with Ok(()) returned and nothing spilled.
+    let _d = env.listen_as(Mode::Mute);
+    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[]);
+    assert!(ok);
+    assert!(chatter.is_empty());
+    assert!(wall < fail_open_ceiling(50), "took {wall:?}");
+    assert_eq!(
+        unseal_ring(&env).len(),
+        1,
+        "silence must not lose the event"
+    );
+    assert_eq!(env.gate_timeouts(), 1);
+    assert_eq!(
+        env.handshake_refusals(),
+        0,
+        "a mute daemon is a timeout, not a refusal"
+    );
+}
+
+/// The shipped budget, measured against the shape that abuses it worst: a
+/// daemon that accepts the connection and then says nothing, forever. Every
+/// other gate test installs a short map, so the number developers actually run
+/// went unmeasured — and at the fragment's 30 s it cost 31.4 s per turn end
+/// against 217 ms for a daemon that was not running at all. A wedged Mark 1
+/// 145x worse than an absent Mark 1 is worse than no product; this is the test
+/// that holds the shipped value to the same promise the short maps prove.
+#[test]
+fn shipped_stop_budget_bounds_a_wedged_daemon() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    // Deliberately NO install_short_gate_map: the map under test is the one in
+    // the binary.
+    let _d = env.listen_as(Mode::Mute);
+    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[]);
+    assert!(ok);
+    assert!(chatter.is_empty(), "silence is allow, not block");
+    assert!(wall < fail_open_ceiling(STOP_DEADLINE_MS), "took {wall:?}");
+    assert_eq!(
+        unseal_ring(&env).len(),
+        1,
+        "silence must not lose the event"
+    );
+    assert_eq!(env.gate_timeouts(), 1, "the fail-open must be counted");
+}
+
+/// The connect itself. `UnixStream::connect` against a starved backlog never
+/// returns, so before the shared deadline the gate path had NO bound at all:
+/// this test did not fail, it hung, and the agent's hook timeout killed it.
+#[test]
+fn gate_blocked_connect_allows_within_budget() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    env.install_short_gate_map(510);
+    let listener = starve_backlog(&env);
+    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[]);
+    assert!(ok, "a parked connect must still exit 0");
+    assert!(chatter.is_empty());
+    assert!(wall < fail_open_ceiling(500), "took {wall:?}");
+    assert_eq!(unseal_ring(&env).len(), 1);
+    assert_eq!(env.gate_timeouts(), 1);
+    drop(listener);
+}
+
+/// The double-spend. The handshake eats 1500 ms of a 2000 ms deadline and the
+/// verdict never comes: the shim gets the remaining 500 ms, not a second
+/// 2000 ms. A per-wait budget costs 3500 ms here.
+#[test]
+fn gate_silence_after_slow_handshake_spends_one_budget() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    env.install_short_gate_map(2_010);
+    let _d = env.listen_as(Mode::SlowHello);
+    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[]);
+    assert!(ok);
+    assert!(chatter.is_empty());
+    assert!(wall < fail_open_ceiling(2_000), "took {wall:?}");
+    assert!(
+        wall > HELLO_DELAY,
+        "the handshake was not actually waited on: {wall:?}"
+    );
+    assert_eq!(unseal_ring(&env).len(), 1);
+    assert_eq!(env.gate_timeouts(), 1);
+}
+
+#[test]
+fn gate_off_short_circuits_before_any_socket_io() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    // Invariant 2: the off-check precedes ANY gate evaluation, which on the
+    // gate path means before the connect. A listener is bound and would
+    // announce any connection, so silence on `connected` is the proof.
+    let d = env.listen_as(Mode::Block);
+    let (ok, chatter, _wall) = env.run(&fixture("Stop"), &[("MARK1_DISABLE", "1")]);
+    assert!(ok);
+    assert!(chatter.is_empty(), "off must never emit a block decision");
+    assert!(
+        d.connected
+            .recv_timeout(Duration::from_millis(300))
+            .is_err(),
+        "off must produce zero fabric I/O — not even a connect"
+    );
+    assert!(!env.ring_path().exists());
+    assert_eq!(env.gate_timeouts(), 0, "off is not a fail-open, it is off");
+}
+
 // ---- maps as data (FR-AGENT-001) ----
 
 #[test]
@@ -472,12 +1003,10 @@ fn map_file_overrides_builtin_without_binary_change() {
     let renamed = format!(
         r#"{{"hookName":"ToolWillRun","sid":"{SESSION}","toolTitle":"Bash","invocationId":"inv_42"}}"#
     );
-    let rx = env.listen();
+    let d = env.listen();
     let (ok, _chatter, _wall) = env.run(renamed.as_bytes(), &[]);
     assert!(ok);
-    let frame = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    let ev = decode_one_event(&frame);
-    match ev.body.unwrap() {
+    match d.event().body.unwrap() {
         pb::event::Body::ToolUse(b) => {
             assert_eq!(b.tool_name, "Bash");
             assert_eq!(b.tool_use_id, "inv_42");
@@ -489,12 +1018,12 @@ fn map_file_overrides_builtin_without_binary_change() {
 #[test]
 fn unmapped_hook_emits_nothing_speculative() {
     let env = TestEnv::new();
-    let rx = env.listen();
+    let d = env.listen();
     let body = format!(r#"{{"hook_event_name":"BrandNewVendorHook","session_id":"{SESSION}"}}"#);
     let (ok, chatter, _wall) = env.run(body.as_bytes(), &[]);
     assert!(ok);
     assert!(chatter.is_empty());
-    assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+    assert!(d.no_event());
 }
 
 // ---- the wall budget (04 §5: total ≤50 ms, timer-enforced) ----
@@ -502,14 +1031,14 @@ fn unmapped_hook_emits_nothing_speculative() {
 #[test]
 fn cold_start_end_to_end_under_50ms() {
     let env = TestEnv::new();
-    let rx = env.listen();
+    let d = env.listen();
     // One warm-up spawn so the very first exec's page-cache misses don't
     // bill this measurement; the budget is per-invocation steady state.
     let _ = env.run(&fixture("SessionEnd"), &[("MARK1_DISABLE", "1")]);
     let (ok, _chatter, wall) = env.run(&fixture("PreToolUse"), &[]);
     assert!(ok);
     assert!(
-        rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+        d.events.recv_timeout(Duration::from_secs(2)).is_ok(),
         "happy path must reach the fabric"
     );
     assert!(

@@ -1033,6 +1033,48 @@ fn build_vectors(signers: &Signers) -> Result<Vec<Vector>> {
         expect: Some(("M1E-3001", "too_large")),
     });
 
+    // knee_p_lcb — bundle zero's shape with the knee table's OPTIONAL per-row
+    // `p_lcb` (D-Z) populated. Both decoders shipped `p_lcb` OUT of their
+    // optional key set, so every CDDL-legal bundle carrying one was an
+    // M1E-3001 and the knee governor could never stop anything. The row mix is
+    // load-bearing: absent, present-and-0.0, and present-nonzero must decode
+    // to three distinct states.
+    let mut plcb_sections = sections_full(false);
+    let mut plcb_route = section_of(&plcb_sections, "route")?.clone();
+    map_set(
+        &mut plcb_route,
+        "knee",
+        m(&[
+            ("cost_basis", t("usd")),
+            (
+                "rows",
+                a(&[
+                    m(&[("n", u(1)), ("c_n", f(0.02))]),
+                    m(&[("n", u(2)), ("c_n", f(0.05)), ("p_lcb", f(0.0))]),
+                    m(&[("n", u(3)), ("c_n", f(0.12)), ("p_lcb", f(0.75))]),
+                ]),
+            ),
+            ("v_default", f(0.35)),
+        ]),
+    )?;
+    map_set(&mut plcb_sections, "route", plcb_route)?;
+    let plcb_sigs = signatures(signers, &plcb_sections, &env_local0)?;
+    out.push(Vector {
+        name: "knee_p_lcb",
+        raw: canon(&bundle_value(
+            env_local0.seq,
+            env_local0.channel,
+            env_local0.prev_hash,
+            env_local0.max_age,
+            plcb_sections,
+            plcb_sigs,
+            Value::Null,
+        ))?,
+        last_applied_seq: None,
+        tlog_head: None,
+        expect: None,
+    });
+
     Ok(out)
 }
 

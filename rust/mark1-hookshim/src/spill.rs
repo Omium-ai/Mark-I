@@ -98,6 +98,40 @@ pub fn append(home: Option<&Path>, mut frame: Vec<u8>) {
     let _ = file.write_all(&sealed);
 }
 
+/// One fail-open gate answer, counted (08 §4.4: a `GateQuery` timeout means
+/// the shim returns allow AND emits `Dropped{reason: gate_timeout}`).
+///
+/// `Dropped` rides on `Batch.dropped`, never inside `Event.body` (07 §2), and
+/// the shim owns no Batch surface — so this takes the same shape the
+/// ring-overflow shed already uses (04 §5.4): one byte per event in an
+/// O_APPEND sidecar, whose LENGTH is the count, no read-modify-write to race
+/// between concurrent shims. mark1d's drain converts the `.shed` sidecar to
+/// `Dropped{RING_EVICTED}`; the equivalent conversion of this file to
+/// `Dropped{GATE_TIMEOUT}` is the daemon's half and does not exist yet — an
+/// uncounted fail-open is the one thing worse than a counted one.
+pub fn count_gate_timeout(home: Option<&Path>) {
+    count(home, "hookshim.gate_timeout");
+}
+
+/// `M1E-4003` — mark1d refused this connection's handshake and closed it
+/// (08 §4.3 steps 2-3). Same sidecar shape, because the alternative is what
+/// this was before: a fleet-wide refusal after a bad rollout, every event
+/// spilling, and no signal anywhere that the handshake is the reason.
+pub fn count_handshake_refused(home: Option<&Path>) {
+    count(home, "hookshim.handshake_refused");
+}
+
+fn count(home: Option<&Path>, name: &str) {
+    let Some(home) = home else { return };
+    let dir = home.join(".omium/mark1/spill");
+    if create_private_dir(&dir).is_err() {
+        return;
+    }
+    if let Ok(mut f) = open_private_append(&dir.join(name)) {
+        let _ = f.write_all(&[1]);
+    }
+}
+
 /// Seal to the device spill public key. No key on disk ⇒ no spill at all:
 /// an unencrypted ring is the one thing this module must never produce.
 fn seal(base: &Path, plaintext: &[u8]) -> Option<Vec<u8>> {
@@ -164,8 +198,9 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
-    // Windows privacy is the profile DACL until the named-pipe lane lands
-    // (04 §11.1) — same phase gap as fabric::send.
+    // Windows privacy is the profile DACL until the named pipe lands — a
+    // weaker guarantee than the 0600 unix path, stated as such. Same
+    // unsanctioned gap as fabric::send (D-CA/D-CD), not a scheduled lane.
     std::fs::OpenOptions::new()
         .append(true)
         .create(true)
