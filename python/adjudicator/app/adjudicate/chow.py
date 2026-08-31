@@ -58,11 +58,26 @@ class Costs:
         return (self.a / self.r, 1.0 - self.a / self.d)
 
 
-def chow_verdict(eta: float, costs: Costs) -> str:
-    """06 §3.1 step 4, exactly: η is posterior[satisfied]."""
-    lo, hi = costs.band
-    if eta >= hi:
+def chow_verdict(u_s: float, total: float, costs: Costs) -> str:
+    """06 §3.1 step 4, exactly, on the UNNORMALISED satisfied mass: η = u_s / total.
+
+    D-AK: BY CROSS-MULTIPLICATION, NEVER DIVISION. `η ≥ 1 − A/D` is `u_s·D ≥ (D−A)·total`
+    and `η ≤ A/R` is `u_s·R ≤ A·total`.
+
+    D-AO(c): the reason is ACCURACY, not determinism. IEEE-754 mandates correct rounding
+    for `/` exactly as it does for `*`, so both forms are bit-portable and `u_s·R` rounds
+    like anything else — division was never the portability hazard the transcendentals
+    were. What cross-multiplication buys is that it needs no DERIVED constant (the
+    divided form must first round `1 − A/D`, and A/D is not representable, putting a
+    second rounding on the threshold itself) and that it is scale-invariant under the
+    fusion loop's frexp/ldexp rescale. The trade is real and runs both ways — measured
+    over 300k constructions: at the SATISFIED threshold cross-multiplication is wrong
+    35,616 times against division's 57,384; at the VIOLATED threshold under D4 costs
+    division is wrong 0 times and cross-multiplication 22,682. It is chosen for the
+    threshold that carries the false-accept cost (D=9), not because it is uniformly
+    tighter."""
+    if u_s * costs.d >= (costs.d - costs.a) * total:
         return "satisfied"
-    if eta <= lo:
+    if u_s * costs.r <= costs.a * total:
         return "violated"
     return "refused"  # η ∈ (A/R, 1 − A/D) — the Chow band

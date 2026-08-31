@@ -124,15 +124,61 @@ class Bundle:
 
     priors: tuple[float, float, float, float] = DEFAULT_PRIORS
     verifiers: dict[str, VerifierParams] = field(default_factory=dict)
+    # OPT-IN, and only where someone decided it: the certification / gold-set path has
+    # no bundle to contradict, so it may fall back to the literature-CALIBRATED rows.
+    # It was inferred from `not self.verifiers` instead, which made a bundle carrying
+    # ZERO verifiers grant full likelihood AND coverage to a total stranger — an
+    # unlisted verifier producing a BLOCK-grade `violated` and not even counted in
+    # unknown_voters, reachable through the unauthenticated /v1/adjudicate/preview
+    # whenever `verifiers` is omitted. The edge's equivalent state contributes
+    # nothing, so the inference was also a Python-only divergence from D-AB.
+    calibrated_defaults: bool = False
 
-    def params_for(self, verifier_id: str, kind: str) -> VerifierParams:
-        """Bundle row when present; literature-CALIBRATED default otherwise, with
-        provenance honestly 'prior' (the Phase 2 posture — mirror of intel
-        engine.py's CALIBRATED fallback: never a fabricated measurement)."""
+    def params_for(self, verifier_id: str, kind: str) -> VerifierParams | None:
+        """The verifier's row, or None when this bundle cannot honestly supply one.
+
+        DECISION D-X (lead, binding). A BUNDLE IS THE SOLE SOURCE OF FUSION
+        PARAMETERS. A verifier this bundle does not list gets no likelihood at all
+        (None) — the caller counts it and moves on, exactly as the edge twin does; a
+        per-kind default here would silently disagree with a mark1d that has no such
+        table, on the same (bundle, votes).
+
+        `calibrated_defaults=True` is the one exemption, and it is a caller's explicit
+        claim to be on the certification path. Its provenance is 'prior', so _stamp
+        caps any fusion that consumed one at BOOTSTRAPPING (D-T), never CERTIFIED.
+        """
         got = self.verifiers.get(verifier_id)
         if got is not None:
             return got
-        return calibrated_params(verifier_id, kind)
+        return calibrated_params(verifier_id, kind) if self.calibrated_defaults else None
+
+    @classmethod
+    def from_verify(
+        cls,
+        priors: tuple[float, float, float, float],
+        verify: dict[str, dict],
+    ) -> "Bundle":
+        """Build a bundle from a policy bundle's raw `verify` section (07).
+
+        The QUARANTINE DROP lives here, in the production path, not in whatever
+        happens to be reading a fixture: a quarantined verifier's row is DROPPED
+        rather than zeroed, so its votes reach fusion indistinguishable from any other
+        unlisted voter's — no likelihood, no coverage (D-AB), counted by D-X's
+        unknown_voters. Mirrors frombundle.go, which is where the edge does it."""
+        return cls(
+            priors=priors,
+            verifiers={
+                vid: VerifierParams(
+                    verifier_id=vid,
+                    kind=spec["kind"],
+                    confusion=tuple(tuple(row) for row in spec["confusion"]),
+                    group=spec["group"],
+                    provenance=spec.get("provenance", "prior"),
+                )
+                for vid, spec in verify.items()
+                if not spec.get("quarantined")
+            },
+        )
 
 
 def calibrated_params(verifier_id: str, kind: str) -> VerifierParams:

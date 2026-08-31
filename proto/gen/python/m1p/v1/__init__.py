@@ -220,6 +220,23 @@ class VerdictStage(betterproto.Enum):
     PROVISIONAL = 1
     CERTIFIED = 2
     REVISED = 3
+    """
+    this is the "adjudicated" position; whether it
+     is certified lives in `certification`.
+    """
+
+
+class CertificationStatus(betterproto.Enum):
+    """
+    D-T. Degrades faster than it upgrades (06 §5): the WEAKEST input wins, so a
+     verdict fusing even one literature-default likelihood row cannot claim
+     CERTIFIED no matter how good the certificate is.
+    """
+
+    UNSPECIFIED = 0
+    UNCERTIFIED = 1
+    BOOTSTRAPPING = 2
+    CERTIFIED = 3
 
 
 class DurabilityClass(betterproto.Enum):
@@ -952,10 +969,10 @@ class BundleAck(betterproto.Message):
      `policy_bundles.body_sha256` (07) and as leafed into the transparency log
      (05 §4.4: "leaves are SHA-256(bundle canonical bytes)"). Carried raw rather
      than as an algorithm-prefixed string so the ACK cannot disagree with the
-     catalog about encoding. NOTE: 08 §3.2 renders this JSON field as
-     "blake3:…" while 07 and 05 both specify SHA-256 — a documented
-     disagreement about the algorithm LABEL only; the field is 32 bytes either
-     way and the label is out-of-band.
+     catalog about encoding. 08 §3.2 once rendered this JSON field as "blake3:…"
+     against 07 and 05's SHA-256; that divergence is closed — the label is
+     "sha256:" everywhere, and it stays out-of-band because the field is 32 raw
+     bytes regardless of what any renderer calls them.
     """
 
     result: str = betterproto.string_field(4)
@@ -1171,6 +1188,24 @@ class VerdictEvent(betterproto.Message):
     """
 
     vote_count: int = betterproto.uint32_field(6)
+    certification: "CertificationStatus" = betterproto.enum_field(7)
+    """
+    [P0] DECISION D-T (lead, binding). Evidence quality is a SEPARATE AXIS from
+     pipeline position, and conflating them cost us a representable state: an
+     adjudicated-but-uncertified verdict had no wire form, because
+     VERDICT_STAGE_CERTIFIED sits among the position values while asserting
+     quality. The only escape was the field-4 convention ("empty cert id ⇒
+     uncertified/bootstrapping"), which cannot separate bootstrapping from
+     uncertified — a distinction 06 §5.4 makes load-bearing, since bootstrapping
+     verdicts gate sessions while uncertified ones may not feed certification.
+    
+     A new field rather than new enum values: adding values to VerdictStage would
+     have kept the two axes fused and made every consumer switch over a product
+     of them. Renaming VERDICT_STAGE_CERTIFIED to _ADJUDICATED would be the
+     honest name but changes the JSON encoding — breaking under WIRE_JSON — so
+     the name stays and this field carries the truth. Read stage for WHERE the
+     verdict came from, this for WHAT MAY BE CLAIMED about it.
+    """
 
 
 @dataclass(eq=False, repr=False)
@@ -1402,6 +1437,42 @@ class Dropped(betterproto.Message):
 
 
 @dataclass(eq=False, repr=False)
+class FabricFrame(betterproto.Message):
+    """
+    DECISION D-U (lead, binding). The payload of EVERY M1PL frame is one
+     serialized FabricFrame. 07 §5 and 08 §4.2 always said the payload is "an
+     Event, or a control message" — but proto3 bytes are not self-describing, so
+     without a carried discriminator both ends of the fabric would have to guess
+     (or worse, invent independent conventions — the exact hole that produced
+     D-N). This oneof IS that sentence made executable. The M1PL header
+     (magic|ver|len) is untouched; the fabric is an "internal" tier surface
+     (08 §1), both ends ship in one signed package, and nothing is deployed —
+     this change is the cheapest it will ever be.
+
+     Event keeps field 1: it is the overwhelming majority of frames and field 1
+     costs the smallest tag. mark1d unwraps and spools the INNER Event bytes —
+     the spool record layout (07 §6) does not change, and control messages
+     remain structurally unspoolable: there is no oneof arm a spool record can
+     carry, because admission takes the Event, not the frame.
+     TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
+     next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, cortex
+     pull, Phase 4), 10 = ContaminationAlert (defined below). 8 and 9 are
+     reserved by this note and by the ruling ledger, not yet by a field.
+    """
+
+    event: "Event" = betterproto.message_field(1, group="kind")
+    hello: "Hello" = betterproto.message_field(2, group="kind")
+    hello_ack: "HelloAck" = betterproto.message_field(3, group="kind")
+    gate_query: "GateQuery" = betterproto.message_field(4, group="kind")
+    gate_verdict: "GateVerdict" = betterproto.message_field(5, group="kind")
+    flush: "Flush" = betterproto.message_field(6, group="kind")
+    flush_ack: "FlushAck" = betterproto.message_field(7, group="kind")
+    contamination_alert: "ContaminationAlert" = betterproto.message_field(
+        10, group="kind"
+    )
+
+
+@dataclass(eq=False, repr=False)
 class Hello(betterproto.Message):
     """
     First frame on every connection (08 §4.3 step 2: any other first frame ⇒
@@ -1424,8 +1495,16 @@ class Hello(betterproto.Message):
 
     session_id: bytes = betterproto.bytes_field(4)
     """
-    16-byte session UUIDv7 when the writer is session-bound (shim, tailer);
-     empty for session-less writers (cortexd push maps).
+    16-byte session UUIDv7. REQUIRED, non-zero, from every writer (D-AT): this
+     is the attribution key for everything the connection goes on to send, so a
+     writer without one is a writer whose events attribute to nothing. Missing,
+     wrong-length or all-zero ⇒ the daemon closes with M1E-4003.
+    
+     This field previously read "empty for session-less writers (cortexd push
+     maps)". That sanctioned a writer the daemon accepted and then silently
+     dropped everything from, which is the failure D-AT exists to end. cortexd
+     is not exempt — it has no session identity yet, so its pushes are refused
+     and counted until the MCP surface carries one (D-AV).
     """
 
 
@@ -1510,4 +1589,47 @@ class FlushAck(betterproto.Message):
     """
     Events the daemon admitted to the spool since this connection's Hello —
      the writer's receipt that its stream is durable, not a global counter.
+    """
+
+
+@dataclass(eq=False, repr=False)
+class ContaminationAlert(betterproto.Message):
+    """
+    proxy → mark1d, ONE-WAY (D-AI). 04 §3.1 step 6's config rollback: an upstream
+     subscription-billing marker means an OAuth credential reached the wire — the
+     CON-001 P0 — and the base-URL fragment must stop pointing at the proxy before
+     the agent's next request.
+
+     The proxy NEVER awaits a reply. It has already killed the session and will
+     refuse every subsequent request for it on its own authority; this frame is
+     notification, not permission, because a P0 kill that blocks on a daemon
+     round-trip is a P0 kill a hung daemon can veto. If mark1d is unreachable the
+     fragment stays pointed at a proxy that now refuses everything for the session,
+     so the failure direction is closed.
+
+     Deliberately carries no evidence. Control messages are non-durable by scope
+     (this file's header): evidence fields here would be evidence that is thrown
+     away. The provable record is the GuardDecision event + its per-event
+     `guard_contamination` receipt (policy.proto, 07 §11), which takes the durable
+     path. This frame carries only what mark1d needs to act.
+    """
+
+    session_id: bytes = betterproto.bytes_field(1)
+    """
+    16-byte session UUIDv7, same bytes as Hello.session_id — what to attribute
+     the resulting CoverageTransition{BYPASS} to.
+    """
+
+    cred_ref: str = betterproto.string_field(2)
+    """
+    The M1-Cred-Ref that transited. mark1d issued it at provisioning, so this
+     is what resolves to the agent + workspace whose fragment must be reverted;
+     session_id alone does not identify a config file.
+    """
+
+    reason_code: str = betterproto.string_field(3)
+    """
+    GuardDecision.reason_code's closed edge-emitted vocabulary (policy.proto);
+     "oauth_marker" is its only current member here. Present so `mark1 doctor`
+     can state why a fragment reverted — a silent rollback is unexplainable.
     """
