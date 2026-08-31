@@ -1,3 +1,5 @@
+//go:build integration
+
 package chproj
 
 // DSN-gated ClickHouse integration: a scratch database gets the REAL
@@ -97,7 +99,7 @@ func nativeAddrOverHTTP(t *testing.T, u *url.URL, user, pass string) string {
 	if err != nil {
 		t.Fatalf("cannot reach test ClickHouse over M1_TEST_CH_DSN: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("tcp_port probe over M1_TEST_CH_DSN: status %d: %s", resp.StatusCode, body)

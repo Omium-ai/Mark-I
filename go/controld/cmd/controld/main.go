@@ -32,6 +32,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/pg"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/policydist"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke/chconn"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/receipts"
@@ -68,7 +69,10 @@ func main() {
 		DisableSSEKMS:  cfg.S3DisableSSEKMS,
 	})
 
-	// 6. (KMS DescribeKey R5) arrives with policydist — see its doc.go stub.
+	// 6. (KMS DescribeKey R5) still deferred: policydist derives its six
+	//    section keys from a local seed rather than holding KMS handles, so
+	//    there is no DescribeKey to assert yet. See policydist/doc.go for the
+	//    seam and the upgrade path.
 
 	// 7. Boot refusal R4 (05 §1.2): every query template validated — a
 	// tenant-less template must never be registerable, even transiently.
@@ -169,6 +173,32 @@ func main() {
 			auth.NewHMACVerifier([]byte(cfg.DevTokenHMACKey), revocations))
 	}
 
+	// The bundle section ring (05 §4.5). Absent seed ⇒ nil ring ⇒ this process
+	// serves bundles and takes ACKs but refuses to publish; publication has no
+	// public route (05 §4.1), so nothing on the request path degrades. NOT an
+	// ephemeral fallback like the two seeds above: an ephemeral bundle key
+	// would publish signed policy that every edge rejects after the next
+	// deploy, which is worse than not publishing.
+	var bundleRing *policydist.Keyring
+	if cfg.BundleSectionSeed != nil {
+		bundleRing, err = policydist.DeriveKeyring(cfg.BundleSectionSeed)
+		if err != nil {
+			log.Fatalf("policydist: boot refusal (05 §1.2 R1): %v", err)
+		}
+	} else {
+		log.Printf("WARNING: BUNDLE_SECTION_ED25519_SEED unset — policydist SERVES and ACKs but cannot publish bundles")
+	}
+	// The tlog head signer is the server CHAIN key: 05 §4.4 requires the
+	// log key class (specifically NOT a bundle section key), and this is that
+	// class. Domain prefixes keep a receipt countersignature and a log-head
+	// signature non-interchangeable.
+	policy := policydist.NewModule(policydist.ModuleDeps{
+		Store:    policydist.NewStore(tenantDB, chainStore, bundleRing, chainSigner),
+		PG:       tenantDB,
+		Verifier: verifier,
+		ObsCfg:   obsCfg,
+	})
+
 	srv := server.New(cfg.Port, cfg.DrainTimeout)
 	srv.Register(ingest.New(ingest.Deps{ // 8. each module contributes routes + readiness
 		Verifier: verifier,
@@ -191,7 +221,7 @@ func main() {
 		PG:       tenantDB,
 		Verifier: verifier,
 		ObsCfg:   obsCfg,
-	}), querychoke.New(querychoke.Deps{ // 08 §3.3 report/query chokepoint
+	}), policy, querychoke.New(querychoke.Deps{ // 08 §3.3 report/query chokepoint
 		Registry:           tmpl,
 		Runner:             querychoke.NewRunner(chQuery, ch, chOffboard),
 		Verifier:           verifier,

@@ -1,3 +1,5 @@
+//go:build integration
+
 package sidefx_test
 
 // DSN-gated Postgres integration (house style, 12 / 05 §7.5): a scratch
@@ -6,7 +8,7 @@ package sidefx_test
 // tenant-GUC discipline (05 §7.2) and RLS-with-NULLIF (05 §7.1) — plus the R2
 // posture that pg.Open REFUSES a bypass-capable role.
 //
-// Gate: M1_TEST_PG_DSN (superuser DSN for scratch setup). Absent ⇒ skip,
+// Gate: M1_MIGRATE_PG_DSN (privileged DSN for scratch setup). Absent ⇒ skip,
 // unless M1_REQUIRE_STORES=1 ⇒ fail.
 
 import (
@@ -28,14 +30,19 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 )
 
+// The privileged DSN: this harness creates its own scratch database and applies
+// the full migration tree, and m1_060 mints a BYPASSRLS role — which PG16 permits
+// only to a role that already holds it. The tests themselves run as the
+// unprivileged role minted below, never as this one — which is also what makes
+// this DSN the honest input to TestIntegrationOpenRefusesBypassCapableRole.
 func pgDSN(t *testing.T) string {
 	t.Helper()
-	v := os.Getenv("M1_TEST_PG_DSN")
+	v := os.Getenv("M1_MIGRATE_PG_DSN")
 	if v == "" {
 		if os.Getenv("M1_REQUIRE_STORES") == "1" {
-			t.Fatal("M1_TEST_PG_DSN required (M1_REQUIRE_STORES=1) but unset")
+			t.Fatal("M1_MIGRATE_PG_DSN required (M1_REQUIRE_STORES=1) but unset")
 		}
-		t.Skip("M1_TEST_PG_DSN unset; skipping Postgres-backed test")
+		t.Skip("M1_MIGRATE_PG_DSN unset; skipping Postgres-backed test")
 	}
 	return v
 }

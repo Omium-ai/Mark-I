@@ -77,6 +77,15 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap exposes the wrapped writer to http.ResponseController, which is how
+// a handler reaches Flush and SetWriteDeadline through a wrapper. Without it
+// the SSE stream in policydist cannot flush (every event sits in the bufio
+// writer) and cannot clear the server's 30 s WriteTimeout (every stream dies
+// at 30 s). ADDITION to the estate-vendored file, noted because this file's
+// header claims the HTTP surface is byte-identical to it; the two Write paths
+// above are unchanged.
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
 func (s *statusRecorder) Write(b []byte) (int, error) {
 	if !s.written {
 		s.code = http.StatusOK
