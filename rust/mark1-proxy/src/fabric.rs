@@ -18,13 +18,19 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use m1p_wire::pb;
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::tee::spill;
 
+// Everything below feeds the `#[cfg(unix)]` `send` only; on Windows the named-pipe
+// lane is still the `Unsupported` stub, so `-D warnings` promotes each to an error.
 /// 08 §4.4.
+#[cfg(unix)]
 const CONNECT_DEADLINE: Duration = Duration::from_millis(100);
+#[cfg(unix)]
 const WRITE_DEADLINE: Duration = Duration::from_millis(250);
+#[cfg(unix)]
 const ACK_DEADLINE: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
@@ -198,6 +204,7 @@ async fn send(_base: &Path, _session_id: &[u8; 16], _frame: &[u8]) -> std::io::R
 }
 
 /// 07 §5: `$XDG_RUNTIME_DIR/omium-mark1/m1p.sock`, fallback `<base>/m1p.sock`.
+#[cfg(unix)]
 fn endpoints(base: &Path) -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(2);
     if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR") {
