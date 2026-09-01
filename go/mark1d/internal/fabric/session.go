@@ -177,6 +177,7 @@ func (ss *session) frame(ctx context.Context, payload []byte) error {
 			return herr
 		}
 		ss.drained++
+		ss.s.Health.Delivered()
 		return nil
 	case frameGateQuery:
 		q := &m1pv1.GateQuery{}

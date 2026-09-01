@@ -17,6 +17,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 )
 
 // DefaultHandshakeTimeout is generous against the shim's 50 ms whole-invocation
@@ -45,6 +47,9 @@ type Server struct {
 	// HandshakeTimeout bounds how long a connected peer may say nothing before
 	// its Hello (08 §4.3). Zero uses DefaultHandshakeTimeout; set before Serve.
 	HandshakeTimeout time.Duration
+
+	// Health counts accepted Event frames as `shim.delivered`; nil is legal.
+	Health *obs.Health
 
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
