@@ -45,7 +45,8 @@ type Config struct {
 type Manager struct {
 	cfg    Config
 	ts     map[string]*Tailer // by path
-	denied map[string]bool    // cwd resolved outside the enabled roots — final per path
+	cwds   map[string]string  // open stream -> the cwd its admission was granted on
+	denied map[string]bool    // cwd resolved outside the read surface — final per path
 }
 
 func NewManager(cfg Config) (*Manager, error) {
@@ -66,7 +67,7 @@ func NewManager(cfg Config) (*Manager, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Manager{cfg: cfg, ts: map[string]*Tailer{}, denied: map[string]bool{}}, nil
+	return &Manager{cfg: cfg, ts: map[string]*Tailer{}, cwds: map[string]string{}, denied: map[string]bool{}}, nil
 }
 
 // Run follows the directory until ctx ends, then drains: every pending Usage
@@ -130,6 +131,7 @@ func (m *Manager) Run(ctx context.Context) error {
 // (04 §2.1).
 func (m *Manager) Sweep(ctx context.Context) {
 	m.discover()
+	m.revoke()
 	now := m.cfg.Now()
 	for path, t := range m.ts {
 		if err := t.poll(now, m.emitAll(ctx)); err != nil {
@@ -142,11 +144,34 @@ func (m *Manager) Sweep(ctx context.Context) {
 	}
 }
 
+// revoke re-asks the oracle about every OPEN stream. 04 §2.1 says the
+// WorkspaceSet is "consulted on every file DISCOVERY, not just once" — and
+// admission is not a one-time grant: a `.mark1ignore` written mid-session, or
+// a `mark1 disable`, must stop the stream before its next line. Pending Usage
+// is DROPPED rather than flushed: the customer's last word wins, so a
+// half-buffered event from a now-excluded tree must not escape on the way out.
+// ponytail: one oracle call per open stream per tick (a stat plus a symlink
+// resolve); memoize per (cwd, tick) if stream counts ever reach the hundreds.
+func (m *Manager) revoke() {
+	for path, t := range m.ts {
+		if m.cfg.Allowed(m.cwds[path]) {
+			continue
+		}
+		m.denied[path] = true
+		t.close()
+		delete(m.ts, path)
+		delete(m.cwds, path)
+		m.cfg.Log.Warn("tailers: stream left the consented read surface mid-session; closed, pending dropped (04 §2.1)",
+			"path", path)
+	}
+}
+
 // CloseFlush drains every stream (read to EOF, flush pending, persist
 // cursors) and closes handles. Used at shutdown and by the Stop-hook path
 // once the shim lands.
 func (m *Manager) CloseFlush(ctx context.Context) error {
 	m.discover()
+	m.revoke()
 	now := m.cfg.Now()
 	var firstErr error
 	for _, t := range m.ts {
@@ -159,6 +184,7 @@ func (m *Manager) CloseFlush(ctx context.Context) error {
 		t.close()
 	}
 	m.ts = map[string]*Tailer{}
+	m.cwds = map[string]string{}
 	return firstErr
 }
 
@@ -225,7 +251,7 @@ func (m *Manager) open(path string, role Role, session uuid.UUID) {
 	}
 	if !m.cfg.Allowed(cwd) {
 		m.denied[path] = true
-		m.cfg.Log.Warn("tailers: stream cwd outside enabled roots, never tailed (04 §2.1)",
+		m.cfg.Log.Warn("tailers: stream cwd outside the consented read surface (enabled roots + .mark1ignore), never tailed (04 §2.1)",
 			"path", path, "cwd", cwd)
 		return
 	}
@@ -239,6 +265,7 @@ func (m *Manager) open(path string, role Role, session uuid.UUID) {
 		return
 	}
 	m.ts[path] = t
+	m.cwds[path] = cwd
 }
 
 // peekCwd bounds for the containment gate: v2.1.251 stamps cwd on every line
