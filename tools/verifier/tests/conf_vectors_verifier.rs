@@ -8,15 +8,33 @@
 // helpers here are plain fns, so the same exemption is restated at file scope.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use mark1_verifier::receipt::hex;
+use mark1_verifier::receipt::{
+    dual_sign, hex, CheckpointPayload, Ed25519Signer, Signer, GENESIS_HASH,
+};
 use mark1_verifier::{
     load_keys, verify, ExportRow, InclusionClaim, Options, WitnessFile, WitnessHead,
     WITNESS_MISMATCH,
 };
 use serde_json::{json, Value};
+
+/// Unique per call, not per process: the harness runs tests in parallel and a
+/// shared name lets one test delete another's files mid-run.
+fn scratch_dir(tag: &str) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "mark1_verifier_{tag}_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
 
 fn manifest() -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -69,10 +87,10 @@ fn export_rows(m: &Value) -> Vec<ExportRow> {
         .collect()
 }
 
-/// KeyRing via `load_keys`, so the manifest-shape parse and the derived-vs-
-/// claimed key_id check run on every use (08 §3.5's local key manifest).
-fn ring_from_files(m: &Value) -> mark1_verifier::receipt::KeyRing {
-    let keys_json = json!({
+/// The manifest's two keys as the CLI's local key manifest (08 §3.5). The two
+/// lists ARE the role split, so device and server stay in their own.
+fn keys_file(m: &Value) -> Value {
+    json!({
         "server_chain_keys": [{
             "pubkey_hex": m["keys"]["server"]["public_hex"],
             "key_id": m["keys"]["server"]["key_id"],
@@ -81,19 +99,118 @@ fn ring_from_files(m: &Value) -> mark1_verifier::receipt::KeyRing {
             "pubkey_hex": m["keys"]["device"]["public_hex"],
             "key_id": m["keys"]["device"]["key_id"],
         }],
-    });
-    // Unique per call, not per process: the harness runs tests in parallel
-    // and a shared name lets one test delete the file under another.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "mark1_verifier_keys_{}_{}.json",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::write(&path, keys_json.to_string()).unwrap();
+    })
+}
+
+/// KeyRing via `load_keys`, so the manifest-shape parse and the derived-vs-
+/// claimed key_id check run on every use (08 §3.5's local key manifest).
+fn ring_from_files(m: &Value) -> mark1_verifier::receipt::KeyRing {
+    let dir = scratch_dir("keys");
+    let path = dir.join("keys.json");
+    fs::write(&path, keys_file(m).to_string()).unwrap();
     let ring = load_keys(&path);
-    fs::remove_file(&path).ok();
+    fs::remove_dir_all(&dir).ok();
     ring.unwrap()
+}
+
+/// Drive the SHIPPED BINARY over an export, not the library: `verify()` is
+/// what the other tests here exercise, and a defect kind proven only through
+/// the library is a defect kind never proven against the artifact a customer
+/// actually runs.
+fn verify_via_binary(m: &Value, rows: &[Value], args: &[String]) -> (Option<i32>, Value) {
+    let dir = scratch_dir("neg");
+    fs::write(dir.join("keys.json"), keys_file(m).to_string()).unwrap();
+    let lines: Vec<String> = rows.iter().map(Value::to_string).collect();
+    fs::write(dir.join("chain.jsonl"), lines.join("\n")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mark1-verifier"))
+        .args([
+            "verify",
+            "--chain",
+            "chain.jsonl",
+            "--keys",
+            "keys.json",
+            "--json",
+        ])
+        .args(args)
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let code = out.status.code();
+    // Exit 1 means the binary called the input malformed and printed no
+    // report. That is a real finding for a negative that should have earned a
+    // VERDICT, so it fails loudly here rather than as a confusing parse error.
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+        panic!(
+            "verifier exited {code:?} with no report on stdout: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    fs::remove_dir_all(&dir).ok();
+    (code, report)
+}
+
+/// The export row a `merkle` negative describes. These two carry no receipt —
+/// they are a leaves/root pair — which is exactly why the old loop stepped
+/// over them; the checkpoint evidence they belong to has to be built here.
+fn merkle_negative_row(m: &Value, mk: &Value) -> Value {
+    let leaves_hex: Vec<&str> = mk["leaves_hex"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+
+    let Some(claimed) = mk.get("claimed_root_hex") else {
+        // truncated_inclusion_path: chain[0] already seals these five leaves
+        // under this very root, so it is the carrier and the short path is
+        // the only thing wrong.
+        assert_eq!(
+            m["chain"][0]["payload"]["merkle_root"], mk["root_hex"],
+            "vector layout drifted: chain[0] no longer seals these leaves"
+        );
+        let mut row = export_row(&m["chain"][0]);
+        let idx = mk["leaf_index"].as_u64().unwrap();
+        row["inclusions"] = json!([{
+            "leaf_hex": leaves_hex[usize::try_from(idx).unwrap()],
+            "leaf_index": idx,
+            "path_hex": mk["path_hex"],
+        }]);
+        return row;
+    };
+
+    // wrong_merkle_root: the claimed root sits INSIDE the signed payload, and
+    // every frozen chain row claims its true one — so the carrier has to be
+    // dual-signed here, under the frozen seeds, or the row would fail for a
+    // signature reason instead of the Merkle one under test.
+    let seed = |role: &str| -> [u8; 32] {
+        hex::decode_array(m["keys"][role]["seed_hex"].as_str().unwrap()).unwrap()
+    };
+    let device = Ed25519Signer::from_seed(seed("device"));
+    let server = Ed25519Signer::from_seed(seed("server"));
+    let device_key_id = device.key_id();
+    let payload = CheckpointPayload {
+        tenant_id: "11111111-1111-1111-1111-111111111111",
+        seq: 1,
+        prev_receipt_hash: GENESIS_HASH,
+        device_id: "33333333-3333-3333-3333-333333333333",
+        device_key_id: &device_key_id,
+        issued_at: "2026-08-29T00:00:01Z",
+        checkpoint_seq: 1,
+        merkle_root: hex::decode_array(claimed.as_str().unwrap()).unwrap(),
+        // Matches the exported leaves, so the ROOT is the sole disagreement.
+        leaf_count: leaves_hex.len() as u64,
+    };
+    let row = dual_sign(&payload.to_value(), &device, &server).unwrap();
+    json!({
+        "seq": row.seq,
+        "payload": row.payload,
+        "receipt_hash_hex": hex::encode(&row.receipt_hash),
+        "device_key_id": row.device_key_id,
+        "device_signature_hex": row.device_signature.as_ref().map(|s| hex::encode(s)),
+        "server_key_id": row.server_key_id,
+        "server_signature_hex": hex::encode(&row.server_signature),
+        "leaves_hex": leaves_hex,
+    })
 }
 
 #[test]
@@ -163,36 +280,73 @@ fn conf_vectors_verifier_accepts_frozen_chain() {
 #[test]
 fn conf_vectors_verifier_names_the_tampered_byte() {
     let m = manifest();
+    let vocabulary: BTreeSet<&str> = m["defect_vocabulary"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    let mut exercised: BTreeSet<&str> = BTreeSet::new();
+
     for neg in m["negatives"].as_array().unwrap() {
-        let Some(receipt) = neg.get("receipt") else {
-            continue;
-        };
-        let row: ExportRow = serde_json::from_value(export_row(receipt)).unwrap();
-        let opts = Options {
-            start_seq: row.seq,
-            anchor_prev: neg
-                .get("verify_against_prev_hash_hex")
-                .and_then(|v| mark1_verifier::parse_anchor(v.as_str().unwrap())),
-        };
-        let report = verify(
-            std::slice::from_ref(&row),
-            &ring_from_files(&m),
-            None,
-            &opts,
-        )
-        .unwrap();
         let name = neg["name"].as_str().unwrap();
-        assert!(!report.ok, "{name}");
+        let expect = neg["expect_defect"].as_str().unwrap();
+
+        let mut args: Vec<String> = Vec::new();
+        let row = if let Some(receipt) = neg.get("receipt") {
+            // Mid-chain negatives are judged against their own position, so
+            // the anchor rides as the CLI flags an operator would pass.
+            args.push("--start-seq".into());
+            args.push(receipt["seq"].to_string());
+            if let Some(prev) = neg.get("verify_against_prev_hash_hex") {
+                args.push("--prev-hash".into());
+                args.push(prev.as_str().unwrap().into());
+            }
+            export_row(receipt)
+        } else if let Some(mk) = neg.get("merkle") {
+            merkle_negative_row(&m, mk)
+        } else {
+            // A shape this loop cannot drive is a defect kind going
+            // unexercised. It used to be a `continue`, which is a skip with
+            // no output — the failure mode this whole test exists to deny.
+            panic!("{name}: negative has neither a receipt nor a merkle body");
+        };
+
+        let (code, report) = verify_via_binary(&m, std::slice::from_ref(&row), &args);
+        // 5 is the defect verdict; 1 would mean the binary rejected the file
+        // rather than judging the chain (08 §7.7's exit contract).
+        assert_eq!(code, Some(5), "{name}: {report}");
+        assert_eq!(report["ok"], json!(false), "{name}: {report}");
+        let kinds: Vec<&str> = report["defects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["kind"].as_str().unwrap())
+            .collect();
+        // A negative that fails for the WRONG reason is a failure (vectors
+        // README), and nothing outside the frozen vocabulary may be emitted
+        // (no witness file rides here, so witness_mismatch cannot appear).
         assert!(
-            report
-                .defects
-                .iter()
-                .any(|d| d.kind == neg["expect_defect"].as_str().unwrap()),
-            "{name}: expected {}, got {:?}",
-            neg["expect_defect"],
-            report.defects
+            kinds.contains(&expect),
+            "{name}: expected {expect}, got {kinds:?}"
         );
+        for kind in &kinds {
+            assert!(
+                vocabulary.contains(kind),
+                "{name}: emitted {kind}, which is not in the frozen vocabulary"
+            );
+        }
+        exercised.insert(expect);
     }
+
+    // The loop asserts its own coverage: every kind the manifest names must
+    // have reached the binary. Without this a negative silently dropped from
+    // the manifest — or a shape the loop stops handling — leaves a defect
+    // kind unproven while the suite stays green.
+    assert_eq!(
+        exercised, vocabulary,
+        "defect kinds in the manifest that never reached the binary"
+    );
 }
 
 #[test]

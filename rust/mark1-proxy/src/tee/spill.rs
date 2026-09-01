@@ -138,13 +138,32 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 
 #[cfg(unix)]
 fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    // 0600 at creation, not chmod-after: no window in which another user can open the ring.
-    std::fs::OpenOptions::new()
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    // `.mode()` applies at CREATION ONLY. An already-existing ring is opened at whatever mode
+    // it carries, so the "no window in which another user can open the ring" this comment used
+    // to claim held for exactly one case — the file created moments ago — and for none of the
+    // ones that matter: a ring an older build wrote under a permissive umask, or one restored
+    // from an archive that dropped modes, stays loose forever and every later append widens it.
+    //
+    // Narrowed rather than REFUSED, unlike identity::FileCustody's 0600 floor. That floor
+    // guards a key being read, where a wrong-mode file may have been swapped and reading it is
+    // the harm. This is a write of already-sealed ciphertext, and the only record that reaches
+    // it is the contamination P0 (module header) — refusing would drop the one event that must
+    // be provable, which is precisely the outcome this whole ring exists to prevent.
+    let file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .mode(0o600)
-        .open(path)
+        // The spill dir is 0700, so a planted symlink implies an attacker who is already this
+        // user and can read the device key anyway. O_NOFOLLOW costs one flag and removes the
+        // case where a stale symlink from an unrelated tool silently redirects the ring.
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    // fchmod on the open descriptor, never chmod on the path: there is no name to re-resolve
+    // between the open and the narrowing, so no TOCTOU. Unconditional because the fstat that
+    // would make it conditional costs the same syscall it would save.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 
 #[cfg(not(unix))]
@@ -195,6 +214,37 @@ mod tests {
         assert!(
             !ring.windows(marker.len()).any(|w| w == marker.as_slice()),
             "plaintext survived into the ring"
+        );
+    }
+
+    /// EDGE-05's 0600 floor has to hold on a ring that ALREADY EXISTS, which is the only
+    /// interesting case: `OpenOptions::mode` is a creation mode, so a pre-existing loose file
+    /// is the one input that can tell a real narrowing apart from a decorative one. A test
+    /// that only appended to a fresh ring would pass with the narrowing deleted.
+    #[cfg(unix)]
+    #[test]
+    fn a_preexisting_loose_ring_is_narrowed_before_it_is_appended_to() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("spill")).unwrap();
+        let secret = x25519_dalek::StaticSecret::random_from_rng(OsRng);
+        let public = x25519_dalek::PublicKey::from(&secret);
+        std::fs::write(tmp.path().join("spill/spill.pub"), public.as_bytes()).unwrap();
+
+        let ring = tmp.path().join("spill/proxy.ring");
+        std::fs::write(&ring, b"").unwrap();
+        std::fs::set_permissions(&ring, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        append(tmp.path(), b"sk-ant-oat01-CONTAMINATIONMARKER".to_vec());
+
+        let mode = std::fs::metadata(&ring).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the ring stayed {mode:o} after an append; every later append would widen it further"
+        );
+        assert!(
+            !std::fs::read(&ring).unwrap().is_empty(),
+            "narrowing must not have cost the record — this ring exists for the contamination P0"
         );
     }
 }

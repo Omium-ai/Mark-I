@@ -107,8 +107,10 @@ pub enum Cause {
     /// HMAC fingerprint did not match enrollment (FR-ENROLL-006: a refusal, never a silent
     /// re-provision).
     FingerprintMismatch,
-    /// Step 5 tripwire: a provisioned credential that classifies OAuth-shaped. P1 — the
-    /// provisioning path has a bug.
+    /// Step 5 tripwire: an OAuth-shaped credential reached this listener at all. **P0, and
+    /// deliberately not conditioned on matching enrollment** — see `decide`. Whether the
+    /// provisioning path admitted it or the user's environment steered a subscription
+    /// session into an API-key pointer, the observable fact is the same and it is CON-001's.
     OauthShaped,
     /// Step 5: matched no rule. Ambiguity refuses (§3.1 step 3).
     ShapeUnknown,
@@ -138,6 +140,23 @@ impl Refusal {
             Refusal::Contaminated => REASON_OAUTH_MARKER,
         }
     }
+}
+
+/// What the registry says about one `cred_ref` right now.
+///
+/// Three-valued on purpose. The durable kill set (`router::load_killed`) drops a record whose
+/// ref is enrolled under a *different* fingerprint, and folding "no line for this ref" together
+/// with "the registry could not be read at all" would make 04 §3.5 row 1 — the fail-closed
+/// state — the one input that clears every kill on disk. An unreadable registry is the state in
+/// which the proxy trusts itself least; it cannot also be the state in which it forgets that a
+/// credential proved subscription-backed.
+pub enum Enrollment {
+    /// Registry readable and this ref is enrolled under this fingerprint.
+    Enrolled([u8; 32]),
+    /// Registry readable and has no line for this ref: provisioning moved on.
+    Absent,
+    /// 04 §3.5 row 1 — registry or key unreadable. Says nothing about any ref.
+    Unverifiable,
 }
 
 /// 04 §9.6's terminal states.
@@ -322,6 +341,22 @@ impl Guard {
         fingerprint_under(key.expose_for_upstream(), cred)
     }
 
+    /// What the registry currently enrolls for `cred_ref` (04 §3.1 step 3).
+    ///
+    /// Read-only and widens nothing: the fingerprint is already a public output of
+    /// [`Guard::fingerprint`], i.e. a value any caller holding the credential can compute
+    /// itself. Nothing here admits a request — `decide` is still the only route to a
+    /// `ForwardTicket`.
+    pub fn enrollment(&self, cred_ref: &str) -> Enrollment {
+        let Verifier::Ready { registry, .. } = &self.verifier else {
+            return Enrollment::Unverifiable;
+        };
+        match registry.get(cred_ref) {
+            Some(fp) => Enrollment::Enrolled(*fp),
+            None => Enrollment::Absent,
+        }
+    }
+
     /// 04 §3.1 steps 1-5, in order, before a single byte goes upstream.
     ///
     /// `off` is the caller's already-evaluated off-marker state (step 1 / invariant 2: read
@@ -344,10 +379,49 @@ impl Guard {
             return self.refuse(Cause::UnknownRef, None);
         };
 
-        // Step 3: HMAC fingerprint match to enrollment, constant-time.
         let Some(cred) = credential_bytes(headers) else {
             return self.refuse(Cause::CredentialAmbiguous, None);
         };
+
+        // The shape tripwire runs BEFORE the fingerprint compare, and the order is the
+        // control, not a preference (D-CQ).
+        //
+        // Fingerprint-first answers "is this the credential we enrolled?" and returns
+        // FingerprintMismatch the moment it is not — so the arrival of a SUBSCRIPTION
+        // bearer at this listener, which is CON-001's event, exited one step early and was
+        // reported as an ordinary wrong-key 403. The tripwire only ever saw credentials
+        // that had already MATCHED enrollment, i.e. only the case where our own
+        // provisioning was buggy. The case where the user's environment delivers an OAuth
+        // session into a proxy pointer meant for their API key — the one that actually
+        // happens, because the pointer is machine-wide and the regime sniff is per-shell —
+        // was structurally outside the tripwire's reach.
+        //
+        // And fingerprint-first computes a keyed HMAC over the OAuth bearer to find that
+        // out. Classify first: we take no function of a subscription credential, not even a
+        // one-way one. Ambiguity refuses here too — an unclassifiable credential is not
+        // something to hash and then think about.
+        //
+        // Strictly a narrowing: shape is now a precondition of reaching the compare, so
+        // this can only add refusals, never admit anything the old order refused.
+        match self.classifier.classify(cred) {
+            CredShape::ApiKey => {}
+            CredShape::Oauth => {
+                tracing::error!(
+                    target: "mark1_proxy::guard",
+                    severity = "P0",
+                    cred_ref,
+                    "OAUTH-SHAPED CREDENTIAL AT THE PROXY — CON-001: subscription traffic \
+                     reached this listener. Refused before any function was computed over \
+                     it (04 §3.1 step 5)"
+                );
+                // No fingerprint: producing one would mean HMAC-ing the bearer we just
+                // refused to touch.
+                return self.refuse(Cause::OauthShaped, None);
+            }
+            CredShape::Unknown => return self.refuse(Cause::ShapeUnknown, None),
+        }
+
+        // Step 3: HMAC fingerprint match to enrollment, constant-time.
         let Some(actual) = fingerprint_under(key.expose_for_upstream(), cred) else {
             return self.refuse(Cause::GuardUnverifiable, None);
         };
@@ -356,22 +430,6 @@ impl Guard {
         }
 
         // Step 4 is structural — see the module header. There is nothing to evaluate.
-
-        // Step 5: shape tripwire.
-        match self.classifier.classify(cred) {
-            CredShape::ApiKey => {}
-            CredShape::Oauth => {
-                tracing::error!(
-                    target: "mark1_proxy::guard",
-                    severity = "P1",
-                    cred_ref,
-                    "provisioned credential classifies OAuth-shaped: the provisioning path \
-                     admitted a subscription credential (04 §3.1 step 5)"
-                );
-                return self.refuse(Cause::OauthShaped, Some(actual));
-            }
-            CredShape::Unknown => return self.refuse(Cause::ShapeUnknown, Some(actual)),
-        }
 
         let ticket = ForwardTicket {
             cred_ref: cred_ref.to_owned(),
@@ -464,6 +522,33 @@ fn credential_bytes(headers: &http::HeaderMap) -> Option<&[u8]> {
     }
 }
 
+/// 64 hex chars → the 32-byte fingerprint. Shared by the `registry` reader here and the
+/// `guard-killed` reader in `router`, so the two files cannot drift into disagreeing about
+/// what a fingerprint looks like — the kill set's re-arm rule compares one against the other
+/// and a length or case difference would silently make every comparison a mismatch.
+pub(crate) fn parse_fingerprint_hex(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// The inverse, for the `guard-killed` writer. Lowercase, matching what `mark1d` writes into
+/// `registry` (`adapters/claudecode/baseurl.go`, `hex.EncodeToString`).
+pub(crate) fn fingerprint_hex(fp: &[u8; 32]) -> String {
+    use std::fmt::Write;
+    fp.iter().fold(String::with_capacity(64), |mut s, b| {
+        // `write!` to a String cannot fail; the result is discarded rather than unwrapped
+        // because a panic on the P0 kill path would be worse than a short line.
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
 fn load_verifier(base: &Path) -> Option<Verifier> {
     let key = std::fs::read(base.join("guard.key")).ok()?;
     if key.is_empty() {
@@ -477,14 +562,7 @@ fn load_verifier(base: &Path) -> Option<Verifier> {
             continue;
         }
         let (r, fp) = line.split_once(' ')?;
-        let mut out = [0u8; 32];
-        if fp.len() != 64 {
-            return None;
-        }
-        for (i, byte) in out.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(fp.get(i * 2..i * 2 + 2)?, 16).ok()?;
-        }
-        registry.insert(r.to_owned(), out);
+        registry.insert(r.to_owned(), parse_fingerprint_hex(fp)?);
     }
     Some(Verifier::Ready {
         key: Secret::new(key),
@@ -503,9 +581,13 @@ mod tests {
         b"Bearer sk-ant-oat01-AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz01";
 
     fn guard_with(cred: &[u8]) -> Guard {
+        guard_with_sampling(cred, Sampling::default())
+    }
+
+    fn guard_with_sampling(cred: &[u8], sampling: Sampling) -> Guard {
         let mut registry = HashMap::new();
         registry.insert("ref-1".to_owned(), fingerprint_under(KEY, cred).unwrap());
-        Guard::from_parts(KEY.to_vec(), registry, Sampling::default())
+        Guard::from_parts(KEY.to_vec(), registry, sampling)
     }
 
     fn headers(pairs: &[(&str, &[u8])]) -> http::HeaderMap {
@@ -567,6 +649,18 @@ mod tests {
         let g_oauth = guard_with(OAUTH);
         assert_refused(
             &g_oauth,
+            &headers(&[(CRED_REF_HEADER, b"ref-1"), ("authorization", OAUTH_BEARER)]),
+            Cause::OauthShaped,
+            false,
+        );
+        // The case the OLD ordering could not see, and the one that actually happens: an
+        // OAuth session arrives at a listener enrolled for this machine's API KEY. The
+        // fingerprint cannot match, so a fingerprint-first guard exits at
+        // FingerprintMismatch — CON-001's event reported as an ordinary wrong-key 403,
+        // after HMAC-ing the subscription bearer to work that out. It must trip the
+        // tripwire (D-CQ). Reordering the two checks back is what turns this red.
+        assert_refused(
+            &g,
             &headers(&[(CRED_REF_HEADER, b"ref-1"), ("authorization", OAUTH_BEARER)]),
             Cause::OauthShaped,
             false,
@@ -708,5 +802,122 @@ mod tests {
         std::fs::write(dir.path().join("registry"), "ref-1 deadbeef\n").unwrap();
         let g = Guard::load(dir.path(), Sampling::default());
         assert_refused(&g, &provisioned(), Cause::GuardUnverifiable, false);
+    }
+
+    /// 12 §9 row 1 `neg_no_classifier_override_in_binary` — CON-001's "no override path may
+    /// exist" checked against the compiled decision function rather than against the text
+    /// that produced it.
+    ///
+    /// What it proves: no construction path, no parameter and no environment input turns an
+    /// OAuth-shaped credential into a forward. Every way this binary can build a `Guard`
+    /// (`load`, `from_parts`, `unverifiable`), crossed with every `Sampling` it accepts and
+    /// both values of `off`, refuses — and refuses before taking any function of the
+    /// credential (D-CQ: the emitted record carries no fingerprint of a subscription token).
+    ///
+    /// `off` is the arm that earns the sweep. `mark1 off` / `MARK1_DISABLE=1` is the nearest
+    /// thing this system has to an operator switch, and `router.rs`'s claim that it narrows
+    /// what the proxy does rather than widening what it will carry was a comment until here.
+    /// A `Sampling` of 0.0 is the other: sampling suppresses *records*, and a guard that let
+    /// it suppress the decision would drop the refusal on the floor at the exact rate an
+    /// operator chose.
+    ///
+    /// What it does NOT prove: that the artifact a customer runs was built from this source.
+    /// That is a property of the build, not of a test running inside it.
+    /// `tools/ci/override_pattern_gate.sh` (13 §7.5) is the other half of the two-sided
+    /// claim — the gate refuses the source patterns that would build a different binary,
+    /// this test proves the binary that exists refuses.
+    ///
+    /// Environment is enumerable and enumerated: the crate reads exactly `HOME` /
+    /// `USERPROFILE` (`lib.rs:170` — where to look for state), `XDG_RUNTIME_DIR`
+    /// (`fabric.rs:210` — which socket to dial) and `MARK1_DISABLE` (`lib.rs:181`). The
+    /// first three select paths and cannot name a credential; the last reaches a decision
+    /// only as the `off` argument, which is swept below. There is no fourth.
+    #[test]
+    fn neg_no_classifier_override_in_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("guard.key"), KEY).unwrap();
+        let hex: String = fingerprint_under(KEY, API_KEY)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        std::fs::write(dir.path().join("registry"), format!("ref-1 {hex}\n")).unwrap();
+
+        // Every `Sampling` reachable: the default, both clamp extremes, and the two inputs
+        // `from_bundle` special-cases. A bundle cannot ask for 0.0 (D-AJ clamps up), so it
+        // is constructed here to prove the clamp is not what is holding the property.
+        let samplings = [
+            Sampling::default(),
+            Sampling::from_bundle(0.0),
+            Sampling::from_bundle(1.0),
+            Sampling::from_bundle(-1.0),
+            Sampling::from_bundle(f64::NAN),
+            Sampling { forward: 0.0 },
+        ];
+
+        // Both header names the guard will read a credential from. `x-api-key` holding an
+        // OAuth token is the contamination this crate exists to stop; `authorization` is the
+        // shape the vendor's own subscription client sends.
+        let presentations = [
+            (
+                "oauth in x-api-key",
+                headers(&[(CRED_REF_HEADER, b"ref-1"), ("x-api-key", OAUTH)]),
+            ),
+            (
+                "oauth in authorization",
+                headers(&[(CRED_REF_HEADER, b"ref-1"), ("authorization", OAUTH_BEARER)]),
+            ),
+        ];
+
+        let mut checked = 0;
+        for sampling in samplings {
+            // `guard_with(OAUTH)` is the adversarial enrollment: a registry that vouches for
+            // the OAuth token itself, so the fingerprint check PASSES and only the shape
+            // tripwire stands between it and the upstream.
+            let paths: [(&str, Guard, Cause); 4] = [
+                (
+                    "from_parts, the oauth token itself enrolled",
+                    guard_with_sampling(OAUTH, sampling),
+                    Cause::OauthShaped,
+                ),
+                (
+                    "from_parts, api key enrolled",
+                    guard_with_sampling(API_KEY, sampling),
+                    Cause::OauthShaped,
+                ),
+                (
+                    "load from disk",
+                    Guard::load(dir.path(), sampling),
+                    Cause::OauthShaped,
+                ),
+                (
+                    "unverifiable",
+                    Guard::unverifiable(sampling),
+                    Cause::GuardUnverifiable,
+                ),
+            ];
+            for (how, g, want) in paths {
+                for off in [false, true] {
+                    for (shape, h) in &presentations {
+                        let case = format!("{how} / off={off} / {shape} / {sampling:?}");
+                        let out = g.decide(h, off);
+                        let Decision::Refused(Refusal::Unprovisioned(cause)) = out.decision else {
+                            panic!("{case}: an OAuth-shaped credential was not refused");
+                        };
+                        assert_eq!(cause, want, "{case}");
+                        // D-AJ: a refusal is never sampled away, at any rate including 0.0.
+                        let rec = out.record.unwrap_or_else(|| panic!("{case}: no record"));
+                        assert_eq!(rec.sample_rate, REFUSED_SAMPLE_RATE, "{case}");
+                        // D-CQ: shape precedes fingerprinting, so nothing derived from a
+                        // subscription credential leaves this process — not even a hash.
+                        assert!(rec.cred_fingerprint.is_empty(), "{case}: fingerprinted");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        // The sweep is the assertion; a refactor that silently drops an arm from any of the
+        // four loops would otherwise leave this test passing on less than it claims.
+        assert_eq!(checked, 6 * 4 * 2 * 2, "the override sweep lost coverage");
     }
 }
