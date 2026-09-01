@@ -81,6 +81,48 @@ func TestWitnessBucketRequiresTenants(t *testing.T) {
 	}
 }
 
+// WITNESS_RETAIN=0 makes witness_s3.go omit the object-lock headers, so the
+// head publishes mutable and the job still reports success — the same
+// looks-healthy-doing-nothing shape as the refusal above, and the one config
+// value that decides whether the chain is externally verifiable at all.
+func TestWitnessRetainZeroNeedsAnExplicitOptOut(t *testing.T) {
+	setRequired(t)
+	t.Setenv("WITNESS_BUCKET", "mark1-witness")
+	t.Setenv("WITNESS_TENANTS", "11111111-1111-1111-1111-111111111111")
+	t.Setenv("WITNESS_RETAIN", "0s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "WITNESS_OBJECT_LOCK") {
+		t.Fatalf("want R1 refusal naming WITNESS_OBJECT_LOCK, got %v", err)
+	}
+	t.Setenv("WITNESS_OBJECT_LOCK", "false")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "WITNESS_OBJECT_LOCK") {
+		t.Fatalf("a near-miss opt-out value must be refused, not read as off: %v", err)
+	}
+	t.Setenv("WITNESS_OBJECT_LOCK", "off")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.WitnessRetain != 0 {
+		t.Fatalf("deliberate opt-out did not survive: %+v", c)
+	}
+	// The escape must not widen to a witness that IS locked: with a retain
+	// horizon set, WITNESS_OBJECT_LOCK is irrelevant and must not disarm it.
+	t.Setenv("WITNESS_RETAIN", "24h")
+	if c, err = Load(); err != nil || c.WitnessRetain != 24*time.Hour {
+		t.Fatalf("retain=24h rejected or lost: %+v %v", c, err)
+	}
+}
+
+// Without a bucket there is no witness to leave unlocked, so the guard must
+// not fire — otherwise every non-witness deployment refuses to boot.
+func TestWitnessRetainZeroIsFineWithNoBucket(t *testing.T) {
+	setRequired(t)
+	t.Setenv("WITNESS_RETAIN", "0s")
+	if _, err := Load(); err != nil {
+		t.Fatalf("no bucket, no witness, no refusal expected: %v", err)
+	}
+}
+
 func TestTokenSeedDecodes(t *testing.T) {
 	setRequired(t)
 	t.Setenv("AUTH_TOKEN_ED25519_SEED", "not-a-seed")

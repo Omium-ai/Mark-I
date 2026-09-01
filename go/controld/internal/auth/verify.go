@@ -66,7 +66,9 @@ type devClaims struct {
 }
 
 // HMACVerifier verifies dev tokens minted by Mint. The exp ceiling is checked
-// exactly like the production scheme will check it: exp − iat ≤ 24 h is a
+// against the same TokenTTLCeiling constant the production verifier uses, not
+// a second literal — moving the constant now moves both seams together, which
+// it did not before D-DT. exp − iat ≤ 24 h is a
 // design floor (05 §3.3 — a stolen token dies within a day even if every
 // revocation mechanism fails simultaneously), so the dev seam enforces it too
 // rather than teaching tests a laxer contract. Revocation rides the SAME
@@ -116,7 +118,7 @@ func (v *HMACVerifier) Verify(ctx context.Context, bearer string) (Claims, error
 	}
 	iat, exp := time.Unix(dc.Iat, 0), time.Unix(dc.Exp, 0)
 	now := v.now()
-	if now.After(exp) || exp.Sub(iat) > 24*time.Hour {
+	if now.After(exp) || exp.Sub(iat) > TokenTTLCeiling {
 		return Claims{}, ErrBadToken
 	}
 	// Revocation AFTER signature: a forged token must never buy a revocation
@@ -132,12 +134,15 @@ func (v *HMACVerifier) Verify(ctx context.Context, bearer string) (Claims, error
 	return Claims{TenantID: tenant, DeviceID: device, KeyID: dc.KeyID, IssuedAt: iat, ExpiresAt: exp}, nil
 }
 
-// Mint issues a dev token. Exposed so the compose stack and integration tests
-// mint credentials the same way; production minting is enroll's (WS-6).
+// Mint issues a dev token. It has no non-test caller: production minting is
+// Signer.Mint, which refuses an over-ceiling request outright (05 §3.3). This
+// one deliberately does NOT, and must not — it is the fixture the ceiling is
+// tested WITH, so it has to be able to build the token the verifier is
+// supposed to refuse. It clamped to 24 h until D-DT: a test asking for 25 h
+// silently received a valid 24 h token and passed green having exercised
+// nothing, which is why TestOver24hTokenRejectedAtIngestRoute had to hand-sign
+// its own tokens rather than ask a minter for one.
 func Mint(key []byte, tenant, device uuid.UUID, ttl time.Duration) string {
-	if ttl > 24*time.Hour {
-		ttl = 24 * time.Hour // the §3.3 ceiling, enforced at mint too
-	}
 	now := time.Now()
 	payload, _ := json.Marshal(devClaims{
 		TenantID: tenant.String(), DeviceID: device.String(),

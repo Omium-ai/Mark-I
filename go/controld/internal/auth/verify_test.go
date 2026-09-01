@@ -48,14 +48,30 @@ func TestExpiredTokenRejected(t *testing.T) {
 	}
 }
 
-// The ≤24 h ceiling is a design floor (05 §3.3): Mint clamps, and a token
-// claiming more than 24 h is refused even if its signature is genuine.
+// The ≤24 h ceiling is a design floor (05 §3.3): a token CLAIMING more than
+// 24 h of life is refused on that ground alone, even with a genuine signature
+// and even while it is still comfortably unexpired. The distinction is the
+// whole test — the previous version minted 48 h (silently clamped to 24 h)
+// and then verified at now+25 h, so it was refused by the now.After(exp) leg
+// and the ceiling leg was never reached. Deleting the ceiling clause left it
+// green (D-DT).
 func TestTokenLifetimeCeiling(t *testing.T) {
-	tok := Mint(key, uuid.New(), uuid.New(), 48*time.Hour)
 	v := NewHMACVerifier(key, StaticRevocations{})
-	v.now = func() time.Time { return time.Now().Add(25 * time.Hour) }
+	// Positive control: at exactly the ceiling the same token verifies, so a
+	// refusal below cannot be some unrelated parse or MAC failure.
+	if _, err := v.Verify(context.Background(), Mint(key, uuid.New(), uuid.New(), TokenTTLCeiling)); err != nil {
+		t.Fatalf("a token at exactly the ceiling must verify: %v", err)
+	}
+	tok := Mint(key, uuid.New(), uuid.New(), 48*time.Hour)
+	// One second past mint: nowhere near exp, so ONLY the ceiling can refuse.
+	v.now = func() time.Time { return time.Now().Add(time.Second) }
 	if _, err := v.Verify(context.Background(), tok); !errors.Is(err, ErrBadToken) {
-		t.Fatalf("token outlived the 24 h ceiling: %v", err)
+		t.Fatalf("an unexpired token claiming 48 h was accepted: %v", err)
+	}
+	// And one second over the ceiling is over it — the boundary is not slack.
+	over := Mint(key, uuid.New(), uuid.New(), TokenTTLCeiling+time.Second)
+	if _, err := v.Verify(context.Background(), over); !errors.Is(err, ErrBadToken) {
+		t.Fatalf("ceiling+1s accepted, so the bound is not tight: %v", err)
 	}
 }
 
