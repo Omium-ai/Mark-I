@@ -30,8 +30,24 @@ Evidence grammar -- one flat list per requirement, no empty lists:
   py:test_name                 a pytest node, by its terminal name
   rust:path::to::test          a libtest name, as `cargo test -- --list` names it
   fuzz:crate/target            rust/<crate>/fuzz/fuzz_targets/<target>.rs
+  gate:tools/ci/x_gate.sh      a design-enforcing gate, invoked by the `gates` recipe
+  gate:.github/workflows/y.yml a CI workflow, which must declare a trigger
   manual:docs/NN-doc.md#anchor a documented procedure, heading must exist
   gap:reason                   no evidence, stated in the open
+
+`gate:` exists because some properties are enforced by a mechanical CI check and
+by nothing else, and there is no test to name. Without it those requirements are
+stuck at `partial:` forever with a body that describes a limitation of THIS TOOL
+rather than a limitation of the system -- and a P0 row that can never go green is
+one everyone learns to scroll past. Its two accepted forms are deliberately
+narrow: a `*_gate.sh` under tools/ci (whose invocation the `gates` recipe already
+self-checks) and a workflow file. Not justfile recipes at large, because
+`gate:just lint` would let any row claim credit for a recipe that runs everything.
+
+What a `gate:` citation asserts is that the check RUNS -- the failure this repo
+has actually committed (a gate printing OK over zero files, RECONCILIATION FIX-05).
+It does not assert the check tests the right property. No evidence kind here does;
+`go:TestFoo` cannot prove TestFoo is about the requirement citing it either.
 
 `gap:` is inside the same list as everything else on purpose. A requirement with
 no evidence is not an absent key or an empty list -- both of which read as
@@ -52,6 +68,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 REQ_DOC = ROOT / "docs/02-requirements.md"
 YAML_PATH = ROOT / "conformance/traceability.yaml"
+DEBT_PATH = ROOT / "conformance/traceability-debt.txt"
 
 REQ_ID = r"(?:CON-\d+|(?:FR|NFR)-[A-Z]+-\d+)"
 ROW = re.compile(rf"^\|\s*({REQ_ID})\s*\|")
@@ -63,8 +80,11 @@ UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
 # A `+` in the column means both sides are required, not either.
 CATEGORY_PREFIXES = {
     "unit": {"go", "py", "rust"},
-    "conformance": {"go", "py", "rust"},
-    "negative": {"go", "py", "rust"},
+    # `gate` reaches exactly these two: both mean "a mechanical check establishes this
+    # property", which is what a gate script is. A unit or chaos requirement names behaviour
+    # of the running system, and a grep over source is not that however green it prints.
+    "conformance": {"go", "py", "rust", "gate"},
+    "negative": {"go", "py", "rust", "gate"},
     "chaos": {"go", "py", "rust"},
     "fuzz": {"fuzz", "go", "py", "rust"},
     "manual": {"manual"},
@@ -79,7 +99,7 @@ CATEGORY_PREFIXES = {
 # test for one clause and nothing at all for another, and a schema with only "evidence or gap"
 # forces that case to be written as evidence -- which reports green over an unbuilt clause. That
 # is the exact false-green this gate exists to prevent, so the gate must not be able to commit it.
-PREFIXES = {"go", "py", "rust", "fuzz", "manual", "gap", "partial"}
+PREFIXES = {"go", "py", "rust", "fuzz", "gate", "manual", "gap", "partial"}
 UNPROVEN = {"gap", "partial"}
 
 
@@ -217,6 +237,24 @@ def resolve(prefix: str, body: str) -> str | None:
             return "expected crate/target"
         p = ROOT / "rust" / crate / "fuzz/fuzz_targets" / f"{target}.rs"
         return None if p.exists() else f"no fuzz target at {p.relative_to(ROOT)}"
+    if prefix == "gate":
+        p = ROOT / body
+        if body.startswith("tools/ci/") and body.endswith("_gate.sh"):
+            if not p.exists():
+                return f"no such gate script {body}"
+            # Exactly the form the `gates` recipe's own self-check greps for, so the two
+            # cannot disagree about what counts as invoked.
+            if f"\n    {body}\n" not in (ROOT / "justfile").read_text(encoding="utf-8"):
+                return f"{body} is not invoked by the justfile's `gates` recipe"
+            return None
+        if body.startswith(".github/workflows/") and body.endswith(".yml"):
+            if not p.exists():
+                return f"no such workflow {body}"
+            # A workflow with no trigger is a file, not a gate.
+            if not re.search(r"^on:", p.read_text(encoding="utf-8"), re.M):
+                return f"{body} declares no `on:` trigger, so it never runs"
+            return None
+        return "expected tools/ci/<name>_gate.sh or .github/workflows/<name>.yml"
     if prefix == "manual":
         rel, _, anchor = body.partition("#")
         p = ROOT / rel
@@ -316,6 +354,24 @@ def die(msg: str) -> None:
     raise SystemExit(2)
 
 
+def load_debt() -> set[str]:
+    """The armed-but-unproven requirements CI already knows about.
+
+    Check 4 without this is unusable in the state it was born into: 66 known gaps
+    and a real check-2 orphan produce one indistinguishable `67 failures`, so the
+    first genuine finding reads as more of the debt everyone has learned to scroll
+    past. The gate's own noise floor hides the signal it exists to emit.
+    """
+    if not DEBT_PATH.exists():
+        return set()
+    out = set()
+    for raw in DEBT_PATH.read_text().splitlines():
+        line = raw.partition("#")[0].strip()
+        if line:
+            out.add(line)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--skip-collect", action="store_true",
@@ -330,6 +386,8 @@ def main() -> int:
     failures: list[str] = []
     gaps_armed: list[str] = []
     gaps_future: list[str] = []
+    debt = load_debt()
+    debt_open: set[str] = set()
 
     # --- check 1: the key set is exactly 02 §9's --------------------------------
     missing = sorted(set(reqs) - set(mapping))
@@ -386,10 +444,19 @@ def main() -> int:
                     f"{req.category}) [{kind}]")
             if armed:
                 gaps_armed.append(line)
-                failures.append(f"[4] {line}: phase {req.phase} is armed "
-                                f"(current_phase={current_phase}) and is not fully proven")
+                if rid in debt:
+                    debt_open.add(rid)
+                else:
+                    failures.append(f"[4] {line}: phase {req.phase} is armed "
+                                    f"(current_phase={current_phase}) and is not fully proven")
             else:
                 gaps_future.append(line)
+
+    # The ratchet only ratchets if a paid-off entry must leave. An allow-list nobody
+    # is forced to prune is how a baseline turns into a permanent waiver.
+    for rid in sorted(debt - debt_open):
+        failures.append(f"[4] {rid}: listed in {DEBT_PATH.name} but is no longer an armed "
+                        f"gap -- delete that line, the debt file may only shrink")
 
     matrix_failures, backlog = check_compliance_matrix()
     failures += matrix_failures
@@ -400,7 +467,8 @@ def main() -> int:
     proven = sum(1 for r in reqs if r in mapping
                  and (kinds(r) - UNPROVEN) and not (kinds(r) & UNPROVEN))
     print(f"trace-check: 02 §9 declares {total} requirements; "
-          f"{proven} fully proven, {len(gaps_armed)} armed and unproven, "
+          f"{proven} fully proven, {len(gaps_armed)} armed and unproven "
+          f"({len(debt_open)} carried in {DEBT_PATH.name}), "
           f"{len(gaps_future)} awaiting their phase (current_phase={current_phase})")
     print(f"trace-check: 10 §12's control matrix has {backlog} tests it proposes and 12 has "
           f"not yet grown (rows graded 'partial' -- declared backlog, not failures)")
