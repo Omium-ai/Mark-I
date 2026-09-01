@@ -10,6 +10,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,11 +23,17 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/server"
 )
 
-// SecurityRecorder is the "+ security event" half of the M1E-8003 reject
-// (05 §2.1 stage 3): the record must outlive the refused request, so the
-// production recorder writes a GuardDecision-class row through the projector.
+// SecurityRecorder is the "+ security event" half of the two ingest refusals
+// that must outlive the request they refused, so the production recorder
+// writes a GuardDecision-class row through the projector.
 type SecurityRecorder interface {
+	// RecordIdentityDisagreement is the M1E-8003 reject (05 §2.1 stage 3).
 	RecordIdentityDisagreement(tenant, device, batch uuid.UUID, detail string, at time.Time)
+	// RecordQuarantine is CON-008's "+ tenant alert" on a stage-7 hit
+	// (08 §9 M1E-7002). classes are the scanner rule classes that fired and
+	// are the ONLY thing the scan is allowed to carry out — see
+	// chproj.QuarantineEventRow for why nothing else may ride along.
+	RecordQuarantine(tenant, device, batch uuid.UUID, classes []string, at time.Time)
 }
 
 // PGReady is the readiness slice of pg.TenantDB (interface here so unit
@@ -113,10 +120,10 @@ func (m *Module) Ready(ctx context.Context) error {
 	return m.store.Ready(ctx)
 }
 
-// projectorSecurity: the default M1E-8003 recorder — a deterministic
-// GuardDecision-class row through the async projector (see
-// chproj.SecurityEventRow for the idempotency story), plus a log line so the
-// event exists even if the projector queue is saturated.
+// projectorSecurity: the default recorder — a deterministic GuardDecision-class
+// row through the async projector (see chproj.SecurityEventRow for the
+// idempotency story), plus a log line so the event exists even if the projector
+// queue is saturated.
 type projectorSecurity struct {
 	proj *chproj.Projector
 }
@@ -125,5 +132,17 @@ func (p *projectorSecurity) RecordIdentityDisagreement(tenant, device, batch uui
 	log.Printf("SECURITY ingest M1E-8003: tenant=%s device=%s batch=%s: %s", tenant, device, batch, detail)
 	if p.proj != nil {
 		p.proj.Enqueue([][]any{chproj.SecurityEventRow(tenant, device, batch, detail, at)}, at)
+	}
+}
+
+// RecordQuarantine logs and projects the rule CLASSES only. Everything here —
+// the log line included — is class-level: a log line naming the matched text
+// would put the secret in a third store with a third retention.
+func (p *projectorSecurity) RecordQuarantine(tenant, device, batch uuid.UUID, classes []string, at time.Time) {
+	detail := strings.Join(classes, ",")
+	log.Printf("SECURITY ingest M1E-7002: tenant=%s device=%s batch=%s: quarantined on rule classes [%s]",
+		tenant, device, batch, detail)
+	if p.proj != nil {
+		p.proj.Enqueue([][]any{chproj.QuarantineEventRow(tenant, device, batch, detail, at)}, at)
 	}
 }

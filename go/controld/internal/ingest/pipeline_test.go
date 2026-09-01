@@ -9,8 +9,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -154,14 +156,27 @@ func (f *fakeDB) WithTenant(context.Context, querychoke.TenantID, func(pgx.Tx) e
 }
 
 type fakeSecurity struct {
-	mu    sync.Mutex
-	calls []string
+	mu          sync.Mutex
+	calls       []string
+	quarantines []string
 }
 
 func (f *fakeSecurity) RecordIdentityDisagreement(_, _, _ uuid.UUID, detail string, _ time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, detail)
+}
+
+func (f *fakeSecurity) RecordQuarantine(_, _, _ uuid.UUID, classes []string, _ time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.quarantines = append(f.quarantines, strings.Join(classes, ","))
+}
+
+func (f *fakeSecurity) quarantineCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.quarantines)
 }
 
 func (f *fakeSecurity) count() int {
@@ -692,6 +707,9 @@ func TestScannerHitQuarantinesWholeBatchNeverStrips(t *testing.T) {
 	if !bytes.Equal(landed, body) {
 		t.Fatal("quarantined object was modified — fail-closed means hold, not strip (05 §2.3)")
 	}
+	if h.sec.quarantineCount() != 1 {
+		t.Fatalf("quarantine recorded no tenant-visible security event (CON-008): %d", h.sec.quarantineCount())
+	}
 	h.drain()
 	if h.ins.count() != 0 || h.db.calls != 0 {
 		t.Fatalf("quarantined batch was projected: proj=%d sidefx=%d", h.ins.count(), h.db.calls)
@@ -721,6 +739,11 @@ func TestQuarantinedRePostReacks202WithoutSecondLanding(t *testing.T) {
 	}
 	if len(h.store.keys()) != 1 {
 		t.Fatalf("re-POST landed a second object: %v", h.store.keys())
+	}
+	// One landed quarantine, one tenant alert: the re-POST returns on the
+	// Duplicate outcome above the recorder, so the alert cannot double-fire.
+	if h.sec.quarantineCount() != 1 {
+		t.Fatalf("re-POST recorded %d security events for one landed quarantine", h.sec.quarantineCount())
 	}
 	h.drain()
 	if h.ins.count() != 0 || h.db.calls != 0 {
@@ -783,6 +806,235 @@ func TestFlaggedRePostDivergentFromIngestLandingIs409(t *testing.T) {
 	}
 	if len(h.store.keys()) != 1 {
 		t.Fatalf("divergent re-POST landed anyway: %v", h.store.keys())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CON-008: a quarantine must alert the TENANT, and must not leak what it caught
+// ---------------------------------------------------------------------------
+
+// The secrets planted below. Both are syntactically valid for their rule class
+// and neither is a real credential.
+const (
+	plantedAWSKey   = "AKIAABCDEFGHIJKLMNOP"
+	plantedGHToken  = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	plantedAWSClass = "aws_access_key_id"
+	plantedGHClass  = "github_token"
+)
+
+// realSecurityHarness wires the PRODUCTION recorder (Deps.Security nil ⇒
+// projectorSecurity), so the assertions run against the row that actually
+// reaches ClickHouse rather than a fake's copy of the arguments it was handed.
+func realSecurityHarness(t *testing.T) *harness {
+	t.Helper()
+	h := newHarness(t)
+	mux := http.NewServeMux()
+	m := New(Deps{
+		Verifier: h.verifier,
+		ObsCfg:   obs.Config{ServiceName: "controld-test"},
+		PG:       fakeReady{}, Store: h.store, Proj: h.proj, Sidefx: h.sfx,
+		PoolSize: 4,
+	})
+	m.RegisterRoutes(mux)
+	h.mux = mux
+	return h
+}
+
+// projCol reads a projected column by NAME, so a column inserted into
+// chproj.Columns moves these assertions instead of silently re-aiming them.
+func projCol(t *testing.T, row []any, name string) any {
+	t.Helper()
+	for i, c := range chproj.Columns {
+		if c == name {
+			return row[i]
+		}
+	}
+	t.Fatalf("no projected column named %q", name)
+	return nil
+}
+
+// rowLeaks names which of secrets survives ANYWHERE in a projected row — every
+// column, not only the one a test expects to be dangerous.
+func rowLeaks(row []any, secrets ...string) []string {
+	rendered := fmt.Sprintf("%v", row)
+	var found []string
+	for _, s := range secrets {
+		if strings.Contains(rendered, s) {
+			found = append(found, s)
+		}
+	}
+	return found
+}
+
+func leakyBatch(t *testing.T) (*m1pv1.Batch, uuid.UUID) {
+	t.Helper()
+	session := mustV7(t)
+	aws := usageEvent(t, session, 1)
+	aws.GetUsage().ServiceTier = plantedAWSKey
+	gh := usageEvent(t, session, 2)
+	gh.GetUsage().RequestId = plantedGHToken
+	return testBatch(t, aws, gh)
+}
+
+// CON-008 / FR-SPINE-012's "alerts the tenant" half: quarantinesTotal is
+// ops-visible, the quarantine object is not tenant-queryable, and the 202's
+// quarantined[] dies with a device that has already parked — so the tenant's
+// own ledger gets a GuardDecision-class row. It names the rule CLASSES and
+// nothing else: writing the matched credential here would convert a caught
+// leak into a committed one, in a store with a different retention and access
+// path than the quarantine object.
+func TestQuarantineAlertsTenantWithRuleClassesAndNoSecret(t *testing.T) {
+	h := realSecurityHarness(t)
+	b, id := leakyBatch(t)
+	body := encodeBatch(t, b)
+
+	// Anti-vacuity 1: a REAL quarantine happened. Without this every "no
+	// secret in the event" assertion below is satisfiable by a harness that
+	// scanned nothing, quarantined nothing and emitted nothing.
+	if rec := h.post(t, id, body, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("want 202 (a real quarantine), got %d: %s", rec.Code, rec.Body.String())
+	}
+	keys := h.store.keys()
+	if len(keys) != 1 || !strings.Contains(keys[0], "/quarantine/v1/") {
+		t.Fatalf("no quarantine landing to alert about: %v", keys)
+	}
+	// Idempotency, on the same path the edge's retry automaton takes.
+	if rec := h.post(t, id, body, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("re-POST: want 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	h.drain()
+
+	// Anti-vacuity 2: an event WAS emitted — exactly one across both POSTs,
+	// and it is the security event, NOT the flagged batch (05 §2.3: nothing
+	// from a flagged batch is projected).
+	if h.ins.count() != 1 {
+		t.Fatalf("want exactly 1 projected row (the security event, once, across two POSTs), got %d", h.ins.count())
+	}
+	row := h.ins.rows[0]
+	if got := projCol(t, row, "event_type"); got != "GuardDecision" {
+		t.Fatalf("tenant alert must land as a GuardDecision-class event (08 §9), got %v", got)
+	}
+
+	// Identity is the stage-3 stamp from verified claims, never the envelope
+	// (which carries no tenant here at all — a recorder reading it would
+	// stamp uuid.Nil and file the alert under nobody).
+	if got := projCol(t, row, "tenant_id"); got != h.tenant {
+		t.Fatalf("security event filed under the wrong tenant: want %s got %v", h.tenant, got)
+	}
+	if got := projCol(t, row, "device_id"); got != h.device {
+		t.Fatalf("security event filed under the wrong device: want %s got %v", h.device, got)
+	}
+
+	var payload struct {
+		ReasonCode string `json:"reason_code"`
+		ErrorCode  string `json:"error_code"`
+		BatchID    string `json:"batch_id"`
+		Detail     string `json:"detail"`
+	}
+	raw, ok := projCol(t, row, "payload").(string)
+	if !ok {
+		t.Fatalf("payload column is not a string: %#v", projCol(t, row, "payload"))
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("payload is not JSON: %s", raw)
+	}
+	if payload.ErrorCode != "M1E-7002" || payload.ReasonCode != "pre_egress_quarantine" {
+		t.Fatalf("alert must cite the 08 §9 taxonomy row: %+v", payload)
+	}
+	if payload.BatchID != id.String() {
+		t.Fatalf("alert must name the quarantined batch: want %s got %s", id, payload.BatchID)
+	}
+	// The property that matters, asserted BEFORE the cosmetic one below so a
+	// leak reds this line and not a string-equality line: the credential we
+	// caught is not now in the ledger. Checked over the WHOLE row.
+	if got := rowLeaks(row, plantedAWSKey, plantedGHToken); len(got) != 0 {
+		t.Fatalf("the security event leaks the secret it quarantined: %v (payload=%s)", got, raw)
+	}
+	// The detail is the rule classes, both of them, and nothing else.
+	if payload.Detail != plantedAWSClass+","+plantedGHClass {
+		t.Fatalf("detail must be exactly the fired rule classes: %q", payload.Detail)
+	}
+	// Anti-vacuity 3 (positive control): the check above must be capable of
+	// failing. Same row, the secret spliced into the detail — and the
+	// detector must name it. A green "no leak" from a detector that cannot
+	// see a leak is worse than no test.
+	leaking := append([]any(nil), row...)
+	for i, c := range chproj.Columns {
+		if c == "payload" {
+			leaking[i] = `{"detail":"` + plantedAWSKey + `"}`
+		}
+	}
+	if got := rowLeaks(leaking, plantedAWSKey, plantedGHToken); len(got) != 1 || got[0] != plantedAWSKey {
+		t.Fatalf("leak detector is vacuous: it did not flag a row that demonstrably carries %s: %v", plantedAWSKey, got)
+	}
+}
+
+// The alert's identity follows the TOKEN. Two tenants quarantine through the
+// same module; neither event may carry the other's tenant or device. The
+// envelope is not consulted — a recorder that read it would stamp uuid.Nil,
+// and one that reused an ambient/first-seen tenant would file both alerts
+// under one tenancy, which is a cross-tenant disclosure of a security event.
+func TestQuarantineAlertIdentityIsPerTokenNotAmbient(t *testing.T) {
+	h := realSecurityHarness(t)
+	otherTenant, otherDevice := uuid.New(), uuid.New()
+	otherToken := auth.Mint(testKey, otherTenant, otherDevice, time.Hour)
+
+	b1, id1 := leakyBatch(t)
+	if rec := h.post(t, id1, encodeBatch(t, b1), nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("tenant A: want 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	b2, id2 := leakyBatch(t)
+	rec := h.post(t, id2, encodeBatch(t, b2), func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+otherToken)
+	})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("tenant B: want 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	h.drain()
+
+	if h.ins.count() != 2 {
+		t.Fatalf("want one alert per quarantine, got %d rows", h.ins.count())
+	}
+	got := map[uuid.UUID]uuid.UUID{}
+	for _, row := range h.ins.rows {
+		tenant, ok := projCol(t, row, "tenant_id").(uuid.UUID)
+		if !ok {
+			t.Fatalf("tenant_id column is not a uuid: %#v", projCol(t, row, "tenant_id"))
+		}
+		device, ok := projCol(t, row, "device_id").(uuid.UUID)
+		if !ok {
+			t.Fatalf("device_id column is not a uuid: %#v", projCol(t, row, "device_id"))
+		}
+		if prev, dup := got[tenant]; dup {
+			t.Fatalf("both alerts filed under tenant %s (device %s then %s)", tenant, prev, device)
+		}
+		got[tenant] = device
+	}
+	if got[h.tenant] != h.device {
+		t.Fatalf("tenant A's alert names device %v, want %s", got[h.tenant], h.device)
+	}
+	if got[otherTenant] != otherDevice {
+		t.Fatalf("tenant B's alert names device %v, want %s", got[otherTenant], otherDevice)
+	}
+}
+
+// The two GuardDecision producers on one batch_id must not collapse onto one
+// event_id in the ReplacingMergeTree: an M1E-8003 refusal and a later
+// M1E-7002 quarantine of the same batch_id are different facts, and losing
+// either to a merge is a silently dropped security event.
+func TestSecurityEventIDsAreSeparatedByErrorCode(t *testing.T) {
+	tenant, device, batch := uuid.New(), uuid.New(), uuid.New()
+	at := time.Now()
+	disagreement := chproj.SecurityEventRow(tenant, device, batch, "advisory_tenant_id disagrees with token", at)
+	quarantine := chproj.QuarantineEventRow(tenant, device, batch, plantedAWSClass, at)
+	if projCol(t, disagreement, "event_id") == projCol(t, quarantine, "event_id") {
+		t.Fatalf("both security events on batch %s derive event_id %v — one collapses away on merge",
+			batch, projCol(t, quarantine, "event_id"))
+	}
+	// Each is still deterministic in its own right (replay must not multiply).
+	if projCol(t, quarantine, "event_id") !=
+		projCol(t, chproj.QuarantineEventRow(tenant, device, batch, plantedAWSClass, at.Add(time.Hour)), "event_id") {
+		t.Fatal("quarantine event_id is not replay-deterministic")
 	}
 }
 
@@ -860,5 +1112,228 @@ func TestReplayReprojectsIdempotently(t *testing.T) {
 	liveDevice, replayDevice := h.ins.rows[0][6], h.ins.rows[1][6]
 	if liveDevice != replayDevice {
 		t.Fatalf("replay lost the device stamp: %v vs %v", liveDevice, replayDevice)
+	}
+}
+
+// v7At mints a uuidv7 carrying at's millisecond timestamp. The landing key's
+// dt= partition is derived from the batch id (s3land.IngestKey), so this is
+// the only way to file a batch under a day other than today — and the day
+// loop is where a partial recovery would hide.
+func v7At(t *testing.T, at time.Time) uuid.UUID {
+	t.Helper()
+	id := mustV7(t) // version/variant bits live in id[6]/id[8]; only the timestamp is rewritten
+	ms := uint64(at.UnixMilli())
+	for i := 0; i < 6; i++ {
+		id[i] = byte(ms >> (40 - 8*i))
+	}
+	if id.Version() != 7 {
+		t.Fatalf("v7At produced a v%d uuid", id.Version())
+	}
+	return id
+}
+
+// rowsByEventID indexes a projection by its event_id column so two projections
+// can be compared as sets — replay lists S3 in key order, not arrival order.
+func rowsByEventID(t *testing.T, rows [][]any) map[uuid.UUID][]any {
+	t.Helper()
+	out := make(map[uuid.UUID][]any, len(rows))
+	for _, r := range rows {
+		id, ok := r[3].(uuid.UUID)
+		if !ok {
+			t.Fatalf("projected column %q is not a uuid: %#v", chproj.Columns[3], r[3])
+		}
+		if _, dup := out[id]; dup {
+			t.Fatalf("two projected rows carry event_id %s", id)
+		}
+		out[id] = r
+	}
+	return out
+}
+
+// NFR-DURABILITY-003's second half: "Ledger wiped, replay from S3 alone
+// reconstructs all acked events." TestReplayReprojectsIdempotently only shows
+// a replayed row agreeing with a live row that is still sitting in the same
+// inserter; here the live ledger is DESTROYED — a fresh inserter, a fresh
+// Postgres fake and a fresh stage-11 pool — so the landing objects are the
+// only surviving input to the rebuild.
+func TestReplayFromS3AloneReconstructsAckedEvents(t *testing.T) {
+	h := newHarness(t)
+
+	// A second device on the same tenant carries its own token: identity is
+	// the stage-3 stamp, and replay must re-derive it from object metadata
+	// alone once the token is gone.
+	otherDevice := uuid.New()
+	otherToken := auth.Mint(testKey, h.tenant, otherDevice, time.Hour)
+	asOther := func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+otherToken) }
+
+	session := mustV7(t)
+	b1, id1 := testBatch(t, usageEvent(t, session, 1), usageEvent(t, session, 2), usageEvent(t, session, 3))
+	b2, id2 := testBatch(t, usageEvent(t, session, 4), usageEvent(t, session, 5))
+	// A Dropped entry has no event_id of its own; its row id is derived from
+	// (batch_id, index), which replay must re-derive identically.
+	b2.Dropped = []*m1pv1.Dropped{{
+		Reason:          m1pv1.DropReason_DROP_REASON_SPOOL_SHED,
+		Quantity:        7,
+		DurabilityClass: m1pv1.DurabilityClass_DURABILITY_CLASS_DIAGNOSTIC,
+	}}
+	b3, _ := testBatch(t, usageEvent(t, session, 6), usageEvent(t, session, 7))
+	id3 := v7At(t, time.Now().UTC().AddDate(0, 0, -1)) // yesterday's dt= partition
+	b3.BatchId = id3[:]
+
+	posts := []struct {
+		batch  *m1pv1.Batch
+		id     uuid.UUID
+		mutate func(*http.Request)
+	}{
+		{b1, id1, nil},
+		{b2, id2, asOther},
+		{b3, id3, nil},
+	}
+	for i, p := range posts {
+		if rec := h.post(t, p.id, encodeBatch(t, p.batch), p.mutate); rec.Code != http.StatusOK {
+			t.Fatalf("setup post %d: want 200, got %d: %s", i, rec.Code, rec.Body.String())
+		}
+	}
+	if got := len(h.store.keys()); got != len(posts) {
+		t.Fatalf("want %d landed objects, got %d: %v", len(posts), got, h.store.keys())
+	}
+	h.drain()
+
+	claims := auth.Claims{TenantID: h.tenant, DeviceID: h.device}
+	tenant, err := querychoke.FromClaims(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The complete live result, snapshotted before anything is wiped.
+	live := rowsByEventID(t, h.ins.rows)
+	liveRows := h.ins.count()
+	liveDBCalls := h.db.calls
+	liveLeaves := h.sfx.PendingLeafCount(tenant, h.device)
+	liveOtherLeaves := h.sfx.PendingLeafCount(tenant, otherDevice)
+	if liveRows != 8 || liveLeaves != 5 || liveOtherLeaves != 2 || liveDBCalls != 3 {
+		t.Fatalf("live path did not produce the expected ledger: rows=%d leaves=%d/%d sidefx=%d",
+			liveRows, liveLeaves, liveOtherLeaves, liveDBCalls)
+	}
+
+	// ---- the ledger is wiped: only h.store survives -----------------------
+	rebuiltIns := &fakeInserter{}
+	rebuiltDB := &fakeDB{}
+	rebuiltSfx := sidefx.New(rebuiltDB, nil, nil, 1, 100)
+	if rebuiltIns.count() != 0 || rebuiltDB.calls != 0 ||
+		rebuiltSfx.PendingLeafCount(tenant, h.device) != 0 || rebuiltSfx.PendingLeafCount(tenant, otherDevice) != 0 {
+		t.Fatal("the wiped ledger is not empty — the rebuild would be reading the live projection, not S3")
+	}
+
+	now := time.Now().UTC()
+	n, err := Replay(context.Background(), h.store, rebuiltIns, rebuiltSfx, tenant,
+		now.AddDate(0, 0, -3), now.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuiltSfx.Close()
+
+	if n != len(posts) {
+		t.Fatalf("replay read %d landing objects, %d were acked", n, len(posts))
+	}
+	if h.ins.count() != liveRows {
+		t.Fatalf("replay wrote into the wiped ledger's inserter (%d → %d rows): the rebuild is not independent",
+			liveRows, h.ins.count())
+	}
+
+	rebuilt := rowsByEventID(t, rebuiltIns.rows)
+	for id, want := range live {
+		got, ok := rebuilt[id]
+		if !ok {
+			t.Fatalf("event %s is not recoverable from S3 alone: the rebuild reconstructed %d of %d acked events",
+				id, len(rebuilt), len(live))
+		}
+		for i := range want {
+			if !reflect.DeepEqual(want[i], got[i]) {
+				t.Fatalf("event %s: rebuilt column %q disagrees with the acked projection: live %#v, rebuilt %#v",
+					id, chproj.Columns[i], want[i], got[i])
+			}
+		}
+	}
+	for id := range rebuilt {
+		if _, ok := live[id]; !ok {
+			t.Fatalf("the rebuild invented event %s, which was never acked", id)
+		}
+	}
+	if len(rebuilt) != len(live) {
+		t.Fatalf("the rebuild holds %d distinct events, %d were acked", len(rebuilt), len(live))
+	}
+
+	// Stage 11 re-derives too: the pending-leaf set is in-memory, so the
+	// landing objects are its ONLY recovery path (05 §2.5).
+	if got := rebuiltSfx.PendingLeafCount(tenant, h.device); got != liveLeaves {
+		t.Fatalf("rebuilt pending-leaf set for device %s: want %d leaves, got %d", h.device, liveLeaves, got)
+	}
+	if got := rebuiltSfx.PendingLeafCount(tenant, otherDevice); got != liveOtherLeaves {
+		t.Fatalf("rebuilt pending-leaf set for device %s: want %d leaves, got %d", otherDevice, liveOtherLeaves, got)
+	}
+	if rebuiltDB.calls != liveDBCalls {
+		t.Fatalf("rebuilt stage-11 Postgres effects: want %d, got %d", liveDBCalls, rebuiltDB.calls)
+	}
+}
+
+// §2.4's in-process shed: a saturated ingest pool refuses with 503 + a
+// Retry-After the edge's backoff automaton can read, and refuses BEFORE
+// stage 4 spends anything on decompression. The body here is a zstd bomb, so
+// a refusal that arrived after stage 4 would answer 400 M1E-2001 instead —
+// the 503 is what proves the ordering.
+func TestSaturatedPoolRefusesWithRetryAfterBeforeDecompression(t *testing.T) {
+	h := newHarness(t)
+
+	// The only pool slot is held by a request parked inside m.now(), which
+	// handleIngest calls immediately after acquiring it. A one-shot channel
+	// rather than sync.Once: if the shed ever moved below this call, the
+	// second request would park too and the test would hang instead of fail.
+	park := make(chan struct{}, 1)
+	park <- struct{}{}
+	admitted, release := make(chan struct{}), make(chan struct{})
+	mux := http.NewServeMux()
+	m := New(Deps{
+		Verifier: h.verifier,
+		ObsCfg:   obs.Config{ServiceName: "controld-test"},
+		PG:       fakeReady{}, Store: h.store, Proj: h.proj, Sidefx: h.sfx, Security: h.sec,
+		PoolSize: 1,
+		Now: func() time.Time {
+			select {
+			case <-park:
+				close(admitted)
+				<-release
+			default:
+			}
+			return time.Now()
+		},
+	})
+	m.RegisterRoutes(mux)
+	h.mux = mux
+
+	b, id := testBatch(t)
+	parked := make(chan int, 1)
+	go func() { parked <- h.post(t, id, encodeBatch(t, b), nil).Code }()
+	<-admitted
+
+	bomb := compress(t, make([]byte, 33<<20))
+	rec := h.post(t, mustV7(t), bomb, nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("saturated pool must shed with 503 before stage 4 decompression, got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+	if code := errCode(t, rec); code != "M1E-9500" {
+		t.Fatalf("want M1E-9500, got %s", code)
+	}
+	if ra := rec.Header().Get("Retry-After"); ra != "1" {
+		t.Fatalf("pool-saturation 503 must carry Retry-After: 1, got %q", ra)
+	}
+
+	close(release)
+	if code := <-parked; code != http.StatusOK {
+		t.Fatalf("the parked request holding the pool slot: want 200, got %d", code)
+	}
+	if got := len(h.store.keys()); got != 1 {
+		t.Fatalf("the shed request must not land: want 1 object, got %d", got)
 	}
 }

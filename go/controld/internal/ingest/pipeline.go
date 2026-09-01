@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -239,6 +240,16 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 	// ---- Stage 9: ack — and only now stages 10–11 ------------------------
 	if flagged {
 		quarantinesTotal.Inc()
+		// CON-008's "+ tenant alert" (08 §9 M1E-7002). quarantinesTotal is
+		// ops-visible and not tenant-visible, the quarantine object is not
+		// tenant-queryable, and the 202's quarantined[] dies with a device
+		// that has already parked — so the ONE surface the tenant owns, its
+		// ledger, gets a GuardDecision-class row. Identity is the stage-3
+		// stamp from verified claims, never the envelope. Reached only on the
+		// LANDING path: a duplicate re-POST returned above, so one landed
+		// quarantine records exactly one event, and the event_id is derived
+		// from batch_id so even a replay collapses instead of multiplying.
+		m.security.RecordQuarantine(claims.TenantID, claims.DeviceID, headerBatchID, hitClasses(hits), receivedAt)
 		// 05 §2.3: nothing from a flagged batch is projected; the 202 is
 		// still a durability promise (the quarantine object holds it all).
 		m.writeAck(w, start, &batch, headerBatchID, hits, false)
@@ -255,6 +266,24 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 	// stamps m1_devices.edge_version alongside last_seen_at (m1_061).
 	m.sfx.Enqueue(tenant, claims.DeviceID, receivedAt, r.Header.Get("X-Mark1-Edge-Version"),
 		sidefx.EffectsFromBatch(&batch, receivedAt))
+}
+
+// hitClasses is the ONLY thing a stage-7 hit is allowed to carry out of the
+// scan: the rule classes that fired, deduped and sorted (deterministic so a
+// replayed batch produces a byte-equal event). scanner.Hit deliberately holds
+// no matched text to leak — see chproj.QuarantineEventRow for why nothing
+// derived from the content may ride along either.
+func hitClasses(hits []scanner.Hit) []string {
+	seen := make(map[string]bool, len(hits))
+	out := make([]string, 0, len(hits))
+	for _, h := range hits {
+		if !seen[h.Class] {
+			seen[h.Class] = true
+			out = append(out, h.Class)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // identityDisagreement applies 08 §2.1's constraint + the envelope's

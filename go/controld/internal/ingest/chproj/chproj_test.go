@@ -75,6 +75,39 @@ func TestUsageRowMapping(t *testing.T) {
 	}
 }
 
+// EdgeHealth is the one body capture.Admit lets through without a session_id
+// (11 §2.3: health is per-device). Batch.session_id is only the head record's,
+// so back-filling from it would file device health under whichever session it
+// was batched behind — silently, and with a plausible-looking uuid.
+func TestDeviceScopedHealthKeepsNoSession(t *testing.T) {
+	tenant, device := uuid.New(), uuid.New()
+	session, batchID := v7(t), v7(t)
+	at := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	b := &m1pv1.Batch{
+		BatchId: batchID[:], SessionId: session[:],
+		Sdk: &m1pv1.SdkInfo{Agent: "claudecode"},
+		Events: []*m1pv1.Event{
+			{EventId: v7b(t), Seq: 1, SessionId: session[:], OccurredAt: timestamppb.New(at),
+				Body: &m1pv1.Event_SessionStart{SessionStart: &m1pv1.SessionStart{}}},
+			{EventId: v7b(t), Seq: 1, OccurredAt: timestamppb.New(at),
+				Body: &m1pv1.Event_EdgeHealth{EdgeHealth: &m1pv1.EdgeHealth{EdgeVersion: "test"}}},
+		},
+	}
+	rows := RowsFromBatch(b, tenant, device, at)
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(rows))
+	}
+	if got := rows[0][col(t, "session_id")]; got != session {
+		t.Errorf("a session-bearing event lost its session: %v", got)
+	}
+	if got := rows[1][col(t, "session_id")]; got != uuid.Nil {
+		t.Errorf("device health was attributed to session %v — the batch head's, not its own", got)
+	}
+	if got := rows[1][col(t, "device_id")]; got != device {
+		t.Errorf("device health lost its device: %v", got)
+	}
+}
+
 func TestVerdictRowMapping(t *testing.T) {
 	eventID := v7(t)
 	certID := uuid.New()

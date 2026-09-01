@@ -258,6 +258,20 @@ func Load() (Config, error) {
 	if c.WitnessRetain, err = durationOr("WITNESS_RETAIN", 8760*time.Hour); err != nil {
 		return Config{}, err
 	}
+	// witness_s3.go:87 treats Retain==0 as "omit the lock headers", so a bare
+	// WITNESS_RETAIN=0 publishes a mutable head and reports success — the same
+	// publishes-nothing-and-hides-it shape as the refusal above. A customer
+	// bucket with no object lock is a real deployment, so the escape exists;
+	// it just has to be typed out.
+	if c.WitnessBucket != "" && c.WitnessRetain == 0 {
+		switch os.Getenv("WITNESS_OBJECT_LOCK") {
+		case "off":
+		case "":
+			return Config{}, fmt.Errorf("config: WITNESS_RETAIN=0 with WITNESS_BUCKET set — the head would publish unlocked, so tampering with the witness target is undetectable and the chain is no longer externally verifiable; set WITNESS_OBJECT_LOCK=off to choose that (boot refusal R1)")
+		default:
+			return Config{}, fmt.Errorf("config: WITNESS_OBJECT_LOCK=%q is not %q or unset (boot refusal R1)", os.Getenv("WITNESS_OBJECT_LOCK"), "off")
+		}
+	}
 	if c.RevocationCacheMaxAge, err = durationOr("REVOCATION_CACHE_MAX_AGE", 60*time.Second); err != nil {
 		return Config{}, err
 	}
