@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -271,8 +274,33 @@ func TestOffRevertsToByteEquality(t *testing.T) {
 // provisions, the real `mark1 off` reverts, and the settings file is
 // byte-identical to the one they had. The single-package tests above can drift
 // from each other; this one cannot, because it runs both commands.
+//
+// It runs the API-key case on purpose, so BOTH fragments are in the file at
+// once. Two fragments fencing one file is where byte-equality is actually at
+// risk: each records a whole-file pre-image, and reverting them in the wrong
+// order restores a snapshot that puts the other one back.
 func TestEnableThenOffIsByteEqual(t *testing.T) {
 	env, out := testEnv(t)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+	if err := os.MkdirAll(env.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A real listener on a real port, answering the way the guard answers a
+	// request carrying no M1-Cred-Ref (rust/mark1-proxy/src/router.rs:143-149).
+	// `mark1 enable` probes the published port before it will write the base-URL
+	// fragment, so a literal port here is a port nothing holds — enable would
+	// write only the hooks fragment and this test would stop covering the
+	// two-fragments-in-one-file case it exists for.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":"M1E-8001","message":"request without a valid M1-Cred-Ref"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	proxyURL := "http://" + srv.Listener.Addr().String()
+	port := strconv.Itoa(srv.Listener.Addr().(*net.TCPAddr).Port)
+	if err := os.WriteFile(claudecode.ProxyPortPath(env.StateDir), []byte(port), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := env.SaveEnrollment(&cli.Enrollment{
 		Version: 1, State: "active", DeviceID: "dev-1",
 		DeviceToken: "tok", TokenExpiresAt: time.Now().Add(time.Hour),
@@ -308,6 +336,11 @@ func TestEnableThenOffIsByteEqual(t *testing.T) {
 	if bytes.Equal(provisionedBytes, []byte(body)) {
 		t.Fatal("enable wrote nothing, so the off below would be byte-equal for the wrong reason")
 	}
+	for _, key := range []string{"_mark1_managed", "_mark1_managed_baseurl", proxyURL} {
+		if !bytes.Contains(provisionedBytes, []byte(key)) {
+			t.Fatalf("enable did not write %s, so this test proves less than it claims:\n%s", key, provisionedBytes)
+		}
+	}
 
 	out.Reset()
 	if err := Run(env, Options{Socket: shortSocket(t), ObserveGrace: 50 * time.Millisecond}); err != nil {
@@ -326,6 +359,16 @@ func TestEnableThenOffIsByteEqual(t *testing.T) {
 	}
 	if !res.OK || !res.ByteEquality {
 		t.Fatalf("result %+v", res)
+	}
+	kinds := map[string]string{}
+	for _, r := range res.Reverted {
+		kinds[r.Agent] = r.Kind
+	}
+	// The hooks fragment reaching its verbatim path is the observable proof the
+	// base-URL fragment came out first: had the order been reversed, the file
+	// would no longer match the hooks post-image and this would read "surgical".
+	if kinds["claudecode"] != "verbatim" || kinds["claudecode/baseurl"] != "surgical" {
+		t.Fatalf("reverted %+v", res.Reverted)
 	}
 }
 

@@ -39,6 +39,11 @@ type Result struct {
 	// enrolled with nothing capturing. So it is reported here and again in
 	// `mark1 doctor`, which is the doc-named surface for both codes.
 	AgentsRefused []Refusal `json:"agents_refused,omitempty"`
+	// ProxyPointer is additive: it always states what happened to the base-URL
+	// fragment, because "we did not point this agent at the proxy" is a legal
+	// boundary (CON-001) and a boundary that is only observable by its silence
+	// is one nobody can audit. "not-eligible" is the correct, common answer.
+	ProxyPointer string `json:"proxy_pointer"`
 }
 
 // Refusal is one agent whose fragment could not be applied, with the M1E code
@@ -119,6 +124,9 @@ func Run(env *cli.Env, opts Options) error {
 				_, _ = fmt.Fprintf(w, "provisioned   %s\n", a)
 			}
 		}
+		if res.ProxyPointer == "provisioned" {
+			_, _ = fmt.Fprintln(w, "provisioned   claudecode base URL -> mark1-proxy (API-key credential)")
+		}
 		for _, r := range res.AgentsRefused {
 			_, _ = fmt.Fprintf(w, "NOT PROVISIONED %s: %s %s\n", r.Agent, r.Code, r.Detail)
 		}
@@ -136,12 +144,30 @@ func provision(env *cli.Env, opts Options, res *Result) (wrote bool, err error) 
 	switch code := claudecode.RefusalCode(err); {
 	case err == nil:
 		res.AgentsProvisioned = append(res.AgentsProvisioned, a.Name())
-		return applied.Changed, nil
+		wrote = applied.Changed
 	case code != "":
 		res.AgentsRefused = append(res.AgentsRefused, Refusal{a.Name(), code, err.Error()})
-		return false, nil
+	default:
+		return false, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", a.Name(), err)
 	}
-	return false, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", a.Name(), err)
+
+	// The base-URL fragment is provisioned only for a detected API-key
+	// credential and only when a proxy is actually listening; every other answer
+	// is ErrNotEligible and is a normal outcome, not a refusal to show the user.
+	pointer, perr := a.ApplyProxyPointer()
+	switch code := claudecode.RefusalCode(perr); {
+	case perr == nil:
+		res.ProxyPointer = "provisioned"
+		wrote = wrote || pointer.Changed
+	case errors.Is(perr, claudecode.ErrNotEligible):
+		res.ProxyPointer = "not-eligible"
+	case code != "":
+		res.ProxyPointer = code
+		res.AgentsRefused = append(res.AgentsRefused, Refusal{a.Name() + "/baseurl", code, perr.Error()})
+	default:
+		return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s base URL: %v", a.Name(), perr)
+	}
+	return wrote, nil
 }
 
 // optedOut reports whether the root .mark1ignore ignores the whole repo —

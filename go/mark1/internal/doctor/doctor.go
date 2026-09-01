@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
@@ -59,7 +60,12 @@ type Agent struct {
 // on disk, so the block we wrote is byte-for-byte diffable from the report
 // itself (FR-AGENT-003) rather than only from the file.
 type Fragment struct {
-	Agent     string            `json:"agent"`
+	Agent string `json:"agent"`
+	// Fragment names which of the agent's blocks this row is. One agent has
+	// more than one: claudecode's hooks and base-URL fragments share a target
+	// file and are reverted in opposite situations, so two rows that differ
+	// only in state would otherwise be unattributable.
+	Fragment  string            `json:"fragment,omitempty"`
 	Mechanism string            `json:"mechanism,omitempty"`
 	Manifest  string            `json:"manifest"`
 	Target    string            `json:"target"`
@@ -143,30 +149,62 @@ func roster() []Agent {
 // every user who has not run `mark1 enable` yet.
 func scanFragments(env *cli.Env, opts Options) []Fragment {
 	var out []Fragment
+	classified := map[string]bool{
+		claudecode.ManifestPath(env.StateDir):        true,
+		claudecode.BaseURLManifestPath(env.StateDir): true,
+	}
 	if _, err := os.Stat(claudecode.ManifestPath(env.StateDir)); err == nil {
 		out = append(out, inspectClaudeCode(env, opts))
+	}
+	if _, err := os.Stat(claudecode.BaseURLManifestPath(env.StateDir)); err == nil {
+		out = append(out, inspectBaseURL(env, opts))
 	}
 	// Any OTHER manifest under <state>/provisioned/ belongs to an agent this
 	// build cannot classify. Listing it beats hiding it: an unclassifiable
 	// fragment is one `mark1 off` will also refuse to revert.
 	matches, _ := filepath.Glob(filepath.Join(env.ProvisionedDir(), "*", "*.manifest.json"))
 	for _, m := range matches {
-		if m == claudecode.ManifestPath(env.StateDir) {
+		if classified[m] {
 			continue
 		}
 		out = append(out, Fragment{
-			Agent: filepath.Base(filepath.Dir(m)), Manifest: m,
-			State:  string(claudecode.StateDamaged),
-			Detail: "no adapter in this build can classify or revert this fragment",
+			Agent:    filepath.Base(filepath.Dir(m)),
+			Fragment: strings.TrimSuffix(filepath.Base(m), ".manifest.json"),
+			Manifest: m,
+			State:    string(claudecode.StateDamaged),
+			Detail:   "no adapter in this build can classify or revert this fragment",
 		})
 	}
 	return out
 }
 
+// inspectBaseURL classifies the proxy pointer through the engine that wrote it,
+// and never repairs it. §7.4's --fix re-applies MISSING and repairs
+// FRAGMENT-DAMAGED, but ApplyBaseURL has no force path on purpose (baseurl.go
+// §8.3(d)): repairing this fragment means re-pointing an agent's API key at a
+// loopback port, and that decision belongs to `mark1 enable`'s eligibility
+// check — a `Detect()==apikey` credential and a proxy that answers the guard
+// probe — none of which a diagnostic re-runs. So --fix names the remedy instead
+// of performing it; leaving the row bare would send a user round the loop.
+func inspectBaseURL(env *cli.Env, opts Options) Fragment {
+	st, err := claudecode.InspectBaseURL(env.StateDir)
+	f := Fragment{
+		Agent: st.Agent, Fragment: st.Fragment, Mechanism: st.Mechanism, Manifest: st.Manifest,
+		Target: st.Target, State: string(st.State), Detail: st.Detail, Lines: st.Lines,
+	}
+	if err != nil {
+		f.State, f.Detail = string(claudecode.StateDamaged), err.Error()
+	}
+	if opts.Fix && (f.State == string(claudecode.StateDamaged) || f.State == string(claudecode.StateMissing)) {
+		f.Detail += " (--fix does not re-point an agent at the proxy: run `mark1 enable` to re-check eligibility, or `mark1 off` to detach)"
+	}
+	return f
+}
+
 func inspectClaudeCode(env *cli.Env, opts Options) Fragment {
 	st, err := claudecode.Inspect(env.StateDir)
 	f := Fragment{
-		Agent: st.Agent, Mechanism: st.Mechanism, Manifest: st.Manifest,
+		Agent: st.Agent, Fragment: st.Fragment, Mechanism: st.Mechanism, Manifest: st.Manifest,
 		Target: st.Target, State: string(st.State), Detail: st.Detail, Lines: st.Lines,
 	}
 	if err != nil {
@@ -281,7 +319,7 @@ func renderHuman(w io.Writer, r *Report) {
 		_, _ = fmt.Fprintln(w, "fragments     none provisioned")
 	}
 	for _, f := range r.Fragments {
-		_, _ = fmt.Fprintf(w, "fragment      %s -> %s [%s] %s\n", f.Agent, f.Target, f.State, f.Detail)
+		_, _ = fmt.Fprintf(w, "fragment      %s/%s -> %s [%s] %s\n", f.Agent, f.Fragment, f.Target, f.State, f.Detail)
 		// Every provisioned line, one line each: a user must be able to see
 		// exactly what we put in their file without opening it, and nine
 		// pretty-printed blocks is a thing nobody reads. The --json Lines keep

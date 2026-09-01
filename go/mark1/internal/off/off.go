@@ -178,6 +178,22 @@ func verifyDaemonObserved(socket string, wasReachable bool, grace time.Duration)
 // block of ours in their config that `mark1 off` did not take out — and both
 // have to make exit 1.
 func revertFragments(env *cli.Env) (done []Reverted, notReverted []string) {
+	// Base-URL BEFORE hooks, and the order is load-bearing. Both fragments fence
+	// the same settings.json, so reverting hooks first restores a whole-file
+	// pre-image that predates the base-URL fragment — putting the proxy pointer
+	// back after we removed it. This order also leaves the file matching the
+	// hooks manifest's post_image, which is what makes the hooks revert take its
+	// verbatim (byte-equal) path instead of the surgical one.
+	// A retained pointer is deliberately NOT listed as done. It keeps its
+	// manifest (D-CR), so the leftover scan below picks it up and makes exit 1
+	// — which is the same road every other unfinished revert travels. Listing
+	// it here as `surgical, byte_equality: false` would file "your API key is
+	// still routed at a loopback port" under the same line as "you edited your
+	// settings after we provisioned".
+	if res, err := claudecode.RevertBaseURL(env.StateDir); err == nil && res.Kind != "not-provisioned" && len(res.Retained) == 0 {
+		done = append(done, Reverted{"claudecode/baseurl", res.Target, res.Kind, res.ByteEquality})
+	}
+
 	res, err := claudecode.Revert(env.StateDir)
 	switch {
 	case err != nil:
