@@ -70,6 +70,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/policy"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 )
@@ -106,6 +107,8 @@ type Config struct {
 	Token       string
 	EdgeVersion string
 	Log         *slog.Logger
+	// Health receives the applied-posture gauges (seq/age_s/stale); nil is legal.
+	Health *obs.Health
 
 	// Test seams; nil/zero ⇒ production defaults.
 	HTTPClient *http.Client
@@ -137,6 +140,7 @@ type Client struct {
 	edgeVersion string
 	keys        *policy.SectionKeys
 	log         *slog.Logger
+	health      *obs.Health
 	http        *http.Client
 	now         func() time.Time
 	rand        func() float64
@@ -177,6 +181,7 @@ func New(cfg Config) (*Client, error) {
 		token:       cfg.Token,
 		edgeVersion: cfg.EdgeVersion,
 		log:         cfg.Log,
+		health:      cfg.Health,
 		http:        cfg.HTTPClient,
 		now:         cfg.Now,
 		rand:        cfg.Rand,
@@ -225,6 +230,7 @@ func New(cfg Config) (*Client, error) {
 		c.lkg = c.loadLKG()
 	}
 	c.boot, c.published.seq, c.published.stale = c.posture()
+	c.report()
 	return c, nil
 }
 
@@ -407,6 +413,7 @@ func (c *Client) publish() {
 	}
 	wasStale := c.published.stale
 	c.published.seq, c.published.stale = seq, stale
+	c.report()
 	if c.Apply != nil {
 		c.Apply(m)
 	}
@@ -416,6 +423,19 @@ func (c *Client) publish() {
 	case !stale && wasStale:
 		c.log.Info("mark1d: policy fresh again", "seq", seq)
 	}
+}
+
+// report mirrors the published posture into the health table. Called from New
+// as well as publish: a daemon that never reaches its control plane is running
+// built-ins on purpose, and that is a posture worth reporting, not an absence.
+// issued_at comes off the bundle rather than the clock, so age_s is publication
+// age — no bundle means 0, which ageS reads as "never", with stale=1 alongside.
+func (c *Client) report() {
+	var issued uint64
+	if c.lkg != nil {
+		issued = c.lkg.b.IssuedAtEpochS
+	}
+	c.health.Bundle(c.published.seq, issued, c.published.stale)
 }
 
 func (c *Client) epoch() uint64 {

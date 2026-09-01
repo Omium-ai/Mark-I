@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 	"google.golang.org/protobuf/proto"
@@ -99,6 +100,91 @@ func TestEpochAndSeq(t *testing.T) {
 	}
 }
 
+// TestEventIDsAreMethod1UUIDv7AndBurstMonotonic covers the first two of
+// FR-SPINE-001's three acceptance clauses: minted ids parse as RFC 9562
+// UUIDv7, and a burst from one daemon is STRICTLY increasing. TestEpochAndSeq
+// checks only len==16 and that two ids differ, which a v4 would also satisfy —
+// and v4 would quietly break the property 07 §2 rests the whole ordering story
+// on, that spool order, id order and the ClickHouse ordering component agree
+// by construction rather than by luck.
+//
+// The third clause ("seq gaps within a session fail the check") is NOT covered
+// here: no consumer in this repo reads a seq stream and rejects a hole. That is
+// a missing consumer, not a missing test, and the traceability entry says so.
+func TestEventIDsAreMethod1UUIDv7AndBurstMonotonic(t *testing.T) {
+	dir := t.TempDir()
+	sp := openSpool(t, filepath.Join(dir, "spool"))
+	a, err := New(sp, Config{EpochPath: filepath.Join(dir, "epoch"), Redact: passRedact})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 512
+	ctx := context.Background()
+	ids := make([][]byte, 0, n)
+	before := time.Now()
+	for i := 0; i < n; i++ {
+		ev := usageEvent(0xC)
+		if err := a.Admit(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, ev.GetEventId())
+	}
+	after := time.Now()
+
+	unixMilli := func(id []byte) int64 {
+		var ms int64
+		for _, b := range id[:6] {
+			ms = ms<<8 | int64(b)
+		}
+		return ms
+	}
+
+	for i, id := range ids {
+		if len(id) != 16 {
+			t.Fatalf("id %d is %d bytes, want 16", i, len(id))
+		}
+		if v := id[6] >> 4; v != 7 {
+			t.Fatalf("id %d has version nibble %d, want 7 — this is not a UUIDv7", i, v)
+		}
+		if id[8]&0xC0 != 0x80 {
+			t.Fatalf("id %d has variant bits %#02x, want RFC 9562 (0b10xxxxxx)", i, id[8]&0xC0)
+		}
+		// A v4 read as v7 would put random bytes in the timestamp field, so this
+		// is what makes the version nibble above more than a formality.
+		//
+		// The slack is deliberately a minute and must not be tightened: random
+		// bytes in id[:6] land somewhere in a ~280,000-year range, so a minute
+		// and a second discriminate identically — but a second does not survive
+		// a host clock resync. Observed 2026-08-31 under WSL2 just after a 60 s
+		// fuzz run: id 0 carried a wall time 1.44 s past `after` while
+		// before..after spanned 1.8 ms, which only a non-monotonic clock can
+		// produce. The minter cannot drift that far (google/uuid advances at
+		// 1/4096 ms per same-millisecond collision, and 512 ids are minted here).
+		ts := time.UnixMilli(unixMilli(id))
+		if ts.Before(before.Add(-time.Minute)) || ts.After(after.Add(time.Minute)) {
+			t.Fatalf("id %d carries timestamp %s, outside the generation window [%s, %s]",
+				i, ts, before, after)
+		}
+	}
+
+	shared := 0
+	for i := 1; i < n; i++ {
+		if bytes.Compare(ids[i-1], ids[i]) >= 0 {
+			t.Fatalf("ids %d and %d are not strictly increasing (%x then %x); Method-1's "+
+				"per-daemon counter is what makes spool order and id order the same order",
+				i-1, i, ids[i-1], ids[i])
+		}
+		if unixMilli(ids[i-1]) == unixMilli(ids[i]) {
+			shared++
+		}
+	}
+	if shared == 0 {
+		t.Fatalf("no two of %d consecutive admissions shared a millisecond, so the ordering "+
+			"above was carried by the clock and the Method-1 counter went unexercised", n)
+	}
+}
+
 // TestClassTag pins the closed billing-grade set on the spool's class byte
 // (07 §6): usage ⇒ 1, everything else ⇒ 2.
 func TestClassTag(t *testing.T) {
@@ -137,6 +223,117 @@ func TestClassTag(t *testing.T) {
 	}
 	if string(recs[0].ID[:16]) != string(ev.GetEventId()) {
 		t.Fatal("record_id[0..16) != event_id")
+	}
+}
+
+// TestClassCensusIsClosedOverEveryBodyType is TestClassTag's missing half.
+// That test admits two events and reads two class bytes; classOf's billing arm
+// names three families and the oneof has twenty-three, so moving verdict_event
+// or receipt_checkpoint into the `default:` arm would shed billing-grade data
+// on a full spool with the whole suite green (NFR-DURABILITY-001).
+//
+// 07 §6 closes the billing set at exactly usage, verdict_event and
+// receipt_checkpoint, and says widening it is an m1p.v2 conversation because it
+// changes what a full spool does to a developer's keystroke. So the census is
+// enumerated from the PROTO's oneof, not from a list of the cases that happen
+// to exist here: a new event family arrives with no row and fails this test
+// until someone classifies it, rather than inheriting `default: diagnostic` in
+// silence — which for a family that ought to be billing-grade is data loss.
+func TestClassCensusIsClosedOverEveryBodyType(t *testing.T) {
+	want := map[string]spool.Class{
+		"Usage":              spool.ClassBilling,
+		"VerdictEvent":       spool.ClassBilling,
+		"ReceiptCheckpoint":  spool.ClassBilling,
+		"SessionStart":       spool.ClassDiagnostic,
+		"SessionEnd":         spool.ClassDiagnostic,
+		"TaskOpen":           spool.ClassDiagnostic,
+		"TaskClose":          spool.ClassDiagnostic,
+		"Turn":               spool.ClassDiagnostic,
+		"ToolUse":            spool.ClassDiagnostic,
+		"ModelRequest":       spool.ClassDiagnostic,
+		"ModelResponse":      spool.ClassDiagnostic,
+		"CoverageTransition": spool.ClassDiagnostic, // per-event receipted AND diagnostic — 07 §6 names it
+		"GuardDecision":      spool.ClassDiagnostic,
+		"EdgeHealth":         spool.ClassDiagnostic,
+		"AnchorVote":         spool.ClassDiagnostic,
+		"JudgeVote":          spool.ClassDiagnostic,
+		"RmScore":            spool.ClassDiagnostic,
+		"ConsistencyVote":    spool.ClassDiagnostic,
+		"CortexInjection":    spool.ClassDiagnostic,
+		"MemoryInjection":    spool.ClassDiagnostic,
+		"ArtifactOutcome":    spool.ClassDiagnostic,
+		"RouteDecision":      spool.ClassDiagnostic,
+		"EvidenceExcerpt":    spool.ClassDiagnostic,
+	}
+
+	od := (&m1pv1.Event{}).ProtoReflect().Descriptor().Oneofs().ByName("body")
+	if od == nil {
+		t.Fatal("Event has no `body` oneof — 07 §2's envelope shape changed and this census covers nothing")
+	}
+	if od.Fields().Len() == 0 {
+		t.Fatal("the body oneof enumerated zero arms; this test would pass over nothing")
+	}
+
+	seen := map[string]bool{}
+	for i := 0; i < od.Fields().Len(); i++ {
+		fd := od.Fields().Get(i)
+		name := string(fd.Message().Name())
+		seen[name] = true
+		exp, ok := want[name]
+		if !ok {
+			t.Errorf("%s is a body arm with no row in this census. Classify it: silence means "+
+				"classOf's `default:` arm, i.e. diagnostic, i.e. dropped first when the spool fills", name)
+			continue
+		}
+		ev := &m1pv1.Event{}
+		ev.ProtoReflect().Mutable(fd)
+		if got := classOf(ev); got != exp {
+			t.Errorf("classOf(%s) = %d, want %d", name, got, exp)
+		}
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Errorf("%s has a census row but is no longer a body arm — the row vouches for nothing", name)
+		}
+	}
+}
+
+// TestSessionExemptionIsClosedOverEveryBodyType is the class census's sibling
+// for the OTHER set that must not drift: which bodies may be admitted with no
+// session_id. Every event names a session because (session_epoch, seq) is 07
+// §2's uniqueness pair; the exempt bodies are the ones reporting on the machine
+// instead, and they share the reserved all-zero seq slot. Widening this set
+// silently would let a session-scoped family take a device counter — a
+// (session_epoch, seq) collision with every other exempt writer on the box —
+// and narrowing it would strand the sealer, whose checkpoints are per-device
+// and whose batches may contain no session at all.
+func TestSessionExemptionIsClosedOverEveryBodyType(t *testing.T) {
+	// CoverageTransition joins the two originals because it has nowhere to put a
+	// session even if we wanted one: the message carries workspace_id and no
+	// session field (proto/m1p/v1/intelligence.proto), and every one of 04 §2.7's
+	// seven reason codes names a condition that exists when no session does —
+	// `mark1 off`, a hard-stopped disk, a proxy that will not start.
+	exempt := map[string]bool{"EdgeHealth": true, "ReceiptCheckpoint": true, "CoverageTransition": true}
+
+	od := (&m1pv1.Event{}).ProtoReflect().Descriptor().Oneofs().ByName("body")
+	if od == nil || od.Fields().Len() == 0 {
+		t.Fatal("the body oneof enumerated zero arms; this test would pass over nothing")
+	}
+	seen := map[string]bool{}
+	for i := 0; i < od.Fields().Len(); i++ {
+		fd := od.Fields().Get(i)
+		name := string(fd.Message().Name())
+		seen[name] = true
+		ev := &m1pv1.Event{}
+		ev.ProtoReflect().Mutable(fd)
+		if got := deviceScoped(ev); got != exempt[name] {
+			t.Errorf("deviceScoped(%s) = %v, want %v", name, got, exempt[name])
+		}
+	}
+	for name := range exempt {
+		if !seen[name] {
+			t.Errorf("%s is exempted from naming a session but is no longer a body arm", name)
+		}
 	}
 }
 

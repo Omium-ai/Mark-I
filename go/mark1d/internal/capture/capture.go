@@ -110,16 +110,21 @@ func (a *Admitter) Epoch() uint32 { return a.epoch }
 // fabric read loops by design, 08 §4.4); diagnostics shed to ErrShed.
 func (a *Admitter) Admit(ctx context.Context, ev *m1pv1.Event) error {
 	// Normalize: identity the rest of the pipeline keys on must hold.
-	if ev == nil || ev.GetBody() == nil || len(ev.GetSessionId()) != 16 {
+	if ev == nil || ev.GetBody() == nil {
 		return a.quarantine(ev, "malformed envelope")
 	}
 	var sid [16]byte
-	copy(sid[:], ev.GetSessionId())
-	if sid == ([16]byte{}) {
-		// D-AL: session_id is OPTIONAL on the wire, so all-zero is "absent"
-		// encoded as present — it must not become the seq key every
-		// session-less writer on the box shares.
-		return a.quarantine(ev, "all-zero session_id is absent, not an address")
+	if !deviceScoped(ev) {
+		if len(ev.GetSessionId()) != 16 {
+			return a.quarantine(ev, "malformed envelope")
+		}
+		copy(sid[:], ev.GetSessionId())
+		if sid == ([16]byte{}) {
+			// D-AL: session_id is OPTIONAL on the wire, so all-zero is "absent"
+			// encoded as present — it must not become the seq key every
+			// session-less writer on the box shares.
+			return a.quarantine(ev, "all-zero session_id is absent, not an address")
+		}
 	}
 	// The 900-band is server-stamped from verified token claims; a non-empty
 	// value here would 403 the WHOLE batch at ingest (07 §2, M1E-8003), so
@@ -244,6 +249,45 @@ func (a *Admitter) quarantine(ev *m1pv1.Event, detail string) error {
 	a.drops[dropLocalQuarantine][class]++
 	a.mu.Unlock()
 	return fmt.Errorf("%w: %s", ErrQuarantined, detail)
+}
+
+// deviceScoped names the bodies exempt from "every event names a session",
+// because the thing they report on is the MACHINE and not any one session:
+//
+//   - EdgeHealth — 11 §2.3 makes an absent session_id normative for it
+//     ("health is per-device, not per-session"), so requiring one would make
+//     the emitter unbuildable.
+//   - ReceiptCheckpoint — its counter is per-DEVICE gap-free (artifacts.proto
+//     `checkpoint_seq`) and controld's CheckpointEvent (receipts/store.go)
+//     carries no session field at all, because a checkpoint attests whatever
+//     batch of events happened to upload together and those span sessions.
+//     Borrowing the first rider's session_id would file a device-scoped chain
+//     fact under an arbitrary session — the exact defect chproj.go refuses to
+//     commit for health — and would leave a batch with no session at all
+//     unsealable, i.e. landed events with no chain evidence whatsoever.
+//   - CoverageTransition — 04 §2.7's door reports on a WORKSPACE or on the
+//     machine ("enable", a failed proxy, a full disk, an unsupported agent
+//     binary), and its wire message carries a workspace_id and no session
+//     field at all (intelligence.proto). Every one of its seven reason codes
+//     names a condition that exists when no session does, so requiring a
+//     session_id here does not tighten anything — it quarantines the entire
+//     coverage plane, which is what it did until this line was added: an
+//     unreceipted bypass window is indistinguishable from full coverage, and
+//     that is the assumed-100%-coverage billing failure C13 exists to end.
+//
+// Such an event takes seq from the reserved all-zero slot — which D-AL leaves
+// unreachable for every other body, so the device stream can never share a
+// counter with a real session, and an all-zero-BYTES session_id stays refused
+// for every body including these two.
+func deviceScoped(ev *m1pv1.Event) bool {
+	if len(ev.GetSessionId()) != 0 {
+		return false
+	}
+	switch ev.GetBody().(type) {
+	case *m1pv1.Event_EdgeHealth, *m1pv1.Event_ReceiptCheckpoint, *m1pv1.Event_CoverageTransition:
+		return true
+	}
+	return false
 }
 
 // classOf is the class-tag stage: the billing-grade set is CLOSED at exactly
