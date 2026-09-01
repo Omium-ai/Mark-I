@@ -3,10 +3,11 @@
 package chproj
 
 // DSN-gated ClickHouse integration: a scratch database gets the REAL
-// m1_ch_001_events.sql DDL (database name rewritten, nothing else), chconn
+// migrations/m1_ch_*.sql DDL (database name rewritten, nothing else), chconn
 // opens against it with the R3 async-insert assertion live, and the tests
-// prove the projection lands and that a §2.5 replay collapses to the same
-// reader-facing rows under the 07 dedupe discipline (LIMIT 1 BY event_id).
+// prove the projection lands, that a §2.5 replay collapses to the same
+// reader-facing rows under the 07 dedupe discipline (LIMIT 1 BY event_id),
+// and that the schema the server actually built is the one ADR-0001 fixed.
 //
 // This file may speak SELECT because it lives under internal/ingest/chproj —
 // one of the two depguard-sanctioned ClickHouse dirs (13 §7.3); production
@@ -282,6 +283,284 @@ func TestIntegrationProjectAndReplayDedupe(t *testing.T) {
 	}
 }
 
+// FR-SPINE-014 layer 3: the ENGINE's collapse, which nothing above observes.
+//
+// TestIntegrationProjectAndReplayDedupe counts through `LIMIT 1 BY event_id`.
+// That is reader-side dedupe — it would pass byte-identically against a plain
+// MergeTree that collapses nothing — so the merge itself is unproven by it, and
+// the DDL guard below only reads system.tables and never watches one happen.
+//
+// The version column is the half that carries the money. m1_ch_001:66-67 makes
+// `ingested_at` the ReplacingMergeTree version so the LATEST server ingest wins;
+// a wrong one keeps an arbitrary row per key, and the direction that costs is
+// exactly m1_ch_001:87's ~2.5x streaming overcount — a first count that a later
+// ingest corrects DOWNWARD. So the two ingests here differ only in their token
+// count, and the newer one is the smaller: an engine that kept the older row
+// (or the larger value) bills the overcount forever, silently.
+func TestIntegrationReplacingMergeCollapsesToNewestIngest(t *testing.T) {
+	conn, query, _ := setupCH(t)
+	ctx := context.Background()
+
+	tenant, device := uuid.New(), uuid.New()
+	batchID, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	eventID := uuid.Must(uuid.NewV7())
+	at := time.Date(2026, 8, 29, 10, 0, 0, 0, time.UTC)
+	const overcounted, corrected uint64 = 5000, 2000
+
+	// The engine collapses on the WHOLE ordering key (ADR-0001:
+	// tenant_id, toDate(occurred_at), session_id, event_id), not on event_id
+	// alone, so every term but the token count is held equal here — which is
+	// also what RowsFromBatch's replay determinism (chproj.go:88-94) buys.
+	usage := func(in uint64) *m1pv1.Batch {
+		return &m1pv1.Batch{
+			BatchId: batchID[:], SessionId: session[:],
+			Sdk: &m1pv1.SdkInfo{Agent: "claudecode"}, SentAt: timestamppb.New(at),
+			Events: []*m1pv1.Event{{
+				EventId: eventID[:], Seq: 7, SessionId: session[:], OccurredAt: timestamppb.New(at),
+				Body: &m1pv1.Event_Usage{Usage: &m1pv1.Usage{
+					Model: "claude-test-1", InputTokens: in, OutputTokens: 11,
+				}},
+			}},
+		}
+	}
+	for _, in := range []uint64{overcounted, corrected} {
+		if err := conn.InsertRows(ctx, Table, Columns, RowsFromBatch(usage(in), tenant, device, at)); err != nil {
+			t.Fatalf("insert (input_tokens=%d): %v", in, err)
+		}
+	}
+
+	// ANTI-VACUITY, before any merge. "One row after OPTIMIZE" is also what a
+	// second insert that silently failed produces, and "the newest wins" is a
+	// coin flip if the two versions are equal — so both physical rows and two
+	// distinct versions have to be shown to exist first. argMax establishes
+	// which count IS the newest from the data rather than from the write order.
+	var raw, versions, newest uint64
+	if err := query.QueryRow(ctx, fmt.Sprintf(
+		`SELECT count(), uniqExact(ingested_at), argMax(input_tokens, ingested_at)
+		   FROM %s WHERE tenant_id = $1 AND event_id = $2`, Table),
+		tenant, eventID).Scan(&raw, &versions, &newest); err != nil {
+		t.Fatal(err)
+	}
+	if raw != 2 {
+		t.Fatalf("pre-merge physical rows = %d, want 2 — the collapse below would prove nothing", raw)
+	}
+	if versions != 2 {
+		t.Fatal("both ingests share one ingested_at; ReplacingMergeTree picks arbitrarily between equal " +
+			"versions, so this test would be a coin flip rather than an assertion")
+	}
+	if newest != corrected {
+		t.Fatalf("newest ingested_at carries input_tokens=%d, want the corrected %d", newest, corrected)
+	}
+
+	// Deterministically, not by waiting: background merges are asynchronous and
+	// a sleep here would be a flake with a timeout. optimize_throw_if_noop turns
+	// "nothing was merged" into a named error instead of a confusing count.
+	if err := query.Exec(ctx, fmt.Sprintf(
+		"OPTIMIZE TABLE %s FINAL SETTINGS optimize_throw_if_noop = 1", Table)); err != nil {
+		t.Fatalf("OPTIMIZE ... FINAL: %v", err)
+	}
+
+	// No LIMIT 1 BY: this counts what is PHYSICALLY on disk, which is the only
+	// form that can tell the engine's dedupe apart from the reader's.
+	var survivors, tokens uint64
+	if err := query.QueryRow(ctx, fmt.Sprintf(
+		`SELECT count(), max(input_tokens) FROM %s WHERE tenant_id = $1 AND event_id = $2`, Table),
+		tenant, eventID).Scan(&survivors, &tokens); err != nil {
+		t.Fatal(err)
+	}
+	if survivors != 1 {
+		t.Fatalf("after OPTIMIZE ... FINAL, %d physical rows survive for one event_id — the engine is not "+
+			"collapsing duplicates, so FR-SPINE-014 layer 3 rests entirely on every reader remembering "+
+			"LIMIT 1 BY (m1_ch_001 footer)", survivors)
+	}
+	if tokens != corrected {
+		t.Fatalf("the surviving row carries input_tokens=%d, want the newest ingest's %d — the version "+
+			"column is not ingested_at, so a corrected token count loses to the one it corrected "+
+			"(m1_ch_001:66-67; the ~2.5x overcount at :87 is billed forever)", tokens, corrected)
+	}
+}
+
 // The R3 refusal negatives live in chconn's own integration suite
 // (internal/querychoke/chconn), where the assertion can be exercised against
 // effective-0 settings for real instead of asserted by proxy.
+
+// ─── FR-SPINE-013: the guard on the one irreversible decision ──────────────
+//
+// A MergeTree ORDER BY cannot be altered in place. ADR-0001 exists for exactly
+// that reason: every other physical choice in the analytics plane — codecs,
+// TTLs, skip indexes, even the partition key — is adjustable after the fact,
+// and this one is not (ADR-0001 §Context, §Reversibility: a new table plus a
+// full S3 replay, hours at pilot and days plus four-to-five figures at 100×).
+// The migrations already ran against a real server above, but nothing read the
+// resulting schema back — so a key that shipped as (session_id, event_id), or
+// a ReplacingMergeTree quietly demoted to MergeTree, passed every gate green
+// and would have surfaced only as unfixable data at a customer. This test
+// reads system.tables and compares what the server built, term for term in
+// order, against ADR-0001 §Decision.
+
+// chTableShape is the unalterable half of a table's DDL: the engine WITH its
+// arguments and the whole ordering key as an ordered tuple. Partition key and
+// TTL are deliberately absent — ADR-0001 §Context names both as adjustable
+// after the fact, so pinning them here would only manufacture false reds.
+type chTableShape struct{ engine, sortingKey string }
+
+// chExpectedShapes is ADR-0001 §Decision transcribed, plus the three rollups'
+// (tenant_id, day, …) prefix that ADR-0001 §Consequences requires them to
+// share with the base table. The set is diffed against system.tables in BOTH
+// directions: a table that vanishes and a table nobody told this test about
+// are the same defect, and the second is the one a hardcoded list normally
+// lets through six months later.
+var chExpectedShapes = map[string]chTableShape{
+	"m1p_events": {
+		engine:     "ReplacingMergeTree(ingested_at)",
+		sortingKey: "tenant_id, toDate(occurred_at), session_id, event_id",
+	},
+	"tvo_session":    {engine: "AggregatingMergeTree", sortingKey: "tenant_id, day, session_id"},
+	"tvo_task":       {engine: "AggregatingMergeTree", sortingKey: "tenant_id, day, task_id"},
+	"tvo_tenant_day": {engine: "AggregatingMergeTree", sortingKey: "tenant_id, day, task_seg_version"},
+	// The MVs carry no sorting key of their own; they are listed so that the
+	// set diff below stays total over the database.
+	"mv_tvo_session": {engine: "MaterializedView"},
+	"mv_tvo_task":    {engine: "MaterializedView"},
+}
+
+func TestIntegrationClickHouseDDLMatchesADR0001(t *testing.T) {
+	query, scratch := setupCHSchema(t)
+	ctx := context.Background()
+
+	rows, err := query.Query(ctx,
+		`SELECT name, engine, engine_full, sorting_key FROM system.tables WHERE database = $1`, scratch)
+	if err != nil {
+		t.Fatalf("system.tables: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	got := make(map[string]chTableShape)
+	for rows.Next() {
+		var name, engine, engineFull, sortingKey string
+		if err := rows.Scan(&name, &engine, &engineFull, &sortingKey); err != nil {
+			t.Fatal(err)
+		}
+		got[name] = chTableShape{
+			engine: engineWithArgs(engine, engineFull),
+			// Whitespace only. Re-ordering the terms here would erase the very
+			// difference the test exists to catch: (tenant_id, toDate, session,
+			// event) and (tenant_id, session, event, toDate) hold the same four
+			// terms and differ catastrophically.
+			sortingKey: strings.Join(strings.Fields(sortingKey), " "),
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Positive count first: "every table matched" is also what a read that
+	// found no tables at all reports, and a scratch database that silently
+	// received no DDL would otherwise pass this test green.
+	if len(got) == 0 {
+		t.Fatalf("system.tables reports no tables in %s — the migrations did not run, so every assertion below is vacuous", scratch)
+	}
+	if len(got) != len(chExpectedShapes) {
+		t.Errorf("migrations created %d ClickHouse tables, ADR-0001 accounts for %d", len(got), len(chExpectedShapes))
+	}
+
+	for name, want := range chExpectedShapes {
+		g, ok := got[name]
+		if !ok {
+			t.Errorf("migrations no longer create %s: ADR-0001 covers it and system.tables does not list it", name)
+			continue
+		}
+		if g.engine != want.engine {
+			t.Errorf("%s engine drifted from ADR-0001 §Decision: want %s, got %s", name, want.engine, g.engine)
+		}
+		if g.sortingKey != want.sortingKey {
+			t.Errorf("%s ORDER BY drifted from ADR-0001 §Decision, and ORDER BY IS NOT ALTERABLE IN PLACE:\n"+
+				"  want ORDER BY (%s)\n"+
+				"  got  ORDER BY (%s)\n"+
+				"If the new key is intended, it needs a superseding ADR and the §\"Migration path and cost\" "+
+				"sequence (new table → dual-write → S3 replay → parity → cutover), not an edit to this expectation.",
+				name, want.sortingKey, g.sortingKey)
+		}
+	}
+	for name, g := range got {
+		if _, ok := chExpectedShapes[name]; !ok {
+			t.Errorf("ClickHouse table %s exists but no ADR-0001 expectation covers it "+
+				"(engine %s, ORDER BY (%s)) — its ordering key is being written unreviewed; "+
+				"add it to chExpectedShapes once the ADR accounts for it", name, g.engine, g.sortingKey)
+		}
+	}
+}
+
+// engineWithArgs re-attaches the argument list that system.tables.engine drops.
+// FR-SPINE-013 promises "ReplacingMergeTree on event_id" with the newest server
+// ingest winning, and that second half is entirely the `(ingested_at)` version
+// column: without it the engine keeps an arbitrary row per key, which no amount
+// of ordering-key correctness recovers. engine_full is empty for views, hence
+// the prefix test rather than a blind split.
+func engineWithArgs(engine, engineFull string) string {
+	if !strings.HasPrefix(engineFull, engine+"(") {
+		return engine
+	}
+	depth := 0
+	for i := len(engine); i < len(engineFull); i++ {
+		switch engineFull[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth--; depth == 0 {
+				return engineFull[:i+1]
+			}
+		}
+	}
+	return engineFull // unbalanced: report it verbatim rather than guess
+}
+
+// setupCHSchema applies EVERY ClickHouse migration, not just m1_ch_001 as
+// setupCH does, and discovers them by glob rather than by name: a migration
+// added next month must land in the guard above by existing, not by someone
+// remembering to list it here.
+func setupCHSchema(t *testing.T) (driver.Conn, string) {
+	t.Helper()
+	ctx := context.Background()
+	addr, user, pass := chEndpoint(t)
+
+	bootstrap, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{addr},
+		Auth: clickhouse.Auth{Database: "default", Username: user, Password: pass},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch := fmt.Sprintf("c4_mark1_ddl_%d", time.Now().UnixNano())
+	if err := bootstrap.Exec(ctx, "CREATE DATABASE "+scratch); err != nil {
+		t.Fatalf("cannot reach test ClickHouse: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = bootstrap.Exec(context.Background(), "DROP DATABASE IF EXISTS "+scratch)
+		_ = bootstrap.Close()
+	})
+
+	// Glob returns its matches sorted, which is the migrations' apply order:
+	// m1_ch_002's materialized views select FROM the m1_ch_001 base table.
+	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "..", "migrations", "m1_ch_*.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no migrations/m1_ch_*.sql found — the DDL guard would assert against an empty database")
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, stmt := range splitCHStatements(string(raw)) {
+			stmt = strings.ReplaceAll(stmt, "mark1.", scratch+".")
+			stmt = strings.ReplaceAll(stmt, "EXISTS mark1", "EXISTS "+scratch)
+			if err := bootstrap.Exec(ctx, stmt); err != nil {
+				t.Fatalf("%s statement failed: %v\n%s", filepath.Base(f), err, stmt)
+			}
+		}
+	}
+	return bootstrap, scratch
+}

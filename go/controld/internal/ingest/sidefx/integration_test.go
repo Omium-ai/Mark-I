@@ -12,6 +12,7 @@ package sidefx_test
 // unless M1_REQUIRE_STORES=1 ⇒ fail.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -23,11 +24,20 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/pg"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/receipts"
+)
+
+// The vectors' TEST-ONLY seeds (conformance/vectors/receipt/README.md):
+// anything signed by these keys is by definition worthless outside tests.
+var (
+	deviceSeed = bytes.Repeat([]byte{0x11}, 32)
+	serverSeed = bytes.Repeat([]byte{0x22}, 32)
 )
 
 // The privileged DSN: this harness creates its own scratch database and applies
@@ -54,6 +64,11 @@ type pgHarness struct {
 	tenantB querychoke.TenantID
 	deviceA uuid.UUID
 	deviceB uuid.UUID
+	// The real receipt writer, so the coverage inserts at sidefx.go:388-398 run
+	// inside an actual AppendCheckpoint transaction rather than a fake's
+	// discarded callback (sidefx_test.go:45-47).
+	deviceKey *receipts.Signer
+	store     *receipts.Store
 	// appPoolQuery queries the raw app pool with NO tenant GUC — the
 	// unset-GUC-matches-nothing probe (05 §7.1).
 	appPoolQuery func(ctx context.Context, sql string, args ...any) (int64, error)
@@ -159,6 +174,16 @@ func setupPG(t *testing.T) *pgHarness {
 	tA, dA := mkTenant("tenant-a")
 	tB, dB := mkTenant("tenant-b")
 
+	deviceKey, err := receipts.NewSigner(deviceSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx,
+		`INSERT INTO m1_device_keys (tenant_id, device_id, key_id, public_key) VALUES ($1, $2, $3, $4)`,
+		tA, dA, deviceKey.KeyID(), []byte(deviceKey.Public())); err != nil {
+		t.Fatal(err)
+	}
+
 	appDSN := fmt.Sprintf("postgres://%s:c4test@%s:%d/%s?sslmode=disable",
 		role, adminCfg.Host, adminCfg.Port, scratch)
 	pool, err := pg.Open(ctx, appDSN)
@@ -166,6 +191,15 @@ func setupPG(t *testing.T) *pgHarness {
 		t.Fatalf("pg.Open as NOBYPASSRLS role: %v", err)
 	}
 	t.Cleanup(pool.Close)
+
+	chainKey, err := receipts.NewSigner(serverSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Boot step, exactly as cmd runs it: publish before the first countersign.
+	if err := receipts.RegisterServerKey(ctx, pool, chainKey); err != nil {
+		t.Fatalf("RegisterServerKey: %v", err)
+	}
 
 	claimsA := auth.Claims{TenantID: tA, DeviceID: dA}
 	claimsB := auth.Claims{TenantID: tB, DeviceID: dB}
@@ -178,15 +212,80 @@ func setupPG(t *testing.T) *pgHarness {
 		t.Fatal(err)
 	}
 
+	db := pg.NewTenantDB(pool)
 	return &pgHarness{
-		admin: admin, db: pg.NewTenantDB(pool),
+		admin: admin, db: db,
 		tenantA: tenantA, tenantB: tenantB, deviceA: dA, deviceB: dB,
+		deviceKey: deviceKey, store: receipts.NewStore(db, chainKey),
 		appPoolQuery: func(ctx context.Context, sql string, args ...any) (int64, error) {
 			var n int64
 			err := pool.QueryRow(ctx, sql, args...).Scan(&n)
 			return n, err
 		},
 	}
+}
+
+// sealCheckpoint plays the edge: read the head as a device would (08 §3.4),
+// build the payload at seq+1/checkpoint_seq+1, origin-sign it. Sealing against
+// the CURRENT head is what makes each seal fresh — a second seal built this way
+// carries its own checkpoint_seq and its own signature bytes, which is why it
+// reaches the append instead of being refused as stale.
+func (h *pgHarness) sealCheckpoint(t *testing.T, device uuid.UUID, leaves []uuid.UUID, issuedAt time.Time) receipts.CheckpointEvent {
+	t.Helper()
+	seq, head, ckpt, err := h.store.Head(context.Background(), h.tenantA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := make([][]byte, len(leaves))
+	for i := range leaves {
+		id := leaves[i]
+		raw[i] = id[:]
+	}
+	root, err := receipts.MerkleRoot(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := receipts.Checkpoint{
+		TenantID: h.tenantA.String(), DeviceID: device.String(),
+		Seq: seq + 1, PrevReceiptHash: head, IssuedAt: receipts.IssuedAtString(issuedAt),
+		CheckpointSeq: ckpt + 1, MerkleRoot: root, LeafCount: len(leaves),
+	}
+	signed, err := receipts.OriginSign(h.deviceKey, cp.Payload(h.deviceKey.KeyID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return receipts.CheckpointEvent{
+		EventID: id, DeviceID: device, DeviceKeyID: h.deviceKey.KeyID(),
+		ClaimedCheckpointSeq: ckpt + 1, MerkleRoot: root, LeafCount: len(leaves),
+		OriginSig: signed.DeviceSig, IssuedAt: issuedAt,
+	}
+}
+
+// coverageRowsTotal reads controld_ingest_coverage_rows_total off the default
+// registry. It is the ONLY observable of the tag.RowsAffected() at
+// sidefx.go:398, and a delta of 0 across a call whose insert loop provably ran
+// is the direct evidence that ON CONFLICT ... DO NOTHING — not an earlier
+// dedupe layer — is what absorbed the duplicate.
+func coverageRowsTotal(t *testing.T) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != "controld_ingest_coverage_rows_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			return m.GetCounter().GetValue()
+		}
+	}
+	t.Fatal("controld_ingest_coverage_rows_total is not registered; the delta below would always be 0")
+	return 0
 }
 
 // R2, continuously: pg.Open must REFUSE a superuser/BYPASSRLS DSN — the
@@ -280,4 +379,115 @@ func TestIntegrationSidefxAndRLS(t *testing.T) {
 			t.Fatalf("unset GUC saw %d rows; the NULLIF floor failed", n)
 		}
 	})
+}
+
+// FR-SPINE-014 layer 2: the ON CONFLICT (event_id) DO NOTHING at sidefx.go:392,
+// reached for real.
+//
+// Two dedupe layers sit IN FRONT of it and short-circuit the obvious test, so a
+// "deliver the checkpoint twice" case proves one of them and leaves line 392 as
+// dead as it was: the in-memory seen map (sidefx.go:311-317) drops the replayed
+// leaf, and re-delivering the SAME seal never reaches the callback at all —
+// store.go:197-203 refuses it as broken_link (its checkpoint_seq no longer
+// extends the chain) before AppendCheckpoint ever inserts a receipt, and
+// sidefx.go:429 then absorbs it as a proven duplicate. That is what
+// TestIntegrationSidefxCheckpointAndCoverage (receipts/integration_test.go:573)
+// exercises, and why its covCount==1 is not evidence about line 392.
+//
+// The state that DOES reach it is a restart, which 05 §2.5 makes routine:
+// process dies, `seen` and `pending` die with it, replay from the landing
+// objects re-admits leaves the chain already sealed, and the device — which
+// re-reads the head before every seal (08 §3.4) — seals them again under a
+// FRESH checkpoint_seq and fresh signature bytes. Nothing about that seal is
+// stale, so it appends, and its coverage insert meets a row that already exists.
+// m1_043:48 names this exact case ("UNIQUE = at-least-once ingest cannot
+// double-count a gap"); line 392 is the code that makes the constraint a no-op
+// instead of a crash.
+func TestIntegrationCoverageInsertSurvivesAResealAfterRestart(t *testing.T) {
+	h := setupPG(t)
+	ctx := context.Background()
+	at := time.Date(2026, 8, 29, 11, 0, 0, 0, time.UTC)
+	covID := uuid.Must(uuid.NewV7())
+	cov := &sidefx.Coverage{
+		Kind: "bypass_start", WorkspaceDigest: make([]byte, 32),
+		OccurredAt: at, Reason: "proxy_bypass",
+	}
+
+	// ── First delivery: the row is INSERTED. Counting it is what keeps the
+	// final "still one row" from being satisfied by "nothing ever happened".
+	before := coverageRowsTotal(t)
+	s1 := sidefx.New(h.db, h.store, nil, 1, 8)
+	seal1 := h.sealCheckpoint(t, h.deviceA, []uuid.UUID{covID}, at)
+	s1.Apply(ctx, h.tenantA, h.deviceA, at, "", []sidefx.Effect{
+		{EventID: covID, Coverage: cov},
+		{EventID: seal1.EventID, Checkpoint: &seal1},
+	})
+	s1.Close() // the restart
+
+	if inserted := coverageRowsTotal(t) - before; inserted != 1 {
+		t.Fatalf("first delivery inserted %v coverage row(s), want 1 — with nothing inserted, "+
+			"every dedupe assertion below is vacuous", inserted)
+	}
+	var firstReceipt uuid.UUID
+	if err := h.admin.QueryRow(ctx,
+		`SELECT receipt_id FROM coverage_transitions WHERE event_id = $1`, covID).Scan(&firstReceipt); err != nil {
+		t.Fatalf("first delivery left no coverage row: %v", err)
+	}
+
+	// ── Restart + 05 §2.5 replay: cold seen, cold pending, and a seal built
+	// against the head the first append advanced.
+	s2 := sidefx.New(h.db, h.store, nil, 1, 8)
+	t.Cleanup(s2.Close)
+	seal2 := h.sealCheckpoint(t, h.deviceA, []uuid.UUID{covID}, at.Add(time.Minute))
+	if bytes.Equal(seal2.OriginSig, seal1.OriginSig) {
+		t.Fatal("the re-seal reuses the first seal's signature bytes, so AlreadyAppended (sidefx.go:367) " +
+			"would answer it: this is a re-delivery, not the fresh seal the test needs")
+	}
+	before = coverageRowsTotal(t)
+	s2.Apply(ctx, h.tenantA, h.deviceA, at, "", []sidefx.Effect{
+		{EventID: covID, Coverage: cov},
+		{EventID: seal2.EventID, Checkpoint: &seal2},
+	})
+
+	// The insert loop provably RAN: sealed() is called only after the receipt
+	// insert and inside the same tx (store.go:249-259), so a second receipt on
+	// the chain means the loop reached line 388 and returned nil. Without ON
+	// CONFLICT the unique violation aborts that tx and this count stays at 1.
+	var receipts2 int64
+	if err := h.admin.QueryRow(ctx, `SELECT count(*) FROM m1_receipts`).Scan(&receipts2); err != nil {
+		t.Fatal(err)
+	}
+	if receipts2 != 2 {
+		t.Fatalf("m1_receipts holds %d row(s), want 2 — the re-seal's transaction did not commit, "+
+			"which is what a coverage insert without ON CONFLICT (event_id) DO NOTHING does to it", receipts2)
+	}
+	if n := s2.PendingLeafCount(h.tenantA, h.deviceA); n != 0 {
+		t.Fatalf("%d leaf/leaves still pending: the re-seal did not consume the coverage leaf, so the "+
+			"insert loop did not iterate over it", n)
+	}
+
+	// ...and inserted nothing. RowsAffected 0 on a loop that ran IS the conflict
+	// path; the two assertions above are what make "0" mean that rather than
+	// "the loop never executed".
+	if again := coverageRowsTotal(t) - before; again != 0 {
+		t.Fatalf("the re-seal inserted %v coverage row(s); at-least-once ingest just double-counted a gap "+
+			"(m1_043:48)", again)
+	}
+
+	var rows int64
+	var receiptNow string // min(uuid) has no aggregate in PG16; ::text does
+	if err := h.admin.QueryRow(ctx,
+		`SELECT count(*), coalesce(min(receipt_id::text), '') FROM coverage_transitions WHERE event_id = $1`,
+		covID).Scan(&rows, &receiptNow); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("coverage_transitions holds %d rows for one event_id, want 1", rows)
+	}
+	// DO NOTHING, not DO UPDATE: the surviving row still names the receipt that
+	// originally sealed it. An upsert would re-point receipt_id at the re-seal
+	// and quietly rewrite evidence the append-only trigger exists to protect.
+	if receiptNow != firstReceipt.String() {
+		t.Fatalf("the coverage row now names receipt %s, not the %s that sealed it", receiptNow, firstReceipt)
+	}
 }

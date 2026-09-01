@@ -94,7 +94,7 @@ func RowsFromBatch(b *m1pv1.Batch, tenant, device uuid.UUID, receivedAt time.Tim
 	}
 
 	for _, ev := range b.GetEvents() {
-		rows = append(rows, eventRow(ev, tenant, device, sessionID, agent, fallbackAt))
+		rows = append(rows, eventRow(ev, tenant, device, agent, fallbackAt))
 	}
 	for i, d := range b.GetDropped() {
 		rows = append(rows, droppedRow(d, i, batchID, tenant, device, sessionID, agent, fallbackAt))
@@ -102,15 +102,20 @@ func RowsFromBatch(b *m1pv1.Batch, tenant, device uuid.UUID, receivedAt time.Tim
 	return rows
 }
 
-func eventRow(ev *m1pv1.Event, tenant, device, batchSession uuid.UUID, agent string, fallbackAt time.Time) []any {
+func eventRow(ev *m1pv1.Event, tenant, device uuid.UUID, agent string, fallbackAt time.Time) []any {
 	occurred := fallbackAt
 	if ts := ev.GetOccurredAt(); ts != nil {
 		occurred = ts.AsTime()
 	}
+	// No back-fill from the batch. capture.Admit refuses every event whose
+	// session_id is not 16 non-zero bytes, with two carve-outs — EdgeHealth,
+	// which omits it because 11 §2.3 makes health per-DEVICE, and
+	// ReceiptCheckpoint, whose counter is per-device and which attests a batch
+	// spanning whatever sessions uploaded together. So a session-less event
+	// reaching here is always one of those, and Batch.session_id is only the
+	// head record's (batch.go sessionIDOf, advisory): filling it in would file a
+	// per-device fact under whichever session it happened to be batched behind.
 	session := uuidOrNil(ev.GetSessionId())
-	if session == uuid.Nil {
-		session = batchSession
-	}
 
 	eventType := BodyTypeName(ev)
 	row := []any{
@@ -183,14 +188,43 @@ func droppedRow(d *m1pv1.Dropped, idx int, batchID, tenant, device, session uuid
 // lands in the ledger as a GuardDecision-class event). The event_id derives
 // from the offending batch_id so a replayed attack does not multiply rows.
 func SecurityEventRow(tenant, device, batchID uuid.UUID, detail string, at time.Time) []any {
+	return securityRow(tenant, device, batchID, "identity_disagreement", "M1E-8003", detail, at)
+}
+
+// QuarantineEventRow is CON-008's "+ tenant alert" half of a pre-egress
+// scanner quarantine (08 §9 `egress M1E-7002`, user-visible surface "tenant
+// alert"): the ops-only quarantinesTotal counter and the 202's quarantined[]
+// — which a device that has already parked may never show a human — are not a
+// surface the tenant can query, and the ledger is.
+//
+// detail carries ONLY the scanner rule CLASSES that fired. Never the matched
+// text, never a surrounding excerpt, never an offset into content, never the
+// payload: the batch is quarantined precisely because it is SUSPECTED of
+// carrying a credential, and copying that credential into m1p_events would
+// convert a caught leak into a committed one — in a store with a different
+// retention and a different access path than the quarantine object.
+//
+// The flagged event_ids are deliberately NOT carried either: nothing from a
+// flagged batch is projected (05 §2.3), so an event_id here would name a row
+// that does not exist. The 202 body and the quarantine object hold them.
+func QuarantineEventRow(tenant, device, batchID uuid.UUID, classes string, at time.Time) []any {
+	return securityRow(tenant, device, batchID, "pre_egress_quarantine", "M1E-7002", classes, at)
+}
+
+// securityRow is the shared GuardDecision-class shape. event_id is derived
+// from (batch_id, lowercased error code) — batch-derived so a replay does not
+// multiply rows, and code-separated so a batch that is refused M1E-8003 on one
+// attempt and quarantined M1E-7002 on another cannot collapse the two events
+// onto one event_id in the ReplacingMergeTree.
+func securityRow(tenant, device, batchID uuid.UUID, reason, code, detail string, at time.Time) []any {
 	payload, _ := json.Marshal(map[string]string{
-		"reason_code": "identity_disagreement",
-		"error_code":  "M1E-8003",
+		"reason_code": reason,
+		"error_code":  code,
 		"batch_id":    batchID.String(),
 		"detail":      detail,
 	})
 	return []any{
-		tenant, at, uuid.Nil, uuid.NewSHA1(batchID, []byte("m1e-8003")), uint64(0), uint32(0),
+		tenant, at, uuid.Nil, uuid.NewSHA1(batchID, []byte(strings.ToLower(code))), uint64(0), uint32(0),
 		device, uuid.Nil,
 		"GuardDecision", "diagnostic", "", "",
 		uint64(0), uint64(0), uint64(0), uint64(0), fixed32(nil),
