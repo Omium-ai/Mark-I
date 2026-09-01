@@ -105,6 +105,23 @@ func (e *Env) BundleMetaPath() string { return filepath.Join(e.StateDir, "bundle
 func (e *Env) SpoolDir() string       { return filepath.Join(e.StateDir, "spool") }
 func (e *Env) QuarantineDir() string  { return filepath.Join(e.StateDir, "quarantine") }
 
+// KeyCustody names the rung of 04 §2.9's ladder the device key actually sits
+// on — keychain/TPM where available, the 0600 file floor otherwise — and, when
+// it is not the top rung, why. NFR-PORTABILITY-004: the ladder is allowed to
+// degrade, it is not allowed to degrade quietly, so `mark1 status` prints both.
+//
+// The degradation may never claim a probe that never ran. "keychain
+// unavailable" would be a lie today — nothing looks for a keychain, because no
+// rung above the floor is compiled in — and that lie is worse than silence: it
+// blames the operator's platform for a rung we have not built.
+//
+// ponytail: the floor is duplicated in go/mark1d/internal/identity.FileCustody,
+// which internal/ puts out of this module's reach. A real rung lands in both at
+// once regardless — enroll mints the key here, the daemon adopts it there.
+func KeyCustody() (tier, degradation string) {
+	return "file", "no keychain/TPM rung is compiled into this build; the device key is a 0600 file under the state dir"
+}
+
 // WriteFileAtomic is 08 §7.6's "atomically": temp file in the target's own
 // directory (rename never crosses a filesystem) + fsync + rename. Parent
 // dirs are created 0700 — the state dir never carries a group/world grant.
@@ -310,11 +327,33 @@ func (e *Env) SaveWorkspaces(ws *Workspaces) error {
 	return WriteFileAtomic(e.WorkspacesPath(), data, 0o600)
 }
 
-// AppendCoverageTransition journals the enable/disable window locally
-// (0600). The receipted CoverageTransition of 08 §7.2/§7.6 step 4 is signed
-// by the device key inside mark1d's capture pipeline; until that wiring
-// lands the journal keeps the window attributable rather than silent.
+// AppendCoverageTransition journals one enable/disable window locally (0600)
+// for mark1d to receipt.
+//
+// The journal is the handoff, not a substitute for the receipt. 08 §7.6 is
+// categorical that `off` works with the daemon down and the network down —
+// "there is no server round-trip on the critical path" — so the CLI cannot be
+// the thing that signs, and it holds no device key to sign with. mark1d drains
+// this file (coverage.DrainJournal) and emits the per-event-receipted
+// CoverageTransition of 08 §7.2/§7.6 step 4 through its own capture pipeline,
+// where the device key lives. Residual, stated plainly: between this write and
+// that drain the line is a file its owner can edit; the receipt chain makes
+// every DRAINED transition tamper-evident, which bounds the window rather than
+// closing it.
+//
+// The reason_code is stamped HERE, from the kind, because 04 §2.7's vocabulary
+// is frozen at seven values and this command owns exactly two of them. A kind
+// outside that pair is refused rather than journalled: mark1d cannot receipt a
+// line it cannot classify, so a silent typo would cost the window entirely.
 func (e *Env) AppendCoverageTransition(rec map[string]any) (err error) {
+	switch rec["kind"] {
+	case "enable":
+		rec["reason"] = "user_enable"
+	case "disable":
+		rec["reason"] = "mark1_off"
+	default:
+		return fmt.Errorf("coverage transition kind %v is not one of 04 §2.7's CLI codes (enable, disable)", rec["kind"])
+	}
 	if err := os.MkdirAll(filepath.Dir(e.CoveragePath()), 0o700); err != nil {
 		return err
 	}
