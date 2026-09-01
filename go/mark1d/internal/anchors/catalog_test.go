@@ -309,3 +309,12 @@ func TestLoadConsentCorruptIsError(t *testing.T) {
 		t.Fatal("unknown consent-store version must error")
 	}
 }
+
+// testSandbox is the REAL sandbox, used wherever a test derives a catalog:
+// derivation's version sniff execs an unconsented binary and must go through it
+// (catalog.go Derive). It lives here rather than in main_test.go because every
+// caller is unix-tagged, and main_test.go builds on every GOOS for TestMain.
+func testSandbox(t *testing.T) Sandbox {
+	t.Helper()
+	return NewSandbox(t.TempDir())
+}

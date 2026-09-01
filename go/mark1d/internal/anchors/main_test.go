@@ -48,14 +48,6 @@ const probeEnv = "MARK1_ANCHOR_TEST_PROBE"
 // raw x32 socket syscall only exists on linux (sandbox_linux_test.go).
 var extraProbes = map[string]func() int{}
 
-// testSandbox is the REAL sandbox, used wherever a test derives a catalog:
-// derivation's version sniff execs an unconsented binary and must go through
-// it (catalog.go Derive).
-func testSandbox(t *testing.T) Sandbox {
-	t.Helper()
-	return NewSandbox(t.TempDir())
-}
-
 func TestMain(m *testing.M) {
 	// Helper stage first: the sandbox parent re-execs this binary with the
 	// helper spec env var; MaybeRunHelper never returns in that mode.

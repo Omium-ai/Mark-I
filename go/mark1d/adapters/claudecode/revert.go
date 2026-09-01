@@ -49,18 +49,27 @@ type Status struct {
 // ByteEquality is the doc's bool; Kind keeps §8.4's "surgical" distinction the
 // bool flattens away, so a user who edited their settings after we provisioned
 // learns why their file is not byte-identical instead of seeing a bare false.
+//
+// Retained names what of ours is STILL IN the file — the one thing a false
+// ByteEquality does not distinguish (D-CR). "Their bytes differ from the
+// pre-image" and "our proxy pointer is still live" are the same `false`, and
+// only the second is an unfinished revert. A non-empty Retained is that second
+// case, and it is why `Kind` has a fifth value.
 type RevertResult struct {
-	Target       string `json:"target"`
-	Kind         string `json:"kind"` // verbatim | surgical | target-absent | not-provisioned
-	ByteEquality bool   `json:"byte_equality"`
+	Target       string   `json:"target"`
+	Kind         string   `json:"kind"` // verbatim | surgical | target-absent | not-provisioned | fragment-damaged
+	ByteEquality bool     `json:"byte_equality"`
+	Retained     []string `json:"retained,omitempty"`
 }
 
 // LoadManifest reads 08 §8.2's record. A missing manifest surfaces as
 // os.ErrNotExist so callers can say "not provisioned" without a stat race; an
 // unparseable one is ErrManifestCorrupt rather than a zero Manifest, because a
 // zero Manifest quietly means "the target path is the empty string".
-func LoadManifest(stateDir string) (Manifest, error) {
-	b, err := os.ReadFile(ManifestPath(stateDir))
+func LoadManifest(stateDir string) (Manifest, error) { return loadManifest(stateDir, "hooks") }
+
+func loadManifest(stateDir, fragment string) (Manifest, error) {
+	b, err := os.ReadFile(manifestPath(stateDir, fragment))
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -100,6 +109,10 @@ func RefusalCode(err error) string {
 		return CodeDuplicateKey
 	case errors.Is(err, ErrManifestCorrupt):
 		return CodeManifestCorrupt
+	case errors.Is(err, ErrEnvConflict):
+		return CodeEnvConflict
+	case errors.Is(err, ErrNotEligible):
+		return CodeNotEligible
 	}
 	return ""
 }
@@ -276,7 +289,7 @@ func surgical(m Manifest, cur []byte) error {
 	if len(hooks.keys) == 0 && !preHadHooks {
 		root.del("hooks")
 	} else {
-		root.set("hooks", hooksRawOrdered(hooks))
+		root.set("hooks", rawOrdered(hooks))
 	}
 	post, err := root.encode()
 	if err != nil {
