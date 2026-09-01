@@ -327,12 +327,24 @@ GET /api/v1/receipts?since_seq=800&limit=500              auth: device or operat
           "device_sig": "ed25519:…", "server_sig": "ed25519:…",
           "key_id": "ed25519:…", "server_key_id": "ed25519:…",
           "prev_hash": "…", "this_hash": "…" } … ],
-        "chain_head": { "seq": 5121, "hash": "…" } }
+        "chain_head": { "seq": 5121, "hash": "…", "checkpoint_seq": 412 } }
 `server_key_id` was added additively (§10.2) once the verifier existed to consume this
 surface: `key_id` names the DEVICE origin key (it rides inside the signed payload) and
 the countersigning server key is a row fact the verifier must resolve per-receipt across
 rotations — one key_id cannot name two keys, and a verifier that guesses which role a
 key served is the S1 the receipt vectors exist to forbid.
+
+`chain_head.checkpoint_seq` was added additively on the same rule, once the EDGE SEALER
+existed to consume it (D-CX). This object is the edge's only source for the three numbers
+a checkpoint signature covers but a device cannot compute: 07 §checkpoint-model has the
+device sign a payload carrying `seq` and `prev_receipt_hash` — per-tenant chain facts that
+advance from other devices and from server-written receipt kinds — and `checkpoint_seq`,
+which the head lock assigns. The sealer claims `seq+1` / `checkpoint_seq+1` against
+`prev_receipt_hash = hash` and the server verifies its signature over exactly that
+reconstruction, so a head stating two of the three is a head no device can seal against.
+It follows that the head must be re-read before **every** seal rather than cached: a
+cached head is stale the moment anything else in the tenant writes a receipt, and the
+stale-head failure is a `bad_signature` refusal, not a retryable error.
 
 GET /api/v1/receipts/checkpoints/{checkpoint_seq}         auth: device or operator token
 → 200 { "checkpoint_seq": 5121, "merkle_root": "…", "leaf_count": 4096,
@@ -1032,10 +1044,19 @@ revert(target, manifest):
          one trailing newline we added; JSON: remove exactly manifest.pointers and
          the _mark1_managed object, touching nothing else).
        → report byte_equality: "surgical" with a diff summary; doctor retains it.
+     3b. UNLESS the block itself no longer verifies (the recorded checksum does not
+         describe what is at the pointers, or the _mark1_managed object is gone):
+         → write NOTHING. Report kind `fragment-damaged` and list, in `retained`,
+           which of our pointers are still set. §7.4 already fixes this reading:
+           what we cannot verify is FRAGMENT-DAMAGED, and the safe response to
+           "I cannot tell what is in there" is the one that refuses to write.
   4. delete manifest last (so a crash mid-revert is re-runnable: revert is also
-     idempotent — a target with no block and no manifest is a successful no-op).
+     idempotent — a target with no block and no manifest is a successful no-op),
+     and NOT AT ALL when step 3b retained anything.
 Mechanism A revert: delete the owned file. byte_equality: true by construction.
 ```
+
+**Why 3b writes nothing and keeps the manifest** (D-CR). The checksum covers a fragment's pointers *jointly*, so the moment it stops matching we can no longer say which pointer the user took ownership of — and a partial removal there is the worst of the three options. The base-URL fragment makes the cost concrete: its two pointers are the user's own `ANTHROPIC_BASE_URL` and *our* `M1-Cred-Ref` header, and removing the `_mark1_managed` object while leaving that header deletes the only record in the file that the header is ours. Deleting the manifest on top of that ends not the exposure but our ability to see it: `mark1 off` globs for manifests and `doctor` reads them, so every subsequent run reports `not-provisioned` at a machine still routing an agent's API key to a loopback port. `retained` is therefore reported separately from `byte_equality` — "their bytes differ from the pre-image" and "our pointer is still live" are both a bare `false`, and only the second is an unfinished revert. `mark1 off` does not count a retained fragment as done; it falls to the leftover scan and exits 1.
 
 `mark1 off` runs `revert` for every manifest in scope and prints the aggregated verdict; the `12`-suite test for this is the byte-equality snapshot check named in the frozen plan (apply → off → `cmp` original). Because gates check the off-marker **before** any policy read (§7.6), reverting fragments is defense in depth, not the off mechanism itself — an agent that caches its config and keeps invoking the shim hits the off-marker check inside the shim and gets a no-op exit 0.
 
@@ -1085,6 +1106,10 @@ Normative. Later documents (04, 05, 11, 12) cite these codes; they do not invent
 | egress | `M1E-7002` | ingest pre-egress scanner quarantine | 202 body | no | tenant alert | fail-closed |
 | provision | `M1E-7101` | fence target absent (mechanism B) | local | no | doctor | refusal — we do not create user files |
 | provision | `M1E-7102` | user edit inside our fence (checksum broken) | local | via `doctor --fix` only | doctor | refusal — no silent overwrite |
+| provision | `M1E-7103` | duplicate key in the settings object | local | no | doctor | refusal — legal JSON that every decoder collapses differently, so a rewrite would silently delete one of the user's values |
+| provision | `M1E-7104` | provisioning manifest unreadable | local | no | doctor | refusal — the manifest's `pre_image` is the only byte-equality revert target, so apply refuses rather than re-snapshot over an unknown prior state |
+| provision | `M1E-7105` | base-URL fragment requested without a detected API-key credential | local | no | doctor | **fail-closed — the CON-001 boundary.** Every non-affirmative answer collapses here (no key, a subscription credential, a detection that errored, no proxy listening): on this path "I could not tell" and "no" must be the same answer, and there is no force path |
+| provision | `M1E-7106` | the agent's settings already set this variable | local | no | doctor | refusal — Mark 1 never overwrites a base URL or header the user set |
 | guard | `M1E-8001` | request without valid `M1-Cred-Ref` at the proxy | 403 | no — **no override path exists in the binary** | receipted (sampled `GuardDecision`) | **fail-closed** |
 | guard | `M1E-8002` | upstream subscription-marker detected (`oauth_contamination`) | local P0 | no | yes — session killed, config rolled back, receipted | **fail-closed** |
 | guard | `M1E-8003` | envelope identity disagrees with verified token claims | 403 | no | security event | **fail-closed** |
