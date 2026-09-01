@@ -31,6 +31,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/capture"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 )
 
@@ -74,6 +75,8 @@ type Drainer struct {
 	// Now is the TTL clock, injectable for tests; the committed-fixture test
 	// pins it so a frozen ring never "expires" the conformance check.
 	Now func() time.Time
+	// Health counts drained ring records as `shim.spilled`; nil is legal.
+	Health *obs.Health
 	// Settle is the one re-read grace for a torn tail: a shim that opened the
 	// ring just before the rename finishes its single write_all within its
 	// 50 ms budget, so one short wait turns an in-flight append into a whole
@@ -202,7 +205,7 @@ func (d *Drainer) drainFile(ctx context.Context, path string) error {
 		}
 		recs, torn = parseRing(raw)
 	}
-	quarantined := uint64(0)
+	quarantined, spilled := uint64(0), uint64(0)
 	if torn {
 		quarantined++ // the torn tail is one lost record, counted
 	}
@@ -237,6 +240,10 @@ func (d *Drainer) drainFile(ctx context.Context, path string) error {
 			errors.Is(err, capture.ErrShed),
 			errors.Is(err, capture.ErrQuarantined):
 			// Admitted, or already accounted inside capture's own ledger.
+			// Either way the shim reached the ring instead of the socket,
+			// which is what `shim.spilled` measures (11 §3.3: the transient
+			// shim holds no counters; the daemon counts its outcomes at drain).
+			spilled++
 		default:
 			// Spool-level failure: keep the file, retry next tick. Anything
 			// already admitted this pass replays then — event_id absorbs it.
@@ -244,6 +251,7 @@ func (d *Drainer) drainFile(ctx context.Context, path string) error {
 		}
 	}
 	d.adm.AccountDropped(dropLocalQuarantine, spool.ClassUnknown, quarantined)
+	d.Health.Spilled(spilled)
 	return os.Remove(path)
 }
 
