@@ -81,7 +81,10 @@ func (s *Spool) recover() error {
 		}
 	}
 
-	f, err := os.OpenFile(segPath(s.cfg.Dir, write.Seq), os.O_RDWR, 0o600)
+	// perm 0 because there is no O_CREATE: the segment already exists, so the
+	// mode argument is ignored and a 0600 here would read as a control that
+	// enforces nothing. The creating site is spool.go's segPath open.
+	f, err := os.OpenFile(segPath(s.cfg.Dir, write.Seq), os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
@@ -189,7 +192,8 @@ func clampToSegments(c Cursor, segs []uint64) Cursor {
 func (s *Spool) scanForward(write Cursor, segs []uint64) (Cursor, error) {
 	cur := write
 	for {
-		f, err := os.OpenFile(segPath(s.cfg.Dir, cur.Seq), os.O_RDWR, 0o600)
+		// perm 0: no O_CREATE, so the mode is ignored (see the reopen above).
+		f, err := os.OpenFile(segPath(s.cfg.Dir, cur.Seq), os.O_RDWR, 0)
 		if err != nil {
 			return Cursor{}, err
 		}
