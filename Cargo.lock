@@ -1178,7 +1178,6 @@ dependencies = [
  "m1p-wire",
  "mark1-frames",
  "mark1-policy",
- "mark1-receipt",
  "mark1-redact",
  "rustls",
  "serde",

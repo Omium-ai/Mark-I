@@ -109,7 +109,9 @@ test-rust:
 # how a suite goes silently missing, so every tag in the repo is listed here with the recipe
 # that runs it. Adding a tag without adding it here is a review failure.
 #   integration -> `just test-integration`      (in `just ci`; CI job `integration`)
-#   chaos       -> nightly + phase gates (12 §6); ⚡ fast set selected by the chaos harness
+#   chaos       -> `just test-chaos`            (in `just ci`; CI job `integration`, Linux-only
+#                  per 12 §11.1 stage 2e). The ⚡ fast set is chaos_daemon_kill9 today; the slow set
+#                  (network partition, clock skew, disk-full) is nightly and unbuilt.
 #
 # PLATFORM tags hide suites from a CI LEG rather than from a recipe, and the inventory missed
 # them entirely — which is how `go (windows-2022)` sat red-and-unread (D-BZ). They are listed
@@ -146,6 +148,21 @@ test-py:
 # Cross-language conformance vectors: Rust ↔ Go ↔ Python must agree bit-identically.
 conformance:
     tools/ci/conformance_crosslang.sh
+
+# chaos_daemon_kill9 (12 §6.2 ⚡ fast set) — NFR-DURABILITY-002 / FR-SPINE-024. Needs no stores:
+# the fault is a real SIGKILL against a real child process writing a real spool on local disk.
+#
+# `-list` before `-run` because `-run` with no match prints "no tests to run" and exits 0, which
+# is the false green this whole lane exists to prevent — and here it is one dropped `-tags chaos`
+# away at all times, since the file is invisible to an untagged build BY DESIGN. The existence
+# check is what makes "ok" mean the harness executed rather than that nothing selected.
+#
+# `-count=1` because a cached chaos pass is not a chaos run: the whole content of this suite is
+# 100 fresh races between an fsync loop and a kill, and Go's test cache would happily replay one
+# from a tree where the spool still worked.
+test-chaos:
+    @cd go/mark1d && n=$(go test -tags chaos -list '^TestChaosDaemonKill9$' ./internal/spool/ | grep -c '^TestChaosDaemonKill9$' || true); [ "$n" = "1" ] || { echo "test-chaos: the chaos harness did not select. 'go test -tags chaos -list' matched $n tests, want 1 — either the build tag stopped selecting chaos_kill9_test.go or the test was renamed. Running -run against that would print 'no tests to run' and exit 0." >&2; exit 1; }
+    cd go/mark1d && go test -tags chaos -count=1 -run '^TestChaosDaemonKill9$' ./internal/spool/
 
 # Store-backed suites, incl. the tag-gated Go integration suite. Real stores on EVERY PR
 # (12 §11.4) — no Docker, no testcontainers, no skip-if-absent. Run `just stores-up` first.
@@ -229,11 +246,23 @@ lint-proto:
     buf breaking proto --against '.git#branch=main,subdir=proto'
 
 # The design-enforcing custom gates (§7.5). Small scripts, zero tolerance.
+#
+# The first line is the list checking itself. A gate script that exists in tools/ci but is not
+# invoked below runs nowhere, in no CI job, and reports nothing — which is indistinguishable
+# from a green build and is precisely how this repo has lost gates before. Derived from the
+# tree, so the next *_gate.sh is either wired here or this recipe fails on sight; it can never
+# quietly sit unrun.
 gates:
+    @u=$(for g in tools/ci/*_gate.sh; do grep -q "^    $g$" justfile || echo "$g"; done); [ -z "$u" ] || { echo "gates: gate script(s) in tools/ci that this recipe never invokes — they run nowhere:" >&2; echo "$u" >&2; exit 1; }
     tools/ci/otel_gate.sh
     tools/ci/secret_type_gate.sh
     tools/ci/override_pattern_gate.sh
     tools/ci/build_tag_gate.sh
+    tools/ci/shapley_gate.sh
+    tools/ci/vendor_binary_gate.sh
+    tools/ci/ci_matrix_gate.sh
+    tools/ci/verifier_offline_gate.sh
+    tools/ci/buf_breaking_gate.sh
 
 # The requirement→test gate (12 §10.3). Deliberately NOT folded into `gates`: this one is built
 # to go red the moment a requirement loses its test, and a red `gates` that could mean any of five
@@ -567,5 +596,8 @@ sbom:
 # `gates` and `conformance` are in the list for the same reason: ci.yml's `gates` job runs both,
 # so leaving them out made `just ci` a weaker check than CI while claiming to be the same one.
 #
+# `test-chaos` needs no stores; it is next to the store lanes because ci.yml runs it in the
+# `integration` job, and the two lists are only the same list while they stay in the same order.
+#
 # Everything a PR must pass, in the order CI runs it.
-ci: gen-check lint test test-integration test-isolation gates conformance fuzz
+ci: gen-check lint test test-chaos test-integration test-isolation gates conformance fuzz
