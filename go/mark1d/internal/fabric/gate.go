@@ -12,6 +12,7 @@ import (
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 )
@@ -56,6 +57,9 @@ type Gate struct {
 	// OnDropped receives the Dropped{gate_timeout} accounting for M1E-5001
 	// answers (wired to capture.AccountDropped); nil is legal.
 	OnDropped func(reason string)
+	// Health counts answers and the read latency SLO-7 is judged on; nil is
+	// legal — an unwired gauge must never change what the gate answers.
+	Health *obs.Health
 }
 
 func NewGate(r verdict.Reader, blocks *verdict.Blocks, stateDir string) *Gate {
@@ -70,6 +74,7 @@ func (g *Gate) now() time.Time {
 }
 
 func (g *Gate) dropped() {
+	g.Health.GateTimeout()
 	if g.OnDropped != nil {
 		g.OnDropped("gate_timeout")
 	}
@@ -122,8 +127,12 @@ func note(v *m1pv1.GateVerdict, unknown uint32) *m1pv1.GateVerdict {
 // Answer is the whole gate path: memory only (04 §8.3 — the off-check is one
 // file stat), budget ≤5 ms. session is the connection's authenticated Hello
 // session id (08 §4.3) — the channel D-AA resolves an empty task_id through.
-func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) *m1pv1.GateVerdict {
+func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdict) {
 	received := g.now()
+	// Named return + defer so the digest covers EVERY exit, including the
+	// fail-open ones: a gate that got slow only on its refusal paths would be
+	// invisible to SLO-7 if the instrument sat on the happy path alone.
+	defer func() { g.Health.GateAnswer(g.now().Sub(received), v.GetDecision()) }()
 
 	// 1. mark1 off / MARK1_DISABLE=1 — before ANY gate evaluation (invariant 2).
 	// ponytail: an uncached stat per query; off's 1 s stat cache when it exists.
@@ -171,7 +180,7 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) *m1pv1.GateVerdict {
 		g.dropped()
 		return allow(CodeGateTimeout + " verdict cache miss")
 	}
-	v := &m1pv1.GateVerdict{
+	v = &m1pv1.GateVerdict{
 		Decision:  m1pv1.GateDecision_GATE_DECISION_ALLOW,
 		Verdict:   e.Verdict.GetVerdict(),
 		Posterior: e.Verdict.GetPosterior(),
