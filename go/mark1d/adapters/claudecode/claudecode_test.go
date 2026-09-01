@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
@@ -12,6 +13,53 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/tailers"
 )
+
+// TestSupportedVersionsMatchTheFixtureTree is what makes SupportedVersions a
+// claim rather than a preference: an entry is a promise that a fixture proves
+// the shape, so the set and conformance/hooks/claudecode must agree in BOTH
+// directions. A const entry with no fixture is an unproven version we would
+// parse blind; a fixture with no const entry is a version we captured evidence
+// for and then refuse to read.
+func TestSupportedVersionsMatchTheFixtureTree(t *testing.T) {
+	// claudecode -> adapters -> mark1d -> go -> repo root.
+	dir := filepath.Join("..", "..", "..", "..", "conformance", "hooks", "claudecode")
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		// Never a skip: the fixture tree going missing is exactly the state
+		// that would let SupportedVersions drift unchecked.
+		t.Fatalf("fixture tree unreadable at %s: %v", dir, err)
+	}
+	fixtures := map[string]struct{}{}
+	for _, e := range ents {
+		if e.IsDir() {
+			fixtures[strings.TrimPrefix(e.Name(), "v")] = struct{}{}
+		}
+	}
+	if len(fixtures) == 0 {
+		t.Fatalf("no version directories under %s", dir)
+	}
+	for v := range SupportedVersions {
+		if _, ok := fixtures[v]; !ok {
+			t.Errorf("SupportedVersions has %q with no fixture directory — that version would be parsed blind", v)
+		}
+	}
+	for v := range fixtures {
+		if _, ok := SupportedVersions[v]; !ok {
+			t.Errorf("conformance/hooks/claudecode/v%s exists but %q is not in SupportedVersions — capture refuses a version we have evidence for", v, v)
+		}
+	}
+}
+
+func TestSupportedRefusesAnUnsniffableVersion(t *testing.T) {
+	// Detect returns "" both when `claude --version` fails and when the binary
+	// is not on the daemon's PATH. Neither may parse.
+	if Supported("") {
+		t.Fatal("an empty version is supported; not knowing the version and guessing the format are the same act")
+	}
+	if Supported("99.0.0") {
+		t.Fatal("an unpinned future version is supported; FR-AGENT-002 requires the opposite")
+	}
+}
 
 // TestTranscriptDirMunge pins 08 §5.1's fallback derivation verbatim —
 // '/' replaced by '-' under ~/.claude/projects/ — on the synthetic pair the

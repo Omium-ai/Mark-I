@@ -53,10 +53,9 @@ const (
 	CodeNoTarget = "M1E-7101"
 	// 08 §8.3(d): a human edited inside our pointers — stop, never overwrite.
 	CodeDamaged = "M1E-7102"
-	// The provisioning family's two other refusals. Neither is in 08 §9's
-	// table yet (both name states the algorithm implies but the table does not
-	// enumerate) — they take the next codes in the family, not a code from
-	// another one.
+	// The provisioning family's two other refusals (08 §9). Both name states
+	// §8.3's algorithm implies without enumerating, so they take the next codes
+	// in the family rather than a code from another one.
 	CodeDuplicateKey    = "M1E-7103"
 	CodeManifestCorrupt = "M1E-7104"
 )
@@ -343,7 +342,7 @@ func apply(settingsPath, stateDir, shim string, force bool) (ApplyResult, error)
 	// Resolved BEFORE the target is opened for write: a manifest we cannot
 	// read is a refusal, and refusing after writeAtomic would leave the file
 	// changed with no manifest describing it.
-	preImage, preHash, err := priorPreImage(stateDir)
+	preImage, preHash, err := priorPreImage(stateDir, "hooks")
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -355,7 +354,7 @@ func apply(settingsPath, stateDir, shim string, force bool) (ApplyResult, error)
 		}
 		hooks.set(r.Event, b)
 	}
-	newHooks, err := json.Marshal(hooksRawOrdered(hooks))
+	newHooks, err := json.Marshal(rawOrdered(hooks))
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -382,7 +381,7 @@ func apply(settingsPath, stateDir, shim string, force bool) (ApplyResult, error)
 	// dies in between. The inverse crash is benign: a manifest whose
 	// post_image matches nothing takes Revert's surgical path, which is
 	// tag-driven and a no-op when none of our entries are there.
-	if err := writeManifest(settingsPath, stateDir, pre, post, desired, preImage, preHash); err != nil {
+	if err := writeManifest(settingsPath, stateDir, "hooks", pre, post, desired, preImage, preHash); err != nil {
 		return ApplyResult{}, err
 	}
 	if err := writeAtomic(settingsPath, post); err != nil {
@@ -447,8 +446,8 @@ func resolve(hooks *object, pointers []string) ([]json.RawMessage, error) {
 	return out, nil
 }
 
-// hooksRawOrdered re-emits the hooks object preserving the user's key order.
-func hooksRawOrdered(o *object) json.RawMessage {
+// rawOrdered re-emits a nested object preserving the user's key order.
+func rawOrdered(o *object) json.RawMessage {
 	var buf bytes.Buffer
 	buf.WriteByte('{')
 	for i, k := range o.keys {
@@ -494,8 +493,14 @@ func writeAtomic(path string, data []byte) error {
 	return nil
 }
 
-func ManifestPath(stateDir string) string {
-	return filepath.Join(stateDir, "provisioned", "claudecode", "hooks.manifest.json")
+func ManifestPath(stateDir string) string { return manifestPath(stateDir, "hooks") }
+
+// manifestPath is 08 §8.2's `provisioned/<agent>/<fragment>.manifest.json`. The
+// fragment name is a parameter because this adapter now fences TWO fragments
+// into one settings file, and `mark1 off` reverts both while the CON-001
+// rollback reverts only the base-URL one — which one manifest cannot express.
+func manifestPath(stateDir, fragment string) string {
+	return filepath.Join(stateDir, "provisioned", "claudecode", fragment+".manifest.json")
 }
 
 // priorPreImage returns the pre-Mark1 bytes an earlier apply recorded, or
@@ -506,11 +511,11 @@ func ManifestPath(stateDir string) string {
 // file on disk is post-Mark1 by then, so treating an unreadable manifest as
 // "no earlier apply" re-snapshots our own output as the pre-image and silently
 // destroys the byte-equality target `mark1 off` restores from (08 §8.4).
-func priorPreImage(stateDir string) (image, hash string, err error) {
+func priorPreImage(stateDir, fragment string) (image, hash string, err error) {
 	if stateDir == "" {
 		return "", "", nil
 	}
-	old, err := os.ReadFile(ManifestPath(stateDir))
+	old, err := os.ReadFile(manifestPath(stateDir, fragment))
 	if os.IsNotExist(err) {
 		return "", "", nil
 	}
@@ -524,11 +529,11 @@ func priorPreImage(stateDir string) (image, hash string, err error) {
 	return m.PreImage, m.PreImageHash, nil
 }
 
-func writeManifest(target, stateDir string, pre, post []byte, fragmentChecksum, preImage, preHash string) error {
+func writeManifest(target, stateDir, fragment string, pre, post []byte, fragmentChecksum, preImage, preHash string) error {
 	if stateDir == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(ManifestPath(stateDir)), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(manifestPath(stateDir, fragment)), 0o700); err != nil {
 		return err
 	}
 	if preImage == "" {
@@ -551,7 +556,7 @@ func writeManifest(target, stateDir string, pre, post []byte, fragmentChecksum, 
 	if err != nil {
 		return err
 	}
-	return writeAtomicMode(ManifestPath(stateDir), b, 0o600)
+	return writeAtomicMode(manifestPath(stateDir, fragment), b, 0o600)
 }
 
 func writeAtomicMode(path string, data []byte, mode os.FileMode) error {

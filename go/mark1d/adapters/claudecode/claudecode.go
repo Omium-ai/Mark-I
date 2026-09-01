@@ -72,22 +72,33 @@ func (c *capWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// apiKeyCredential is the ONE reading of the customer-owned API key: Detect
+// classifies the regime from it and the base-URL fragment fingerprints it into
+// the guard registry. Two readings could disagree, and a disagreement here is a
+// subscription agent pointed at the proxy (CON-001).
+func apiKeyCredential() string { return os.Getenv("ANTHROPIC_API_KEY") }
+
 // Detect sniffs installation and version at runtime — the version selects the
 // agent_maps field map and an unmapped version must go inert, never guess
 // (08 §5 rule 2; the map check itself lives with internal/policy).
 func (a *Adapter) Detect() (adapters.Detection, error) {
-	bin, err := exec.LookPath("claude")
-	if err != nil {
-		return adapters.Detection{}, nil
-	}
-	d := adapters.Detection{Installed: true, Regime: adapters.RegimeSubscription}
+	d := adapters.Detection{Regime: adapters.RegimeSubscription}
 	// ponytail: ANTHROPIC_API_KEY presence as the regime sniff — the guard's
 	// authoritative Detect()==apikey input is the proxy row's provenance
 	// check (04 §3.1); this only steers eligibility, and subscription is the
 	// conservative default.
-	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+	//
+	// Read BEFORE the PATH lookup, not after: the regime is a property of the
+	// credential, not of this process's PATH, and a `claude` the daemon cannot
+	// see must not silently reclassify an API-key install as subscription.
+	if apiKeyCredential() != "" {
 		d.Regime = adapters.RegimeAPIKey
 	}
+	bin, err := exec.LookPath("claude")
+	if err != nil {
+		return d, nil
+	}
+	d.Installed = true
 	// Bounded sniff: a wedged or chatty `claude --version` must not hang the
 	// daemon's Detect() or buffer without limit. Same class as the anchors
 	// version sniff (internal/anchors/catalog.go) — this one stays unsandboxed
@@ -103,6 +114,38 @@ func (a *Adapter) Detect() (adapters.Detection, error) {
 	}
 	d.Version = versionRe.FindString(buf.String())
 	return d, nil
+}
+
+// SupportedVersions is every Claude Code release this adapter has been proven
+// against — one entry per fixture directory under conformance/hooks/claudecode,
+// which TestSupportedVersionsMatchTheFixtureTree keeps equal in both
+// directions, so a fixture drop and a const edit cannot separate.
+//
+// Compiled rather than read from a bundle on purpose. agent_maps is the
+// designed home for field maps (08 §5 rule 2) and extending this set from a
+// bundle push is still owed, but the set cannot ONLY live there: a fresh
+// install with no control plane reachable would then support no version at
+// all, and capture is fail-open-for-availability, not fail-static.
+var SupportedVersions = map[string]struct{}{
+	"2.1.251": {},
+}
+
+// Supported reports whether the transcript tailer may parse this agent's
+// output. FR-AGENT-002's "never parse blind", and the blindness is literal:
+// internal/tailers.txLine names every token field as a compiled struct tag, so
+// a release that renames one does not fail — encoding/json leaves the field at
+// its zero value and the tailer emits a well-formed billing-grade Usage that
+// reads zero. Wrong numbers admitted as right ones poison the ledger, every
+// TVO figure derived from it, and the corpus, and nothing downstream can tell.
+// Refusing a version we have no fixture for is the only failure mode that is
+// visible.
+//
+// An unsniffable version ("" from Detect, including a `claude` the daemon
+// cannot see on its PATH) is NOT supported, for the same reason: not knowing
+// the version and guessing the format are the same act.
+func Supported(version string) bool {
+	_, ok := SupportedVersions[version]
+	return ok
 }
 
 // Provision applies the 08 §8 mechanism-B fragment (fragment.go) to the user's
