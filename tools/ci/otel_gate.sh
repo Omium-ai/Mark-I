@@ -173,11 +173,14 @@ MEMBERS=$(awk '/^members = \[/{f=1} f{print} f && /\]/{exit}' Cargo.toml | grep 
 # cargo still will not write, and a gate that demands the impossible is a gate someone deletes.
 # That is not a softer excuse: the workspace does not build until the last member has a target
 # either, so the deferral cannot outlive anything that could ship.
+has_target() { # has_target <crate-dir> — cargo's own four conditions, transcribed
+  [ -f "$1/src/lib.rs" ] || [ -f "$1/src/main.rs" ] ||
+    grep -qE '^\[lib\]|^\[\[bin\]\]' "$1/Cargo.toml" 2>/dev/null
+}
+
 NO_TARGET=''
 for m in $MEMBERS; do
-  [ -f "$m/src/lib.rs" ] || [ -f "$m/src/main.rs" ] ||
-    grep -qE '^\[lib\]|^\[\[bin\]\]' "$m/Cargo.toml" 2>/dev/null ||
-    NO_TARGET="$NO_TARGET $m"
+  has_target "$m" || NO_TARGET="$NO_TARGET $m"
 done
 if [ -n "$NO_TARGET" ]; then
   RUST_LOCKABLE=0
@@ -201,6 +204,17 @@ for f in $(find . -name Cargo.toml -not -path '*/target/*' | sed 's|^\./||' | so
 # scan silently instead of failing. direct() owns that wording; call it for the missing case only.
 for m in $MEMBERS; do [ -f "$m/Cargo.toml" ] || direct "$m/Cargo.toml"; done
 closure Cargo.lock "$RUST_LOCKABLE" "$RUST_TRIGGER" "cargo generate-lockfile"
+# [workspace.exclude] crates each resolve their OWN Cargo.lock, which the root lock does not
+# contain and cargo-deny — walking the root graph — never opens. The direct loop above already
+# scans their manifests, so scanning only the root lock left a hole exactly the shape of "a fuzz
+# dependency pulls otel in transitively": invisible to every layer at once. Derived from the
+# manifest for the same reason MEMBERS is, so a fourth excluded crate is covered on arrival.
+EXCLUDED=$(awk '/^exclude = \[/{f=1} f{print} f && /\]/{exit}' Cargo.toml | grep -oE '"[^"]+"' | tr -d '"')
+for x in $EXCLUDED; do
+  if has_target "$x"; then L=1; else L=0; fi
+  closure "$x/Cargo.lock" "$L" "$x has a target (src/lib.rs, src/main.rs, [lib] or [[bin]])" \
+    "cd $x && cargo generate-lockfile"
+done
 eco_close
 
 echo "== go =="
@@ -236,6 +250,61 @@ eco_close
   echo "      A block that no longer runs cannot report that it stopped checking."
   FAILED=1
 }
+
+# ---------------------------------------------------------------------------
+# 02 §9's SECOND CON-005 acceptance clause: "grep of docs finds no OTel-as-dependency
+# reference". Everything above scans lockfiles; this scans prose, and until now nobody
+# checked it.
+#
+# It is not a bare grep, because a bare grep is unusable: ADR-0005 exists to argue
+# AGAINST OpenTelemetry and names it 25 times, correctly, as does the D-M waiver. The
+# clause forbids a *dependency* reference, so the scan matches PACKAGE IDENTIFIERS only
+# — go module paths, crate/npm names, the OTEL_ env-var family. English prose about
+# OpenTelemetry is not a dependency and is never flagged.
+#
+# Deliberately case-SENSITIVE. `otel_gate.sh` — this file, named in three documents —
+# is not an identifier, and a scan that flags its own name is one people learn to
+# ignore. OTEL_ env vars are uppercase by convention; package names are lowercase.
+DOCS_IDENT='go\.opentelemetry\.io|@opentelemetry/|opentelemetry[-_.][a-z]|[a-z]-opentelemetry|OTEL_[A-Z_]+|otlp[-_][a-z]'
+DOCS_ALLOW=tools/ci/otel_docs_allowlist.txt
+if [ ! -f "$DOCS_ALLOW" ]; then
+  echo "FAIL: $DOCS_ALLOW is missing; the doc half of CON-005 is unchecked and silently green."
+  FAILED=1
+else
+  # Exact set equality, both directions. A NEW line is an unreviewed OTel reference. A
+  # VANISHED line matters just as much: an allow-list nobody has to prune decays into a
+  # permanent waiver, which is the failure traceability-debt.txt's header warns about.
+  # Path + squeezed text, never line numbers, so renumbering a document is not a diff.
+  # POSIX sh: no process substitution, so both sides land in temp files.
+  DOCS_WANT=$(mktemp); DOCS_GOT=$(mktemp); DOCS_DIFF=$(mktemp)
+  grep -v '^#' "$DOCS_ALLOW" > "$DOCS_WANT" || true
+  # EVERY markdown file we author, not just docs/. 02 §9 says "docs", but a collector
+  # sidecar documented in deploy/README.md would be exactly the reference the clause
+  # forbids and exactly the one a docs/-only scan cannot see. Pruned: dot-directories
+  # (.venv, .git, .pytest_cache, .stores), node_modules and target — build output and
+  # vendored trees are not documents we wrote.
+  find . -name '*.md' \
+      -not -path './.*' -not -path '*/node_modules/*' -not -path './target/*' \
+    | sed 's|^\./||' | sort | while read -r f; do
+    grep -E "$DOCS_IDENT" "$f" | while IFS= read -r l; do
+      printf '%s\t%s\n' "$f" "$(printf '%s' "$l" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+    done
+  done | sort -u > "$DOCS_GOT" || true
+  if diff -u "$DOCS_WANT" "$DOCS_GOT" > "$DOCS_DIFF" 2>&1; then
+    echo "== docs =="
+    echo "docs: $(wc -l < "$DOCS_GOT" | tr -d ' ') OTel identifier reference(s), all reviewed; none is a dependency."
+  else
+    echo "FAIL: docs/ OTel identifier references do not match the reviewed allow-list."
+    echo "      '-' = an allow-listed reference that no longer exists (prune it)."
+    echo "      '+' = an OTel package identifier now in the docs that nobody reviewed."
+    sed -n '3,40p' "$DOCS_DIFF"
+    echo "      If the new line BANS or SCANS for the identifier (as every baseline entry"
+    echo "      does), add it to $DOCS_ALLOW in the same PR. If it introduces OTel as a"
+    echo "      dependency, it violates CON-005 and the doc is wrong, not the gate."
+    FAILED=1
+  fi
+  rm -f "$DOCS_WANT" "$DOCS_GOT" "$DOCS_DIFF"
+fi
 
 if [ "$FAILED" -ne 0 ]; then
   [ "$HIT" -eq 0 ] || {

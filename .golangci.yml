@@ -38,6 +38,10 @@ linters:
           deny:
             - pkg: "google.golang.org/grpc"
               desc: "No gRPC in Mark 1 — M1P is plain HTTPS; the fabric is M1PL."
+            - pkg: "connectrpc.com/connect"
+              desc: "Connect is the realistic way a gRPC-shaped surface would enter here; same rule (D-DU)."
+            - pkg: "github.com/grpc-ecosystem"
+              desc: "No gRPC in Mark 1 — M1P is plain HTTPS; the fabric is M1PL."
     gosec:
       excludes:
         - G304   # file inclusion via variable — tailers/spool open computed paths by design, behind WorkspaceSet

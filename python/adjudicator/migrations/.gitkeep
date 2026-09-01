@@ -1,0 +1,5 @@
+# Keeps this directory tracked. `just migrate` (justfile:295) points
+# scripts/migrate-db.sh here, and that script hard-fails on a missing directory
+# rather than skipping — deliberately, since a silently-unmigrated service is
+# the failure it exists to catch. An untracked empty dir exists locally and not
+# on a CI runner, which is how it turned `integration` red while passing here.
