@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,6 +167,22 @@ func (d *delayLog) list() []time.Duration {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]time.Duration(nil), d.ds...)
+}
+
+// parkEntries counts observed entries into PARKED. park (uplink.go:449) is the
+// only caller that ever asks for parkRequeue, so this is a POSITIVE sighting of
+// the automaton in PARKED rather than an inference from "the cycle returned
+// without an error" — which a cycle that never ran would also satisfy.
+func (d *delayLog) parkEntries() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, dur := range d.ds {
+		if dur == parkRequeue {
+			n++
+		}
+	}
+	return n
 }
 
 // stubDrops replays a fixed row set exactly once — DrainDropped's
@@ -460,6 +478,172 @@ func TestParkAfterBudgetThenRequeueSucceeds(t *testing.T) {
 	assertDrained(t, sp)
 }
 
+// wantDelay is 08 §2.5's ladder written from the DOC — min(30 min, 6 s·2^(n−1))
+// — with literals rather than backoffBase/backoffCap, so a constant edited in
+// uplink.go fails here instead of quietly re-deriving its own expectation.
+func wantDelay(attempt int) time.Duration {
+	if d := 6 * time.Second << (attempt - 1); d < 30*time.Minute {
+		return d
+	}
+	return 30 * time.Minute
+}
+
+// TestBackoffLadderIsCappedAtThirtyMinutes measures how LONG the uploader asks
+// to sleep, which no other test here does: the park test counts sleeps, so
+// min(exp, cap) was unobserved. The clamp is load-bearing — the unclamped
+// exponential is 51m12s by attempt 10 — and dropping it would leave every
+// other test in this file green while a customer's daemon parked 20 minutes
+// late.
+func TestBackoffLadderIsCappedAtThirtyMinutes(t *testing.T) {
+	sp := openSpool(t)
+	session, _ := uuid.NewV7()
+	appendAll(t, sp, makeEvent(t, session, 1, spool.ClassBilling))
+
+	ingest := &fakeIngest{respond: func(_ int, w http.ResponseWriter, _ string) {
+		writeErr(w, http.StatusServiceUnavailable, "M1E-9500", nil)
+	}}
+	// Rand = 1.0 (newTestUplink's default) draws the top of the jitter window,
+	// the only setting where a clamp on that window is visible at all.
+	u, dl, _ := newTestUplink(t, sp, ingest, nil)
+
+	if res := sendOnce(t, u); res != cycleParked {
+		t.Fatalf("result = %v, want parked after the retry budget", res)
+	}
+	// Positive capture first: the exact durations slept, in order. "Nothing
+	// exceeded 30 min" is also what a test that recorded zero sleeps reports.
+	got := dl.list()
+	if len(got) != maxAttempts-1 {
+		t.Fatalf("observed %d sleeps, want %d (one per failure but the last, which parks)", len(got), maxAttempts-1)
+	}
+	for i, d := range got {
+		if want := wantDelay(i + 1); d != want {
+			t.Fatalf("sleep %d = %v, want %v (base 6 s, doubling)", i+1, d, want)
+		}
+		if d > 30*time.Minute {
+			t.Fatalf("sleep %d = %v exceeds the 30 min cap", i+1, d)
+		}
+	}
+	// The budget stops the observed ladder at attempt 9 (25m36s), one rung
+	// short of the cap — the 10th failure parks instead of sleeping — so the
+	// clamp is asserted at the computation, the only place reachable. It is not
+	// decoration: raise maxAttempts by one and attempt 10 sleeps 51m12s
+	// without it.
+	capped := 0
+	for n := 1; n <= 12; n++ {
+		unclamped := 6 * time.Second << (n - 1) // the doc's base, doubled, un-clamped
+		if unclamped > 30*time.Minute {
+			capped++
+		}
+		if d := u.backoff(n); d != wantDelay(n) {
+			t.Fatalf("backoff(%d) = %v, want %v (unclamped this rung is %v)", n, d, wantDelay(n), unclamped)
+		}
+	}
+	if capped < 3 {
+		t.Fatalf("walked only %d rungs past the 30 min cap, want ≥3: the clamp went unexercised", capped)
+	}
+}
+
+// TestBackoffDrawsFullJitterOverTheCappedExponential pins the U(0,1)·ceiling
+// semantics of 08 §2.5's "full jitter": the draw scales the WHOLE window, so a
+// zero draw waits zero and no draw can exceed the rung. Every other backoff
+// test runs at one fixed draw, so an implementation that consulted the jitter
+// source and discarded it — fleet-wide lockstep retries, the thundering herd
+// the clause exists to prevent — would keep them all green.
+func TestBackoffDrawsFullJitterOverTheCappedExponential(t *testing.T) {
+	ingest := &fakeIngest{respond: func(int, http.ResponseWriter, string) {}}
+	u, _, _ := newTestUplink(t, openSpool(t), ingest, nil)
+
+	for _, draw := range []float64{0, 0.37, 0.5, 1} {
+		u.rand = func() float64 { return draw }
+		for n := 1; n <= 12; n++ {
+			ceiling := wantDelay(n)
+			d := u.backoff(n)
+			if d < 0 || d > ceiling {
+				t.Fatalf("backoff(%d) at draw %v = %v, outside the full-jitter window [0, %v]", n, draw, d, ceiling)
+			}
+			if want := time.Duration(float64(ceiling) * draw); d != want {
+				t.Fatalf("backoff(%d) at draw %v = %v, want %v (delay = draw · min(30m, 6s·2^(n−1)))", n, draw, d, want)
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 08 §2.5, the network row: every retry test above drives a status code, but a
+// torn connection or a dead route never produces one — and that is the failure
+// a laptop on hotel wifi actually hits.
+// ---------------------------------------------------------------------------
+
+func TestTornConnectionIsRetriedNeverQuarantined(t *testing.T) {
+	sp := openSpool(t)
+	session, _ := uuid.NewV7()
+	appendAll(t, sp, makeEvent(t, session, 1, spool.ClassBilling))
+
+	ingest := &fakeIngest{respond: func(n int, w http.ResponseWriter, bid string) {
+		if n == 1 {
+			// Kill the connection with the request already on the wire and no
+			// status line ever written: the client gets a transport error, the
+			// one retry class no status code can express.
+			panic(http.ErrAbortHandler)
+		}
+		writeAck(w, http.StatusOK, bid, nil)
+	}}
+	u, dl, qdir := newTestUplink(t, sp, ingest, nil)
+
+	if res := sendOnce(t, u); res != cycleAdvanced {
+		t.Fatalf("result = %v, want advanced once the retry landed", res)
+	}
+	if ingest.count() != 2 {
+		t.Fatalf("requests = %d, want 2: a network failure is retried (08 §2.5)", ingest.count())
+	}
+	if ds := dl.list(); len(ds) != 1 || ds[0] != wantDelay(1) {
+		t.Fatalf("backoff sleeps = %v, want exactly [%v] — the retry must back off, not spin", ds, wantDelay(1))
+	}
+	if ents, _ := os.ReadDir(qdir); len(ents) != 0 {
+		t.Fatal("a torn connection quarantined the batch: network failures retry, they are not content verdicts (08 §2.5)")
+	}
+	assertDrained(t, sp)
+}
+
+func TestUnreachableEndpointExhaustsBudgetThenParks(t *testing.T) {
+	sp := openSpool(t)
+	session, _ := uuid.NewV7()
+	appendAll(t, sp, makeEvent(t, session, 1, spool.ClassBilling))
+
+	// A closed loopback port: the POST fails at dial, so nothing ever speaks
+	// HTTP — the offline-device case, where quarantining would destroy
+	// billing-grade bytes the spool was holding correctly.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ingest := &fakeIngest{respond: func(int, http.ResponseWriter, string) {}}
+	u, dl, qdir := newTestUplink(t, sp, ingest, func(c *Config) {
+		c.Endpoint = "http://" + dead + "/m1p/v1/ingest"
+	})
+
+	if res := sendOnce(t, u); res != cycleParked {
+		t.Fatalf("result = %v, want parked: an unreachable endpoint spends the budget (08 §2.5)", res)
+	}
+	if ingest.count() != 0 {
+		t.Fatalf("the live fake ingest saw %d requests: the test never reached the dead endpoint", ingest.count())
+	}
+	if n := len(dl.list()); n != maxAttempts-1 {
+		t.Fatalf("backoff sleeps = %d, want %d: all %d attempts must be spent before parking", n, maxAttempts-1, maxAttempts)
+	}
+	if ents, _ := os.ReadDir(qdir); len(ents) != 0 {
+		t.Fatal("an offline device quarantined billing-grade data — a dial failure parks, leaving the bytes spooled (08 §2.5)")
+	}
+	if ack, write := sp.Cursors(); ack == write {
+		t.Fatal("the parked batch was acked away; the spool must still hold it")
+	}
+}
+
 func TestRunRequeuesParkedWorkOnNetworkChange(t *testing.T) {
 	sp := openSpool(t)
 	session, _ := uuid.NewV7()
@@ -628,6 +812,123 @@ func Test401WithoutRefreshParks(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(qdir); len(ents) != 0 {
 		t.Fatal("auth failure must not quarantine data")
+	}
+}
+
+// TestParkedOn401KeepsSpoolingThenReplaysBothSides is FR-ENROLL-002's
+// keeps-spooling clause: a rejected device token is an UPLOAD problem and must
+// never become a CAPTURE one (08 §2.5 — "PARKED is uploader state, not data
+// state"). Neither neighbouring test can see it. Test401WithoutRefreshParks
+// (line 780) stops at the park and never appends again, so it cannot observe
+// whether capture survived; TestParkAfterBudgetThenRequeueSucceeds (line 429)
+// asserts the ack cursor held, which proves the EXISTING batch was not lost,
+// not that anything new was accepted. A daemon that went silent the moment the
+// token expired keeps both of them green, and the resulting hole is permanent:
+// it surfaces months later as an unexplained dip in a billing-grade metric,
+// with no loss row to price it (07 §6 forbids silent loss above all).
+//
+// Phase 0 is the anti-vacuity control — the same appendAll, the same spool, the
+// same uplink, un-parked. Without it every assertion below is equally satisfied
+// by a harness whose appends never reached the spool at all.
+func TestParkedOn401KeepsSpoolingThenReplaysBothSides(t *testing.T) {
+	sp := openSpool(t)
+	session, _ := uuid.NewV7()
+
+	// The token ledger's two states, flipped from the test goroutine while Run
+	// serves requests: atomic because the handler reads it concurrently.
+	var authOK atomic.Bool
+	authOK.Store(true)
+	ingest := &fakeIngest{respond: func(_ int, w http.ResponseWriter, bid string) {
+		if !authOK.Load() {
+			writeErr(w, http.StatusUnauthorized, "M1E-1002", nil)
+			return
+		}
+		writeAck(w, http.StatusOK, bid, nil)
+	}}
+	netChange := make(chan struct{})
+	// StaticToken (newTestUplink's default) has no refresh path, so the first
+	// 401 parks immediately — 08 §2.4's expired/revoked row, one request.
+	u, dl, qdir := newTestUplink(t, sp, ingest, func(c *Config) { c.NetworkChange = netChange })
+	dl.blockPark = true // the 6 h timer never fires; only the signal re-queues
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- u.Run(ctx) }()
+
+	// Phase 0 — control: capture → spool → wire is live on this harness.
+	ctrl := makeEvent(t, session, 1, spool.ClassBilling)
+	appendAll(t, sp, ctrl)
+	waitFor(t, "the control event to land", func() bool {
+		ack, write := sp.Cursors()
+		return ingest.count() == 1 && ack == write
+	})
+
+	// Phase 1 — the device token is rejected. The in-flight backlog parks.
+	authOK.Store(false)
+	pre := makeEvent(t, session, 2, spool.ClassBilling)
+	appendAll(t, sp, pre)
+	waitFor(t, "the uploader to enter PARKED", func() bool { return dl.parkEntries() == 1 })
+	parkedAck, parkedWrite := sp.Cursors()
+	reqsAtPark := ingest.count()
+
+	// Phase 2 — THE CLAUSE: capture keeps recording through the park.
+	// appendAll t.Fatals on any Append error, ErrDiagnosticShed included, so a
+	// park that closed the write path fails here rather than silently no-opping.
+	post1 := makeEvent(t, session, 3, spool.ClassBilling)
+	post2 := makeEvent(t, session, 4, spool.ClassDiagnostic)
+	appendAll(t, sp, post1, post2)
+
+	// Ordered before the cursor check on purpose: a park that SHED rather than
+	// stopped names its own cause here (reason + class), where growth alone
+	// would only report bytes missing. Nothing may be shed for an upload
+	// verdict, and billing-grade may not be shed for any reason — it blocks
+	// (07 §6). Both losses are silent on the wire without this row.
+	if rows := sp.DrainDropped(); len(rows) != 0 {
+		t.Fatalf("loss ledger = %v while parked, want empty: a 401 is an upload verdict, nothing is shed for it — "+
+			"least of all billing-grade, which blocks and is never shed (07 §6)", rows)
+	}
+	ack, write := sp.Cursors()
+	grown := parkedWrite.Off + uint64(len(post1.payload)+len(post2.payload))
+	if write.Seq != parkedWrite.Seq || write.Off < grown {
+		t.Fatalf("durable write cursor %v -> %v, want at least (%d,%d): the parked daemon stopped spooling — "+
+			"an expired token became a capture outage (08 §2.5)", parkedWrite, write, parkedWrite.Seq, grown)
+	}
+	if ack != parkedAck {
+		t.Fatalf("ack cursor moved %v -> %v while parked: bytes were released with nothing landed (08 §2.2)", parkedAck, ack)
+	}
+	if ents, _ := os.ReadDir(qdir); len(ents) != 0 {
+		t.Fatal("auth failure quarantined data: 401 parks, never quarantines (08 §2.4)")
+	}
+	if n := ingest.count(); n != reqsAtPark {
+		t.Fatalf("requests = %d, want %d: PARKED must wait for a re-queue trigger, not hammer a rejected token", n, reqsAtPark)
+	}
+
+	// Phase 3 — the token is accepted again. One re-queue uploads BOTH sides of
+	// the park in spool order: the customer's ledger is whole, not holed.
+	authOK.Store(true)
+	netChange <- struct{}{} // 08 §2.5's wake / network-change re-queue
+	waitFor(t, "the re-queued backlog to land", func() bool {
+		ack, write := sp.Cursors()
+		return ingest.count() == reqsAtPark+1 && ack == write
+	})
+	_, frames := decodeBody(t, ingest.req(ingest.count()-1).body)
+	if len(frames) != 3 ||
+		!bytes.Equal(frames[0], pre.payload) ||
+		!bytes.Equal(frames[1], post1.payload) ||
+		!bytes.Equal(frames[2], post2.payload) {
+		t.Fatalf("replayed batch carried %d frames, want the pre-park backlog then both post-park events, "+
+			"in spool order — this is the only proof the post-park appends were real bytes", len(frames))
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	// Exactly: the control, the 401, one replay. A fourth would mean the
+	// backlog uploaded twice — at-least-once is the server's dedupe to absorb,
+	// but a re-send here would mean the ack cursor never took.
+	if n := ingest.count(); n != 3 {
+		t.Fatalf("requests = %d, want 3 (control, the 401, one replay)", n)
 	}
 }
 
@@ -1099,4 +1400,85 @@ func TestSchemaWindow426QuarantinesAndHalts(t *testing.T) {
 		t.Fatal("426 must quarantine-and-report the offending batch")
 	}
 	assertDrained(t, sp) // the one refused batch is acked out of the upload path
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint seal seam (07's checkpoint model)
+// ---------------------------------------------------------------------------
+
+type sealCall struct {
+	leaves [][]byte
+}
+
+// TestCheckpointSealsExactlyTheAckedBatch binds the seal to the ONE landing
+// that licenses it. A quarantine ack also advances the cursor, and sealing
+// there would mint chain evidence for events controld refused.
+func TestCheckpointSealsExactlyTheAckedBatch(t *testing.T) {
+	sp := openSpool(t)
+	session, _ := uuid.NewV7()
+	e1 := makeEvent(t, session, 1, spool.ClassBilling)
+	e2 := makeEvent(t, session, 2, spool.ClassDiagnostic)
+	appendAll(t, sp, e1, e2)
+
+	var calls []sealCall
+	ingest := &fakeIngest{respond: func(n int, w http.ResponseWriter, bid string) {
+		writeAck(w, http.StatusOK, bid, nil)
+	}}
+	u, _, _ := newTestUplink(t, sp, ingest, func(c *Config) {
+		c.Checkpoint = func(_ context.Context, leaves [][]byte) {
+			calls = append(calls, sealCall{leaves: leaves})
+		}
+	})
+
+	if res := sendOnce(t, u); res != cycleAdvanced {
+		t.Fatal("verified 2xx must advance")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("seals = %d after one acked batch, want 1", len(calls))
+	}
+	// Leaves are the batch's event_ids in spool order — the order controld's
+	// EffectsFromBatch would rebuild the tree in.
+	got := calls[0].leaves
+	if len(got) != 2 || !bytes.Equal(got[0], e1.id[:]) || !bytes.Equal(got[1], e2.id[:]) {
+		t.Fatalf("leaves = %x, want the batch's event_ids in spool order", got)
+	}
+
+	// A refused batch is acked out of the upload path but never landed: no seal.
+	e3 := makeEvent(t, session, 3, spool.ClassBilling)
+	appendAll(t, sp, e3)
+	ingest.respond = func(n int, w http.ResponseWriter, bid string) {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", nil)
+	}
+	if res := sendOnce(t, u); res != cycleAdvanced {
+		t.Fatal("quarantine must advance the cursor")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("seals = %d after a quarantined batch, want 1 — a refused batch is not chain evidence", len(calls))
+	}
+}
+
+// TestFlushSealsItsAck: the shutdown drain lands billable events through its own
+// ack path (07 §6). Unsealed, the last batch of every session would upload with
+// no chain evidence and nothing would ever go back for it.
+func TestFlushSealsItsAck(t *testing.T) {
+	sp := openSpool(t)
+	session, _ := uuid.NewV7()
+	e1 := makeEvent(t, session, 1, spool.ClassBilling)
+	appendAll(t, sp, e1)
+
+	var calls []sealCall
+	ingest := &fakeIngest{respond: func(n int, w http.ResponseWriter, bid string) {
+		writeAck(w, http.StatusOK, bid, nil)
+	}}
+	u, _, _ := newTestUplink(t, sp, ingest, func(c *Config) {
+		c.Checkpoint = func(_ context.Context, leaves [][]byte) {
+			calls = append(calls, sealCall{leaves: leaves})
+		}
+	})
+
+	u.Flush(context.Background())
+	assertDrained(t, sp)
+	if len(calls) != 1 || len(calls[0].leaves) != 1 || !bytes.Equal(calls[0].leaves[0], e1.id[:]) {
+		t.Fatalf("Flush sealed %v, want one checkpoint over the flushed batch", calls)
+	}
 }

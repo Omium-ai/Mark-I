@@ -74,6 +74,7 @@ func (u *Uplink) quarantine(b *outBatch, raw []byte, status int, errCode, note s
 	if err := writeFileSync(filepath.Join(u.quarantineDir, b.id.String()+".manifest.json"), man); err != nil {
 		return err
 	}
+	u.health.Quarantined()
 	// The report half: the manifest is durable; the log line is the live
 	// surface until `mark1 status` grows its quarantine row (04 §2.5).
 	u.log.Error("uplink: batch quarantined, never auto-retried (08 §2.5)",

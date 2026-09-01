@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 )
 
@@ -69,9 +70,21 @@ type Config struct {
 	QuarantineDir string
 	Seal          func(plaintext []byte) ([]byte, error)
 
+	// Health receives the uplink gauges and emits EdgeHealth at the end of a
+	// successful cycle (11 §2.3's cadence). nil is legal — an unwired health
+	// table costs gauges, never uploads.
+	Health *obs.Health
+
 	// NetworkChange re-queues PARKED work when it fires (08 §2.5: wake /
 	// network-change signal). nil is legal: restart and the 6 h timer remain.
 	NetworkChange <-chan struct{}
+
+	// Checkpoint seals one acked batch into the receipt chain (07's checkpoint
+	// model): eventIDs are the batch's Merkle leaves in spool order. nil is
+	// legal and is the posture whenever the device has no enrolled key or
+	// identity — an unsealed uplink uploads exactly as it did before receipts
+	// existed.
+	Checkpoint func(ctx context.Context, eventIDs [][]byte)
 
 	// Test seams; nil ⇒ production defaults.
 	HTTPClient *http.Client
@@ -96,6 +109,11 @@ type Uplink struct {
 	quarantineDir string
 	seal          func([]byte) ([]byte, error)
 	netChange     <-chan struct{}
+	checkpoint    func(context.Context, [][]byte)
+	health        *obs.Health
+	// lastAck is the instant of the most recent verified 2xx — Run-owned, like
+	// every other field here.
+	lastAck time.Time
 
 	client *http.Client
 	log    *slog.Logger
@@ -176,6 +194,7 @@ func New(cfg Config) (*Uplink, error) {
 		store: cfg.Store, drops: cfg.Drops, tokens: cfg.Tokens,
 		endpoint: cfg.Endpoint, edgeVersion: cfg.EdgeVersion, sdk: cfg.SDK,
 		quarantineDir: cfg.QuarantineDir, seal: cfg.Seal, netChange: cfg.NetworkChange,
+		checkpoint: cfg.Checkpoint, health: cfg.Health,
 		client: cfg.HTTPClient, log: cfg.Log, now: cfg.Now, after: cfg.After,
 		rand: cfg.Rand, poll: cfg.Poll, enc: enc,
 	}, nil
@@ -218,11 +237,22 @@ func (u *Uplink) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		// The head of the composed window IS the oldest durable-but-unacked
+		// record at this instant (spool order), and its record_id leads with
+		// the event_id — a UUIDv7, so the backlog age is readable from the
+		// identity without decoding the payload (07 §6/§2).
+		oldestUnacked := uuidV7Time(recordEventID(b.recs[0]))
 		res, err := u.send(ctx, b, 0)
 		if err != nil {
 			return err
 		}
 		switch res {
+		case cycleAdvanced:
+			// 11 §2.3's cadence: one EdgeHealth per successful uploader cycle,
+			// rate-limited inside Health to one per 15 minutes per device. It
+			// is admitted, not sent — health rides the next batch like every
+			// other event, through the one admission chokepoint.
+			u.health.Cycle(ctx, u.lastAck, oldestUnacked)
 		case cycleCtxDone:
 			return nil
 		case cycleHalt:
@@ -258,10 +288,28 @@ func (u *Uplink) Flush(ctx context.Context) {
 			return
 		}
 		u.accountServerQuarantine(b, resp.quarantined)
-		if u.store.Ack(b.end) != nil {
+		if u.ackSealed(ctx, b) != nil {
 			return
 		}
 	}
+}
+
+// ackSealed is both verified-2xx landings — the automaton's ack and Flush's —
+// and only those. The other Ack calls in this file advance the cursor past
+// bytes controld REFUSED (quarantine, unsplittable 413, 422 with nothing
+// recoverable); sealing there would mint chain evidence for events the server
+// rejected, so the split is what makes a checkpoint mean "this landed".
+//
+// Ack FIRST: a checkpoint attests to bytes controld has already landed, and a
+// seal ahead of the ack would attest to a batch a crash could still replay.
+func (u *Uplink) ackSealed(ctx context.Context, b *outBatch) error {
+	if err := u.store.Ack(b.end); err != nil {
+		return err
+	}
+	if u.checkpoint != nil {
+		u.checkpoint(ctx, batchLeaves(b.recs))
+	}
+	return nil
 }
 
 // send runs the 08 §2.5 automaton for one batch. depth guards the two
@@ -284,8 +332,9 @@ func (u *Uplink) send(ctx context.Context, b *outBatch, depth int) (cycleResult,
 				// be lost by Omium — the license for ack-then-delete. Ack
 				// failure is local ledger damage: fatal, and harmless to
 				// durability because a restart re-sends and the server dedupes.
+				u.lastAck = u.now()
 				u.accountServerQuarantine(b, resp.quarantined)
-				if err := u.store.Ack(b.end); err != nil {
+				if err := u.ackSealed(ctx, b); err != nil {
 					return 0, err
 				}
 				return cycleAdvanced, nil
@@ -392,6 +441,8 @@ func (u *Uplink) backoff(attempt int) time.Duration {
 // Run starts at the spool cursor. Returns false on ctx cancellation.
 func (u *Uplink) park(ctx context.Context) bool {
 	u.log.Warn("uplink: parked — retry budget exhausted; spool retains the batch (08 §2.5)")
+	u.health.Parked(true)
+	defer u.health.Parked(false)
 	select {
 	case <-ctx.Done():
 		return false
