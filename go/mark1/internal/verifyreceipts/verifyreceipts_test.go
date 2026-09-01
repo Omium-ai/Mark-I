@@ -1,8 +1,16 @@
 // Two rungs of proof: a fake verifier script pins the orchestration contract
-// (args, exit-code passthrough, fetch translation), and — when the real
-// tools/verifier binary is built at target/debug/mark1-verifier — an
-// end-to-end run over the conformance receipt vectors proves the whole §7.7
-// loop with real crypto, tamper case included.
+// (args, exit-code passthrough, fetch translation), and an end-to-end run of
+// the REAL tools/verifier binary over the conformance receipt vectors proves
+// the whole §7.7 loop with real crypto, tamper case included. The second rung
+// builds the binary if it is missing rather than skipping (see realVerifier),
+// so a lane that ships no Rust toolchain fails loudly instead of reporting
+// FR-CLI-007 green by never running it.
+//
+// "with every Omium endpoint blackholed" (02 FR-SPINE-020, 12 §12's
+// conf_verifier_offline) is not provable from inside a test process that could
+// always just not have called out: tools/ci/verifier_offline_gate.sh runs these
+// same two tests inside an empty network namespace, with a probe proving the
+// namespace really does blackhole.
 package verifyreceipts
 
 import (
@@ -14,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -296,14 +305,46 @@ func TestFetchNotEnrolled(t *testing.T) {
 
 const repoRoot = "../../../.."
 
+// realVerifier returns the SHIPPED verifier binary, building it if it is not
+// there yet.
+//
+// It used to t.Skip() when target/debug/mark1-verifier was absent, which made
+// FR-CLI-007 a false green: the row cites the two tests below as the proof
+// that the real binary verifies a real chain, and `just test-go` runs in a CI
+// job that never builds any Rust — so on every lane that mattered the "proof"
+// was a skip, and a skip and a pass are the same exit code. Building here is
+// the same move controld's TestIntegrationVerifierE2EExportRoundTrip already
+// makes for the same binary, so the two verifier e2e suites now have one
+// precondition story rather than two.
+//
+// cargo absent is the only remaining skip, and M1_REQUIRE_STORES=1 inverts it
+// into a failure exactly as it does for a missing DSN (12 §11.4): a developer
+// without a Rust toolchain still gets the fake-verifier rungs, while no CI lane
+// can report this requirement green without having executed it.
 func realVerifier(t *testing.T) string {
 	t.Helper()
-	bin, err := filepath.Abs(filepath.Join(repoRoot, "target", "debug", "mark1-verifier"))
+	root, err := filepath.Abs(repoRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
+	bin := filepath.Join(root, "target", "debug", "mark1-verifier")
+	if _, err := os.Stat(bin); err == nil {
+		return bin
+	}
+	if _, err := exec.LookPath("cargo"); err != nil {
+		if os.Getenv("M1_REQUIRE_STORES") == "1" {
+			t.Fatal("cargo required (M1_REQUIRE_STORES=1) but not found: FR-CLI-007's evidence is the real mark1-verifier binary running, and this lane cannot build it — skipping here would report the requirement green without ever executing it")
+		}
+		t.Skip("cargo not found and target/debug/mark1-verifier not built; orchestration is proven by the fake-verifier tests above")
+	}
+	// --locked: the verifier the customer audits is the one Cargo.lock pins.
+	build := exec.Command("cargo", "build", "--locked", "-p", "mark1-verifier")
+	build.Dir = root
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("cargo build --locked -p mark1-verifier: %v\n%s", err, out)
+	}
 	if _, err := os.Stat(bin); err != nil {
-		t.Skip("target/debug/mark1-verifier not built (run `cargo build -p mark1-verifier`); orchestration is proven by the fake-verifier tests above")
+		t.Fatalf("cargo build reported success but %s is absent (%v) — the build produced no binary to test", bin, err)
 	}
 	return bin
 }

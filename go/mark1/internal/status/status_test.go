@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +114,62 @@ func TestStatusReadsLiveSurfaces(t *testing.T) {
 	}
 	if !rep.Off.Active || rep.Off.Scope != "all" {
 		t.Fatalf("off %+v", rep.Off)
+	}
+}
+
+// TestStatusShowsKeyCustodyDegradation: NFR-PORTABILITY-004 — the ladder may
+// fall to the 0600 file floor, it may not fall quietly. Asserted on the HUMAN
+// render as well as the JSON, because "visible in `mark1 status`" means the
+// output an operator actually reads, not a field only --json consumers see.
+func TestStatusShowsKeyCustodyDegradation(t *testing.T) {
+	env, out := enrolledEnv(t)
+	if err := os.WriteFile(env.DeviceKeyPath(), make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(env, Options{Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	var rep Report
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	tier, degradation := cli.KeyCustody()
+	if rep.KeyCustody.Tier != tier || !rep.KeyCustody.Present {
+		t.Fatalf("key custody %+v, want tier %q present", rep.KeyCustody, tier)
+	}
+	if rep.KeyCustody.Reason != degradation || rep.KeyCustody.Degraded != (degradation != "") {
+		t.Fatalf("degradation must be reported verbatim: %+v", rep.KeyCustody)
+	}
+	if !rep.KeyCustody.Degraded {
+		t.Fatal("cli.KeyCustody reports no degradation — a rung above the floor has landed, so this test must be rewritten to assert the new rung, not deleted")
+	}
+
+	var human bytes.Buffer
+	renderHuman(&human, &rep)
+	if !strings.Contains(human.String(), "key custody") || !strings.Contains(human.String(), degradation) {
+		t.Fatalf("human render hides the custody degradation:\n%s", human.String())
+	}
+}
+
+// TestStatusKeyCustodyAbsentKey: enrolled with no key on disk is its own broken
+// state — the daemon can capture but never attribute — so it must not render as
+// a healthy floor.
+func TestStatusKeyCustodyAbsentKey(t *testing.T) {
+	env, out := enrolledEnv(t)
+	if err := Run(env, Options{Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	var rep Report
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.KeyCustody.Present {
+		t.Fatal("no device.key on disk, but custody reports one present")
+	}
+	var human bytes.Buffer
+	renderHuman(&human, &rep)
+	if !strings.Contains(human.String(), "no key stored yet") {
+		t.Fatalf("absent device key is invisible:\n%s", human.String())
 	}
 }
 

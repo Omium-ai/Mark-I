@@ -26,6 +26,7 @@ type Options struct {
 type Report struct {
 	OK         bool        `json:"ok"`
 	Enrollment *Enrollment `json:"enrollment"`
+	KeyCustody KeyCustody  `json:"key_custody"`
 	Daemon     Daemon      `json:"daemon"`
 	Workspaces []Workspace `json:"workspaces"`
 	Spool      Spool       `json:"spool"`
@@ -39,6 +40,17 @@ type Enrollment struct {
 	TenantID       string `json:"tenant_id"`
 	TokenFresh     bool   `json:"token_fresh"`
 	TokenExpiresAt string `json:"token_expires_at"`
+}
+
+// KeyCustody is NFR-PORTABILITY-004 made visible: which rung of 04 §2.9's
+// ladder holds the device key, whether a key is stored at all, and — when the
+// rung is not the top — why. A fallback nobody can see is exactly the silent
+// downgrade the requirement forbids.
+type KeyCustody struct {
+	Tier     string `json:"tier"`
+	Present  bool   `json:"present"`
+	Degraded bool   `json:"degraded"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 type Daemon struct {
@@ -94,6 +106,15 @@ func Run(env *cli.Env, opts Options) error {
 		TenantID:       doc.TenantID,
 		TokenFresh:     time.Now().Before(doc.TokenExpiresAt),
 		TokenExpiresAt: doc.TokenExpiresAt.UTC().Format(time.RFC3339),
+	}
+
+	// Stat, never read: status is a read-only transparency surface and has no
+	// business pulling a private seed into its address space to print a bool.
+	_, keyErr := os.Stat(env.DeviceKeyPath())
+	tier, degradation := cli.KeyCustody()
+	rep.KeyCustody = KeyCustody{
+		Tier: tier, Present: keyErr == nil,
+		Degraded: degradation != "", Reason: degradation,
 	}
 
 	socket := opts.Socket
@@ -198,6 +219,14 @@ func renderHuman(w io.Writer, r *Report) {
 	}
 	_, _ = fmt.Fprintf(w, "enrollment    %s device %s tenant %s (token %s)\n",
 		r.Enrollment.State, r.Enrollment.DeviceID, r.Enrollment.TenantID, fresh)
+	custody := "key custody   " + r.KeyCustody.Tier
+	if !r.KeyCustody.Present {
+		custody += ", no key stored yet"
+	}
+	if r.KeyCustody.Degraded {
+		custody += " — DEGRADED: " + r.KeyCustody.Reason
+	}
+	_, _ = fmt.Fprintln(w, custody)
 	if len(r.Workspaces) == 0 {
 		_, _ = fmt.Fprintf(w, "workspaces    none enabled\n")
 	}

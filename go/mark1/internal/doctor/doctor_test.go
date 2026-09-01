@@ -185,6 +185,138 @@ func TestDoctorClassifiesFragmentStates(t *testing.T) {
 	})
 }
 
+// provisionBaseURL applies the real proxy-pointer fragment. It calls
+// ApplyBaseURL rather than ApplyProxyPointer deliberately: the eligibility gate
+// wants a detected API-key credential and a live proxy answering the guard
+// probe, neither of which a doctor test has, and neither of which changes a
+// single byte of what lands in the file.
+func provisionBaseURL(t *testing.T, env *cli.Env, target string) string {
+	t.Helper()
+	if target == "" {
+		target = filepath.Join(t.TempDir(), "settings.json")
+		if err := os.WriteFile(target, []byte(`{"model": "opus"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := claudecode.ApplyBaseURL(target, env.StateDir, "http://127.0.0.1:41234", "claudecode")
+	if err != nil || !res.Changed {
+		t.Fatalf("setup base-URL apply: %v %+v", err, res)
+	}
+	return target
+}
+
+func fragmentRow(t *testing.T, rep Report, name string) Fragment {
+	t.Helper()
+	for _, f := range rep.Fragments {
+		if f.Fragment == name {
+			return f
+		}
+	}
+	t.Fatalf("no %q row among %+v", name, rep.Fragments)
+	return Fragment{}
+}
+
+// TestDoctorClassifiesTheBaseURLFragment closes D-CM. The base-URL fragment
+// writes its own §8.2 manifest beside the hooks one, and doctor globs
+// `provisioned/*/*.manifest.json` — so before this, provisioning the proxy
+// pointer made `mark1 doctor` exit non-zero with "no adapter in this build can
+// classify or revert this fragment" about a fragment this build had just
+// written. The state assertions below are what separate a real classifier from
+// a widened skip list: a skip alone would make every base-URL fragment silently
+// invisible, including the one state that is a legal exposure.
+func TestDoctorClassifiesTheBaseURLFragment(t *testing.T) {
+	t.Run("a freshly provisioned pointer is OK, not an unclassifiable manifest", func(t *testing.T) {
+		env, out := enrolledEnv(t)
+		provisionBaseURL(t, env, "")
+		rep, err := runDoctor(t, env, out, Options{})
+		if err != nil {
+			t.Fatalf("doctor failed on a fragment this build wrote: %v\n%+v", err, rep.Fragments)
+		}
+		f := fragmentRow(t, rep, "baseurl")
+		if f.State != "OK" || f.Mechanism != "B" {
+			t.Fatalf("row %+v", f)
+		}
+		if len(f.Lines) != 2 {
+			t.Fatalf("FR-AGENT-003 wants both provisioned env lines, got %+v", f.Lines)
+		}
+		for _, l := range f.Lines {
+			if !strings.Contains(l.Value, "127.0.0.1:41234") && !strings.Contains(l.Value, "M1-Cred-Ref") {
+				t.Fatalf("line %+v shows neither the URL we wrote nor the cred-ref header", l)
+			}
+		}
+	})
+
+	t.Run("both fragments in one settings file stay green", func(t *testing.T) {
+		env, out := enrolledEnv(t)
+		provisionBaseURL(t, env, provision(t, env))
+		rep, err := runDoctor(t, env, out, Options{})
+		if err != nil {
+			t.Fatalf("the ordinary two-fragment install failed doctor: %v\n%+v", err, rep.Fragments)
+		}
+		if len(rep.Fragments) != 2 {
+			t.Fatalf("fragments %+v, want one row each", rep.Fragments)
+		}
+		// The hooks apply rewrote the file after the base-URL post-image was
+		// recorded, so USER-EDITED here is correct and healthy — our own bytes
+		// are checksum-verified intact. Only OK and USER-EDITED may pass.
+		if s := fragmentRow(t, rep, "baseurl").State; s != "OK" && s != "USER-EDITED" {
+			t.Fatalf("base-URL row is %s after the hooks fragment landed in the same file", s)
+		}
+	})
+
+	t.Run("a standing pointer with our checksum object deleted is DAMAGED and named", func(t *testing.T) {
+		env, out := enrolledEnv(t)
+		target := provisionBaseURL(t, env, "")
+		var root map[string]json.RawMessage
+		b, err := os.ReadFile(target)
+		if err != nil || json.Unmarshal(b, &root) != nil {
+			t.Fatalf("read back %v", err)
+		}
+		if _, ok := root["_mark1_managed_baseurl"]; !ok {
+			t.Fatalf("fixture drift: no checksum object to delete in\n%s", b)
+		}
+		delete(root, "_mark1_managed_baseurl")
+		b, _ = json.Marshal(root)
+		if err := os.WriteFile(target, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		rep, err := runDoctor(t, env, out, Options{})
+		if err == nil {
+			t.Fatal("doctor passed a machine whose agent is still pointed at a loopback port with nothing owning the pointer")
+		}
+		f := fragmentRow(t, rep, "baseurl")
+		if f.State != "FRAGMENT-DAMAGED" {
+			t.Fatalf("row %+v, want FRAGMENT-DAMAGED (D-CR: a live pointer is not absence)", f)
+		}
+		if !strings.Contains(f.Detail, "ANTHROPIC_BASE_URL") {
+			t.Fatalf("detail %q does not name what is still set", f.Detail)
+		}
+	})
+
+	t.Run("--fix reports the remedy instead of re-pointing the agent", func(t *testing.T) {
+		env, out := enrolledEnv(t)
+		target := provisionBaseURL(t, env, "")
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		rep, err := runDoctor(t, env, out, Options{Fix: true})
+		if err == nil {
+			t.Fatal("--fix reported green over a fragment it cannot repair")
+		}
+		f := fragmentRow(t, rep, "baseurl")
+		if f.Fixed {
+			t.Fatalf("--fix re-pointed an agent at the proxy without an eligibility check: %+v", f)
+		}
+		if !strings.Contains(f.Detail, "mark1 enable") {
+			t.Fatalf("detail %q leaves the user with no next step", f.Detail)
+		}
+		if _, err := os.Stat(target); !os.IsNotExist(err) {
+			t.Fatalf("--fix created the user's settings file: %v", err)
+		}
+	})
+}
+
 // damage edits a byte INSIDE our fence — the timeout of the Stop gate.
 func damage(t *testing.T, target string) {
 	t.Helper()
