@@ -29,6 +29,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spill"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 )
@@ -497,5 +498,167 @@ func TestUnsessionedHelloIsRefusedEntry(t *testing.T) {
 		t.Fatalf("the daemon answered a session-less Hello instead of closing (D-AT); first byte %#x", buf[0])
 	} else if errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatal("the daemon neither answered nor closed a session-less Hello — it must refuse audibly, not hang")
+	}
+}
+
+// TestCoverageJournalDrainsAtBootAndAtShutdown is the daemon-level half of
+// sites 3 and 4 (`mark1 enable`, `mark1 off`). internal/coverage proves the
+// drain works; this proves mark1d RUNS it, at both of the two moments the CLI
+// can be observed at all:
+//
+//   - at entry, because 08 §7.6 lets `mark1 enable`/`off` run with the daemon
+//     down, so the journal is routinely older than the process reading it;
+//   - on cancellation, because `mark1 off` writes its line and then the
+//     off-watcher cancels this very context — the shutdown path is the
+//     likeliest place to strand a disable window, and a 5-second tick would
+//     never fire in it.
+//
+// Both windows are unreceipted if this wiring is absent, and an unreceipted
+// off window reads downstream as full coverage: the assumed-100% billing
+// failure C13 exists to end.
+func TestCoverageJournalDrainsAtBootAndAtShutdown(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	spoolDir := filepath.Join(dir, "spool")
+	socket := filepath.Join(dir, "sock", "m1p.sock")
+	journal := coverage.JournalPath(stateDir)
+	if err := os.MkdirAll(filepath.Dir(journal), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The CLI's exact bytes (go/mark1/internal/cli.AppendCoverageTransition).
+	appendLine := func(line string) {
+		t.Helper()
+		f, err := os.OpenFile(journal, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(line + "\n"); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendLine(`{"kind":"enable","reason":"user_enable","ts":"2026-08-31T10:00:00Z","workspace":"/home/dev/project"}`)
+
+	stop := runDaemon(t, config{
+		stateDir: stateDir,
+		spoolDir: spoolDir,
+		socket:   socket,
+		offPoll:  10 * time.Millisecond,
+	})
+	waitFor(t, "fabric socket bound (daemon fully up)", func() bool {
+		_, err := os.Stat(socket)
+		return err == nil
+	})
+
+	// Deliberately shorter than coverageDrainEvery: a daemon that only drained
+	// on its ticker would pass a 5-second wait, so this window is the whole
+	// assertion about the drain AT ENTRY.
+	cursor := filepath.Join(stateDir, "coverage", "drain.cursor") // coverage.cursorPath
+	deadline := time.Now().Add(coverageDrainEvery / 2)
+	for {
+		if b, err := os.ReadFile(cursor); err == nil && len(b) > 0 && string(b) != "0" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the daemon-down enable window was still unreceipted %v after boot; "+
+				"it waits for a tick instead of draining at entry", coverageDrainEvery/2)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// `mark1 off` mid-run: write the line, then cancel — exactly the order the
+	// off-watcher produces.
+	appendLine(`{"kind":"disable","reason":"mark1_off","scope":"all","ts":"2026-08-31T11:30:00Z"}`)
+	stop()
+
+	sp, err := spool.Open(spool.Config{Dir: spoolDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sp.Close() }()
+	got := spooledCoverage(t, sp)
+	if len(got) != 2 {
+		t.Fatalf("spool holds %d coverage transitions, want 2 (the boot-time enable and the shutdown disable)", len(got))
+	}
+	if got[0].GetReasonCode() != coverage.ReasonUserEnable || got[0].GetKind() != m1pv1.CoverageKind_COVERAGE_KIND_ENABLE {
+		t.Errorf("first transition = %v/%q, want ENABLE/%s", got[0].GetKind(), got[0].GetReasonCode(), coverage.ReasonUserEnable)
+	}
+	if got[1].GetReasonCode() != coverage.ReasonMark1Off || got[1].GetKind() != m1pv1.CoverageKind_COVERAGE_KIND_DISABLE {
+		t.Errorf("second transition = %v/%q, want DISABLE/%s — the off window died with the daemon",
+			got[1].GetKind(), got[1].GetReasonCode(), coverage.ReasonMark1Off)
+	}
+	// The enable named a workspace and the off did not: they must not carry the
+	// same digest, or the band cannot tell a machine-wide off from one root's.
+	if bytes.Equal(got[0].GetWorkspaceId(), got[1].GetWorkspaceId()) {
+		t.Error("a per-workspace enable and a device-wide off landed on the same workspace_id")
+	}
+}
+
+// TestDiskHardStopReceiptsTheBypassWindow is site 2 of 04 §2.7 at the daemon
+// level: the 95 % hard stop (07 §6 / NFR-FOOTPRINT-002) stops capture writing,
+// which is a BYPASS window, and a window nobody receipts is billed as full
+// coverage.
+//
+// It also pins the honest ceiling. A coverage record is DIAGNOSTIC class (07 §6
+// closes the billing-grade set at {usage, verdict_event, receipt_checkpoint}),
+// so the transition announcing the hard stop is shed BY the hard stop: only the
+// close survives, carrying the window length. That is a real hole — named here
+// executably rather than in a comment — and it is not closable from the edge,
+// because intelligence.proto explicitly refuses to promote coverage to
+// billing-grade ("a backpressure contract 07 never authorized").
+func TestDiskHardStopReceiptsTheBypassWindow(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	spoolDir := filepath.Join(dir, "spool")
+	socket := filepath.Join(dir, "sock", "m1p.sock")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var usedPct atomic.Uint64
+	usedPct.Store(50)
+
+	stop := runDaemon(t, config{
+		stateDir:  stateDir,
+		spoolDir:  spoolDir,
+		socket:    socket,
+		offPoll:   10 * time.Millisecond,
+		diskUsage: func(string) (float64, error) { return float64(usedPct.Load()) / 100, nil },
+	})
+	waitFor(t, "fabric socket bound (daemon fully up)", func() bool {
+		_, err := os.Stat(socket)
+		return err == nil
+	})
+
+	// The sampler runs on the spool's 250 ms fsync cadence, so each edge needs
+	// one cadence to be observed. Both waits are several cadences.
+	usedPct.Store(99)
+	time.Sleep(time.Second)
+	usedPct.Store(50)
+	time.Sleep(time.Second)
+	stop()
+
+	sp, err := spool.Open(spool.Config{Dir: spoolDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sp.Close() }()
+	got := spooledCoverage(t, sp)
+	if len(got) != 1 {
+		t.Fatalf("spool holds %d coverage transitions, want exactly 1 — the close of the hard-stop window "+
+			"(the open is shed by the stop it reports; more than one means the shed hazard changed)", len(got))
+	}
+	if got[0].GetReasonCode() != coverage.ReasonDiskHardStop {
+		t.Errorf("reason_code = %q, want %q", got[0].GetReasonCode(), coverage.ReasonDiskHardStop)
+	}
+	if got[0].GetKind() != m1pv1.CoverageKind_COVERAGE_KIND_BYPASS {
+		t.Errorf("kind = %v, want BYPASS", got[0].GetKind())
+	}
+	// Nonzero is the whole point of the close: sidefx.coverageKind files a
+	// zero-duration BYPASS as a bypass_START, so a close that lost its window
+	// would re-open the bypass instead of ending it.
+	if got[0].GetDurationMs() == 0 {
+		t.Error("duration_ms = 0, so the server files this close as a second bypass_start and the window never ends")
 	}
 }
