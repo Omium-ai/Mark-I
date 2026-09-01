@@ -35,7 +35,11 @@ webpki-roots = { workspace = true }
 m1p-wire = { workspace = true }
 mark1-frames = { workspace = true }
 mark1-policy = { workspace = true }
-mark1-receipt = { workspace = true }   # per-event receipted oauth_contamination (04 §3.1(6))
+# No mark1-receipt: 04 §3.1(6)'s receipt is minted by mark1d, which owns the device Ed25519
+# origin key and the gap-free chain (`guard_contamination` is already a DeviceOriginType).
+# Two processes appending to one chain would race the `seq` invariant, so a receipt minted
+# here would be wrong rather than merely unimplemented. The dependency was declared with a
+# comment claiming the feature and never imported, which made the gap invisible in this file.
 mark1-redact = { workspace = true }    # both axes: redact-in-transit + spill admit
 
 # --- provenance guard: HMAC fingerprint, constant-time compare, Secret<T> custody (04 §3.1/§3.3) ---
