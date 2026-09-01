@@ -91,10 +91,21 @@ type row struct {
 	ServerSig   []byte
 }
 
-func (m *Module) readChain(ctx context.Context, tenant querychoke.TenantID, sinceSeq int64, limit int) ([]row, int64, [32]byte, error) {
+// chainHead is the head row as the edge must see it. All THREE numbers travel
+// together because all three are inputs to a signature: the device sealer
+// rebuilds the checkpoint payload at seq+1 with prev_receipt_hash = hash and
+// checkpoint_seq = checkpoint_seq+1, and AppendCheckpoint verifies its
+// signature over exactly that reconstruction (store.go:196-217). A head that
+// states two of the three is a head no device can seal against.
+type chainHead struct {
+	Seq           int64
+	Hash          [32]byte
+	CheckpointSeq int64
+}
+
+func (m *Module) readChain(ctx context.Context, tenant querychoke.TenantID, sinceSeq int64, limit int) ([]row, chainHead, error) {
 	var rows []row
-	var headSeq int64
-	headHash := GenesisHash
+	head := chainHead{Hash: GenesisHash}
 	err := m.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
 		res, err := tx.Query(ctx, `
 			SELECT seq, payload, prev_receipt_hash, receipt_hash, record_type,
@@ -117,17 +128,20 @@ func (m *Module) readChain(ctx context.Context, tenant querychoke.TenantID, sinc
 		}
 		var h []byte
 		scanErr := tx.QueryRow(ctx,
-			`SELECT seq, head_hash FROM m1_receipt_chain_head WHERE tenant_id = $1`,
-			tenant.UUID()).Scan(&headSeq, &h)
+			`SELECT seq, head_hash, checkpoint_seq FROM m1_receipt_chain_head WHERE tenant_id = $1`,
+			tenant.UUID()).Scan(&head.Seq, &h, &head.CheckpointSeq)
 		if errors.Is(scanErr, pgx.ErrNoRows) {
+			// A tenant that has never sealed has no head row; the genesis
+			// zeros this returns ARE its head, and a sealer reading them
+			// correctly claims seq 1 / checkpoint_seq 1.
 			return nil
 		}
 		if scanErr == nil {
-			headHash = [32]byte(h)
+			head.Hash = [32]byte(h)
 		}
 		return scanErr
 	})
-	return rows, headSeq, headHash, err
+	return rows, head, err
 }
 
 // tenantOf stamps tenancy from the verified claims — the ONLY identity source
@@ -179,7 +193,7 @@ func (m *Module) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sinceSeq, limit := pageParams(r)
-	rows, headSeq, headHash, err := m.readChain(r.Context(), tenant, sinceSeq, limit)
+	rows, head, err := m.readChain(r.Context(), tenant, sinceSeq, limit)
 	if err != nil {
 		http.Error(w, `{"error":{"code":"M1E-9500","message":"chain read failed"}}`, http.StatusServiceUnavailable)
 		return
@@ -196,11 +210,15 @@ func (m *Module) handleList(w http.ResponseWriter, r *http.Request) {
 		PrevHash    string  `json:"prev_hash"`
 		ThisHash    string  `json:"this_hash"`
 	}
+	// checkpoint_seq was added additively on the same reasoning that added
+	// server_key_id (D-O): a field arrives when a consumer exists to need it.
+	// The edge checkpoint sealer is that consumer — see chainHead above.
 	out := struct {
 		Receipts  []listReceipt `json:"receipts"`
 		ChainHead struct {
-			Seq  int64  `json:"seq"`
-			Hash string `json:"hash"`
+			Seq           int64  `json:"seq"`
+			Hash          string `json:"hash"`
+			CheckpointSeq int64  `json:"checkpoint_seq"`
 		} `json:"chain_head"`
 	}{Receipts: []listReceipt{}}
 	for _, r := range rows {
@@ -216,8 +234,9 @@ func (m *Module) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Receipts = append(out.Receipts, lr)
 	}
-	out.ChainHead.Seq = headSeq
-	out.ChainHead.Hash = hex.EncodeToString(headHash[:])
+	out.ChainHead.Seq = head.Seq
+	out.ChainHead.Hash = hex.EncodeToString(head.Hash[:])
+	out.ChainHead.CheckpointSeq = head.CheckpointSeq
 	writeJSON(w, out)
 }
 
@@ -231,7 +250,7 @@ func (m *Module) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sinceSeq, limit := pageParams(r)
-	rows, _, _, err := m.readChain(r.Context(), tenant, sinceSeq, limit)
+	rows, _, err := m.readChain(r.Context(), tenant, sinceSeq, limit)
 	if err != nil {
 		http.Error(w, `{"error":{"code":"M1E-9500","message":"chain read failed"}}`, http.StatusServiceUnavailable)
 		return

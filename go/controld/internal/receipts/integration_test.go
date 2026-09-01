@@ -73,6 +73,7 @@ type harness struct {
 	admin     *pgx.Conn
 	pool      *pgxpool.Pool
 	db        *pg.TenantDB
+	appRole   string
 	tenantA   querychoke.TenantID
 	tenantB   querychoke.TenantID
 	deviceA   uuid.UUID
@@ -213,7 +214,7 @@ func setup(t *testing.T) *harness {
 	}
 	db := pg.NewTenantDB(pool)
 	return &harness{
-		admin: admin, pool: pool, db: db,
+		admin: admin, pool: pool, db: db, appRole: role,
 		tenantA: tenantA, tenantB: tenantB, deviceA: dA, deviceB: dB,
 		deviceKey: deviceKey, chainKey: chainKey,
 		store: receipts.NewStore(db, chainKey),
@@ -366,6 +367,92 @@ func TestIntegrationAppendGenesisLinkageAndRefusals(t *testing.T) {
 	_, err = h.store.AppendCheckpoint(ctx, h.tenantB, evB, nil)
 	if ref, ok := receipts.AsRefusal(err); !ok || ref.Code != receipts.DefectUnknownKey {
 		t.Fatalf("cross-tenant key: want unknown_key refusal, got %v", err)
+	}
+}
+
+// FR-SPINE-017's negative, which 02's Verification column asks for by name.
+// m1_002 makes m1_receipts append-only three INDEPENDENT ways (grants, a row
+// trigger, a TRUNCATE trigger), so a migration that drops one while leaving
+// the others would keep every other test in this file green. Each mechanism
+// is therefore made to refuse ON ITS OWN: the grant layer first, then the
+// triggers — reachable only once the grant that would otherwise answer first
+// is handed back.
+func TestIntegrationReceiptsAppendOnly(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+
+	ev := h.sealCheckpoint(t, h.tenantA, h.deviceA, h.deviceKey, leavesOf(v7(t)), time.Now())
+	r1, err := h.store.AppendCheckpoint(ctx, h.tenantA, ev, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every attempt runs on the connection shape a REQUEST uses — the
+	// NOBYPASSRLS app role with the tenant GUC set — never the migration
+	// superuser, which bypasses privilege checks and would prove nothing.
+	attempt := func(sql string) error {
+		return h.db.WithTenant(ctx, h.tenantA, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, sql)
+			return err
+		})
+	}
+	// RLS filters UPDATE/DELETE targets BEFORE any row trigger runs, so a row
+	// this role cannot see turns every statement below into a zero-row
+	// SUCCESS: the test would observe nothing and still pass. Visibility is
+	// the precondition that makes the refusals mean something.
+	var visible int64
+	if err := h.db.WithTenant(ctx, h.tenantA, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM m1_receipts`).Scan(&visible)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 {
+		t.Fatalf("app role sees %d receipts, want 1 — the writes below would refuse nothing", visible)
+	}
+
+	// Ordered, not a map: whichever statement runs first is the only one whose
+	// escape is observed cleanly, because a leak that empties the table makes
+	// the rest refuse nothing. TRUNCATE last, so a broken mechanism is named
+	// by the one line that fails rather than by all three.
+	stmts := []struct{ op, sql string }{
+		{"UPDATE", `UPDATE m1_receipts SET payload = '{"rewritten":true}'`},
+		{"DELETE", `DELETE FROM m1_receipts`},
+		{"TRUNCATE", `TRUNCATE m1_receipts`},
+	}
+	// (a) The grant layer: controld holds SELECT+INSERT on the chain, nothing
+	// more (m1_002 §5). This is the leg that answers in production.
+	for _, s := range stmts {
+		err := attempt(s.sql)
+		if err == nil || !strings.Contains(err.Error(), "permission denied for table m1_receipts") {
+			t.Errorf("%s as the app role: want permission denied, got %v", s.op, err)
+		}
+	}
+
+	// (b)+(c) The triggers, which are the leg that HOLDS. Granting the app
+	// role exactly what m1_002 revoked disarms the grant layer, so a silent
+	// pass here can only mean the trigger is gone. Both raise SQLSTATE 42501,
+	// so the message — not the code — is what tells the two legs apart.
+	if _, err := h.admin.Exec(ctx,
+		`GRANT UPDATE, DELETE, TRUNCATE ON m1_receipts TO `+h.appRole); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range stmts {
+		err := attempt(s.sql)
+		if err == nil || !strings.Contains(err.Error(), "append-only; "+s.op+" is not permitted") {
+			t.Errorf("%s with the privilege granted back: want the append-only trigger, got %v", s.op, err)
+		}
+	}
+
+	// The chain is byte-identical: a refusal that still mutated would be the
+	// worst outcome of the three.
+	var count int64
+	var payload string
+	if err := h.admin.QueryRow(ctx,
+		`SELECT count(*), coalesce(max(payload), '') FROM m1_receipts`).Scan(&count, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || payload != r1.PayloadText {
+		t.Fatalf("the chain moved under a refused write: %d row(s), payload %q", count, payload)
 	}
 }
 
@@ -768,5 +855,114 @@ func TestIntegrationVerifierE2EExportRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(out, string(receipts.DefectPayloadMismatch)) {
 		t.Fatalf("tampered export must name payload_mismatch:\n%s", out)
+	}
+}
+
+// TestIntegrationChainHeadIsSealableOverHTTP grades GET /api/v1/receipts on the
+// only thing its chain_head is FOR: whether a device that has never seen this
+// database can seal against it.
+//
+// The device-signed checkpoint payload carries `seq` and `prev_receipt_hash`,
+// which are per-TENANT server facts, and `checkpoint_seq`, which the head lock
+// assigns — so an edge sealer's inputs are three numbers it cannot compute and
+// must be told (store.go:196-217). Every other test in this file seals through
+// h.sealCheckpoint, which reads them straight out of Postgres via store.Head:
+// a path no edge daemon has. This test deliberately does NOT call store.Head.
+// It takes only what the HTTP surface published and, if that is a number short
+// or a byte wrong, AppendCheckpoint refuses — which is the assertion. Checking
+// that the JSON merely CONTAINS a checkpoint_seq field would pass on a field
+// that was always zero.
+func TestIntegrationChainHeadIsSealableOverHTTP(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	at := time.Date(2026, 8, 31, 9, 0, 0, 0, time.UTC)
+
+	// A non-genesis head, so a sealer that ignored the published numbers and
+	// assumed 1/1 would be caught. Two of the three published numbers only
+	// diverge from their genesis values once something is already on the chain.
+	first := h.sealCheckpoint(t, h.tenantA, h.deviceA, h.deviceKey, leavesOf(v7(t), v7(t)), at)
+	if _, err := h.store.AppendCheckpoint(ctx, h.tenantA, first, nil); err != nil {
+		t.Fatalf("seeding the chain: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	receipts.NewModule(receipts.ModuleDeps{
+		DB: h.db, PG: h.db,
+		Verifier: auth.NewHMACVerifier([]byte("head-test-key"), auth.StaticRevocations{}),
+		ObsCfg:   obs.Config{ServiceName: "controld-head-test"},
+	}).RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/receipts?limit=1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+auth.Mint([]byte("head-test-key"), h.tenantA.UUID(), h.deviceA, time.Hour))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/receipts: %d %s", resp.StatusCode, body)
+	}
+	var published struct {
+		ChainHead struct {
+			Seq           int64  `json:"seq"`
+			Hash          string `json:"hash"`
+			CheckpointSeq int64  `json:"checkpoint_seq"`
+		} `json:"chain_head"`
+	}
+	if err := json.Unmarshal(body, &published); err != nil {
+		t.Fatal(err)
+	}
+
+	prev, err := hex.DecodeString(published.ChainHead.Hash)
+	if err != nil || len(prev) != 32 {
+		t.Fatalf("chain_head.hash = %q (%d bytes decoded, err %v), want 32 hex-encoded bytes",
+			published.ChainHead.Hash, len(prev), err)
+	}
+	leaves := leavesOf(v7(t), v7(t), v7(t))
+	root, err := receipts.MerkleRoot(leaves)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued := at.Add(time.Minute)
+	cp := receipts.Checkpoint{
+		TenantID:        h.tenantA.String(),
+		DeviceID:        h.deviceA.String(),
+		Seq:             published.ChainHead.Seq + 1,
+		PrevReceiptHash: [32]byte(prev),
+		IssuedAt:        receipts.IssuedAtString(issued),
+		CheckpointSeq:   published.ChainHead.CheckpointSeq + 1,
+		MerkleRoot:      root,
+		LeafCount:       len(leaves),
+	}
+	signed, err := receipts.OriginSign(h.deviceKey, cp.Payload(h.deviceKey.KeyID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	landed, err := h.store.AppendCheckpoint(ctx, h.tenantA, receipts.CheckpointEvent{
+		EventID:              v7(t),
+		DeviceID:             h.deviceA,
+		DeviceKeyID:          h.deviceKey.KeyID(),
+		ClaimedCheckpointSeq: published.ChainHead.CheckpointSeq + 1,
+		MerkleRoot:           root,
+		LeafCount:            len(leaves),
+		OriginSig:            signed.DeviceSig,
+		IssuedAt:             issued,
+	}, nil)
+	if err != nil {
+		t.Fatalf("a checkpoint sealed against the PUBLISHED head was refused: %v\n"+
+			"chain_head was %+v — the edge sealer has no other source for these numbers, so this "+
+			"refusal means GET /api/v1/receipts cannot be sealed against at all", err, published.ChainHead)
+	}
+	if landed.Seq != 2 || landed.CheckpointSeq != 2 {
+		t.Fatalf("landed at seq %d / ckpt %d, want 2/2", landed.Seq, landed.CheckpointSeq)
 	}
 }

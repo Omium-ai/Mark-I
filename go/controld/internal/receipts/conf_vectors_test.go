@@ -337,7 +337,9 @@ func TestConfVectorsReceiptControldNegatives(t *testing.T) {
 		vocab[d] = true
 	}
 
+	exercised := map[string]bool{}
 	for _, n := range m.Negatives {
+		exercised[n.ExpectDefect] = true
 		t.Run(n.Name, func(t *testing.T) {
 			var got []ChainDefect
 			switch {
@@ -377,6 +379,16 @@ func TestConfVectorsReceiptControldNegatives(t *testing.T) {
 				t.Errorf("expected defect %q, got %+v", n.ExpectDefect, got)
 			}
 		})
+	}
+
+	// The loop asserts its own coverage, as the verifier leg's does.
+	// loadManifest catches an EMPTIED negatives family, but not a single
+	// vector removed from it — which would leave one defect kind unproven
+	// here while the suite stayed green.
+	for d := range vocab {
+		if !exercised[d] {
+			t.Errorf("no negative vector exercises defect kind %q", d)
+		}
 	}
 }
 
