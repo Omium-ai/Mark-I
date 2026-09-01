@@ -8,8 +8,10 @@
 package uplink
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sort"
+	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 	"github.com/google/uuid"
@@ -265,4 +267,29 @@ func recordEventID(r spool.Record) uuid.UUID {
 	return id
 }
 
+// batchLeaves is the checkpoint's Merkle leaf set: every event_id in the batch,
+// in spool order. Order is load-bearing — controld's EffectsFromBatch walks the
+// decoded batch in the same order, so the tree it would rebuild is this tree.
+func batchLeaves(recs []spool.Record) [][]byte {
+	leaves := make([][]byte, len(recs))
+	for i := range recs {
+		id := recordEventID(recs[i])
+		leaves[i] = id[:]
+	}
+	return leaves
+}
+
 func fmtCursor(c spool.Cursor) string { return fmt.Sprintf("(%d,%d)", c.Seq, c.Off) }
+
+// uuidV7Time reads RFC 9562's 48-bit big-endian millisecond prefix — the half
+// of a trace span an event_id already gives us (11 §0.3: "the ID *is* a coarse
+// timestamp"). A non-v7 id has no such prefix and reports the zero time rather
+// than a number from another layout.
+func uuidV7Time(id uuid.UUID) time.Time {
+	if id.Version() != 7 {
+		return time.Time{}
+	}
+	//nolint:gosec // G115: >>16 leaves 48 bits, which always fits in int64.
+	ms := int64(binary.BigEndian.Uint64(id[0:8]) >> 16)
+	return time.UnixMilli(ms)
+}

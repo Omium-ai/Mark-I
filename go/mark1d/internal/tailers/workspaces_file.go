@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -73,20 +72,15 @@ type LiveSet struct {
 
 func NewLiveSet() *LiveSet { return &LiveSet{} }
 
-// SetRoots swaps the whole set, canonicalizing exactly like NewWorkspaceSet
-// (abs + symlinks resolved — 04 §11's canonicalize-then-check). A root that
-// fails to resolve is dropped from the set, never kept stale.
+// SetRoots swaps the whole set through the SAME constructor NewWorkspaceSet
+// uses (abs + symlinks resolved — 04 §11's canonicalize-then-check — and each
+// root's .mark1ignore attached), so the long-running daemon's oracle is never
+// the weaker of the two. A root that fails to resolve is dropped from the
+// set, never kept stale.
 func (l *LiveSet) SetRoots(roots []string) error {
-	rs := rootSet{}
-	for _, r := range roots {
-		abs, err := filepath.Abs(r)
-		if err != nil {
-			return err
-		}
-		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = resolved
-		}
-		rs = append(rs, abs)
+	rs, err := newRootSet(roots)
+	if err != nil {
+		return err
 	}
 	l.mu.Lock()
 	l.rs = rs
