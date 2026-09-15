@@ -555,8 +555,24 @@ stores-up:
       if [ ! -x "$BIN/minio" ]; then
         OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
         ARCH="$(uname -m)"; [ "$ARCH" = "x86_64" ] && ARCH=amd64 || ARCH=arm64
+        # GitHub Releases, not dl.min.io: on 2026-09-15 dl.min.io answered 410 Gone for the
+        # archive AND for latest -- MinIO stopped serving binaries there -- and the integration
+        # lane died at fetch on a cold runner while every laptop with a cached .stores/bin/minio
+        # stayed green (D-DY, again). The release asset is byte-identical to the old archive
+        # object (same sha256), and the hash is now PINNED so a swapped or truncated download
+        # cannot become the store the tenancy negatives run against. Only linux/amd64 has a hash
+        # recorded; another triple refuses rather than trusting an unverified binary.
+        ASSET="minio.${OS}-${ARCH}.${MINIO_VERSION}"
+        case "${OS}-${ARCH}" in
+          linux-amd64) MINIO_SHA256="c27873d791b56d33518de11f12c5bfae4be88ebac00e12c6dd0027b08123fd80" ;;
+          *) echo "stores-up: no pinned sha256 for minio ${OS}-${ARCH}; add one from the release's .sha256sum asset" >&2; exit 1 ;;
+        esac
         curl -fsSL -o "$BIN/minio" \
-          "https://dl.min.io/server/minio/release/${OS}-${ARCH}/archive/minio.${MINIO_VERSION}"
+          "https://github.com/minio/minio/releases/download/${MINIO_VERSION}/${ASSET}"
+        echo "${MINIO_SHA256}  $BIN/minio" | sha256sum -c - >/dev/null || {
+          echo "stores-up: minio download does not match the pinned sha256; refusing to start a store from it" >&2
+          rm -f "$BIN/minio"; exit 1
+        }
         chmod +x "$BIN/minio"
       fi
       mkdir -p "$ROOT/s3"

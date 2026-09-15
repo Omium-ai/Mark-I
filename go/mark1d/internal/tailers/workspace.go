@@ -61,6 +61,15 @@ func (rs rootSet) Roots() []string {
 }
 
 func (rs rootSet) Allowed(absPath string) bool {
+	// The same canonicalisation the roots went through at registration, so
+	// both sides of the containment compare are the same shape. Not
+	// decorative: on Windows filepath.Abs prepends the drive, so a root
+	// registered from a POSIX-looking string became C:\home\... while the
+	// stream's cwd stayed /home/... and nothing ever matched — the replay
+	// corpus tailed zero streams on the windows-2022 leg for that reason.
+	if a, err := filepath.Abs(absPath); err == nil {
+		absPath = a
+	}
 	// Symlinks resolve BEFORE the containment check — a link inside a root
 	// pointing outside it must not widen the oracle. The ignore check then
 	// runs on the RESOLVED path, so a symlink cannot launder an excluded

@@ -124,7 +124,9 @@ mod imp {
     }
 }
 
-#[cfg(test)]
+// `all(test, unix)`: both tests are unix-only, so on Windows the module would hold one
+// unused `use super::*` and `-D warnings` makes that a build error there (CI run 35025349147).
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

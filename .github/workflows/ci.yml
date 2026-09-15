@@ -237,6 +237,14 @@ jobs:
         with:
           version: ${{ env.BUF_VERSION }}
           github_token: ${{ github.token }}
+      # verifier_offline_gate's blackhole mechanism runs the shipped verifier inside an
+      # unprivileged network namespace (unshare -rn). The 24.04 image restricts that through
+      # AppArmor, the gate reports PARTIAL, and under $CI a PARTIAL is a FAIL -- so this job was
+      # red on run 35025349147 for the same kernel knob the go job lifts. Same lift, same reason.
+      - name: Allow unprivileged user namespaces for the offline-verifier blackhole
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare -rn true
       - run: just gates
       - run: just conformance
 

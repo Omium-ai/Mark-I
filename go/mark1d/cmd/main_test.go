@@ -19,7 +19,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric/fabrictest"
@@ -310,13 +310,19 @@ func TestEnableWorkspaceWhileRunning(t *testing.T) {
 	})
 
 	// A transcript already sits in the derived vendor dir; nothing may tail
-	// it until the root is enabled. Munge mirrors claudecode.TranscriptDir,
-	// over the canonical root (reconcile resolves symlinks before StartTail).
+	// it until the root is enabled. Derived by the PRODUCTION function over
+	// the canonical root (reconcile resolves symlinks before StartTail): a
+	// test-side copy of the munge was separator-only and disagreed with the
+	// daemon on macOS, whose temp paths carry an underscore — red on the
+	// macos-14 leg, green here, for exactly the reason the munge was fixed.
 	canonRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	vendorDir := filepath.Join(home, ".claude", "projects", strings.ReplaceAll(canonRoot, "/", "-"))
+	vendorDir, err := (&claudecode.Adapter{StateDir: stateDir}).TranscriptDir(canonRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(vendorDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
