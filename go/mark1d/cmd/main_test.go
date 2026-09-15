@@ -67,9 +67,16 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // the Flush gate reads the OFF marker, never how the context died.
 func runDaemon(t *testing.T, cfg config) func() {
 	t.Helper()
+	return runDaemonLog(t, cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+}
+
+// runDaemonLog is runDaemon with the daemon's logger injected, for tests whose
+// assertion IS a log line (a refused approval is only visible there).
+func runDaemonLog(t *testing.T, cfg config, log *slog.Logger) func() {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, slog.New(slog.NewTextHandler(os.Stderr, nil)), cfg) }()
+	go func() { done <- run(ctx, log, cfg) }()
 	return func() {
 		t.Helper()
 		cancel()

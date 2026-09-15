@@ -62,6 +62,7 @@ require (
 require lukechampine.com/blake3 v1.4.1
 
 require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 )

@@ -465,3 +465,42 @@ func TestReopenedTaskIsNotUngatedByAStaleStreak(t *testing.T) {
 		t.Fatalf("the reopened attempt answered %v %q — it ran ungated on the previous attempt's streak", v.GetDecision(), v.GetReason())
 	}
 }
+
+// TestGateBlockCarriesEvidenceRef is FR-VERIFY-011's below-knee half at the
+// daemon: a BLOCK names the failing anchor's typed evidence in evidence_ref
+// (the shim appends it as `[evidence: …]` to the continuation reason), and no
+// ALLOW — knee stop, cache miss, cap — carries one, because none of them has a
+// failing anchor to name.
+func TestGateBlockCarriesEvidenceRef(t *testing.T) {
+	const ref = "ruff:E501 errors=2 warnings=0 files=1"
+	entries := stubReader{{1}: violatedEntry(false, false), {2}: violatedEntry(true, false)}
+	g := blockableGate(t, entries)
+	g.Evidence = func(task verdict.TaskID) string {
+		if task == (verdict.TaskID{1}) {
+			return ref
+		}
+		return "evidence for a task that was not asked about"
+	}
+
+	v := g.Answer(query(1, 5000), testSession)
+	if v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_BLOCK {
+		t.Fatalf("decision %v %q, want BLOCK", v.GetDecision(), v.GetReason())
+	}
+	if v.GetEvidenceRef() != ref {
+		t.Fatalf("BLOCK evidence_ref %q, want the failing anchor's typed evidence %q", v.GetEvidenceRef(), ref)
+	}
+
+	// At the knee: ALLOW with the verdict surfaced, no retry target to name.
+	if v := g.Answer(query(2, 5000), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || v.GetEvidenceRef() != "" {
+		t.Fatalf("knee stop answered %v evidence_ref %q, want ALLOW with none", v.GetDecision(), v.GetEvidenceRef())
+	}
+	// Cache miss: fail-open ALLOW, nothing to name.
+	if v := g.Answer(query(3, 5000), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || v.GetEvidenceRef() != "" {
+		t.Fatalf("cache miss answered %v evidence_ref %q, want ALLOW with none", v.GetDecision(), v.GetEvidenceRef())
+	}
+	// No seam wired: BLOCK still blocks, evidence_ref honestly empty.
+	g.Evidence = nil
+	if v := g.Answer(query(1, 5000), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_BLOCK || v.GetEvidenceRef() != "" {
+		t.Fatalf("unwired seam answered %v evidence_ref %q, want BLOCK with none", v.GetDecision(), v.GetEvidenceRef())
+	}
+}

@@ -1,10 +1,10 @@
 package supervise
 
-// The one child wired in this row: `mark1-proxy --mode=sidecar`, per 04 :81.
-//
-// cortexd is the other child 04 §1.2 names and it is deliberately absent —
-// go/mark1d/internal/cortex does not exist, so a second Child here would be a
-// spec transcribed against nothing.
+// The sidecar child: `mark1-proxy --mode=sidecar`, per 04 :81. cortexd, the
+// other child 04 §1.2 names, is built by go/mark1d/internal/cortex on the same
+// Child shape; only the binary lookup rule (FindProxy / FindCortexd) is shared
+// here, because "a packaged install puts the siblings in ONE directory" is a
+// fact about the install, not about either child.
 
 import (
 	"context"
@@ -32,6 +32,9 @@ const (
 	// a developer machine no lookup rule can find both halves on its own.
 	proxyBinaryEnv = "MARK1_PROXY"
 
+	cortexdBinary    = "cortexd"
+	cortexdBinaryEnv = "MARK1_CORTEXD"
+
 	// proxyStopGrace is how long SIGINT gets before the kill. The proxy's stop
 	// path is `tokio::signal::ctrl_c` on the accept loop; it holds no fsync
 	// drain and no ledger, so this is "let in-flight responses finish", not
@@ -43,6 +46,11 @@ const (
 // port is ever published, ApplyProxyPointer refuses on every run, and the whole
 // enablement path looks broken rather than un-installed (RECONCILIATION D-CM).
 var ErrNoProxyBinary = errors.New("supervise: " + proxyBinary + " not found")
+
+// ErrNoCortexdBinary is the cortex plane's twin: without cortexd no root is
+// ever pushed, every anchor vote ships an incomplete integrity envelope and
+// MCP has nothing to serve — an un-installed machine, named as such.
+var ErrNoCortexdBinary = errors.New("supervise: " + cortexdBinary + " not found")
 
 type ProxyConfig struct {
 	// StateDir is mark1d's --state-dir. See proxyHome for why it is load-bearing.
@@ -191,17 +199,24 @@ func removePort(path string) error {
 // the only rung that holds for an installed user with no PATH entry. It does
 // NOT hold in this repo's own build: `just build-edge` writes dist/mark1d and
 // target/release/mark1-proxy, which is why MARK1_PROXY and PATH follow it.
-func FindProxy() (string, error) {
-	name := proxyBinary
+func FindProxy() (string, error) { return findBinary(proxyBinary, proxyBinaryEnv, ErrNoProxyBinary) }
+
+// FindCortexd resolves the per-workspace cortexd child by the same rule, with
+// MARK1_CORTEXD as its dev seam.
+func FindCortexd() (string, error) {
+	return findBinary(cortexdBinary, cortexdBinaryEnv, ErrNoCortexdBinary)
+}
+
+func findBinary(name, envVar string, missing error) (string, error) {
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
-	if p := os.Getenv(proxyBinaryEnv); p != "" {
+	if p := os.Getenv(envVar); p != "" {
 		// An operator-set path that is wrong is an error, never a fallthrough:
 		// silently searching elsewhere would run a different binary than the
 		// one they named.
 		if err := isFile(p); err != nil {
-			return "", fmt.Errorf("%w: %s=%s: %w", ErrNoProxyBinary, proxyBinaryEnv, p, err)
+			return "", fmt.Errorf("%w: %s=%s: %w", missing, envVar, p, err)
 		}
 		return p, nil
 	}
@@ -213,10 +228,15 @@ func FindProxy() (string, error) {
 	}
 	p, err := exec.LookPath(name)
 	if err != nil {
-		return "", fmt.Errorf("%w: not beside this binary, not on PATH, and %s is unset", ErrNoProxyBinary, proxyBinaryEnv)
+		return "", fmt.Errorf("%w: not beside this binary, not on PATH, and %s is unset", missing, envVar)
 	}
 	return p, nil
 }
+
+// IsFile is the lookup's file check, exported for the cortex plane's Binary
+// override so an override that does not exist fails before the supervisor
+// exists, exactly as ProxyChild's does.
+func IsFile(p string) error { return isFile(p) }
 
 func isFile(p string) error {
 	fi, err := os.Stat(p)

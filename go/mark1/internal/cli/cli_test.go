@@ -55,6 +55,9 @@ func TestLoadEnrollmentAbsentIsNotEnrolled(t *testing.T) {
 }
 
 func TestLoadEnrollmentRefusesLooseMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits do not exist here; owner-only on Windows is an ACL, which nothing in the daemon sets yet — NFR-SECURITY-007 residual")
+	}
 	env := testEnv(t)
 	if err := env.SaveEnrollment(&Enrollment{Version: 1, State: "active", TokenExpiresAt: time.Now()}); err != nil {
 		t.Fatal(err)

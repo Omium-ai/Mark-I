@@ -20,8 +20,16 @@ struct Args {
     #[arg(long)]
     store: Option<PathBuf>,
     /// Session-start map token budget (04 §6.4: default 2k, ceiling 8k).
+    /// mark1d passes the bundle's `cortex.map_budget_tokens.max` here.
     #[arg(long, default_value_t = cortexd::session::DEFAULT_BUDGET_TOKENS)]
     budget: u32,
+    /// Where mark1d publishes this workspace's live agent session
+    /// (`<state>/run/sessions/<workspace-id>.json`, go/mark1d/internal/cortex).
+    /// Every fabric push Hellos with the session read from here (D-AT); with
+    /// none published, pushes are held until one is. Unset (hand-run) ⇒ held
+    /// forever, which is the honest state for a cortexd nobody supervises.
+    #[arg(long)]
+    session_file: Option<PathBuf>,
 }
 
 /// 07 names workspace_id = HMAC_tenant(root path); no tenant key exists on an
@@ -53,6 +61,13 @@ async fn main() -> anyhow::Result<()> {
     // dir with group/world bits — a create_dir_all here would pre-create it
     // with umask modes and trip that refusal on first boot.
     let (shared, cas) = cortexd::bootstrap(root, store, args.budget)?;
+    if let Some(p) = args.session_file {
+        // First and only set; the OnceLock cannot already hold a value here.
+        let _ = shared.session_file.set(p);
+    }
+    // Held pushes (no session yet) are delivered by this loop the moment
+    // mark1d publishes one, rather than at the next settle or tool call.
+    tokio::spawn(cortexd::fabric::flush_loop(Arc::clone(&shared)));
 
     // Watcher feeds the single writer task (04 §6.3) over a std channel; the
     // writer runs on its own OS thread at idle priority. `handle.enter()`

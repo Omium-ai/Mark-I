@@ -33,6 +33,8 @@ const (
 	maxBatchEvents = 10_000
 	// Event.session_id is field 3 of the Event envelope (envelope.proto).
 	eventSessionIDField = 3
+	// Event.body's receipt_checkpoint arm is field 21 (envelope.proto).
+	eventReceiptCheckpointField = 21
 	// Batch.events is field 5 of the Batch envelope (envelope.proto).
 	batchEventsField = 5
 )
@@ -173,30 +175,44 @@ func (u *Uplink) encodeBatch(b *outBatch) ([]byte, error) {
 	return u.enc.EncodeAll(raw, make([]byte, 0, len(raw)/2)), nil
 }
 
-// sessionIDOf walks the top-level wire fields of one encoded Event for
-// session_id (field 3) — a tag scan, not a decode, honoring the opaque-payload
-// rule. Absent/odd shapes return nil: the field is advisory (see encodeBatch).
-func sessionIDOf(payload []byte) []byte {
+// topLevelBytes walks the top-level wire fields of one encoded Event for the
+// first length-delimited field numbered num — a tag scan, not a decode,
+// honoring the opaque-payload rule. ok is false when absent or malformed.
+func topLevelBytes(payload []byte, num protowire.Number) (v []byte, ok bool) {
 	b := payload
 	for len(b) > 0 {
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			return nil
+		n, typ, m := protowire.ConsumeTag(b)
+		if m < 0 {
+			return nil, false
 		}
-		b = b[n:]
-		if num == eventSessionIDField && typ == protowire.BytesType {
-			v, m := protowire.ConsumeBytes(b)
-			if m < 0 || len(v) != 16 {
-				return nil
-			}
-			return v
+		b = b[m:]
+		if n == num && typ == protowire.BytesType {
+			v, m = protowire.ConsumeBytes(b)
+			return v, m >= 0
 		}
-		if n = protowire.ConsumeFieldValue(num, typ, b); n < 0 {
-			return nil
+		if m = protowire.ConsumeFieldValue(n, typ, b); m < 0 {
+			return nil, false
 		}
-		b = b[n:]
+		b = b[m:]
 	}
-	return nil
+	return nil, false
+}
+
+// sessionIDOf reads session_id (field 3). Absent/odd shapes return nil: the
+// field is advisory (see encodeBatch).
+func sessionIDOf(payload []byte) []byte {
+	v, ok := topLevelBytes(payload, eventSessionIDField)
+	if !ok || len(v) != 16 {
+		return nil
+	}
+	return v
+}
+
+// isCheckpoint reports whether the encoded Event's body is a ReceiptCheckpoint
+// (field 21 present; an embedded message is length-delimited even when empty).
+func isCheckpoint(payload []byte) bool {
+	_, ok := topLevelBytes(payload, eventReceiptCheckpointField)
+	return ok
 }
 
 // mergeDropped collapses rows by (reason, class): the counters are additive
@@ -267,14 +283,27 @@ func recordEventID(r spool.Record) uuid.UUID {
 	return id
 }
 
-// batchLeaves is the checkpoint's Merkle leaf set: every event_id in the batch,
-// in spool order. Order is load-bearing — controld's EffectsFromBatch walks the
-// decoded batch in the same order, so the tree it would rebuild is this tree.
+// batchLeaves is the checkpoint's Merkle leaf set: every event_id in the batch
+// EXCEPT ReceiptCheckpoint records, in spool order.
+//
+// The rule is the server's (controld ingest/sidefx/sidefx.go Apply): "every
+// non-checkpoint landed event is a leaf of the device's NEXT checkpoint; the
+// checkpoint announcement itself is sealed AFTER its tree and is deliberately
+// not a leaf of any tree." A checkpoint's attestation is its own chain row, so
+// a tree that counted it would claim one leaf more than controld holds pending
+// and be refused, and its orphaned leaf would wedge every later honest seal
+// into merkle_mismatch. Order is load-bearing — controld's EffectsFromBatch
+// walks the decoded batch in the same order, so the tree it rebuilds is this
+// tree. A batch of only checkpoints yields no leaves, and the sealer seals
+// nothing over nothing — that is the termination rule.
 func batchLeaves(recs []spool.Record) [][]byte {
-	leaves := make([][]byte, len(recs))
-	for i := range recs {
-		id := recordEventID(recs[i])
-		leaves[i] = id[:]
+	leaves := make([][]byte, 0, len(recs))
+	for _, r := range recs {
+		if isCheckpoint(r.Payload) {
+			continue
+		}
+		id := recordEventID(r)
+		leaves = append(leaves, id[:])
 	}
 	return leaves
 }

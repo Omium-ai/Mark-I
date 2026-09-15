@@ -61,9 +61,10 @@ type Config struct {
 	Now        func() time.Time
 }
 
-// Sealer holds the device identity and the set of checkpoints it has emitted.
-// NOT safe for concurrent use: uplink's Run goroutine is the sole caller, and
-// Flush runs only after Run has returned (uplink.Uplink's own contract).
+// Sealer holds the device identity and the chain position of the newest
+// checkpoint it has emitted. NOT safe for concurrent use: uplink's Run
+// goroutine is the sole caller, and Flush runs only after Run has returned
+// (uplink.Uplink's own contract).
 type Sealer struct {
 	key      identity.DeviceKey
 	keyID    string
@@ -77,13 +78,12 @@ type Sealer struct {
 	log    *slog.Logger
 	now    func() time.Time
 
-	// mine holds the event_ids of the checkpoints THIS process admitted — the
-	// termination fact, see allMine.
-	// ponytail: process-lifetime memory, one 16-byte entry per acked batch.
-	// Bounded in practice by how deep a backlog gets drained before the tail of
-	// checkpoints is uploaded; evict-on-sight if a long-lived daemon ever shows
-	// it in a heap profile.
-	mine map[[16]byte]struct{}
+	// last is the head the newest checkpoint THIS process admitted will leave
+	// behind once controld applies it: its seq, its receipt hash (= the server's
+	// head_hash, store.go "hash := sha256.Sum256(signingInput)"), its
+	// checkpoint_seq. Zero until the first admit. See Seal for why it can
+	// outrank a freshly fetched head.
+	last chainHead
 
 	// pending holds leaves whose seal was refused by an I/O path that can clear.
 	// See retain. Capped at maxPendingLeaves.
@@ -118,7 +118,6 @@ func New(cfg Config) (*Sealer, error) {
 		tenantID: cfg.TenantID, deviceID: cfg.DeviceID,
 		headURL: cfg.HeadURL, token: cfg.Token, admit: cfg.Admit,
 		client: cfg.HTTPClient, log: cfg.Log, now: cfg.Now,
-		mine: map[[16]byte]struct{}{},
 	}, nil
 }
 
@@ -151,8 +150,11 @@ func HeadURL(ingestURL string) (string, error) {
 }
 
 // Seal turns one acked upload batch into a checkpoint: leaves are the batch's
-// event_ids in spool order (= the order the tree is built in, mirrored by
-// controld's EffectsFromBatch).
+// non-checkpoint event_ids in spool order (= the order the tree is built in,
+// mirrored by controld's EffectsFromBatch). A ReceiptCheckpoint is never a
+// leaf — uplink's batchLeaves drops them, the rule controld enforces
+// (sidefx.go Apply) — so a batch of only checkpoints arrives here as no leaves
+// and seals nothing, which is what ends the checkpoint-of-a-checkpoint chain.
 //
 // The checkpoint is admitted session-lessly. `checkpoint_seq` is per-DEVICE and
 // controld's CheckpointEvent has no session field, so there is no session this
@@ -166,7 +168,7 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 	// Leaves a previous seal could not place come first: they are older, so this
 	// keeps first_event_id/last_event_id a true range over the combined tree.
 	leaves = append(s.pending, leaves...)
-	if len(leaves) == 0 || s.allMine(leaves) {
+	if len(leaves) == 0 {
 		return
 	}
 	root, err := identity.MerkleRoot(leaves)
@@ -182,6 +184,22 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 	if err != nil {
 		s.retain(leaves, err)
 		return
+	}
+	if head.checkpointSeq < s.last.checkpointSeq {
+		// The head race: controld applies a batch's checkpoint POST-ack, on a
+		// per-device queue (sidefx.Enqueue/Apply), so the head read right after
+		// the ack may predate the checkpoint that rode in that very batch — or
+		// one still in the spool behind this seal. Chaining to the stale row
+		// would re-mint its checkpoint_seq and be refused broken_link once the
+		// earlier one lands (store.go AppendCheckpoint). The edge knows exactly
+		// what that checkpoint leaves as the head — it signed it — so chain to
+		// that. Correct iff it lands before this one, which spool order and the
+		// server's in-order queue give; if it is refused instead, no head the
+		// edge could pick makes this seal right (its leaves sit behind the
+		// refused set, see retain's STILL OPEN). A head at or past `last` is the
+		// server's newer truth (our checkpoint applied, or another device's
+		// seal outran it) and wins as before.
+		head = s.last
 	}
 	// One instant, used twice: the payload's issued_at string and the envelope's
 	// occurred_at. The server rebuilds the string from the envelope with its own
@@ -229,7 +247,7 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 		return
 	}
 	s.pending = nil
-	s.mine[[16]byte(ev.GetEventId())] = struct{}{}
+	s.last = chainHead{seq: cp.Seq, hash: signed.ReceiptHash, checkpointSeq: cp.CheckpointSeq}
 	s.log.Info("receipt: batch sealed",
 		"checkpoint_seq", cp.CheckpointSeq, "seq", cp.Seq, "leaves", len(leaves),
 		"merkle_root", hex.EncodeToString(root[:]))
@@ -269,29 +287,6 @@ func (s *Sealer) orphaned(leaves [][]byte, err error) {
 		"leaves", len(leaves), "err", err)
 }
 
-// allMine reports whether a batch is made up ENTIRELY of checkpoints this
-// process emitted — the termination rule. A checkpoint is admitted as an event,
-// so it rides the next batch; sealing that batch would emit another checkpoint,
-// forever. A checkpoint's attestation is its own chain row and needs no Merkle
-// inclusion, so a batch with nothing else in it is already fully attested and
-// gets no new seal. A batch with even one other event still seals, and covers
-// the checkpoints riding beside it.
-//
-// A restart empties the set, so the first batch of pre-restart checkpoints
-// seals ONE extra checkpoint; the batch after that is all-ours again and the
-// loop closes. Bounded by construction — no persistent state needed.
-func (s *Sealer) allMine(leaves [][]byte) bool {
-	for _, l := range leaves {
-		if len(l) != identity.LeafSize {
-			return false
-		}
-		if _, ok := s.mine[[16]byte(l)]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
 // chainHead is the tenant's chain position as 08 §3.4 reports it.
 type chainHead struct {
 	seq           int64
@@ -304,6 +299,8 @@ type chainHead struct {
 // receipt kinds, so a cached head is stale the moment anything else in the
 // tenant writes a receipt, and a stale head signs the wrong counter (refused
 // broken_link, store.go:201). The honest cost is one extra GET per checkpoint.
+// The one thing the fetch can lag is this device's own just-acked checkpoint,
+// which Seal reconciles against `last`.
 func (s *Sealer) head(ctx context.Context) (chainHead, error) {
 	tok, err := s.token(ctx)
 	if err != nil {

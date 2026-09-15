@@ -116,6 +116,12 @@ func (e *Env) CoveragePath() string {
 }
 func (e *Env) ConsentPath() string    { return filepath.Join(e.StateDir, "consent.jsonl") }
 func (e *Env) AnchorsCatalog() string { return filepath.Join(e.StateDir, "anchors", "catalog.json") }
+func (e *Env) AnchorsCandidates() string {
+	return filepath.Join(e.StateDir, "anchors", "candidates.json")
+}
+func (e *Env) AnchorsApprovals() string {
+	return filepath.Join(e.StateDir, "anchors", "approvals.jsonl")
+}
 func (e *Env) ProvisionedDir() string { return filepath.Join(e.StateDir, "provisioned") }
 func (e *Env) BundleMetaPath() string { return filepath.Join(e.StateDir, "bundle", "meta.json") }
 func (e *Env) SpoolDir() string       { return filepath.Join(e.StateDir, "spool") }
@@ -396,6 +402,80 @@ type Consent struct {
 // AppendConsent journals one Consent (see the type for what and why).
 func (e *Env) AppendConsent(c Consent) error {
 	return appendJSONL(e.ConsentPath(), c)
+}
+
+// AnchorCandidates is <state>/anchors/candidates.json: mark1d's answer to
+// "what could run here, under exactly which effective-execution hash, and has
+// the user consented to it" (go/mark1d/internal/anchors/candidates.go defines
+// it; the shape is copied here because that package is module-private). The
+// CLI cannot derive a catalog — derivation execs the tool inside the daemon's
+// sandbox — so this file is the only thing `mark1 enable` may offer consent
+// to, and consent names the exec_hash printed here, never the ID alone.
+type AnchorCandidates struct {
+	Version    int                   `json:"version"`
+	Workspaces []WorkspaceCandidates `json:"workspaces"`
+}
+
+type WorkspaceCandidates struct {
+	Path    string            `json:"path"`
+	Anchors []AnchorCandidate `json:"anchors"`
+}
+
+// AnchorCandidate is one derived entry in the consent store's own field names
+// (consent.go's ConsentRecord) plus the store's answer.
+type AnchorCandidate struct {
+	ID          string    `json:"id"`
+	Tool        string    `json:"tool"`
+	Argv        []string  `json:"argv"`
+	BinaryPath  string    `json:"binary_path"`
+	BinaryHash  string    `json:"binary_hash"`
+	ToolVersion string    `json:"tool_version"`
+	Class       string    `json:"class"`
+	SideEffect  string    `json:"side_effect"`
+	ExecHash    string    `json:"exec_hash"`
+	ConsentedAt time.Time `json:"consented_at"`
+	Consented   bool      `json:"consented"`
+}
+
+// ErrNoCandidates: the daemon has never published. Distinct from an empty
+// list on purpose — "nothing to consent to" and "nobody has looked yet" must
+// never render the same.
+var ErrNoCandidates = errors.New("mark1d has not published anchor candidates (anchors/candidates.json absent — is mark1d running?)")
+
+func (e *Env) LoadAnchorCandidates() (*AnchorCandidates, error) {
+	data, err := os.ReadFile(e.AnchorsCandidates())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNoCandidates
+	}
+	if err != nil {
+		return nil, err
+	}
+	var c AnchorCandidates
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("%s is corrupt: %w", e.AnchorsCandidates(), err)
+	}
+	if c.Version != 1 {
+		return nil, fmt.Errorf("%s has unsupported version %d", e.AnchorsCandidates(), c.Version)
+	}
+	return &c, nil
+}
+
+// AnchorApproval is one line of <state>/anchors/approvals.jsonl — the daemon's
+// anchors.Approval, copied. Append-only, 0600: who consented, for which
+// workspace, to which anchor under exactly which exec_hash. mark1d applies a
+// line only while that (id, exec_hash) is a current candidate, so a line
+// naming a hash that no longer derives is refused there, never approved.
+type AnchorApproval struct {
+	TS        string `json:"ts"`
+	User      string `json:"user,omitempty"`
+	UID       string `json:"uid,omitempty"`
+	Workspace string `json:"workspace"`
+	ID        string `json:"id"`
+	ExecHash  string `json:"exec_hash"`
+}
+
+func (e *Env) AppendAnchorApproval(a AnchorApproval) error {
+	return appendJSONL(e.AnchorsApprovals(), a)
 }
 
 // appendJSONL is the one append-only journal writer under the state dir:

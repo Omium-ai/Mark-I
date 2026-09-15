@@ -79,4 +79,14 @@ var (
 		Name: "controld_ingest_schema_registry_fallbacks_total",
 		Help: "Registry reads that failed and were served from the compiled-in window — fail-static, capture continues (08 §9)",
 	})
+
+	// Distinct from chproj's queue_dropped_total, whose help text says
+	// "recovered only by replay" — true for a landed batch's rows and FALSE
+	// for these: an M1E-8003 batch never landed and the quarantine prefix is
+	// never auto-replayed, so a security row dropped here is gone. Counted
+	// under its own name so the loss is priced, never silent (11 §10.1).
+	securityEventsDropped = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "controld_ingest_security_events_dropped_total",
+		Help: "Security-event rows (M1E-8003 / M1E-7002) dropped on projector queue overflow — NO replay path; any nonzero value pages (05 §2.1 stage 3; 11 §10.1)",
+	}, []string{"code"})
 )

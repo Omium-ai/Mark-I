@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,30 +33,72 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 )
 
+// fakeVerifierEnvVar switches TestMain into fake-verifier mode: the fixture
+// used to be a `#!/bin/sh` script named "fake-verifier" with no extension,
+// which Windows cannot exec (no shebang, no .exe). This test binary re-exec's
+// itself as MARK1_VERIFIER instead, which is exec'able on every OS. Same
+// shape as go/mark1d/internal/supervise/proxy_test.go's "port-then-crash"
+// child mode.
+const fakeVerifierEnvVar = "MARK1_TEST_FAKE_VERIFIER"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(fakeVerifierEnvVar) == "1" {
+		os.Exit(runFakeVerifier())
+	}
+	os.Exit(m.Run())
+}
+
+// runFakeVerifier mirrors the old shell script: it copies the --chain and
+// --keys inputs (read off argv exactly as verifyreceipts.Run built them)
+// into the dir named by MARK1_TEST_FAKE_VERIFIER_DIR, prints a verdict, and
+// returns MARK1_TEST_FAKE_VERIFIER_EXIT as the exit code.
+func runFakeVerifier() int {
+	// os.Args = [self, "verify", "--chain", <path>, "--keys", <path>, ...]
+	if len(os.Args) < 6 || os.Args[1] != "verify" {
+		return 2
+	}
+	dir := os.Getenv(fakeVerifierEnvVar + "_DIR")
+	chain, err := os.ReadFile(os.Args[3])
+	if err != nil {
+		return 9
+	}
+	if err := os.WriteFile(filepath.Join(dir, "got-chain.jsonl"), chain, 0o600); err != nil {
+		return 9
+	}
+	keys, err := os.ReadFile(os.Args[5])
+	if err != nil {
+		return 9
+	}
+	if err := os.WriteFile(filepath.Join(dir, "got-keys.json"), keys, 0o600); err != nil {
+		return 9
+	}
+	exitCode, err := strconv.Atoi(os.Getenv(fakeVerifierEnvVar + "_EXIT"))
+	if err != nil {
+		return 9
+	}
+	fmt.Printf("{\"ok\":%v,\"checked\":{\"receipts\":1},\"defects\":[]}\n", exitCode == 0)
+	return exitCode
+}
+
 func testEnv(t *testing.T, server string) (*cli.Env, *bytes.Buffer) {
 	t.Helper()
 	out := &bytes.Buffer{}
 	return &cli.Env{StateDir: t.TempDir(), Server: server, JSON: true, Stdout: out, Stderr: os.Stderr}, out
 }
 
-// fakeVerifier writes a shell stand-in for mark1-verifier that copies its
-// --chain and --keys inputs into dir (so tests can inspect what the CLI
-// built) and exits with the given code.
+// fakeVerifier arranges for this test binary — re-exec'd as MARK1_VERIFIER —
+// to copy its --chain and --keys inputs into dir (so tests can inspect what
+// the CLI built) and exit with the given code. See runFakeVerifier.
 func fakeVerifier(t *testing.T, dir string, exitCode int) string {
 	t.Helper()
-	script := fmt.Sprintf(`#!/bin/sh
-# $1=verify $2=--chain $3=<path> $4=--keys $5=<path> [--json...]
-[ "$1" = "verify" ] || exit 2
-cp "$3" %q/got-chain.jsonl
-cp "$5" %q/got-keys.json
-echo '{"ok":%v,"checked":{"receipts":1},"defects":[]}'
-exit %d
-`, dir, dir, exitCode == 0, exitCode)
-	path := filepath.Join(dir, "fake-verifier")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+	self, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	return path
+	t.Setenv(fakeVerifierEnvVar, "1")
+	t.Setenv(fakeVerifierEnvVar+"_DIR", dir)
+	t.Setenv(fakeVerifierEnvVar+"_EXIT", strconv.Itoa(exitCode))
+	return self
 }
 
 func TestVerifierMissingIsRuntimeFailure(t *testing.T) {
@@ -327,7 +370,11 @@ func realVerifier(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin := filepath.Join(root, "target", "debug", "mark1-verifier")
+	binName := "mark1-verifier"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	bin := filepath.Join(root, "target", "debug", binName)
 	if _, err := os.Stat(bin); err == nil {
 		return bin
 	}

@@ -237,6 +237,18 @@ func New(cfg Config) (*Client, error) {
 // Matrices is the boot value for verdict.NewEngine. Call it before Run.
 func (c *Client) Matrices() verdict.BundleMatrices { return c.boot }
 
+// Cortex is the applied bundle's cortex section under the same freshness
+// posture as Matrices: no bundle, or one past max_age, is the zero section,
+// which cortex.BudgetFrom maps to the compiled default. Read once at boot
+// before Run, so it needs no lock -- the daemon does not respawn cortexd on
+// a bundle change (NFR-FOOTPRINT-003 residual: budget applies at next boot).
+func (c *Client) Cortex() policy.CortexSection {
+	if c.lkg == nil || !c.lkg.b.IsFresh(c.epoch()) {
+		return policy.CortexSection{}
+	}
+	return c.lkg.b.Cortex
+}
+
 // Run drives the state machine until ctx is done. It returns only on
 // cancellation; every failure inside is logged and retried, never fatal.
 func (c *Client) Run(ctx context.Context) {

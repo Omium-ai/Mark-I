@@ -10,7 +10,9 @@
 package scanner
 
 import (
+	"fmt"
 	"regexp"
+	"sort"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -48,10 +50,47 @@ var rules = []rule{
 	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)},
 }
 
-// ScanBatch walks every string field of every event (05 §2.1 stage 7),
+// Ruleset is one versioned edition of the stage-7 rules. The version is the
+// seam a ruleset bump is visible through: a batch that landed clean under one
+// edition and is flagged under a later one is exactly the case ingest.Rescan
+// exists for, and the log line there names which edition judged it.
+type Ruleset struct {
+	Version string
+	rules   []rule
+}
+
+// Default is the compiled-in edition the live pipeline runs (ingest.Deps.
+// Scanner nil ⇒ this). Bump the version with the rules: it is the only
+// record of which edition a batch was scanned under.
+var Default = &Ruleset{Version: "v1", rules: rules}
+
+// Compile builds an edition from class → RE2 pattern (tests and a future
+// operator-supplied ruleset). Classes are sorted so scan order — and so the
+// order hits come back in — is a function of the rules, not of map iteration.
+func Compile(version string, patterns map[string]string) (*Ruleset, error) {
+	classes := make([]string, 0, len(patterns))
+	for c := range patterns {
+		classes = append(classes, c)
+	}
+	sort.Strings(classes)
+	rs := &Ruleset{Version: version, rules: make([]rule, 0, len(classes))}
+	for _, c := range classes {
+		re, err := regexp.Compile(patterns[c])
+		if err != nil {
+			return nil, fmt.Errorf("scanner: ruleset %s class %s: %w", version, c, err)
+		}
+		rs.rules = append(rs.rules, rule{class: c, re: re})
+	}
+	return rs, nil
+}
+
+// ScanBatch scans under the compiled-in Default edition.
+func ScanBatch(b *m1pv1.Batch) []Hit { return Default.Scan(b) }
+
+// Scan walks every string field of every event (05 §2.1 stage 7),
 // recursively through nested messages, via protoreflect — so a new event
 // family is scanned the day it exists, with no per-family plumbing to forget.
-func ScanBatch(b *m1pv1.Batch) []Hit {
+func (rs *Ruleset) Scan(b *m1pv1.Batch) []Hit {
 	var hits []Hit
 	for _, ev := range b.GetEvents() {
 		eventID, err := uuid.FromBytes(ev.GetEventId())
@@ -60,7 +99,7 @@ func ScanBatch(b *m1pv1.Batch) []Hit {
 			// belt-and-suspenders: a hit with no id still flags the batch.
 			eventID = uuid.Nil
 		}
-		for _, class := range scanMessage(ev.ProtoReflect()) {
+		for _, class := range rs.scanMessage(ev.ProtoReflect()) {
 			hits = append(hits, Hit{EventID: eventID, Class: class})
 		}
 	}
@@ -68,46 +107,46 @@ func ScanBatch(b *m1pv1.Batch) []Hit {
 }
 
 // scanMessage returns the classes hit anywhere in m's string fields.
-func scanMessage(m protoreflect.Message) []string {
+func (rs *Ruleset) scanMessage(m protoreflect.Message) []string {
 	var classes []string
 	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
 		switch {
 		case fd.IsList():
 			list := v.List()
 			for i := 0; i < list.Len(); i++ {
-				classes = append(classes, scanValue(fd, list.Get(i))...)
+				classes = append(classes, rs.scanValue(fd, list.Get(i))...)
 			}
 		case fd.IsMap():
 			mv := v.Map()
 			mv.Range(func(_ protoreflect.MapKey, mval protoreflect.Value) bool {
-				classes = append(classes, scanValue(fd.MapValue(), mval)...)
+				classes = append(classes, rs.scanValue(fd.MapValue(), mval)...)
 				return true
 			})
 		default:
-			classes = append(classes, scanValue(fd, v)...)
+			classes = append(classes, rs.scanValue(fd, v)...)
 		}
 		return true
 	})
 	return classes
 }
 
-func scanValue(fd protoreflect.FieldDescriptor, v protoreflect.Value) []string {
+func (rs *Ruleset) scanValue(fd protoreflect.FieldDescriptor, v protoreflect.Value) []string {
 	switch fd.Kind() {
 	case protoreflect.StringKind:
-		return scanString(v.String())
+		return rs.scanString(v.String())
 	case protoreflect.MessageKind, protoreflect.GroupKind:
-		return scanMessage(v.Message())
+		return rs.scanMessage(v.Message())
 	default:
 		return nil
 	}
 }
 
-func scanString(s string) []string {
+func (rs *Ruleset) scanString(s string) []string {
 	if s == "" {
 		return nil
 	}
 	var classes []string
-	for _, r := range rules {
+	for _, r := range rs.rules {
 		if r.re.MatchString(s) {
 			classes = append(classes, r.class)
 		}

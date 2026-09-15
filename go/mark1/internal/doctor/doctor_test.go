@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,9 @@ func TestDoctorAllGreen(t *testing.T) {
 }
 
 func TestDoctorFailsOnLooseStateDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits do not exist here; owner-only on Windows is an ACL, which nothing in the daemon sets yet — NFR-SECURITY-007 residual")
+	}
 	env, out := enrolledEnv(t)
 	if err := os.Chmod(env.StateDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -570,5 +574,111 @@ func TestDoctorFixLeavesAHealthyFragmentAlone(t *testing.T) {
 	after, _ := os.ReadFile(target)
 	if !bytes.Equal(before, after) {
 		t.Fatalf("--fix changed a healthy file:\n--- before\n%s\n--- after\n%s", before, after)
+	}
+}
+
+func healthRow(t *testing.T, rep Report, name string) Check {
+	t.Helper()
+	for _, c := range rep.Health {
+		if c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("no %q check among %+v", name, rep.Health)
+	return Check{}
+}
+
+// TestDoctorListsCandidatesWithState is FR-CLI-004's "anchor catalog matches
+// consent store" clause: doctor joins mark1d's candidates.json against
+// catalog.json and states every row — consented, pending (never consented),
+// drifted (consented under another exec_hash) and stale (consented, no longer
+// derivable). An absent candidates file is named as "not published", never
+// rendered as an empty list.
+func TestDoctorListsCandidatesWithState(t *testing.T) {
+	env, out := enrolledEnv(t)
+	if err := os.MkdirAll(filepath.Dir(env.AnchorsCatalog()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Store: tsc consented under 2222 (matches), ruff under 9999 (drifted),
+	// black under 3333 (no longer derivable anywhere: stale).
+	const store = `{"version":1,"entries":[
+{"id":"black@cat-1","tool":"black","argv":["x"],"binary_path":"/b","binary_hash":"c","tool_version":"1","class":"fast","side_effect":"static","exec_hash":"3333","consented_at":"2026-01-03T00:00:00Z"},
+{"id":"ruff@cat-1","tool":"ruff","argv":["x"],"binary_path":"/r","binary_hash":"a","tool_version":"0.5","class":"fast","side_effect":"static","exec_hash":"9999","consented_at":"2026-01-01T00:00:00Z"},
+{"id":"tsc@cat-1","tool":"tsc","argv":["x"],"binary_path":"/t","binary_hash":"b","tool_version":"5.5","class":"fast","side_effect":"static","exec_hash":"2222","consented_at":"2026-01-02T03:04:05Z"}
+]}`
+	if err := os.WriteFile(env.AnchorsCatalog(), []byte(store), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := runDoctor(t, env, out, Options{})
+	if err != nil {
+		t.Fatalf("doctor failed with the store alone: %v\n%+v", err, rep)
+	}
+	if c := healthRow(t, rep, "anchor_candidates"); !c.OK || !strings.Contains(c.Detail, "not published") {
+		t.Fatalf("anchor_candidates %+v, want OK with 'not published'", c)
+	}
+	if len(rep.Anchors) != 3 {
+		t.Fatalf("store-only rows %+v, want the 3 consented entries", rep.Anchors)
+	}
+	var buf bytes.Buffer
+	renderHuman(&buf, &rep)
+	if !strings.Contains(buf.String(), "not published") {
+		t.Fatalf("human render must say the daemon has not published:\n%s", buf.String())
+	}
+
+	// Now the daemon's candidates: ruff derives under 1111 (drift), tsc under
+	// 2222 (consented), eslint under 4444 (pending); black derives nowhere.
+	const cands = `{"version":1,"workspaces":[{"path":"/ws","anchors":[
+{"id":"eslint@cat-1","tool":"eslint","argv":["x"],"binary_path":"/e","binary_hash":"d","tool_version":"9","class":"fast","side_effect":"static","exec_hash":"4444","consented_at":"0001-01-01T00:00:00Z","consented":false},
+{"id":"ruff@cat-1","tool":"ruff","argv":["x"],"binary_path":"/r","binary_hash":"a2","tool_version":"0.6","class":"fast","side_effect":"static","exec_hash":"1111","consented_at":"0001-01-01T00:00:00Z","consented":false},
+{"id":"tsc@cat-1","tool":"tsc","argv":["x"],"binary_path":"/t","binary_hash":"b","tool_version":"5.5","class":"fast","side_effect":"static","exec_hash":"2222","consented_at":"2026-01-02T03:04:05Z","consented":true}
+]}]}`
+	if err := os.WriteFile(env.AnchorsCandidates(), []byte(cands), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep, err = runDoctor(t, env, out, Options{})
+	if err != nil {
+		t.Fatalf("doctor failed: %v\n%+v", err, rep)
+	}
+	want := map[string]struct {
+		consented bool
+		state     string
+	}{
+		"eslint@cat-1": {false, "pending"},
+		"ruff@cat-1":   {false, "drifted"},
+		"tsc@cat-1":    {true, ""},
+		"black@cat-1":  {true, "stale"},
+	}
+	if len(rep.Anchors) != len(want) {
+		t.Fatalf("rows %+v, want %d", rep.Anchors, len(want))
+	}
+	for id, w := range want {
+		row := anchorRow(t, rep, id)
+		if row.Consented != w.consented || row.State != w.state {
+			t.Fatalf("%s: %+v, want consented=%v state=%q", id, row, w.consented, w.state)
+		}
+	}
+	if r := anchorRow(t, rep, "tsc@cat-1"); r.Workspace != "/ws" || r.ConsentedAt.IsZero() {
+		t.Fatalf("consented row %+v must carry its workspace and timestamp", r)
+	}
+	if c := healthRow(t, rep, "anchor_candidates"); !c.OK || !strings.Contains(c.Detail, "1 workspace") {
+		t.Fatalf("anchor_candidates %+v", c)
+	}
+
+	// Published, but no workspace enabled: still not an empty-list silence.
+	if err := os.WriteFile(env.AnchorsCandidates(), []byte(`{"version":1,"workspaces":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(env.AnchorsCatalog()); err != nil {
+		t.Fatal(err)
+	}
+	rep, err = runDoctor(t, env, out, Options{})
+	if err != nil {
+		t.Fatalf("doctor failed: %v\n%+v", err, rep)
+	}
+	buf.Reset()
+	renderHuman(&buf, &rep)
+	if !strings.Contains(buf.String(), "no workspace enabled") {
+		t.Fatalf("human render:\n%s", buf.String())
 	}
 }

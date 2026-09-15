@@ -2,8 +2,10 @@ package anchors
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
@@ -43,19 +45,34 @@ type taskVotes struct {
 	latest  map[string]verdict.AnchorVote
 	voted   map[string]bool // anchors that have already voted at this attempt
 	attempt int
+	// evidence is the typed EvidenceRecord riding on each anchor's newest
+	// vote, kept beside the vote because the fusion tee strips it and the
+	// verdict cache never held it -- FR-VERIFY-011's evidence_ref has no
+	// other source (fabric.Gate.Evidence reads it on BLOCK only).
+	evidence map[string]*m1pv1.EvidenceRecord
 }
 
 // NewVotes wires the tee. entries is the Enabled catalog (Reconcile's output) —
 // the only place the fast/slow class of an anchor id is known by the time its
 // vote arrives as an Event.
 func NewVotes(out Emitter, eng *verdict.Engine, entries []CatalogEntry) *Votes {
+	v := &Votes{out: out, eng: eng, tasks: map[verdict.TaskID]*taskVotes{}}
+	v.SetCatalog(entries)
+	return v
+}
+
+// SetCatalog swaps the class map live, for the same reason Scheduler.SetCatalog
+// exists: a slow anchor consented mid-session must land on PublishRevised.
+func (v *Votes) SetCatalog(entries []CatalogEntry) {
 	slow := map[string]bool{}
 	for _, e := range entries {
 		if e.Class == ClassSlow {
 			slow[e.ID] = true
 		}
 	}
-	return &Votes{out: out, eng: eng, slow: slow, tasks: map[verdict.TaskID]*taskVotes{}}
+	v.mu.Lock()
+	v.slow = slow
+	v.mu.Unlock()
 }
 
 // Admit passes every event through to capture and, for AnchorVote bodies,
@@ -73,14 +90,14 @@ func (v *Votes) Admit(ctx context.Context, ev *m1pv1.Event) error {
 	if !ok {
 		return err
 	}
-	votes, attempt := v.record(task, verdict.AnchorVote{
+	votes, attempt, slow := v.record(task, verdict.AnchorVote{
 		AnchorID: av.GetAnchorId(),
 		Vote:     av.GetVote(),
 		// The anti-tamper envelope decides admissibility, not the vote value:
 		// a tampered vote never enters the likelihood (Thm 5.2).
 		Tamper: av.GetIntegrity().GetTamper(),
-	})
-	if v.slow[av.GetAnchorId()] {
+	}, av.GetEvidence())
+	if slow {
 		v.eng.PublishRevised(task, votes, attempt)
 		return err
 	}
@@ -124,12 +141,12 @@ func (v *Votes) resolve(ev *m1pv1.Event) (verdict.TaskID, bool) {
 // evidence for the attempt it was scheduled in, so it never bumps n on its own.
 // ponytail: per-task state is never evicted — task close (04 §9.2) is the
 // eviction trigger and the daemon does not segment tasks yet.
-func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote) ([]verdict.AnchorVote, int) {
+func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote, ev *m1pv1.EvidenceRecord) ([]verdict.AnchorVote, int, bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	tv := v.tasks[task]
 	if tv == nil {
-		tv = &taskVotes{latest: map[string]verdict.AnchorVote{}, voted: map[string]bool{}, attempt: 1}
+		tv = &taskVotes{latest: map[string]verdict.AnchorVote{}, voted: map[string]bool{}, attempt: 1, evidence: map[string]*m1pv1.EvidenceRecord{}}
 		v.tasks[task] = tv
 	}
 	if tv.voted[vote.AnchorID] {
@@ -138,9 +155,36 @@ func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote) ([]verdict.
 	}
 	tv.voted[vote.AnchorID] = true
 	tv.latest[vote.AnchorID] = vote
+	tv.evidence[vote.AnchorID] = ev
 	out := make([]verdict.AnchorVote, 0, len(tv.latest))
 	for _, id := range slices.Sorted(maps.Keys(tv.latest)) {
 		out = append(out, tv.latest[id])
 	}
-	return out, tv.attempt
+	return out, tv.attempt, v.slow[vote.AnchorID]
+}
+
+// Evidence renders the failing evidence behind a task's current verdict for
+// GateVerdict.evidence_ref (FR-VERIFY-011): every VIOLATED, untampered vote's
+// typed record as "<tool>:<code> errors=N warnings=M files=F", anchor-id
+// order, "; "-joined. Typed fields only -- no path, no excerpt (CON-004).
+// Empty when nothing violated, which the gate renders as no suffix.
+func (v *Votes) Evidence(task verdict.TaskID) string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	tv := v.tasks[task]
+	if tv == nil {
+		return ""
+	}
+	var parts []string
+	for _, id := range slices.Sorted(maps.Keys(tv.latest)) {
+		vote := tv.latest[id]
+		e := tv.evidence[id]
+		if vote.Tamper || vote.Vote != m1pv1.Verdict_VERDICT_VIOLATED || e == nil {
+			continue
+		}
+		c := e.GetCounts()
+		parts = append(parts, fmt.Sprintf("%s:%s errors=%d warnings=%d files=%d",
+			e.GetTool(), e.GetDiagnosticCode(), c.GetErrors(), c.GetWarnings(), c.GetFilesAffected()))
+	}
+	return strings.Join(parts, "; ")
 }

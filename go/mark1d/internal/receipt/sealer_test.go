@@ -215,37 +215,91 @@ func TestSealVerifiesAsControldWould(t *testing.T) {
 	}
 }
 
-// TestSealTerminates pins the loop-breaker in BOTH directions: a batch that is
-// nothing but our own checkpoints seals nothing, and a batch that merely
-// CONTAINS one still seals. A one-directional test would pass on a sealer that
-// had simply stopped working.
+// TestSealTerminates: the checkpoint-of-a-checkpoint loop ends at the leaf
+// rule, not here — a ReceiptCheckpoint is never a leaf (uplink batchLeaves;
+// controld sidefx.go Apply), so a batch of only checkpoints reaches the sealer
+// as no leaves at all. Nothing over nothing: no seal, and no head GET either.
 func TestSealTerminates(t *testing.T) {
 	h := newHarness(t, nil)
+	h.sealer.Seal(context.Background(), nil)
+	if got := len(h.checkpoints(t)); got != 0 {
+		t.Fatalf("an empty batch sealed %d checkpoints — the chain does not terminate", got)
+	}
+	if h.heads != 0 {
+		t.Errorf("chain head fetched %d times for an empty batch, want 0", h.heads)
+	}
+}
+
+// TestSealerDoesNotReMintACheckpointSeqAfterAStaleHead: controld appends the
+// checkpoint riding in a batch AFTER acking it (sidefx worker), so the head
+// read for the next seal can still show the counter BEFORE the checkpoint this
+// process just minted. Re-minting that counter is refused broken_link once the
+// earlier one lands (store.go AppendCheckpoint) — and its leaves are then
+// outside the chain for good. The sealer must chain to the checkpoint it last
+// sent: seq+1, checkpoint_seq+1, prev_receipt_hash = THAT checkpoint's receipt
+// hash, exactly the head controld will hold when it verifies this one.
+func TestSealerDoesNotReMintACheckpointSeqAfterAStaleHead(t *testing.T) {
+	// The fake head is frozen at (headSeq, headHash, headCkpt): every GET after
+	// the first is stale by construction.
+	h := newHarness(t, nil)
 	ctx := context.Background()
-	h.sealer.Seal(ctx, [][]byte{leaf(1), leaf(2)})
+
+	h.sealer.Seal(ctx, [][]byte{leaf(1)})
+	h.sealer.Seal(ctx, [][]byte{leaf(2)})
 	cps := h.checkpoints(t)
-	if len(cps) != 1 {
-		t.Fatalf("first seal produced %d checkpoints, want 1", len(cps))
-	}
-	own := cps[0].GetEventId()
-
-	// The checkpoint rides the next batch alone: sealing it would emit another
-	// checkpoint, forever.
-	h.sealer.Seal(ctx, [][]byte{own})
-	if got := len(h.checkpoints(t)); got != 1 {
-		t.Fatalf("a batch of only our own checkpoints sealed again (%d total) — the chain does not terminate", got)
-	}
-
-	// One live event beside it and the batch seals again, covering both.
-	h.sealer.Seal(ctx, [][]byte{own, leaf(3)})
-	cps = h.checkpoints(t)
 	if len(cps) != 2 {
-		t.Fatalf("a mixed batch produced %d checkpoints total, want 2", len(cps))
+		t.Fatalf("sealed %d checkpoints, want 2", len(cps))
 	}
-	if got := cps[1].GetReceiptCheckpoint().GetCheckpointSeq(); got != uint64(headCkpt+1) {
-		// The fake head never advances, so both seals claim the same counter —
-		// the point is only that the second seal HAPPENED.
-		t.Errorf("second checkpoint_seq %d, want %d", got, headCkpt+1)
+	if h.heads != 2 {
+		t.Fatalf("chain head fetched %d times, want 2 — the head is still read fresh every seal", h.heads)
+	}
+	first, second := cps[0].GetReceiptCheckpoint(), cps[1].GetReceiptCheckpoint()
+	if first.GetCheckpointSeq() != uint64(headCkpt+1) {
+		t.Fatalf("first checkpoint_seq %d, want %d", first.GetCheckpointSeq(), headCkpt+1)
+	}
+	if second.GetCheckpointSeq() != uint64(headCkpt+2) {
+		t.Fatalf("second checkpoint_seq %d, want %d — the stale head re-minted the counter (broken_link on the server)",
+			second.GetCheckpointSeq(), headCkpt+2)
+	}
+
+	// --- the server's reconstruction of the SECOND seal, after the first landed:
+	// head = (headSeq+1, receipt_hash(first), headCkpt+1). receipt_hash is
+	// sha256 over the signing input, prefix included (store.go, vectors README).
+	headHash, err := hex.DecodeString(headHashHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuild := func(ev *m1pv1.Event, seq int64, prev [32]byte) identity.Checkpoint {
+		cp := ev.GetReceiptCheckpoint()
+		var root [32]byte
+		copy(root[:], cp.GetMerkleRoot())
+		return identity.Checkpoint{
+			TenantID: testTenant, DeviceID: testDevice,
+			Seq: seq, PrevReceiptHash: prev,
+			IssuedAt:      ev.GetOccurredAt().AsTime().UTC().Truncate(time.Second).Format(time.RFC3339),
+			CheckpointSeq: int64(cp.GetCheckpointSeq()),
+			MerkleRoot:    root, LeafCount: int(cp.GetLeafCount()),
+		}
+	}
+	firstHash, err := identity.ReceiptHash(rebuild(cps[0], headSeq+1, [32]byte(headHash)).Payload(first.GetKeyId()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingInput, err := identity.CanonicalBytes(rebuild(cps[1], headSeq+2, firstHash).Payload(second.GetKeyId()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !identity.Verify(h.pub, second.GetOriginSignature(), signingInput) {
+		t.Fatal("second seal does not verify over (seq+1, receipt_hash(first), checkpoint_seq+1) — controld would refuse bad_signature")
+	}
+
+	// A head at or past our own is the server's newer truth (our checkpoint
+	// applied, or another device's seal outran it) and wins outright.
+	h.sealer.last = chainHead{seq: 1, checkpointSeq: headCkpt - 1}
+	h.sealer.Seal(ctx, [][]byte{leaf(3)})
+	cps = h.checkpoints(t)
+	if got := cps[2].GetReceiptCheckpoint().GetCheckpointSeq(); got != uint64(headCkpt+1) {
+		t.Errorf("third checkpoint_seq %d, want %d — a fresh head that is not stale must be followed", got, headCkpt+1)
 	}
 }
 

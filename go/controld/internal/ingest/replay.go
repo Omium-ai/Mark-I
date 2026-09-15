@@ -29,57 +29,126 @@ import (
 // prefix is replayed mechanically; a secret there would resurface forever).
 func Replay(ctx context.Context, store s3land.Store, ins chproj.Inserter, sfx *sidefx.Sidefx,
 	tenant querychoke.TenantID, from, to time.Time) (int, error) {
-	if tenant.IsZero() {
-		return 0, fmt.Errorf("ingest: replay requires a tenant")
-	}
 	tenantUUID := tenant.UUID()
 	replayed := 0
+	err := walkLanded(ctx, store, tenant, from, to, func(key string, compressed []byte, device uuid.UUID, batch *m1pv1.Batch, day time.Time) error {
+		// Quarantined AFTER landing (Rescan under a newer ruleset): the twin
+		// under the quarantine prefix is the marker. The ingest object is
+		// immutable and stays, but 05 §2.3's rule is that the quarantine
+		// prefix is never replayed — so neither is a batch that now lives
+		// there. Divergent counts too: anything quarantined under this
+		// batch_id disqualifies it, whatever bytes the twin holds.
+		batchID, _ := uuid.FromBytes(batch.GetBatchId())
+		if q, err := store.Probe(ctx, s3land.QuarantineKey(tenantUUID, batchID), compressed); err != nil {
+			return err
+		} else if q != s3land.NotLanded {
+			log.Printf("ingest: replay %s: skipped, quarantined after landing (05 §2.3)", key)
+			return nil
+		}
+		// The device stamp rides the landing object's metadata (the
+		// token that carried it is long gone); the landing key already
+		// proves the tenant.
+		// Stage 10 synchronously (replay is a batch job; the async pool
+		// is for the request path), stage 11 via the sidefx pool.
+		rows := chproj.RowsFromBatch(batch, tenantUUID, device, day)
+		if err := ins.InsertRows(ctx, chproj.Table, chproj.Columns, rows); err != nil {
+			return err
+		}
+		if sfx != nil && device != uuid.Nil {
+			// The full stage-11 effect set replays too: pending leaves and
+			// checkpoint seals re-derive from the landing objects — the
+			// recovery story the in-memory pending-leaf set depends on.
+			// BLOCKING enqueue: replay is the bulk path that fills the
+			// queues, and a dropped effect here has no later replay to
+			// recover it — backpressure, never drop (05 §2.5).
+			if err := sfx.EnqueueBlocking(ctx, tenant, device, day, sidefx.EffectsFromBatch(batch, day)); err != nil {
+				return err
+			}
+		}
+		replayed++
+		if replayed%100 == 0 {
+			log.Printf("ingest: replay progress: %d objects (tenant %s)", replayed, tenantUUID)
+		}
+		return nil
+	})
+	return replayed, err
+}
+
+// Rescan is the ruleset-bump half of 05 §2.3 that the request path cannot
+// reach: a batch that landed CLEAN under an older stage-7 edition and would
+// be flagged today is re-acked as Duplicate by the ingest-key probe ABOVE the
+// recorder on any re-POST (pipeline.go, deliberately — one landed batch,
+// one response, forever). So the module's CURRENT edition (the bumped one —
+// a ruleset bump is a new binary) is applied here, over the landing objects
+// themselves, the way Replay re-runs stages 5/10/11: stage 7 re-runs, and a
+// hit raises the same tenant alert the live path raises — through the same
+// recorder, which a Module cannot be built without — and lands the object
+// under the quarantine prefix, the marker Replay honours above. The ingest
+// object is left where it is: landing objects are immutable by contract
+// (05 §2.2), and the rows it already projected stay in the ledger — the alert
+// names the batch; un-projecting is triage's job, not a scan's.
+//
+// A worker entrypoint like Replay, not a route. Idempotent: the alert's
+// event_id derives from batch_id + M1E-7002 and the twin's Land is the
+// conditional PUT, so a second pass over the same day re-derives,
+// re-collapses and re-Duplicates instead of doubling anything.
+func (m *Module) Rescan(ctx context.Context, tenant querychoke.TenantID, from, to time.Time) (int, error) {
+	tenantUUID := tenant.UUID()
+	flagged := 0
+	err := walkLanded(ctx, m.store, tenant, from, to, func(key string, compressed []byte, device uuid.UUID, batch *m1pv1.Batch, _ time.Time) error {
+		hits := m.scanner.Scan(batch)
+		if len(hits) == 0 {
+			return nil
+		}
+		batchID, _ := uuid.FromBytes(batch.GetBatchId())
+		outcome, err := m.store.Land(ctx, s3land.QuarantineKey(tenantUUID, batchID), compressed, tenantUUID, device)
+		if err != nil {
+			return err
+		}
+		if outcome == s3land.Divergent {
+			return fmt.Errorf("quarantine twin holds different bytes for batch %s", batchID)
+		}
+		m.security.RecordQuarantine(tenantUUID, device, batchID, hitClasses(hits), m.now())
+		quarantinesTotal.Inc()
+		flagged++
+		log.Printf("ingest: rescan %s: flagged under ruleset %s, quarantined (05 §2.3)", key, m.scanner.Version)
+		return nil
+	})
+	return flagged, err
+}
+
+// walkLanded lists the ingest prefix for (tenant, date-range) and hands each
+// landing object to visit already through stage 5 (same bounds as live
+// ingest: an object that no longer decodes within bounds is a defect to
+// surface, not to skip silently). Errors carry the key.
+func walkLanded(ctx context.Context, store s3land.Store, tenant querychoke.TenantID, from, to time.Time,
+	visit func(key string, compressed []byte, device uuid.UUID, batch *m1pv1.Batch, day time.Time) error) error {
+	if tenant.IsZero() {
+		return fmt.Errorf("ingest: replay requires a tenant")
+	}
+	tenantUUID := tenant.UUID()
 	for day := from.UTC().Truncate(24 * time.Hour); !day.After(to.UTC()); day = day.Add(24 * time.Hour) {
 		keys, err := store.List(ctx, s3land.IngestPrefix(tenantUUID, day))
 		if err != nil {
-			return replayed, err
+			return err
 		}
 		for _, key := range keys {
 			compressed, device, err := store.Get(ctx, key)
 			if err != nil {
-				return replayed, err
+				return err
 			}
-			// Stage 5 re-run, same bounds as live ingest: a landing object
-			// that no longer decodes within bounds is a defect to surface,
-			// not to skip silently.
 			decoded, err := decodeZstdBounded(compressed)
 			if err != nil {
-				return replayed, fmt.Errorf("ingest: replay %s: %w", key, err)
+				return fmt.Errorf("ingest: replay %s: %w", key, err)
 			}
 			var batch m1pv1.Batch
 			if err := proto.Unmarshal(decoded, &batch); err != nil {
-				return replayed, fmt.Errorf("ingest: replay %s: %w", key, err)
+				return fmt.Errorf("ingest: replay %s: %w", key, err)
 			}
-			// The device stamp rides the landing object's metadata (the
-			// token that carried it is long gone); the landing key already
-			// proves the tenant.
-			// Stage 10 synchronously (replay is a batch job; the async pool
-			// is for the request path), stage 11 via the sidefx pool.
-			rows := chproj.RowsFromBatch(&batch, tenantUUID, device, day)
-			if err := ins.InsertRows(ctx, chproj.Table, chproj.Columns, rows); err != nil {
-				return replayed, fmt.Errorf("ingest: replay %s: %w", key, err)
-			}
-			if sfx != nil && device != uuid.Nil {
-				// The full stage-11 effect set replays too: pending leaves and
-				// checkpoint seals re-derive from the landing objects — the
-				// recovery story the in-memory pending-leaf set depends on.
-				// BLOCKING enqueue: replay is the bulk path that fills the
-				// queues, and a dropped effect here has no later replay to
-				// recover it — backpressure, never drop (05 §2.5).
-				if err := sfx.EnqueueBlocking(ctx, tenant, device, day, sidefx.EffectsFromBatch(&batch, day)); err != nil {
-					return replayed, fmt.Errorf("ingest: replay %s: %w", key, err)
-				}
-			}
-			replayed++
-			if replayed%100 == 0 {
-				log.Printf("ingest: replay progress: %d objects (tenant %s)", replayed, tenantUUID)
+			if err := visit(key, compressed, device, &batch, day); err != nil {
+				return fmt.Errorf("ingest: replay %s: %w", key, err)
 			}
 		}
 	}
-	return replayed, nil
+	return nil
 }

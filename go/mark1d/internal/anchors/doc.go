@@ -25,6 +25,12 @@
 //     that hash, which disables the entry until re-consented; `mark1 doctor`
 //     reads Doctor() to show the diff (04 §2.2 "Consent catalog lifecycle").
 //
+//     How consent arrives: mark1d publishes every derivable entry with its
+//     exec_hash to <state>/anchors/candidates.json; `mark1 enable` shows
+//     them at a terminal and appends each `y` to <state>/anchors/
+//     approvals.jsonl naming that exact hash; the daemon approves a line
+//     only while the (id, exec_hash) still derives (candidates.go).
+//
 //     Consent file format (documented here because the CLI reads it):
 //
 //     {

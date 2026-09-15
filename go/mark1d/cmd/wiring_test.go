@@ -317,9 +317,13 @@ func TestSpoolShedReachesTheWire(t *testing.T) {
 		t.Fatal("all 32 prompts were admitted under a 1 KiB cap — nothing shed, the test cannot observe the seam")
 	}
 
-	waitUpTo(t, 20*time.Second, "the spool shed to reach the wire", func() bool {
+	// Exactly 54: 27 TaskOpen + 27 Turn shed under the 1 KiB cap (64-byte
+	// segment header, 72-byte Turn records, 143–149-byte TaskOpen records;
+	// derived in conformance/vectors/coverage/README.md, which pins this
+	// quantity as case spool_shed_reaches_the_wire). A union across batches.
+	waitUpTo(t, 20*time.Second, "the spool shed (54 records) to reach the wire", func() bool {
 		return tap.dropped(m1pv1.DropReason_DROP_REASON_SPOOL_SHED,
-			m1pv1.DurabilityClass_DURABILITY_CLASS_DIAGNOSTIC) > 0
+			m1pv1.DurabilityClass_DURABILITY_CLASS_DIAGNOSTIC) == 54
 	})
 }
 

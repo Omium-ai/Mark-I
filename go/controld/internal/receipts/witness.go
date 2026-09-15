@@ -75,6 +75,7 @@ type WitnessJob struct {
 	tenants  TenantSource
 	interval time.Duration
 	now      func() time.Time
+	tick     <-chan time.Time // nil ⇒ Run owns a real time.Ticker at interval
 }
 
 // NewWitnessJob builds the hourly loop. interval <= 0 defaults to the
@@ -87,12 +88,25 @@ func NewWitnessJob(db DB, signer *Signer, pub Publisher, tenants TenantSource, i
 	return &WitnessJob{db: db, signer: signer, pub: pub, tenants: tenants, interval: interval, now: time.Now}
 }
 
+// Clock injects the job's time source and tick channel, so a test can drive
+// two "hours" through Run in milliseconds and watch the real publisher fire
+// twice — the cadence clause of FR-SPINE-019 observed as elapsed (fake) time
+// rather than interval arithmetic. Production never calls it: the real
+// ticker and time.Now are the defaults. Call before Run.
+func (j *WitnessJob) Clock(now func() time.Time, tick <-chan time.Time) {
+	j.now, j.tick = now, tick
+}
+
 // Run ticks until ctx ends. Singleton discipline rides inside RunOnce (the
 // per-tenant advisory xact lock + the freshness check), so extra replicas
 // running this loop skip work instead of double-publishing (05 §8.1).
 func (j *WitnessJob) Run(ctx context.Context) {
-	t := time.NewTicker(j.interval)
-	defer t.Stop()
+	tick := j.tick
+	if tick == nil {
+		t := time.NewTicker(j.interval)
+		defer t.Stop()
+		tick = t.C
+	}
 	for {
 		if err := j.RunOnce(ctx); err != nil {
 			log.Printf("receipts: witness tick failed: %v", err) // next tick catches up (05 §1.5)
@@ -100,7 +114,7 @@ func (j *WitnessJob) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-tick:
 		}
 	}
 }

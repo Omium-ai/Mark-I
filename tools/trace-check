@@ -196,8 +196,11 @@ def py_tests() -> frozenset[str]:
     # `conformance/tenancy` is the fourth because a universe is every test CI RUNS, not every
     # test one recipe runs: it is `just test-isolation`, a required PR check, and leaving it out
     # made the tenancy suite -- the whole 12 §4 negative story -- structurally uncitable.
+    # `conformance/e2e` is the fifth for the same reason: `just test-e2e` is in the ci chain
+    # and is the Phase-1 gate's own harness (mark1d -> controld -> ClickHouse -> verifier);
+    # the rows it proves are the ones the whole plan hangs on.
     for pkg in ("python/shared/mark1_receipts/tests", "python/adjudicator/tests",
-                "python/intel/tests", "conformance/tenancy"):
+                "python/intel/tests", "conformance/tenancy", "conformance/e2e"):
         out = _run([sys.executable, "-m", "pytest", "--collect-only", "-q",
                     pkg, "-o", "asyncio_mode=auto"], ROOT)
         for line in out.splitlines():

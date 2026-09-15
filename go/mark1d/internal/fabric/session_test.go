@@ -310,3 +310,44 @@ func TestVersionMismatchIsToldNotJustDropped(t *testing.T) {
 		t.Fatal("a rejected-version connection reached admission")
 	}
 }
+
+// TestSessionedCortexHelloIsAdmitted is D-AT/D-AV's other half: cortexd is
+// not exempt from the session rule, and it is not refused by NAME either. A
+// Hello from component "cortexd" carrying the session id the daemon published
+// for its workspace (internal/cortex, <state>/run/sessions/<ws>.json) is
+// accepted like any other writer's, and the CortexInjection it then pushes
+// reaches admission with that session on it. The refusal test above still
+// holds for the same writer without one.
+func TestSessionedCortexHelloIsAdmitted(t *testing.T) {
+	addr, got := startStub(t, nil)
+	c := dial(t, addr)
+	sid := bytes.Repeat([]byte{0xC0}, 16) // what the daemon published, not a synthetic id
+	frameFabric(t, c, &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Hello{
+		Hello: &m1pv1.Hello{Component: "cortexd", Pid: 7, Version: "0.1.0", SessionId: sid},
+	}})
+	ack := readFrame(t, c).GetHelloAck()
+	if ack == nil || !ack.GetAccepted() {
+		t.Fatalf("a sessioned cortexd Hello was not admitted: %+v", ack)
+	}
+	root := bytes.Repeat([]byte{9}, 32)
+	frameFabric(t, c, &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Event{Event: &m1pv1.Event{
+		SessionId: sid,
+		Body:      &m1pv1.Event_CortexInjection{CortexInjection: &m1pv1.CortexInjection{RootHash: root, IndexClock: 3}},
+	}}})
+	// Flush is the round-trip that proves the event was handed on: its ack
+	// counts events admitted since Hello.
+	frameFabric(t, c, &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Flush{Flush: &m1pv1.Flush{}}})
+	if d := readFrame(t, c).GetFlushAck().GetDrained(); d != 1 {
+		t.Fatalf("FlushAck drained %d, want the one CortexInjection", d)
+	}
+	if len(*got) != 1 {
+		t.Fatalf("%d payload(s) reached admission, want 1", len(*got))
+	}
+	ev := &m1pv1.Event{}
+	if err := proto.Unmarshal((*got)[0], ev); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(ev.GetSessionId(), sid) || !bytes.Equal(ev.GetCortexInjection().GetRootHash(), root) {
+		t.Fatalf("admitted event is not the sessioned root push: %v", ev)
+	}
+}

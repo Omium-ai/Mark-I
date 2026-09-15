@@ -22,7 +22,10 @@ use std::time::{Duration, Instant};
 use m1p_wire::pb;
 
 /// Endpoint per 07 §5 (R-2 side): `$XDG_RUNTIME_DIR/omium-mark1/m1p.sock`,
-/// fallback `~/.omium/mark1/m1p.sock`.
+/// fallback `~/.omium/mark1/m1p.sock`. Reached only from the `#[cfg(unix)]`
+/// connector, so it carries the same gate -- a dead fn is a `-D warnings`
+/// error on the Windows leg.
+#[cfg(unix)]
 fn endpoints() -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(2);
     if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR") {

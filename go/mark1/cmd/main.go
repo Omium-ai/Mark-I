@@ -29,6 +29,13 @@ import (
 // Injected at release via -ldflags "-X main.version=..." (13 §9).
 var version = "0.0.0-dev"
 
+// isTerminal: stdlib's answer, portable — a console on Windows is a char
+// device too. A pipe, a file or /dev/null is not, and gets no consent prompt.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
 func main() {
 	env := &cli.Env{Stdout: os.Stdout, Stderr: os.Stderr, Version: version}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -74,18 +81,21 @@ func main() {
 	enrollCmd.Flags().StringVar(&enrollOpts.Tenant, "tenant", "", "tenant slug (the tenant id from onboarding)")
 	enrollCmd.Flags().StringVar(&enrollOpts.Channel, "channel", "stable", "bundle channel: stable|canary")
 
+	var enableOpts enable.Options
 	enableCmd := &cobra.Command{
 		Use:   "enable <workspace-path>",
-		Short: "Add a workspace to the capture allow-list (08 §7.2)",
+		Short: "Add a workspace to the capture allow-list and consent to its anchors (08 §7.2)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return enable.Run(env, enable.Options{Path: args[0]})
+			enableOpts.Path = args[0]
+			// The consent prompt reads a terminal or nothing: piped stdin
+			// never consents (enable.Options.TTY).
+			enableOpts.Stdin, enableOpts.TTY = os.Stdin, isTerminal(os.Stdin)
+			return enable.Run(env, enableOpts)
 		},
 	}
-	// §7.2 flags accepted for contract stability; the anchor-consent walk is
-	// mark1d's anchors catalog row, so today both mean "no anchor prompts".
-	enableCmd.Flags().String("anchors", "", "consent non-interactively to exactly these catalog IDs")
-	enableCmd.Flags().Bool("no-anchors", false, "skip anchor consent prompts")
+	enableCmd.Flags().StringSliceVar(&enableOpts.Anchors, "anchors", nil, "consent non-interactively to exactly these catalog IDs (comma-separated)")
+	enableCmd.Flags().BoolVar(&enableOpts.NoAnchors, "no-anchors", false, "skip anchor consent prompts")
 
 	statusCmd := &cobra.Command{
 		Use:   "status",

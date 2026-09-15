@@ -255,15 +255,18 @@ fn memory_recall_carries_preamble_and_budget() {
 }
 
 /// FR-CORTEX-005 / 04 §6.4: every serve emits one `CortexInjection`, refusals
-/// included. Outside a runtime `spawn_push` cannot deliver and counts the drop
-/// synchronously, so `fabric_dropped` is the per-call emission witness; the
-/// event itself must carry the live L0 root and the current index clock.
+/// included. This `Shared` has no session file, so every emission is HELD
+/// for the session mark1d will publish (D-AT/D-AV: nothing is sent without
+/// one, and holding is not a drop) — `pending` is the per-call emission
+/// witness; the event itself must carry the live L0 root and the current
+/// index clock.
 #[test]
 fn every_tool_call_emits_one_cortex_injection() {
     use m1p_wire::pb::{event::Body, InjectionChannel};
     use std::sync::atomic::Ordering;
     let (shared, _work, _store) = scratch();
-    let before = shared.fabric_dropped.load(Ordering::Relaxed);
+    let held = |shared: &cortexd::session::Shared| shared.pending.lock().unwrap().len() as u64;
+    let before = held(&shared);
     let calls = [
         ("find_definition", serde_json::json!({ "symbol": "f" })),
         ("repo_map", serde_json::json!({})),
@@ -277,9 +280,14 @@ fn every_tool_call_emits_one_cortex_injection() {
     let out = cortexd::mcp::call_tool(&shared, "repo_map", &serde_json::json!({})).unwrap();
     assert_eq!(out["reason_code"], serde_json::json!("M1E-6401"));
     assert_eq!(
-        shared.fabric_dropped.load(Ordering::Relaxed) - before,
+        held(&shared) - before,
         calls.len() as u64 + 1,
         "one emission per call, refusals included"
+    );
+    assert_eq!(
+        shared.fabric_dropped.load(Ordering::Relaxed),
+        0,
+        "held for a session is not a drop"
     );
 
     let ev = cortexd::mcp::injection_event(&shared, 2000, 10);

@@ -4,11 +4,13 @@
 //! (04 §6.3 single-writer discipline).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use m1p_wire::pb;
 use rand::RngCore;
+use serde::Deserialize;
 
 use crate::l0_merkle::MerkleTree;
 use crate::l1_tags::Tag;
@@ -55,11 +57,18 @@ pub struct Shared {
     /// Nobody listening only — a refusal is a different fact and gets its own
     /// counter below.
     pub fabric_dropped: AtomicU64,
-    /// Pushes mark1d refused with M1E-4003 (08 §4.3). Today that is every push
-    /// against a live daemon: D-AT requires a 16-byte non-zero `session_id`
-    /// and cortexd has no session identity to give until the MCP surface
-    /// carries one (D-AV). Counting it is what makes that gap a number.
+    /// Pushes mark1d refused with M1E-4003 (08 §4.3): a Hello it would not
+    /// accept — a mid-upgrade version, or a session the daemon no longer holds.
+    /// Counting it is what makes that a number instead of a silent success.
     pub fabric_handshake_refused: AtomicU64,
+    /// Where mark1d publishes this workspace's live agent session
+    /// (`--session-file`; go/mark1d/internal/cortex). Unset (a hand-run
+    /// cortexd) means no session can ever be read, so every push is held.
+    pub session_file: OnceLock<PathBuf>,
+    /// Pushes waiting for a session (04 §6.7 root pushes, 04 §6.4 serve
+    /// accounting). A held push is NOT a drop: it lands on the next flush
+    /// once the daemon publishes a session. Bounded — see `hold`.
+    pub pending: Mutex<Vec<pb::Event>>,
     /// L1 CAS probe accounting (04 §6.1: a hit skips the parse). What makes
     /// "a key bump invalidates exactly the affected entries" a number.
     pub cas_hits: AtomicU64,
@@ -81,10 +90,45 @@ impl Shared {
             default_budget: default_budget.clamp(MIN_CALL_TOKENS, MAX_CALL_TOKENS),
             fabric_dropped: AtomicU64::new(0),
             fabric_handshake_refused: AtomicU64::new(0),
+            session_file: OnceLock::new(),
+            pending: Mutex::new(Vec::new()),
             cas_hits: AtomicU64::new(0),
             cas_misses: AtomicU64::new(0),
         }
     }
+
+    /// The live agent session for this workspace, as mark1d last published it,
+    /// or `None` while there is none. Read per push (one small file, ~100
+    /// bytes — far inside the 08 §4.4 push budget, so no mtime cache).
+    pub fn live_session(&self) -> Option<[u8; 16]> {
+        read_live_session(self.session_file.get()?)
+    }
+}
+
+/// How many pushes wait for a session before the oldest is dropped (counted
+/// in `fabric_dropped`, because at that point it IS a loss). Root pushes
+/// never accumulate — `hold` keeps only the newest — so this bounds the
+/// per-call serve accounting of a tool-calling agent the daemon has not yet
+/// attributed to a workspace.
+pub const PENDING_CAP: usize = 64;
+
+/// The file mark1d writes at `<state>/run/sessions/<workspace-id>.json`
+/// (go/mark1d/internal/cortex sessionFile) — one contract, two decoders.
+#[derive(Deserialize)]
+struct LiveSession {
+    /// 32 hex chars. `started_at` is also on disk and is display-grade; serde
+    /// skips what is not declared, so the id is the only field that acts.
+    session_id_hex: String,
+}
+
+/// D-AT's rule applied at the reader: only a 16-byte non-zero id is a session.
+/// A missing file is the ordinary "no agent session in this workspace" state;
+/// an unparseable one is treated the same way rather than guessed at.
+fn read_live_session(path: &Path) -> Option<[u8; 16]> {
+    let bytes = std::fs::read(path).ok()?;
+    let ls: LiveSession = serde_json::from_slice(&bytes).ok()?;
+    let id = *uuid::Uuid::parse_str(&ls.session_id_hex).ok()?.as_bytes();
+    (id != [0u8; 16]).then_some(id)
 }
 
 /// Lock helpers: a poisoned lock means a reader panicked mid-read; the index
@@ -163,6 +207,43 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn live_session_reads_the_daemons_file_and_refuses_non_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ws.json");
+        let shared = Shared::new(PathBuf::from("."), PathBuf::from("."), 2_000);
+        assert_eq!(
+            shared.live_session(),
+            None,
+            "no file configured: no session"
+        );
+        shared.session_file.set(path.clone()).unwrap();
+        assert_eq!(shared.live_session(), None, "no file yet: no session");
+
+        std::fs::write(
+            &path,
+            br#"{"session_id_hex":"0190a1b2c3d4e5f60708090a0b0c0d0e","started_at":"2026-09-15T10:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            shared.live_session(),
+            Some([
+                0x01, 0x90, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+                0x0d, 0x0e
+            ])
+        );
+        for bad in [
+            r#"{"session_id_hex":"00000000000000000000000000000000","started_at":""}"#,
+            r#"{"session_id_hex":"abc","started_at":""}"#,
+            "not json",
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            assert_eq!(shared.live_session(), None, "{bad}");
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(shared.live_session(), None, "SessionEnd removed it");
     }
 
     #[test]

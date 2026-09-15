@@ -57,6 +57,14 @@ type Gate struct {
 	// OnDropped receives the Dropped{gate_timeout} accounting for M1E-5001
 	// answers (wired to capture.AccountDropped); nil is legal.
 	OnDropped func(reason string)
+	// Evidence is FR-VERIFY-011's evidence_ref source: the failing anchors'
+	// typed evidence for a task, rendered by whoever still holds the votes.
+	// The cache does not — verdict.Cached carries the fused VerdictEvent and
+	// the knee, and the anchors tee strips EvidenceRecord before fusion — so
+	// this is a lookup seam exactly like TaskFor, read on BLOCK only and never
+	// a computation. nil, or an empty answer, leaves evidence_ref empty and the
+	// shim renders no `[evidence: …]` suffix (mark1-hookshim/src/gate.rs).
+	Evidence func(task verdict.TaskID) string
 	// Health counts answers and the read latency SLO-7 is judged on; nil is
 	// legal — an unwired gauge must never change what the gate answers.
 	Health *obs.Health
@@ -195,6 +203,12 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 	if e.Verdict.GetVerdict() == m1pv1.Verdict_VERDICT_VIOLATED && !e.Knee.Stop {
 		g.blocks.RecordBlock(session, task, received)
 		v.Decision = m1pv1.GateDecision_GATE_DECISION_BLOCK
+		// FR-VERIFY-011: below the knee the failure evidence IS the
+		// continuation reason. Only here — an ALLOW has no failing anchor to
+		// name, and a knee stop surfaces the verdict, not a retry target.
+		if g.Evidence != nil {
+			v.EvidenceRef = g.Evidence(task)
+		}
 		// D-AN(c): !Stop is also how "no knee table", "n below the first row"
 		// (D-Y(b)) and "no p_lcb on the row" (D-Z) arrive here. Printing the
 		// inequality then states a false one (0.000 · V > c) and reads as

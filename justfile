@@ -117,8 +117,10 @@ test-rust:
 # that runs it. Adding a tag without adding it here is a review failure.
 #   integration -> `just test-integration`      (in `just ci`; CI job `integration`)
 #   chaos       -> `just test-chaos`            (in `just ci`; CI job `integration`, Linux-only
-#                  per 12 §11.1 stage 2e). The ⚡ fast set is chaos_daemon_kill9 today; the slow set
-#                  (network partition, clock skew, disk-full) is nightly and unbuilt.
+#                  per 12 §11.1 stage 2e). The ⚡ fast set is chaos_daemon_kill9 (spool writer)
+#                  plus cmd/chaos_process_kill (mark1d and mark1-proxy SIGKILLed under a live
+#                  hookshim session; cortexd is a named skip until internal/cortex exists). The
+#                  slow set (network partition, clock skew, disk-full) is nightly and unbuilt.
 #
 # PLATFORM tags hide suites from a CI LEG rather than from a recipe, and the inventory missed
 # them entirely — which is how `go (windows-2022)` sat red-and-unread (D-BZ). They are listed
@@ -156,20 +158,34 @@ test-py:
 conformance:
     tools/ci/conformance_crosslang.sh
 
-# chaos_daemon_kill9 (12 §6.2 ⚡ fast set) — NFR-DURABILITY-002 / FR-SPINE-024. Needs no stores:
-# the fault is a real SIGKILL against a real child process writing a real spool on local disk.
+# The ⚡ fast chaos set (12 §6.2). Two harnesses, both real SIGKILLs against real processes:
+#   internal/spool chaos_daemon_kill9 — NFR-DURABILITY-002 / FR-SPINE-024: a spool writer killed
+#     mid-append, recovery graded against the raw bytes.
+#   cmd/chaos_process_kill            — NFR-AVAILABILITY-001: the assembled mark1d killed between
+#     two hook invocations of a live mark1-hookshim session (hooks fail open inside the 08 §4.4
+#     budgets, the ring drains on restart, Usage still arrives, Dropped{} audited off the wire);
+#     the supervised mark1-proxy killed under a client mid-request, six times to FAILED (D-CM
+#     revert + the proxy_failed bypass receipt); cortexd is a named t.Skip until internal/cortex
+#     exists. Linux-only (build tag): it finds the sidecar's pid through /proc.
+# Needs no stores. Needs the Rust toolchain: cmd/chaos_process_kill drives the REAL hookshim and
+# proxy binaries and runs `cargo build --locked` itself (a warm build is a no-op; the line below
+# only makes the cold build a visible step instead of a slow-looking Go test).
 #
 # `-list` before `-run` because `-run` with no match prints "no tests to run" and exits 0, which
 # is the false green this whole lane exists to prevent — and here it is one dropped `-tags chaos`
-# away at all times, since the file is invisible to an untagged build BY DESIGN. The existence
-# check is what makes "ok" mean the harness executed rather than that nothing selected.
+# away at all times, since the files are invisible to an untagged build BY DESIGN. The count is
+# the exact number of named tests, so a rename or a file that stops selecting is a red, not a
+# narrower green.
 #
 # `-count=1` because a cached chaos pass is not a chaos run: the whole content of this suite is
-# 100 fresh races between an fsync loop and a kill, and Go's test cache would happily replay one
-# from a tree where the spool still worked.
+# fresh races between a process and a kill, and Go's test cache would happily replay one from a
+# tree where the spool still worked.
 test-chaos:
+    cargo build -p mark1-hookshim -p mark1-proxy -p cortexd --locked
     @cd go/mark1d && n=$(go test -tags chaos -list '^TestChaosDaemonKill9$' ./internal/spool/ | grep -c '^TestChaosDaemonKill9$' || true); [ "$n" = "1" ] || { echo "test-chaos: the chaos harness did not select. 'go test -tags chaos -list' matched $n tests, want 1 — either the build tag stopped selecting chaos_kill9_test.go or the test was renamed. Running -run against that would print 'no tests to run' and exit 0." >&2; exit 1; }
+    @cd go/mark1d && n=$(go test -tags chaos -list '^TestChaos(Mark1dKill9MidSession|ProxyKill9MidStream|CortexdKill9)$' ./cmd/ | grep -c '^TestChaos' || true); [ "$n" = "3" ] || { echo "test-chaos: the process-kill harness did not select. 'go test -tags chaos -list' matched $n tests in cmd/, want 3 — either the build tag stopped selecting chaos_process_kill_test.go or a leg was renamed. Running -run against that would print 'no tests to run' and exit 0." >&2; exit 1; }
     cd go/mark1d && go test -tags chaos -count=1 -run '^TestChaosDaemonKill9$' ./internal/spool/
+    cd go/mark1d && go test -tags chaos -count=1 -v -run '^TestChaos(Mark1dKill9MidSession|ProxyKill9MidStream|CortexdKill9)$' ./cmd/
 
 # Store-backed suites, incl. the tag-gated Go integration suite. Real stores on EVERY PR
 # (12 §11.4) — no Docker, no testcontainers, no skip-if-absent. Run `just stores-up` first.
@@ -210,6 +226,18 @@ test-integration:
 # Tenant-isolation negative tests (12 §4) — the required PR check the tenancy story rests on.
 test-isolation:
     uv run --frozen --all-packages -m pytest conformance/tenancy -o asyncio_mode=auto
+
+# The pinned hook bodies through the real mark1-hookshim and the pinned transcripts through the
+# real mark1d, uplinked to a real controld over the store contract above, asserted from the cloud
+# side (ClickHouse, m1_receipts, the landing prefix, querychoke) and verified offline by the real
+# mark1-verifier. Fixture-fast — no live agent — so it rides every PR beside test-integration
+# (12 §1.1: "the Phase-1 replay path also on PR"). Builds the binaries itself; needs go, cargo,
+# psql and the ClickHouse client migrate-db.sh needs (CLICKHOUSE_CLIENT, or .stores/bin/clickhouse).
+# Its conftest asserts zero skips under M1_REQUIRE_STORES=1, so "passed" cannot mean "did not run".
+#
+# The Phase-1 replay path end to end (12 §1.1 end-to-end row; 12 §12 Phase 1 item 1).
+test-e2e:
+    uv run --frozen --all-packages -m pytest conformance/e2e -o asyncio_mode=auto
 
 # ---------- lint / fmt ----------
 
@@ -623,5 +651,8 @@ sbom:
 # `test-chaos` needs no stores; it is next to the store lanes because ci.yml runs it in the
 # `integration` job, and the two lists are only the same list while they stay in the same order.
 #
+# `test-e2e` follows `test-integration` for the same reason: ci.yml's `integration` job runs it
+# right after that recipe, on the stores that job just provisioned.
+#
 # Everything a PR must pass, in the order CI runs it.
-ci: gen-check lint test test-chaos test-integration test-isolation gates conformance fuzz
+ci: gen-check lint test test-chaos test-integration test-e2e test-isolation gates conformance fuzz

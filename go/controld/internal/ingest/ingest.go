@@ -19,6 +19,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/chproj"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/registry"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/s3land"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/scanner"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/server"
@@ -57,6 +58,9 @@ type Deps struct {
 	// Registry is the m1p-registry (FR-SPINE-023): per-tenant schema windows
 	// behind the 426. nil ⇒ the compiled-in [m1p.v1] window for every tenant.
 	Registry registry.Registry
+	// Scanner is the stage-7 ruleset edition. nil ⇒ scanner.Default. Tests
+	// land batches under one edition and Rescan them under another.
+	Scanner *scanner.Ruleset
 	// PoolSize is the §8.1 ingest pipeline bound (64 at prod defaults).
 	PoolSize int
 	Now      func() time.Time
@@ -71,6 +75,7 @@ type Module struct {
 	sfx      *sidefx.Sidefx
 	security SecurityRecorder
 	registry registry.Registry
+	scanner  *scanner.Ruleset
 	limiter  *Limiter
 	sem      chan struct{}
 	now      func() time.Time
@@ -86,6 +91,9 @@ func New(d Deps) *Module {
 	if d.Registry == nil {
 		d.Registry = registry.Static(registry.Compiled)
 	}
+	if d.Scanner == nil {
+		d.Scanner = scanner.Default
+	}
 	m := &Module{
 		verifier: d.Verifier,
 		obsCfg:   d.ObsCfg,
@@ -95,6 +103,7 @@ func New(d Deps) *Module {
 		sfx:      d.Sidefx,
 		security: d.Security,
 		registry: d.Registry,
+		scanner:  d.Scanner,
 		limiter:  NewLimiter(),
 		sem:      make(chan struct{}, d.PoolSize),
 		now:      d.Now,
@@ -133,14 +142,32 @@ func (m *Module) Ready(ctx context.Context) error {
 // row through the async projector (see chproj.SecurityEventRow for the
 // idempotency story), plus a log line so the event exists even if the projector
 // queue is saturated.
+//
+// Overflow is COUNTED, not blocked on. A bounded block here would hold an
+// ingest pool slot (05 §8.1) for the bound on the one path an attacker
+// controls the rate of — disagreeing envelopes cost the sender nothing — so
+// a slow ClickHouse plus a hostile device would turn the security path into
+// the shed lever for honest tenants. The ledger classes the row diagnostic
+// (chproj.securityRow), and 11 §10.1's rule for that class is that loss is
+// accounted, never silent: the drop lands in securityEventsDropped (pages on
+// any nonzero) alongside the log line and the stage-3 counter that already
+// page.
 type projectorSecurity struct {
 	proj *chproj.Projector
 }
 
 func (p *projectorSecurity) RecordIdentityDisagreement(tenant, device, batch uuid.UUID, detail string, at time.Time) {
 	log.Printf("SECURITY ingest M1E-8003: tenant=%s device=%s batch=%s: %s", tenant, device, batch, detail)
-	if p.proj != nil {
-		p.proj.Enqueue([][]any{chproj.SecurityEventRow(tenant, device, batch, detail, at)}, at)
+	p.project("M1E-8003", batch, chproj.SecurityEventRow(tenant, device, batch, detail, at), at)
+}
+
+func (p *projectorSecurity) project(code string, batch uuid.UUID, row []any, at time.Time) {
+	if p.proj == nil {
+		return
+	}
+	if !p.proj.Enqueue([][]any{row}, at) {
+		securityEventsDropped.WithLabelValues(code).Inc()
+		log.Printf("SECURITY ingest %s: batch=%s: ledger row DROPPED on projector overflow — no replay path; the log line above is the only record", code, batch)
 	}
 }
 
@@ -151,7 +178,5 @@ func (p *projectorSecurity) RecordQuarantine(tenant, device, batch uuid.UUID, cl
 	detail := strings.Join(classes, ",")
 	log.Printf("SECURITY ingest M1E-7002: tenant=%s device=%s batch=%s: quarantined on rule classes [%s]",
 		tenant, device, batch, detail)
-	if p.proj != nil {
-		p.proj.Enqueue([][]any{chproj.QuarantineEventRow(tenant, device, batch, detail, at)}, at)
-	}
+	p.project("M1E-7002", batch, chproj.QuarantineEventRow(tenant, device, batch, detail, at), at)
 }

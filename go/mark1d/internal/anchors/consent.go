@@ -75,18 +75,7 @@ func Approve(path string, now time.Time, entries ...CatalogEntry) error {
 		byID[r.ID] = r
 	}
 	for _, e := range entries {
-		byID[e.ID] = ConsentRecord{
-			ID:          e.ID,
-			Tool:        e.Tool,
-			Argv:        append([]string(nil), e.Argv...),
-			BinaryPath:  e.BinaryPath,
-			BinaryHash:  hex.EncodeToString(e.BinaryHash),
-			ToolVersion: e.ToolVersion,
-			Class:       e.Class,
-			SideEffect:  e.SideEffect,
-			ExecHash:    hex.EncodeToString(ExecHash(e)),
-			ConsentedAt: now.UTC(),
-		}
+		byID[e.ID] = toRecord(e, now.UTC())
 	}
 	f := consentFile{Version: 1}
 	for _, r := range byID {
@@ -126,26 +115,7 @@ func saveConsent(path string, f consentFile) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	tf, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := tf.Write(b); err != nil {
-		_ = tf.Close()
-		return err
-	}
-	if err := tf.Sync(); err != nil {
-		_ = tf.Close()
-		return err
-	}
-	if err := tf.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writePrivate(path, b)
 }
 
 // stillConsented re-reads the store and reports whether e is still covered by

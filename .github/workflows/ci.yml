@@ -325,6 +325,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+      # test-chaos drives the REAL mark1-hookshim and mark1-proxy binaries (cmd/chaos_process_kill)
+      # and builds them itself with `cargo build --locked`; without a toolchain here the recipe
+      # dies at `cargo: not found` before killing anything. rust-cache keeps the cold build off
+      # the critical path of a lane whose own content is ~15 s.
+      - uses: dtolnay/rust-toolchain@stable   # rust-toolchain.toml pins the actual channel
+      - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
@@ -343,6 +349,13 @@ jobs:
           just migrate "$M1_MIGRATE_PG_DSN"
           just migrate "$M1_MIGRATE_PG_DSN"
       - run: just test-integration
+      # The Phase-1 replay path (12 §12 Phase 1 item 1; 12 §1.1 "the Phase-1 replay path also on
+      # PR"): the real mark1-hookshim → the real mark1d → the real controld → the stores this job
+      # just provisioned, asserted from the cloud side and verified offline by the real
+      # mark1-verifier. Fixture-fast (~20 s warm; the binaries are built by the recipe on the Go +
+      # Rust toolchains above), which is why it is here and not nightly. Its conftest asserts
+      # zero skips under M1_REQUIRE_STORES=1.
+      - run: just test-e2e
       - run: just test-isolation
       - name: Store logs on failure
         if: failure()

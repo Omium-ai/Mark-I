@@ -161,7 +161,13 @@ func TestIntegrationCrossServiceSmokeTenantIsolation(t *testing.T) {
 	markerJSON, _ := json.Marshal(markerList)
 	cmd := exec.CommandContext(ctx, uvPath, "run", "--frozen", "--all-packages", "python", "-c", smokePy)
 	cmd.Dir = "../../../.."
+	// PYTHONPATH pins `app` to python/intel: adjudicator and intel BOTH export a
+	// top-level `app`, and which one wins an unpinned import depends on the
+	// install order of the workspace members -- intel here, adjudicator on the
+	// CI runner, where this leg died with ModuleNotFoundError: app.tvo (run
+	// 35027575115). intel's own conftest.py does the same pin for its tests.
 	cmd.Env = append(os.Environ(),
+		"PYTHONPATH=python/intel",
 		"M1_SMOKE_CHOKE_URL="+ts.URL,
 		"M1_SMOKE_BEARER_A="+bearerA,
 		"M1_SMOKE_A_SESSION="+sessionA.String(),

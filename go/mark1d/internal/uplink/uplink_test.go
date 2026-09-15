@@ -1482,3 +1482,64 @@ func TestFlushSealsItsAck(t *testing.T) {
 		t.Fatalf("Flush sealed %v, want one checkpoint over the flushed batch", calls)
 	}
 }
+
+// makeCheckpoint builds one encoded ReceiptCheckpoint event as the sealer
+// admits it: device-scoped (no session), billing class (07 §6).
+func makeCheckpoint(t *testing.T, seq uint64) testEvent {
+	t.Helper()
+	id, err := uuid.NewV7()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := &m1pv1.Event{EventId: id[:], Body: &m1pv1.Event_ReceiptCheckpoint{
+		ReceiptCheckpoint: &m1pv1.ReceiptCheckpoint{CheckpointSeq: seq, LeafCount: 1},
+	}}
+	payload, err := proto.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testEvent{id: id, payload: payload, class: spool.ClassBilling}
+}
+
+// TestCheckpointRecordsAreNeverLeaves pins the leaf rule to the one controld
+// enforces (ingest/sidefx/sidefx.go Apply: a checkpoint "is deliberately not
+// a leaf of any tree"): the seal over a batch covers its OTHER events only.
+// [cp, X, Y] → {X, Y}; [cp] → nothing; [cp, cp2] → nothing. Counting the
+// checkpoint claimed one leaf more than the server held pending, was refused,
+// and the orphaned leaf turned every later honest seal into merkle_mismatch.
+func TestCheckpointRecordsAreNeverLeaves(t *testing.T) {
+	sp := openSpool(t)
+	session, _ := uuid.NewV7()
+	var calls []sealCall
+	ingest := &fakeIngest{respond: func(n int, w http.ResponseWriter, bid string) {
+		writeAck(w, http.StatusOK, bid, nil)
+	}}
+	u, _, _ := newTestUplink(t, sp, ingest, func(c *Config) {
+		c.Checkpoint = func(_ context.Context, leaves [][]byte) {
+			calls = append(calls, sealCall{leaves: leaves})
+		}
+	})
+	cp, x, y := makeCheckpoint(t, 1), makeEvent(t, session, 1, spool.ClassBilling), makeEvent(t, session, 2, spool.ClassDiagnostic)
+	for i, batch := range [][]testEvent{
+		{cp, x, y},
+		{makeCheckpoint(t, 2)},
+		{makeCheckpoint(t, 3), makeCheckpoint(t, 4)},
+	} {
+		appendAll(t, sp, batch...)
+		if res := sendOnce(t, u); res != cycleAdvanced {
+			t.Fatalf("batch %d: verified 2xx must advance", i)
+		}
+	}
+	if len(calls) != 3 {
+		t.Fatalf("seals = %d after three acked batches, want 3 (one per ack; the sealer decides over the leaves)", len(calls))
+	}
+	if got := calls[0].leaves; len(got) != 2 || !bytes.Equal(got[0], x.id[:]) || !bytes.Equal(got[1], y.id[:]) {
+		t.Fatalf("[cp, X, Y] leaves = %x, want {X, Y} in spool order", got)
+	}
+	if got := calls[1].leaves; len(got) != 0 {
+		t.Fatalf("[cp] leaves = %x, want none", got)
+	}
+	if got := calls[2].leaves; len(got) != 0 {
+		t.Fatalf("[cp, cp2] leaves = %x, want none", got)
+	}
+}

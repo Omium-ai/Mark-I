@@ -315,6 +315,9 @@ func TestEnrollExpiredCode(t *testing.T) {
 }
 
 func TestEnrollRefusesLooseDeviceKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits do not exist here; owner-only on Windows is an ACL, which nothing in the daemon sets yet — NFR-SECURITY-007 residual")
+	}
 	srv, _ := enrollStub(t, 0)
 	env, _ := testEnv(t, srv.URL)
 	if err := os.MkdirAll(env.StateDir, 0o700); err != nil {

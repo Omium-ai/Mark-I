@@ -136,17 +136,20 @@ done
 # says runs in exactly two places, and Python is one of them. Families absent from PY_REQUIRED
 # have no Python twin by design (m1pl/redact/bundle: Rust reference + Go), so demanding one
 # would be theatre. Matching is on the `conf_vectors_<family>` token, which is why the test
-# module is named test_conf_vectors_fusion.py. ----
-PY_REQUIRED="receipt fusion"
+# module is named test_conf_vectors_fusion.py. coverage is the band family (Go querychoke +
+# Python intel, the SQL fold in between — NFR-OPERABILITY-001). ----
+PY_REQUIRED="receipt fusion coverage"
 for fam in $PY_REQUIRED; do
   # $EXPECTED is newline-separated, so a `case " $EXPECTED "` glob would never match.
   printf '%s\n' "$EXPECTED" | grep -qx "$fam" || continue
   # A pytest node id carries the FILE PATH, so a bare substring match bound a filename,
   # not a behaviour: dropping in tests/test_conf_vectors_fusion_zzrev.py containing only
-  # `def test_nothing(): pass` raised this count and satisfied the gate. Requiring the
-  # family token to be a COMPLETE identifier inside a node id is the same shape of claim
-  # the Go loop above makes when it matches a test NAME.
-  fam_n=$(printf '%s\n' "$PY_OUT_ALL" | grep -cE "conf_vectors_$fam[^A-Za-z0-9_].*::.*PASSED" || true)
+  # `def test_nothing(): pass` raised this count and satisfied the gate. Two shapes count,
+  # and that spoof satisfies neither: the family token as a COMPLETE identifier in the
+  # module stem (receipt's functions carry no token), or as a PREFIX of the test FUNCTION
+  # name after `::` (coverage: test_conf_vectors_coverage_band[...]) — the latter is the
+  # same shape of claim the Go loop above makes when it matches a test NAME.
+  fam_n=$(printf '%s\n' "$PY_OUT_ALL" | grep -cE "(conf_vectors_$fam[^A-Za-z0-9_].*::|::test_conf_vectors_$fam[^A-Za-z0-9]).*PASSED" || true)
   if [ "$fam_n" -eq 0 ]; then
     echo "FAIL: family $fam ran zero Python vector tests (filter -k conf_vectors, token"
     echo "      conf_vectors_$fam) — a silently uncovered family is a failed gate. Both"

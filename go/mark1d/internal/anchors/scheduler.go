@@ -87,6 +87,16 @@ func NewScheduler(r *Runner, enabled []CatalogEntry, consentPath, worktree strin
 	}
 }
 
+// SetCatalog swaps the Enabled set and the worktree it runs against, live —
+// consent lands through approvals.jsonl while the daemon runs, and a consent
+// that only armed at the next restart would be the M1E-5001 bug wearing a
+// prompt. Same provenance rule as NewScheduler: Reconcile().Enabled only.
+func (s *Scheduler) SetCatalog(worktree string, enabled []CatalogEntry) {
+	s.mu.Lock()
+	s.entries, s.worktree = enabled, worktree
+	s.mu.Unlock()
+}
+
 // Start launches the workers and the idle watcher. ctx is the kill switch:
 // cancel stops scheduling AND (through the sandbox) SIGKILLs running anchors —
 // `mark1 off` cancels this before its other steps (04 §2.2).
@@ -175,7 +185,10 @@ func (s *Scheduler) idleLoop(ctx context.Context) {
 }
 
 func (s *Scheduler) enqueueSlow(tk taskKey) {
-	for _, e := range s.entries {
+	s.mu.Lock()
+	entries := s.entries
+	s.mu.Unlock()
+	for _, e := range entries {
 		if e.Class == ClassSlow {
 			s.enqueue(workItem{entry: e, tk: tk})
 		}
@@ -210,7 +223,10 @@ func (s *Scheduler) worker(ctx context.Context) {
 			// Fail-open per run: one anchor's failure never blocks another's
 			// schedule (04 §2.2). ErrRefused and infra errors are logged; the
 			// VERDICT_ERROR vote (when one was emitted) carries the truth.
-			if err := s.runner.RunOne(ctx, w.entry, w.tk.session, w.tk.task, s.worktree); err != nil {
+			s.mu.Lock()
+			worktree := s.worktree
+			s.mu.Unlock()
+			if err := s.runner.RunOne(ctx, w.entry, w.tk.session, w.tk.task, worktree); err != nil {
 				s.log.Warn("anchors: run failed", "anchor", w.entry.ID, "err", err)
 			}
 		}

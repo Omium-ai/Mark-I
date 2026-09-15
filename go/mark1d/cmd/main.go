@@ -20,6 +20,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -35,6 +36,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/bundle"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/capture"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/cortex"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
@@ -296,6 +298,22 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		return err
 	}
 
+	// The cortex plane (04 §1.2, §6): cortexd supervised per enabled root,
+	// its session identity published out of band (D-AT/D-AV letter: every
+	// admitted writer is sessioned), its L0 root routed to the anchor runner.
+	// Budget comes from the applied bundle's cortex section or the compiled
+	// default; a workspaces.json the plane cannot read means no child, never
+	// a guessed root.
+	cxRoots, err := cortex.Roots(cfg.stateDir, cfg.workspace)
+	if err != nil {
+		log.Error("mark1d: workspaces.json unreadable; cortexd not supervised", "err", err)
+	}
+	cx, err := cortex.New(cortex.Config{StateDir: cfg.stateDir, Roots: cxRoots, Budget: cortex.BudgetFrom(bc.Cortex()), Log: log})
+	if err != nil {
+		_ = sp.Close()
+		return err
+	}
+
 	// The verdict plane (04 §2.3), always on — with no bundle, no anchor vote
 	// and no cache entry it answers every gate with allow, which is a normal
 	// state and not an error. blocks is shared by exactly two writers: the
@@ -310,7 +328,9 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	// no runner nothing ever produces an AnchorVote, so the cache is never
 	// written and every gate answers M1E-5001 allow. The catalog is locally
 	// derived and user-consented; no worktree, no consent or no sandbox all
-	// reduce to the same posture — run nothing, stay fail-open.
+	// reduce to the same posture — run nothing, stay fail-open. Derivation and
+	// consent are reconcileAnchors' job below (they change while the daemon
+	// runs); here only the sandbox exists.
 	// The scratch root must EXIST before the first run: the sandbox mkdtemps a
 	// per-run HOME inside it, and a missing root fails every run — including
 	// derivation's version sniff, which silently empties ToolVersion and drifts
@@ -321,22 +341,10 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		return err
 	}
 	sb := anchors.NewSandbox(scratch)
-	worktree := anchorWorktree(cfg)
-	var enabled []anchors.CatalogEntry
-	if worktree != "" {
-		rep, derr := anchors.Doctor(sb, worktree, anchors.ConsentPath(cfg.stateDir))
-		if derr != nil {
-			// An unreadable consent store must never read as consent
-			// (consent.go), so the catalog stays empty and nothing runs.
-			log.Error("mark1d: anchor catalog unavailable; no anchor will run", "worktree", worktree, "err", derr)
-		} else {
-			enabled = rep.Enabled
-		}
-	}
 	// The anchor→fusion tee. It wraps the ONE Admitter, so a vote reaches
 	// fusion through the same door it reaches the spool through — no second
 	// transport, no second vote shape (04 §2.3's recompute loop).
-	votes := anchors.NewVotes(adm, eng, enabled)
+	votes := anchors.NewVotes(adm, eng, nil)
 
 	// task_seg.v1 (ADR-0002): the daemon is the party that mints task ids, so
 	// the segmenter sits on the admission path the events arrive on, and D-AA's
@@ -449,20 +457,35 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	// The runner emits through the tee, so its vote lands in the spool AND in
 	// fusion by the one path. outputHMACKey stays nil without a tenant root:
 	// EvidenceRecord.output_hmac degrades to absent, never to an unkeyed hash.
-	var sched *anchors.Scheduler
-	if len(enabled) > 0 {
-		var outKey []byte
-		if len(tenantRoot) > 0 {
-			if outKey, err = anchors.DeriveOutputHMACKey(tenantRoot); err != nil {
-				_ = sp.Close()
-				return err
-			}
+	// The scheduler always exists — empty it schedules nothing — so a consent
+	// that lands mid-session (approvals.jsonl) arms it without a restart.
+	var outKey []byte
+	if len(tenantRoot) > 0 {
+		if outKey, err = anchors.DeriveOutputHMACKey(tenantRoot); err != nil {
+			_ = sp.Close()
+			return err
 		}
-		runner := anchors.NewRunner(sb, votes, outKey, false)
-		sched = anchors.NewScheduler(runner, enabled, anchors.ConsentPath(cfg.stateDir), worktree, log)
-		sched.Start(ctx)
-		log.Info("mark1d: anchor plane armed", "worktree", worktree, "anchors", len(enabled))
 	}
+	runner := anchors.NewRunner(sb, votes, outKey, false)
+	// One runner today, so every enabled root's L0 push lands on the same
+	// SetL0Root -- the anchorWorktree ceiling cortex.go's header records.
+	for _, root := range cxRoots {
+		cx.OnRoot(root, runner.SetL0Root)
+	}
+	sched := anchors.NewScheduler(runner, nil, anchors.ConsentPath(cfg.stateDir), "", log)
+	sched.Start(ctx)
+	// The consent surface (anchors/candidates.go): derive for every enabled
+	// root, apply the CLI's approvals, publish candidates.json, arm the plane.
+	// The first step runs HERE, synchronously, so the boot derivation precedes
+	// the first ToolUse the fabric can deliver; watchAnchors re-runs it on
+	// workspaces.json / approvals.jsonl change and on the tick.
+	anchorStep := reconcileAnchors(log, cfg, sb, sched, votes)
+	anchorStep()
+	anchorsDone := make(chan struct{})
+	go func() {
+		defer close(anchorsDone)
+		watchAnchors(ctx, log, cfg.stateDir, anchorStep)
+	}()
 
 	// Spill keypair + drain (04 §5.4): the daemon mints the device X25519
 	// keypair — private half in its own custody, public half materialized for
@@ -488,6 +511,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		<-drainDone
 		<-engDone
 		<-bundleDone
+		<-anchorsDone
 		_ = sp.Close()
 		return err
 	}
@@ -498,6 +522,10 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 			// re-entering through its own door keeps that accounting single-site.
 			return adm.AdmitBytes(ctx, payload)
 		}
+		// The cortex plane watches every decoded event: session start/end
+		// publishes or retires the session file cortexd Hellos with, and an
+		// admitted CortexInjection's root_hash reaches the anchor runner.
+		cx.Observe(ev)
 		// Segmentation runs BEFORE admission so a vote or gate query riding the
 		// same connection already resolves to the task this event opened, and
 		// TaskOpen precedes the event that opened it in the spool.
@@ -512,7 +540,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		// just resolved: a run whose vote could not be filed against a real
 		// task would be evidence D-AA drops on arrival, so an unresolved
 		// session schedules nothing rather than running an anchor for nobody.
-		if sched != nil && ev.GetToolUse() != nil && len(ev.GetSessionId()) == 16 {
+		if ev.GetToolUse() != nil && len(ev.GetSessionId()) == 16 {
 			var sid [16]byte
 			copy(sid[:], ev.GetSessionId())
 			if task, ok := seg.TaskFor(sid, [16]byte{}); ok {
@@ -524,6 +552,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	// The GateQuery route is constructed with eng.Reader() — a verdict.Reader,
 	// the only verdict surface with no method that computes (04 §2.3).
 	gate := fabric.NewGate(eng.Reader(), blocks, cfg.stateDir)
+	gate.Evidence = votes.Evidence // FR-VERIFY-011: evidence_ref on BLOCK
 	gate.TaskFor = seg.TaskFor
 	gate.OnDropped = func(string) { adm.AccountDropped(dropGateTimeout, spool.ClassDiagnostic, 1) }
 	gate.Health = health
@@ -543,6 +572,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		<-drainDone
 		<-engDone
 		<-bundleDone
+		<-anchorsDone
 		_ = sp.Close()
 		return err
 	}
@@ -642,6 +672,11 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		defer close(supDone)
 		superviseProxy(ctx, log, cfg, cov)
 	}()
+	cxDone := make(chan struct{})
+	go func() {
+		defer close(cxDone)
+		cx.Supervise(ctx)
+	}()
 
 	// Sites: `mark1 enable` and `mark1 off`. The CLI cannot sign — 08 §7.6
 	// requires both to work with the daemon down and holds no device key — so
@@ -681,15 +716,17 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	if err := <-tailDone; err != nil {
 		log.Error("tail drain", "err", err)
 	}
-	<-drainDone  // ctx is done; the ring drain stops before its spool closes
-	<-engDone    // the fusion goroutine holds no resource; joined so it cannot outlive the session
-	<-bundleDone // same: the policy client owns only its own HTTP client
+	<-drainDone   // ctx is done; the ring drain stops before its spool closes
+	<-engDone     // the fusion goroutine holds no resource; joined so it cannot outlive the session
+	<-bundleDone  // same: the policy client owns only its own HTTP client
+	<-anchorsDone // same: the consent reconcile owns a watcher and files, no spool
 	// Joined before the spool closes, and joined at all because the join is what
 	// makes the proxy's stop ORDERED: Supervisor.Run returns only once the child
 	// has been signalled, reaped, and its proxy.port removed. A daemon that
 	// exited without waiting would leave a live proxy and a file naming its port
 	// — the exact pair the stale-port control exists to prevent.
 	<-supDone
+	<-cxDone
 	// Joined BEFORE the spool closes and before the uplink's final Flush, so
 	// the shutdown drain's `mark1 off` disable window is admitted in time to
 	// ride the same batch out. Unjoined, it would race the close and the
@@ -796,19 +833,170 @@ func perEventLoss(err error) bool {
 	return errors.Is(err, capture.ErrShed) || errors.Is(err, capture.ErrQuarantined)
 }
 
-// anchorWorktree picks the one worktree the anchor catalog is derived from.
+// enabledRoots is the live workspace set the anchor catalog derives for: the
+// --workspace flag first, then <state>/workspaces.json, canonicalized the way
+// tailWorkspaces does (04 §11) and deduplicated in that order.
+func enabledRoots(cfg config) []string {
+	var roots []string
+	if cfg.workspace != "" {
+		roots = append(roots, cfg.workspace)
+	}
+	// Unreadable ⇒ the flag root alone: the same "keep the last good set"
+	// posture the tailer reconcile takes, degraded to what is still known.
+	if file, err := tailers.LoadWorkspacesFile(filepath.Join(cfg.stateDir, "workspaces.json")); err == nil {
+		roots = append(roots, file...)
+	}
+	seen := map[string]bool{}
+	var canon []string
+	for _, r := range roots {
+		abs, err := filepath.Abs(r)
+		if err != nil {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = resolved
+		}
+		if !seen[abs] {
+			seen[abs] = true
+			canon = append(canon, abs)
+		}
+	}
+	return canon
+}
+
+// anchorRederiveEvery paces catalog re-derivation between workspace changes: a
+// tool upgrade changes the exec_hash, which drifts the entry out of consent
+// (04 §2.2) and must reach candidates.json without a restart. Derivation is
+// five sandboxed `--version` execs per workspace — fine at this cadence, not
+// at wsReloadTick.
+const anchorRederiveEvery = time.Minute
+
+// reconcileAnchors returns the one idempotent step behind the consent surface
+// (anchors/candidates.go): re-read the enabled roots, re-derive when they
+// changed or the re-derive interval passed, apply new approvals.jsonl lines,
+// and — when any of that changed something — publish candidates.json and hand
+// the Enabled set to the scheduler and the vote tee. State lives in the
+// closure exactly as tailWorkspaces keeps its manager map.
+//
 // ponytail: one scheduler over the first enabled root — nothing on the wire
 // says which workspace a session belongs to, so a per-workspace scheduler would
-// have no way to pick between them; revisit when Hello carries a cwd.
-func anchorWorktree(cfg config) string {
-	if cfg.workspace != "" {
-		return cfg.workspace
+// have no way to pick between them; revisit when Hello carries a cwd. The
+// candidates file, unlike the scheduler, is per workspace already.
+func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *anchors.Scheduler, votes *anchors.Votes) func() {
+	consentPath := anchors.ConsentPath(cfg.stateDir)
+	approvalsPath := anchors.ApprovalsPath(cfg.stateDir)
+	candidatesPath := anchors.CandidatesPath(cfg.stateDir)
+	derived := map[string][]anchors.CatalogEntry{}
+	var lastRoots []string
+	var lastDerive time.Time
+	var approvalsOffset int64
+	published := false
+	return func() {
+		roots := enabledRoots(cfg)
+		rederived := !slices.Equal(roots, lastRoots) || time.Since(lastDerive) >= anchorRederiveEvery
+		if rederived {
+			next := map[string][]anchors.CatalogEntry{}
+			for _, root := range roots {
+				entries, err := anchors.Derive(sb, root)
+				if err != nil {
+					log.Error("mark1d: anchor derivation failed; workspace publishes no candidates", "worktree", root, "err", err)
+					continue
+				}
+				next[root] = entries
+			}
+			derived, lastRoots, lastDerive = next, roots, time.Now()
+		}
+		off, approved, err := anchors.ApplyApprovals(consentPath, approvalsPath, approvalsOffset, derived, time.Now(), log)
+		if err != nil {
+			log.Error("mark1d: anchor approvals not applied", "path", approvalsPath, "err", err)
+		}
+		approvalsOffset = off
+		if published && !rederived && !approved {
+			return
+		}
+		consented, err := anchors.LoadConsent(consentPath)
+		if err != nil {
+			// An unreadable consent store must never read as consent
+			// (consent.go): candidates publish as unconsented, nothing runs.
+			log.Error("mark1d: anchor consent store unreadable; no anchor will run", "err", err)
+			consented = nil
+		}
+		if err := anchors.PublishCandidates(candidatesPath, consented, derived); err != nil {
+			log.Error("mark1d: anchor candidates not published; `mark1 enable` cannot offer consent", "path", candidatesPath, "err", err)
+		} else {
+			published = true
+		}
+		worktree := ""
+		var enabled []anchors.CatalogEntry
+		if len(roots) > 0 {
+			worktree = roots[0]
+			enabled = anchors.Reconcile(derived[worktree], consented).Enabled
+		}
+		sched.SetCatalog(worktree, enabled)
+		votes.SetCatalog(enabled)
+		if len(enabled) > 0 {
+			log.Info("mark1d: anchor plane armed", "worktree", worktree, "anchors", len(enabled))
+		}
 	}
-	roots, err := tailers.LoadWorkspacesFile(filepath.Join(cfg.stateDir, "workspaces.json"))
-	if err != nil || len(roots) == 0 {
-		return ""
+}
+
+// watchAnchors re-runs step on every workspaces.json / approvals.jsonl change
+// and on the tick — the tailWorkspaces shape: the tick is the correctness
+// path, the watch is latency. Two directories, because the CLI renames
+// workspaces.json into <state> and appends approvals.jsonl under
+// <state>/anchors; the daemon's own writes there (candidates.json,
+// catalog.json) are filtered by name so a publish never re-triggers a step.
+func watchAnchors(ctx context.Context, log *slog.Logger, stateDir string, step func()) {
+	anchorsDir := filepath.Join(stateDir, "anchors")
+	_ = os.MkdirAll(anchorsDir, 0o700) // watchable before the first approval
+	w, werr := fsnotify.NewWatcher()
+	var events chan fsnotify.Event
+	if werr == nil {
+		defer func() { _ = w.Close() }()
+		_ = w.Add(stateDir)
+		_ = w.Add(anchorsDir)
+		events = make(chan fsnotify.Event)
+		go func() {
+			defer close(events)
+			for {
+				select {
+				case ev, ok := <-w.Events:
+					if !ok {
+						return
+					}
+					select {
+					case events <- ev:
+					case <-ctx.Done():
+						return
+					}
+				case _, ok := <-w.Errors:
+					if !ok {
+						return
+					}
+				}
+			}
+		}()
+	} else {
+		log.Warn("mark1d: fsnotify unavailable for anchor consent files, polling only", "err", werr)
 	}
-	return roots[0]
+	tick := time.NewTicker(wsReloadTick)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-events:
+			if name := filepath.Base(ev.Name); name == "workspaces.json" || name == "approvals.jsonl" {
+				step()
+			}
+		case <-tick.C:
+			if w != nil {
+				_ = w.Add(stateDir) // idempotent; re-arms after dir churn
+				_ = w.Add(anchorsDir)
+			}
+			step()
+		}
+	}
 }
 
 // wsReloadTick paces the workspaces.json reconcile between fsnotify events —

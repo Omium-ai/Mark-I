@@ -196,7 +196,7 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 
 	// ---- Stage 7: independent second redaction scan ----------------------
 	scanStart := m.now()
-	hits := scanner.ScanBatch(&batch)
+	hits := m.scanner.Scan(&batch)
 	scannerScanSeconds.Observe(m.now().Sub(scanStart).Seconds())
 	for _, h := range hits {
 		scannerHits.WithLabelValues(h.Class).Inc()

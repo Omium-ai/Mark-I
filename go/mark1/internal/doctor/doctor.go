@@ -13,9 +13,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -40,8 +42,15 @@ type Report struct {
 	Health    []Check    `json:"health"`
 }
 
+// Anchor is one row of the FR-CLI-004 join between what mark1d can run
+// (candidates.json, per workspace) and what the user consented to
+// (catalog.json). State is empty for a consented, derivation-stable entry;
+// otherwise "pending" (never consented), "drifted" (consented under a
+// different exec_hash — disabled until re-consented, 04 §2.2) or "stale"
+// (consented, no longer derivable anywhere).
 type Anchor struct {
 	ID          string    `json:"id"`
+	Workspace   string    `json:"workspace,omitempty"`
 	Consented   bool      `json:"consented"`
 	State       string    `json:"state,omitempty"`
 	ConsentedAt time.Time `json:"consented_at"`
@@ -91,14 +100,11 @@ func Run(env *cli.Env, opts Options) error {
 		return cli.Failf(cli.ExitRuntime, "", "reading enrollment: %v", err)
 	}
 	rep := Report{OK: true}
-	anchors, badVersion := readAnchors(env)
+	anchors, anchorChecks := readAnchors(env)
 	rep.Anchors = anchors
 	rep.Agents = roster()
 	rep.Fragments = scanFragments(env, opts)
-	rep.Health = healthChecks(env, opts)
-	if badVersion != nil {
-		rep.Health = append(rep.Health, *badVersion)
-	}
+	rep.Health = append(healthChecks(env, opts), anchorChecks...)
 
 	for _, f := range rep.Fragments {
 		if f.State != string(claudecode.StateOK) && f.State != string(claudecode.StateUserEdited) {
@@ -141,30 +147,75 @@ func Run(env *cli.Env, opts Options) error {
 // expected key "anchors", the daemon writes "entries", so anchors always
 // read as none) — so an unrecognised version is reported back as its own
 // doctor finding instead of silently producing zero anchors.
-func readAnchors(env *cli.Env) ([]Anchor, *Check) {
-	data, err := os.ReadFile(env.AnchorsCatalog())
-	if err != nil {
-		return nil, nil
+//
+// The store alone says what was consented; candidates.json (the daemon's
+// current derivation, anchors/candidates.go) says what that consent covers
+// TODAY. With it, every candidate is a row carrying its state; without it
+// the rows are the store's and the anchor_candidates finding says the daemon
+// has not published — never an empty list that reads as "nothing to consent".
+func readAnchors(env *cli.Env) ([]Anchor, []Check) {
+	var checks []Check
+	store := map[string]string{} // id → consented exec_hash
+	storeAt := map[string]time.Time{}
+	if data, err := os.ReadFile(env.AnchorsCatalog()); err == nil {
+		var catalog struct {
+			Version int `json:"version"`
+			Entries []struct {
+				ID          string    `json:"id"`
+				ExecHash    string    `json:"exec_hash"`
+				ConsentedAt time.Time `json:"consented_at"`
+			} `json:"entries"`
+		}
+		switch {
+		case json.Unmarshal(data, &catalog) != nil:
+		case catalog.Version != 1:
+			checks = append(checks, Check{"anchors_catalog_version", false,
+				fmt.Sprintf("catalog.json version %d unsupported", catalog.Version)})
+		default:
+			for _, e := range catalog.Entries {
+				store[e.ID], storeAt[e.ID] = e.ExecHash, e.ConsentedAt
+			}
+		}
 	}
-	var catalog struct {
-		Version int `json:"version"`
-		Entries []struct {
-			ID          string    `json:"id"`
-			ConsentedAt time.Time `json:"consented_at"`
-		} `json:"entries"`
+
+	var out []Anchor
+	seen := map[string]bool{}
+	cands, err := env.LoadAnchorCandidates()
+	switch {
+	case errors.Is(err, cli.ErrNoCandidates):
+		checks = append(checks, Check{"anchor_candidates", true, "daemon has not published candidates (anchors/candidates.json absent — start mark1d, then `mark1 enable`)"})
+	case err != nil:
+		checks = append(checks, Check{"anchor_candidates", false, err.Error()})
+	case len(cands.Workspaces) == 0:
+		checks = append(checks, Check{"anchor_candidates", true, "no workspace enabled"})
+	default:
+		for _, ws := range cands.Workspaces {
+			for _, c := range ws.Anchors {
+				seen[c.ID] = true
+				row := Anchor{ID: c.ID, Workspace: ws.Path, Consented: c.Consented, ConsentedAt: c.ConsentedAt}
+				switch {
+				case c.Consented:
+				case store[c.ID] != "":
+					row.State = "drifted"
+				default:
+					row.State = "pending"
+				}
+				out = append(out, row)
+			}
+		}
+		checks = append(checks, Check{"anchor_candidates", true, fmt.Sprintf("%d workspace(s) published", len(cands.Workspaces))})
 	}
-	if json.Unmarshal(data, &catalog) != nil {
-		return nil, nil
+	for _, id := range slices.Sorted(maps.Keys(store)) {
+		if seen[id] {
+			continue
+		}
+		row := Anchor{ID: id, Consented: true, ConsentedAt: storeAt[id]}
+		if err == nil && len(cands.Workspaces) > 0 {
+			row.State = "stale"
+		}
+		out = append(out, row)
 	}
-	if catalog.Version != 1 {
-		return nil, &Check{"anchors_catalog_version", false,
-			fmt.Sprintf("catalog.json version %d unsupported", catalog.Version)}
-	}
-	out := make([]Anchor, 0, len(catalog.Entries))
-	for _, e := range catalog.Entries {
-		out = append(out, Anchor{ID: e.ID, Consented: true, ConsentedAt: e.ConsentedAt})
-	}
-	return out, nil
+	return out, checks
 }
 
 func roster() []Agent {
@@ -335,11 +386,19 @@ func retentionCheck(opts Options) Check {
 
 func renderHuman(w io.Writer, r *Report) {
 	if len(r.Anchors) == 0 {
-		_, _ = fmt.Fprintln(w, "anchors       no catalog derived yet")
+		// Which kind of nothing: unpublished, no workspace, or nothing
+		// derivable — the anchor_candidates finding already says.
+		why := "no catalog derived yet"
+		for _, c := range r.Health {
+			if c.Name == "anchor_candidates" {
+				why = c.Detail
+			}
+		}
+		_, _ = fmt.Fprintln(w, "anchors      ", why)
 	}
 	for _, a := range r.Anchors {
-		_, _ = fmt.Fprintf(w, "anchor        %s consented=%v %s consented_at=%s\n",
-			a.ID, a.Consented, a.State, a.ConsentedAt.Format(time.RFC3339))
+		_, _ = fmt.Fprintf(w, "anchor        %s consented=%v %s consented_at=%s %s\n",
+			a.ID, a.Consented, a.State, a.ConsentedAt.Format(time.RFC3339), a.Workspace)
 	}
 	for _, a := range r.Agents {
 		if a.Implemented {
