@@ -68,6 +68,26 @@ pub fn gate_query(
     }
 }
 
+/// The SessionEnd drain barrier (08 §4.2's `Flush` row) on ONE connection:
+/// Hello, the SessionEnd event frame, `Flush`, `FlushAck`. The Flush goes
+/// AFTER the event on the same connection so the daemon's drain covers it;
+/// Ok is the daemon's receipt, Err (timeout, refusal, EOF, a foreign arm) is
+/// the caller's cue to spill — the ack is the only delivery evidence there is.
+pub fn flush(
+    event_frame: &[u8],
+    session_id: &[u8],
+    budget: Duration,
+) -> Result<(), std::io::Error> {
+    let deadline = Instant::now() + budget;
+    let mut conn = Conn::open(session_id, deadline)?;
+    conn.write_frame(event_frame)?;
+    conn.write_control(&pb::fabric_frame::Kind::Flush(pb::Flush {}))?;
+    match conn.read_frame(deadline)?.kind {
+        Some(pb::fabric_frame::Kind::FlushAck(_)) => Ok(()),
+        _ => Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+    }
+}
+
 #[cfg(unix)]
 mod imp {
     use std::io::{Read, Write};

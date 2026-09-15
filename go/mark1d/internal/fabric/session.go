@@ -194,6 +194,16 @@ func (ss *session) frame(ctx context.Context, payload []byte) error {
 		}
 		return ss.reply(&m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_GateVerdict{GateVerdict: v}})
 	case frameFlush:
+		// Drain before ack (NFR-DURABILITY-004): the shim sends Flush after
+		// SessionEnd on the same connection and treats the ack as its only
+		// delivery evidence, so an ack written off the admitted counter alone
+		// attested to bytes still in the page cache. A failed sync writes no
+		// ack and closes: the shim spills and replays, at-least-once (07 §6).
+		if sync := ss.s.Sync; sync != nil {
+			if err := sync(); err != nil {
+				return fmt.Errorf("fabric: Flush: spool sync failed, ack withheld: %w", err)
+			}
+		}
 		return ss.reply(&m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_FlushAck{FlushAck: &m1pv1.FlushAck{Drained: ss.drained}}})
 	case frameContaminationAlert:
 		a := &m1pv1.ContaminationAlert{}

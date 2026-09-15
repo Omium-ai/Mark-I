@@ -12,11 +12,33 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+// kernelLacks is the ONE skip site for a kernel that cannot host the sandbox.
+// Absent feature ⇒ skip, unless M1_REQUIRE_SANDBOX=1 ⇒ fail — the same
+// inversion M1_REQUIRE_STORES applies to a missing DSN, for the same reason:
+// the sandbox is the security boundary (04 §2.2), and a probe that skips
+// reports the boundary green without ever pushing on it. ci.yml sets it on the
+// ubuntu leg, after lifting AppArmor's userns restriction: the stock
+// ubuntu-24.04 image keeps kernel.apparmor_restrict_unprivileged_userns=1, so
+// clone(CLONE_NEWUSER) was EPERM for the test binary and every probe in this
+// file skipped while the job read green (FR-VERIFY-002).
+func kernelLacks(t *testing.T, feature string) {
+	t.Helper()
+	if os.Getenv("M1_REQUIRE_SANDBOX") == "1" {
+		t.Fatalf("kernel lacks %s (M1_REQUIRE_SANDBOX=1): this leg must exercise the sandbox, not skip it", feature)
+	}
+	t.Skipf("kernel lacks %s", feature)
+}
+
+// probeRuns counts sandbox runs the kernel actually admitted (the child was
+// spawned inside the namespaces); TestSandboxProbesNotVacuous reads it.
+var probeRuns atomic.Int32
 
 func init() {
 	// x32 socket(2) probe: nr 0x40000029 arrives with arch AUDIT_ARCH_X86_64 —
@@ -75,15 +97,17 @@ func probeSpec(t *testing.T, worktree, mode string, extraEnv map[string]string) 
 	}
 }
 
-// runProbeSpec runs the spec, skipping (not failing) on kernels that refuse
-// unprivileged user namespaces — the sandbox floor itself refuses there, which
-// IS the contract, but leaves nothing to assert about the inner denials.
+// runProbeSpec runs the spec. A kernel that refuses unprivileged user
+// namespaces refuses the run — the sandbox floor itself, which IS the contract
+// — but that leaves nothing to assert about the inner denials, so it is a skip
+// or (M1_REQUIRE_SANDBOX=1) a failure via kernelLacks.
 func runProbeSpec(t *testing.T, sb *LinuxSandbox, spec RunSpec) (RunResult, error) {
 	t.Helper()
 	res, err := sb.Run(context.Background(), spec)
 	if errors.Is(err, ErrSandboxUnavailable) && !spec.RequireFSConfined {
-		t.Skipf("kernel refuses unprivileged userns here: %v", err)
+		kernelLacks(t, "unprivileged user namespaces: "+err.Error())
 	}
+	probeRuns.Add(1)
 	return res, err
 }
 
@@ -195,7 +219,7 @@ func TestSandboxWriteConfinement(t *testing.T) {
 		if _, err := sb.Run(context.Background(), spec); !errors.Is(err, ErrSandboxUnavailable) {
 			t.Fatalf("RequireFSConfined without Landlock must refuse, got %v", err)
 		}
-		t.Skip("kernel lacks Landlock; write-confinement denial not testable here")
+		kernelLacks(t, "Landlock; write-confinement denial not testable here")
 	}
 
 	t.Run("write outside worktree denied", func(t *testing.T) {
@@ -236,7 +260,7 @@ func TestSandboxWriteConfinement(t *testing.T) {
 func TestSandboxIsAOneWayValve(t *testing.T) {
 	sb := NewSandbox(t.TempDir())
 	if !sb.FSConfined() {
-		t.Skip("kernel lacks Landlock; the claim under test is about the STRONGEST regime")
+		kernelLacks(t, "Landlock; the claim under test is about the STRONGEST regime")
 	}
 	worktree := t.TempDir()
 	secret := filepath.Join(t.TempDir(), "redact.key") // stands in for <state>/redact.key
@@ -316,10 +340,11 @@ func TestSandboxKillSwitch(t *testing.T) {
 		cancel() // `mark1 off` semantics: cancel ⇒ SIGKILL the group, immediately
 	}()
 	start := time.Now()
-	res, err := sb.Run(ctx, spec)
+	res, err := sb.Run(ctx, spec) // not runProbeSpec: the cancelable ctx IS the subject
 	if errors.Is(err, ErrSandboxUnavailable) {
-		t.Skipf("kernel refuses unprivileged userns here: %v", err)
+		kernelLacks(t, "unprivileged user namespaces: "+err.Error())
 	}
+	probeRuns.Add(1)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -477,5 +502,25 @@ func TestSandboxEnvScrub(t *testing.T) {
 		if !strings.Contains(got, kv) {
 			t.Errorf("attested env %q not present in the child's environment", kv)
 		}
+	}
+}
+
+// TestSandboxProbesNotVacuous is FR-VERIFY-002's guard against what this file
+// did on CI for months: every probe above routes through runProbeSpec, and a
+// kernel refusing userns skipped them all — a dozen green tests, zero denials
+// asserted. Under M1_REQUIRE_SANDBOX=1 it asserts the sandbox really admitted
+// at least one run per probe, so a refactor that hands the probes a new skip
+// path cannot re-open the hole silently. Source order is run order (this
+// package never shuffles), so it stays the LAST test in this file.
+func TestSandboxProbesNotVacuous(t *testing.T) {
+	if os.Getenv("M1_REQUIRE_SANDBOX") != "1" {
+		t.Skip("M1_REQUIRE_SANDBOX unset; the probes above may legitimately skip here")
+	}
+	want := int32(12) // one per runProbeSpec/KillSwitch run above; +1 for the amd64-only x32 probe
+	if runtime.GOARCH == "amd64" {
+		want++
+	}
+	if got := probeRuns.Load(); got < want {
+		t.Fatalf("only %d sandbox probes executed, want ≥ %d — a probe above is skipping under M1_REQUIRE_SANDBOX=1 (or this ran under -run/-shuffle without them)", got, want)
 	}
 }

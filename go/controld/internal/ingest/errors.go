@@ -3,6 +3,9 @@ package ingest
 import (
 	"encoding/json"
 	"net/http"
+	"time"
+
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/registry"
 )
 
 // apiErr is one 08 §9 taxonomy row as it leaves the wire:
@@ -55,17 +58,25 @@ func writeErr(w http.ResponseWriter, e apiErr) {
 }
 
 // writeUpgradeRequired is the 426 M1E-2007 shape of 08 §10.2: the structured
-// upgrade hint rides beside the error, not inside it.
-func writeUpgradeRequired(w http.ResponseWriter, presented string) {
+// upgrade hint rides beside the error, not inside it, and every field comes
+// from the tenant's registry window (registry.Window.Hint).
+func writeUpgradeRequired(w http.ResponseWriter, presented string, win registry.Window) {
+	accepted, minEdge, closes, notesURI := win.Hint(presented)
+	var closesJSON *string
+	if closes != nil {
+		s := closes.UTC().Format(time.RFC3339)
+		closesJSON = &s
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUpgradeRequired)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]string{"code": "M1E-2007", "message": "schema out of accepted window"},
 		"upgrade": map[string]any{
-			"presented": presented,
-			"accepted":  []string{schemaV1},
-			"min_edge":  nil, "window_closes": nil,
-			"notes_uri": "https://docs.omium.ai/mark1/upgrade/m1p-v1",
+			"presented":     presented,
+			"accepted":      accepted,
+			"min_edge":      minEdge,
+			"window_closes": closesJSON,
+			"notes_uri":     notesURI,
 		},
 	})
 }

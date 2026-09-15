@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
@@ -40,9 +41,10 @@ type Report struct {
 }
 
 type Anchor struct {
-	ID        string `json:"id"`
-	Consented bool   `json:"consented"`
-	State     string `json:"state,omitempty"`
+	ID          string    `json:"id"`
+	Consented   bool      `json:"consented"`
+	State       string    `json:"state,omitempty"`
+	ConsentedAt time.Time `json:"consented_at"`
 }
 
 // Agent is one of 08 §5's seven slots. Printing the unimplemented ones is the
@@ -89,10 +91,14 @@ func Run(env *cli.Env, opts Options) error {
 		return cli.Failf(cli.ExitRuntime, "", "reading enrollment: %v", err)
 	}
 	rep := Report{OK: true}
-	rep.Anchors = readAnchors(env)
+	anchors, badVersion := readAnchors(env)
+	rep.Anchors = anchors
 	rep.Agents = roster()
 	rep.Fragments = scanFragments(env, opts)
 	rep.Health = healthChecks(env, opts)
+	if badVersion != nil {
+		rep.Health = append(rep.Health, *badVersion)
+	}
 
 	for _, f := range rep.Fragments {
 		if f.State != string(claudecode.StateOK) && f.State != string(claudecode.StateUserEdited) {
@@ -118,21 +124,47 @@ func Run(env *cli.Env, opts Options) error {
 	return nil
 }
 
-// readAnchors renders <state>/anchors/catalog.json (04 §2.2's consent
-// catalog, written at `mark1 enable`'s anchor walk — a mark1d anchors row).
-// No catalog is a state, not an error: nothing has been derived yet.
-func readAnchors(env *cli.Env) []Anchor {
+// readAnchors renders <state>/anchors/catalog.json: the consent store
+// go/mark1d/internal/anchors/consent.go writes, not a second doctor-side
+// notion of it. The on-disk shape is consent.go:22-25's consentFile
+// ({"version":1,"entries":[...]}) holding consent.go:30-41's ConsentRecord
+// fields (id, ..., consented_at). The daemon's own meaning of "consented" is
+// presence in Entries — LoadConsent's doc comment: "a missing file is an
+// empty store ... nothing has been consented" talks about the *store*, not a
+// per-record flag, and Approve/Revoke only ever add or remove whole records
+// — so every entry decoded here is consented, regardless of whether its
+// consented_at happens to be zero.
+//
+// No catalog is a state, not an error: nothing has been derived yet. A
+// version this reader does not recognise must not decode as an empty list —
+// that is exactly what the bug this replaces looked like (the reader
+// expected key "anchors", the daemon writes "entries", so anchors always
+// read as none) — so an unrecognised version is reported back as its own
+// doctor finding instead of silently producing zero anchors.
+func readAnchors(env *cli.Env) ([]Anchor, *Check) {
 	data, err := os.ReadFile(env.AnchorsCatalog())
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var catalog struct {
-		Anchors []Anchor `json:"anchors"`
+		Version int `json:"version"`
+		Entries []struct {
+			ID          string    `json:"id"`
+			ConsentedAt time.Time `json:"consented_at"`
+		} `json:"entries"`
 	}
 	if json.Unmarshal(data, &catalog) != nil {
-		return nil
+		return nil, nil
 	}
-	return catalog.Anchors
+	if catalog.Version != 1 {
+		return nil, &Check{"anchors_catalog_version", false,
+			fmt.Sprintf("catalog.json version %d unsupported", catalog.Version)}
+	}
+	out := make([]Anchor, 0, len(catalog.Entries))
+	for _, e := range catalog.Entries {
+		out = append(out, Anchor{ID: e.ID, Consented: true, ConsentedAt: e.ConsentedAt})
+	}
+	return out, nil
 }
 
 func roster() []Agent {
@@ -306,7 +338,8 @@ func renderHuman(w io.Writer, r *Report) {
 		_, _ = fmt.Fprintln(w, "anchors       no catalog derived yet")
 	}
 	for _, a := range r.Anchors {
-		_, _ = fmt.Fprintf(w, "anchor        %s consented=%v %s\n", a.ID, a.Consented, a.State)
+		_, _ = fmt.Fprintf(w, "anchor        %s consented=%v %s consented_at=%s\n",
+			a.ID, a.Consented, a.State, a.ConsentedAt.Format(time.RFC3339))
 	}
 	for _, a := range r.Agents {
 		if a.Implemented {

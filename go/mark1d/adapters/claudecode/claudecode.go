@@ -211,9 +211,8 @@ func (a *Adapter) Surfaces() []adapters.CaptureSurface {
 	}
 }
 
-// TranscriptDir is 08 §5.1's fallback derivation: ~/.claude/projects/<munged-cwd>,
-// where <munged-cwd> is the absolute cwd with '/' replaced by '-'. The
-// primary source (hook payloads' transcript_path) arrives with the shim.
+// TranscriptDir is 08 §5.1's fallback derivation: ~/.claude/projects/<munged-cwd>.
+// The primary source (hook payloads' transcript_path) arrives with the shim.
 func (a *Adapter) TranscriptDir(cwd string) (string, error) {
 	home, err := a.home()
 	if err != nil {
@@ -223,7 +222,26 @@ func (a *Adapter) TranscriptDir(cwd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".claude", "projects", strings.ReplaceAll(abs, "/", "-")), nil
+	return filepath.Join(home, ".claude", "projects", mungeCwd(abs)), nil
+}
+
+// mungeCwd is Claude Code's projects-dir slug: every rune outside ASCII
+// [A-Za-z0-9] becomes '-' — separators, but also '.', '_', ':', spaces and
+// each non-ASCII character, one dash per rune. Not "'/' replaced by '-'":
+// that reading tails nothing under any cwd holding a dot or underscore.
+// Established from directory names real installs wrote, never guessed:
+// anthropics/claude-code#93231 (windows, `X:\myrepo\.claude\worktrees\b`
+// → `F--myrepo--claude-worktrees-b`, drive-letter case kept),
+// #93743 (windows, `C:\Users\u\Downloads\근평 웹만들기` →
+// `C--Users-u-Downloads--------`), #92734 (`…/<proj>_b` → `…-<proj>-b`),
+// #40946 (`~/projects/외주/app` → `…projects----app`, one dash per rune).
+func mungeCwd(abs string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, abs)
 }
 
 // TailConfig is the wiring the daemon supplies; everything vendor-shaped is
@@ -238,8 +256,8 @@ type TailConfig struct {
 // StartTail builds the tailer manager for one enabled workspace. The root
 // pre-check is a cheap refusal; the oracle itself rides into the manager and
 // is consulted on EVERY discovered stream's own cwd (04 §2.1), because the
-// '/'→'-' munge is not injective — …/foo/bar and …/foo-bar derive the same
-// vendor dir, so the derived path alone proves nothing about containment.
+// munge is not injective — …/foo/bar, …/foo-bar and …/foo_bar derive the
+// same vendor dir, so the derived path alone proves nothing about containment.
 // Per-payload transcript_path checks ride the shim.
 func (a *Adapter) StartTail(ws adapters.Workspace, set tailers.WorkspaceSet, cfg TailConfig) (*tailers.Manager, error) {
 	root, err := filepath.Abs(ws.Root)

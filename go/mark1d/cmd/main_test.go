@@ -30,6 +30,7 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric/fabrictest"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spill"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 )
@@ -92,7 +93,7 @@ func TestOffMarkerGatesDaemon(t *testing.T) {
 	spoolDir := filepath.Join(dir, "spool")
 	// A fresh subdir so fabric.Listen creates it 0700 itself — t.TempDir()
 	// arrives 0755, which Listen (correctly) refuses per 07 §5.
-	socket := filepath.Join(dir, "sock", "m1p.sock")
+	socket := filepath.Join(fabrictest.SocketDir(t), "sock", "m1p.sock")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +162,7 @@ func TestSpillRingDrainAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	spoolDir := filepath.Join(dir, "spool")
-	socket := filepath.Join(dir, "sock", "m1p.sock")
+	socket := filepath.Join(fabrictest.SocketDir(t), "sock", "m1p.sock")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +281,7 @@ func TestEnableWorkspaceWhileRunning(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	spoolDir := filepath.Join(dir, "spool")
-	socket := filepath.Join(dir, "sock", "m1p.sock")
+	socket := filepath.Join(fabrictest.SocketDir(t), "sock", "m1p.sock")
 	home := filepath.Join(dir, "home")
 	root := filepath.Join(dir, "ws")
 	for _, d := range []string{stateDir, home, root} {
@@ -290,6 +291,11 @@ func TestEnableWorkspaceWhileRunning(t *testing.T) {
 	}
 	// The zero-value adapter resolves ~/.claude via $HOME (08 §5.1).
 	t.Setenv("HOME", home)
+	// The subject is the allow-list wiring, not version policy — but the
+	// tailer refuses to run against an unpinned or absent `claude`, and this
+	// test spent two weeks red on every runner (installed=false) and on every
+	// laptop whose npm had moved past the pin. Present the pinned one.
+	fakeClaudeOnPath(t, pinnedAgentVersion(t))
 
 	stop := runDaemon(t, config{
 		stateDir: stateDir,
@@ -377,7 +383,7 @@ func TestOffSkipsUploadHalfOfDrain(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	spoolDir := filepath.Join(dir, "spool")
-	socket := filepath.Join(dir, "sock", "m1p.sock")
+	socket := filepath.Join(fabrictest.SocketDir(t), "sock", "m1p.sock")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +526,7 @@ func TestCoverageJournalDrainsAtBootAndAtShutdown(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	spoolDir := filepath.Join(dir, "spool")
-	socket := filepath.Join(dir, "sock", "m1p.sock")
+	socket := filepath.Join(fabrictest.SocketDir(t), "sock", "m1p.sock")
 	journal := coverage.JournalPath(stateDir)
 	if err := os.MkdirAll(filepath.Dir(journal), 0o700); err != nil {
 		t.Fatal(err)
@@ -612,7 +618,7 @@ func TestDiskHardStopReceiptsTheBypassWindow(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	spoolDir := filepath.Join(dir, "spool")
-	socket := filepath.Join(dir, "sock", "m1p.sock")
+	socket := filepath.Join(fabrictest.SocketDir(t), "sock", "m1p.sock")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}

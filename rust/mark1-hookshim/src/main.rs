@@ -27,6 +27,14 @@ mod spill;
 /// at ≤50 ms.
 const FABRIC_ABANDON_MS: u64 = 45;
 
+/// The SessionEnd drain barrier's wall budget (08 §4.2 `Flush` row, 07 §6):
+/// the one place this fire-and-forget fabric is allowed to block, bounded
+/// like the gate — the agent hook's own budget minus 08 §4.4's 10 ms margin.
+/// The budget is the vendor's 1.5 s SessionEnd default (08 §5.1), not the
+/// fragment's 30 s kill deadline: a wedged daemon costs the developer one
+/// exit stall of at most this, never thirty seconds (see `maps::GateRule`).
+const FLUSH_DEADLINE_MS: u64 = 1_500 - 10;
+
 /// Stdin bound: no hook body legitimately approaches the 4 MiB frame bound
 /// (07 §5); reading past it can only be a hostile or broken agent.
 const MAX_STDIN: u64 = 4 * 1024 * 1024;
@@ -117,6 +125,12 @@ fn run(started: Instant) {
         );
         return;
     }
+    // SessionEnd forces the drain (NFR-DURABILITY-004): the Flush rides the
+    // same connection AFTER the event, so the daemon's drain covers it.
+    if matches!(event.body, Some(m1p_wire::pb::event::Body::SessionEnd(_))) {
+        flush(home().as_deref(), frame, &event.session_id);
+        return;
+    }
     // What is LEFT of the 45 ms, not 45 ms from here: the abandon timer bounds
     // the whole invocation, startup included (04 §5 step 4).
     let budget = Duration::from_millis(FABRIC_ABANDON_MS).saturating_sub(started.elapsed());
@@ -145,5 +159,17 @@ fn observe(home: Option<&Path>, frame: Vec<u8>, session_id: &[u8], budget: Durat
         // unreachable: write_all succeeded against a socket mark1d was
         // closing, so every event was lost with Ok(()) and no spill.
         _ => spill::append(home, frame),
+    }
+}
+
+/// The mandatory drain barrier (08 §4.2): Hello, the SessionEnd event, Flush,
+/// then wait for FlushAck — bounded, and fail-open past the bound exactly like
+/// a gate: the daemon never acked, so it never accounted this event either;
+/// spill it and count the missed ack.
+fn flush(home: Option<&Path>, frame: Vec<u8>, session_id: &[u8]) {
+    let budget = Duration::from_millis(FLUSH_DEADLINE_MS);
+    if fabric::flush(&frame, session_id, budget).is_err() {
+        spill::append(home, frame);
+        spill::count_flush_timeout(home);
     }
 }

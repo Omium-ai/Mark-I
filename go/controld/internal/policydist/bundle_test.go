@@ -106,6 +106,13 @@ func TestDecodeSectionsAcceptsCanonicalBaseline(t *testing.T) {
 	if len(got.Verify.Anchors) != 1 || got.Gates.MaxConsecutiveBlocks != 3 {
 		t.Fatalf("decoded sections lost content: %+v", got)
 	}
+	// Positive control AT the FR-VERIFY-010 bounds: mcb=3 above, and the
+	// hourly ceiling exactly at the edge default must decode.
+	s := validSections()
+	s.Gates.HourlyBlockCeiling = maxHourlyBlockCeiling
+	if _, err := DecodeSections(mustEncode(t, s)); err != nil {
+		t.Fatalf("hourly_block_ceiling at the bound (%d) must decode: %v", maxHourlyBlockCeiling, err)
+	}
 }
 
 // The rejection table. Each case names the 08 §9 code the publisher must emit;
@@ -168,6 +175,9 @@ func TestDecodeSectionsRejections(t *testing.T) {
 		}), "M1E-3001"},
 		{"max_consecutive_blocks raised above 3", mut(func(s *Sections) {
 			s.Gates.MaxConsecutiveBlocks = 4
+		}), "M1E-3001"},
+		{"hourly_block_ceiling raised above the edge default", mut(func(s *Sections) {
+			s.Gates.HourlyBlockCeiling = maxHourlyBlockCeiling + 1
 		}), "M1E-3001"},
 		{"cortex budget min > max", mut(func(s *Sections) {
 			s.Cortex.MapBudgetTokens = BudgetRange{Min: 2000, Max: 500}

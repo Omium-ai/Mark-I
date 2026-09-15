@@ -270,7 +270,9 @@ impl MerkleTree {
         let mut dirty_dirs: BTreeSet<String> = BTreeSet::new();
         for rel in changed {
             let abs = root.join(rel);
-            let is_dir_hint = abs.is_dir();
+            // Lstat: `is_dir()` follows symlinks, and a link to a directory
+            // outside the root would otherwise be walked as if it were inside.
+            let is_dir_hint = std::fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir());
             if ignore.matches(rel, is_dir_hint) {
                 continue;
             }

@@ -113,6 +113,14 @@ pub fn count_gate_timeout(home: Option<&Path>) {
     count(home, "hookshim.gate_timeout");
 }
 
+/// One missed `FlushAck` (08 §4.2: the SessionEnd drain barrier the writer
+/// MUST wait for), counted the same way — a SessionEnd whose drain the daemon
+/// never receipted is the durability gap NFR-DURABILITY-004 exists to close,
+/// and it must be countable rather than a session that merely ended.
+pub fn count_flush_timeout(home: Option<&Path>) {
+    count(home, "hookshim.flush_timeout");
+}
+
 /// `M1E-4003` — mark1d refused this connection's handshake and closed it
 /// (08 §4.3 steps 2-3). Same sidecar shape, because the alternative is what
 /// this was before: a fleet-wide refusal after a bad rollout, every event

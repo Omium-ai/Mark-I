@@ -10,8 +10,14 @@ import (
 // never reads, released by the OS when the handle closes — including on an
 // abrupt process death, so no stale lock survives a crash. os.OpenFile shares
 // the file for read and write on Windows, so the open itself excludes nothing.
+//
+// The locked byte sits past the pid text lockDir writes at offset 0. Windows
+// byte-range locks are mandatory and per handle, so a lock over byte 0 would
+// make the loser's ReadFile of the pid fail with ERROR_LOCK_VIOLATION and
+// every refusal would read "holder pid unrecorded". A byte beyond EOF is a
+// legal lock target.
 func lockExclusive(f *os.File) error {
-	var ov windows.Overlapped
+	ov := windows.Overlapped{Offset: 1 << 20}
 	return windows.LockFileEx(windows.Handle(f.Fd()),
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)
 }

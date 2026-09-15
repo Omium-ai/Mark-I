@@ -253,3 +253,46 @@ fn memory_recall_carries_preamble_and_budget() {
         "the envelope itself costs tokens; zero means unbooked"
     );
 }
+
+/// FR-CORTEX-005 / 04 §6.4: every serve emits one `CortexInjection`, refusals
+/// included. Outside a runtime `spawn_push` cannot deliver and counts the drop
+/// synchronously, so `fabric_dropped` is the per-call emission witness; the
+/// event itself must carry the live L0 root and the current index clock.
+#[test]
+fn every_tool_call_emits_one_cortex_injection() {
+    use m1p_wire::pb::{event::Body, InjectionChannel};
+    use std::sync::atomic::Ordering;
+    let (shared, _work, _store) = scratch();
+    let before = shared.fabric_dropped.load(Ordering::Relaxed);
+    let calls = [
+        ("find_definition", serde_json::json!({ "symbol": "f" })),
+        ("repo_map", serde_json::json!({})),
+        ("memory_recall", serde_json::json!({ "query": "anything" })),
+    ];
+    for (name, args) in &calls {
+        cortexd::mcp::call_tool(&shared, name, args).unwrap();
+    }
+    // A refusal is a serve too (emit_and wraps the M1E-6401 envelope).
+    shared.stale.store(true, Ordering::SeqCst);
+    let out = cortexd::mcp::call_tool(&shared, "repo_map", &serde_json::json!({})).unwrap();
+    assert_eq!(out["reason_code"], serde_json::json!("M1E-6401"));
+    assert_eq!(
+        shared.fabric_dropped.load(Ordering::Relaxed) - before,
+        calls.len() as u64 + 1,
+        "one emission per call, refusals included"
+    );
+
+    let ev = cortexd::mcp::injection_event(&shared, 2000, 10);
+    let Some(Body::CortexInjection(ci)) = ev.body else {
+        panic!("not a CortexInjection: {:?}", ev.body);
+    };
+    assert_ne!(
+        ci.root_hash,
+        vec![0u8; 32],
+        "root is the live L0 root, never zero"
+    );
+    assert_eq!(ci.root_hash, shared.snapshot().merkle.root().to_vec());
+    assert_eq!(ci.index_clock, shared.index_clock.load(Ordering::SeqCst));
+    assert_eq!(ci.channel, InjectionChannel::McpPull as i32);
+    assert_eq!((ci.token_budget, ci.tokens_used), (2000, 10));
+}

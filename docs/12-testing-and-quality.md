@@ -543,7 +543,7 @@ The estate's CI has gitleaks, trivy, hadolint, pip-audit — and **no `cargo-den
 
 | Gate | Tool | When | Blocking? |
 |---|---|---|---|
-| Rust dependency audit: advisories, licenses, bans, duplicate versions | `cargo-deny check` (config commits the allow-list; `mark1-hookshim` and token-path crates additionally under `cargo vet` per NFR-SECURITY-008) | every PR | **blocks** |
+| Rust dependency audit: advisories, licenses, bans, duplicate versions | `cargo-deny check` (config commits the allow-list; `mark1-hookshim` and `mark1-proxy` additionally have their whole resolved closures pinned to reviewed lists by `tools/ci/tokenpath_deps_gate.sh` per NFR-SECURITY-008 — *reconciled 2026-09-15: this row previously named `cargo vet`, which has never been configured in this tree; the closure gate is the control that exists*) | every PR | **blocks** |
 | Go vulnerability scan | `govulncheck ./...` | every PR | **blocks** (call-graph-reachable findings; unreachable-in-binary findings report + 14-day fix window) |
 | Python audit | `pip-audit` (estate-inherited) | every PR | **blocks** |
 | SBOM | CycloneDX: `cargo cyclonedx` + `cyclonedx-gomod` + `cyclonedx-py`, merged per release artifact | release | **blocks release** (a release without an SBOM does not publish) |

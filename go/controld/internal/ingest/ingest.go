@@ -17,6 +17,7 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/chproj"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/registry"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/s3land"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
@@ -53,6 +54,9 @@ type Deps struct {
 	Proj     *chproj.Projector
 	Sidefx   *sidefx.Sidefx
 	Security SecurityRecorder // nil ⇒ log+project via Proj
+	// Registry is the m1p-registry (FR-SPINE-023): per-tenant schema windows
+	// behind the 426. nil ⇒ the compiled-in [m1p.v1] window for every tenant.
+	Registry registry.Registry
 	// PoolSize is the §8.1 ingest pipeline bound (64 at prod defaults).
 	PoolSize int
 	Now      func() time.Time
@@ -66,6 +70,7 @@ type Module struct {
 	proj     *chproj.Projector
 	sfx      *sidefx.Sidefx
 	security SecurityRecorder
+	registry registry.Registry
 	limiter  *Limiter
 	sem      chan struct{}
 	now      func() time.Time
@@ -78,6 +83,9 @@ func New(d Deps) *Module {
 	if d.Now == nil {
 		d.Now = time.Now
 	}
+	if d.Registry == nil {
+		d.Registry = registry.Static(registry.Compiled)
+	}
 	m := &Module{
 		verifier: d.Verifier,
 		obsCfg:   d.ObsCfg,
@@ -86,6 +94,7 @@ func New(d Deps) *Module {
 		proj:     d.Proj,
 		sfx:      d.Sidefx,
 		security: d.Security,
+		registry: d.Registry,
 		limiter:  NewLimiter(),
 		sem:      make(chan struct{}, d.PoolSize),
 		now:      d.Now,

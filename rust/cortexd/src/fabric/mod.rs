@@ -23,21 +23,30 @@
 //! "no daemon is listening" and "the daemon refused our identity" are
 //! different facts, and one counter would say neither.
 
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::Duration;
 
 use m1p_wire::pb;
 
 use crate::session::Shared;
 
+// The deadlines, the endpoint list and their two imports feed the `#[cfg(unix)]` `push`
+// only; on Windows the named-pipe lane is still the `Unsupported` stub at the bottom of
+// this file, so under `-D warnings` each ungated one is a dead-code ERROR there and a
+// clean build here. Same shape as mark1-proxy's fabric.rs.
 /// 08 §4.4 deadlines, verbatim.
+#[cfg(unix)]
 const CONNECT_DEADLINE: Duration = Duration::from_millis(100);
+#[cfg(unix)]
 const WRITE_DEADLINE: Duration = Duration::from_millis(250);
 
 /// Endpoint per the hookshim sibling: `$XDG_RUNTIME_DIR/omium-mark1/m1p.sock`,
 /// fallback `~/.omium/mark1/m1p.sock`.
+#[cfg(unix)]
 fn endpoints() -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(2);
     if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR") {

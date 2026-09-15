@@ -51,6 +51,13 @@ type Server struct {
 	// Health counts accepted Event frames as `shim.delivered`; nil is legal.
 	Health *obs.Health
 
+	// Sync is the Flush barrier's durability half (NFR-DURABILITY-004): it
+	// runs BEFORE every FlushAck, so the ack attests to fsynced records and
+	// not merely written ones. cmd/main.go installs spool.Sync — the one
+	// fsync path the spool has, not a second one. nil (the stub tests, an
+	// embedding with no durable store) acks on admission alone.
+	Sync func() error
+
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
 	closed bool

@@ -1,26 +1,26 @@
 package tailers
 
-import "io/fs"
+import (
+	"os"
+	"syscall"
+)
 
 // FileID's Windows form is (volume serial, file index) — 07 §5's counterpart to
-// the unix (dev, inode) — and it is NOT derivable from an fs.FileInfo. Go's
-// os.Stat fills Sys() with a *syscall.Win32FileAttributeData, which carries
-// timestamps and attributes and no identity at all; the volume serial and file
-// index come from GetFileInformationByHandle against an OPEN HANDLE, which is a
-// different call with a different lifetime than this signature has.
-//
-// os.SameFile does compare Windows identity internally, but it compares — it
-// cannot hand back a value, and this type is both a JSON field on the persisted
-// cursor and a component of the cursor's filename. A comparison does not
-// serialize.
-//
-// So the honest answer is (zero, false), which is not a stub: NewTailer already
-// treats !ok as "no file identity on this platform" and refuses to construct a
-// tailer at all. Nothing here degrades into following a file it cannot identify
-// across a rotation — the one failure mode the ID exists to prevent.
+// the unix (dev, inode). It comes from GetFileInformationByHandle against an
+// OPEN HANDLE, which is why fileID takes the *os.File and not an fs.FileInfo:
+// os.Stat's Sys() here is a *Win32FileAttributeData carrying timestamps and
+// attributes and no identity at all, and os.SameFile compares identities
+// without ever handing one back — this type is both a JSON field on the
+// persisted cursor and a component of the cursor's filename.
 type FileID struct {
 	Dev uint64
 	Ino uint64
 }
 
-func fileID(fs.FileInfo) (FileID, bool) { return FileID{}, false }
+func fileID(f *os.File) (FileID, bool) {
+	var d syscall.ByHandleFileInformation
+	if err := syscall.GetFileInformationByHandle(syscall.Handle(f.Fd()), &d); err != nil {
+		return FileID{}, false
+	}
+	return FileID{Dev: uint64(d.VolumeSerialNumber), Ino: uint64(d.FileIndexHigh)<<32 | uint64(d.FileIndexLow)}, true
+}

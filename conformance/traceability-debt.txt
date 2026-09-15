@@ -18,6 +18,11 @@
 # their rows went fully proven, which check 4's ratchet counts as twelve failures --
 # so this file going stale reds CI exactly as loudly as regressing would. Prune it in
 # the same pass that strikes a `partial:`, not later.
+#
+# 2026-09-15: 41 -> 44. Three RE-ARMED, not new debt: FR-SPINE-021, FR-SPINE-022 and
+# NFR-CORRECTNESS-002 were fully proven by their tests but 02 s12 gates their acceptance on
+# ADR-0002, which is still Proposed. A ledger that closes a row the spec says cannot close is
+# wrong in the direction this file exists to prevent, so they come back until the signature.
 CON-003
 CON-004
 CON-008
@@ -31,7 +36,6 @@ FR-CLI-001
 FR-CLI-002
 FR-CLI-003
 FR-CLI-006
-FR-CLI-008
 FR-ENROLL-003
 FR-ENROLL-004
 FR-ENROLL-005
@@ -46,8 +50,11 @@ FR-SPINE-015
 FR-SPINE-016
 FR-SPINE-018
 FR-SPINE-019
+FR-SPINE-021
+FR-SPINE-022
 FR-SPINE-023
 FR-SPINE-026
+NFR-CORRECTNESS-002
 NFR-DURABILITY-004
 NFR-OPERABILITY-001
 NFR-OPERABILITY-003

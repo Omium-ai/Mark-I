@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric/fabrictest"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
@@ -86,7 +87,7 @@ func startProofDaemon(t *testing.T, m *verdict.BundleMatrices) (string, func()) 
 	t.Helper()
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
-	socket := filepath.Join(dir, "sock", "m1p.sock")
+	socket := filepath.Join(fabrictest.SocketDir(t), "sock", "m1p.sock")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +392,7 @@ func TestAssembledDaemonResolvesItsDenominator(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	spoolDir := filepath.Join(dir, "spool")
-	socket := filepath.Join(dir, "sock", "m1p.sock")
+	socket := filepath.Join(fabrictest.SocketDir(t), "sock", "m1p.sock")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}

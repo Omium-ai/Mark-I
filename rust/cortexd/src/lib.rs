@@ -190,20 +190,22 @@ fn retag(
         if let Some(hit) = cas.get_tags(
             path,
             &hash,
-            l1_tags::grammar_rev(),
+            l1_tags::grammar_rev(lang),
             l1_tags::QUERY_REV,
             l1_tags::INDEXER_REV,
         )? {
+            shared.cas_hits.fetch_add(1, Ordering::Relaxed);
             tags.insert(path.clone(), hit);
             continue;
         }
+        shared.cas_misses.fetch_add(1, Ordering::Relaxed);
         let source = std::fs::read(shared.root.join(path))?;
         match l1_tags::extract(lang, &source) {
             Ok(file_tags) => {
                 cas.put_tags(
                     path,
                     &hash,
-                    l1_tags::grammar_rev(),
+                    l1_tags::grammar_rev(lang),
                     l1_tags::QUERY_REV,
                     l1_tags::INDEXER_REV,
                     &file_tags,

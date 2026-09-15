@@ -205,6 +205,141 @@ func provisionBaseURL(t *testing.T, env *cli.Env, target string) string {
 	return target
 }
 
+func anchorRow(t *testing.T, rep Report, id string) Anchor {
+	t.Helper()
+	for _, a := range rep.Anchors {
+		if a.ID == id {
+			return a
+		}
+	}
+	t.Fatalf("no anchor %q among %+v", id, rep.Anchors)
+	return Anchor{}
+}
+
+// TestDoctorReadsTheDaemonsCatalogFormat closes the bug two mappers found
+// independently: doctor's reader expected {"anchors":[...]}, but the daemon
+// (go/mark1d/internal/anchors/consent.go) writes {"version":1,"entries":[...]}
+// with per-entry consented_at. The two formats never met, so `mark1 doctor`
+// rendered an empty anchor list forever and nothing noticed.
+func TestDoctorReadsTheDaemonsCatalogFormat(t *testing.T) {
+	t.Run("the daemon's real format", func(t *testing.T) {
+		env, out := enrolledEnv(t)
+		if err := os.MkdirAll(filepath.Dir(env.AnchorsCatalog()), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// Hand-built from consent.go:22-25 (consentFile: version, entries) and
+		// consent.go:30-41 (ConsentRecord's JSON tags: id, tool, argv,
+		// binary_path, binary_hash, tool_version, class, side_effect,
+		// exec_hash, consented_at). No import of mark1d — the shape is
+		// copied, not referenced.
+		//
+		// Two entries: a1 carries a consented_at, a2 does not. Both are
+		// consented — LoadConsent's rule is that presence in the store IS
+		// consent (Approve/Revoke only ever add or remove whole records,
+		// never half-write one), so a reader that derives Consented from
+		// "has a timestamp" instead of "is in the array" must fail a2.
+		const body = `{
+  "version": 1,
+  "entries": [
+    {
+      "id": "a1",
+      "tool": "git",
+      "argv": ["status"],
+      "binary_path": "/usr/bin/git",
+      "binary_hash": "aa",
+      "tool_version": "2.40.0",
+      "class": "fast",
+      "side_effect": "static",
+      "exec_hash": "bb",
+      "consented_at": "2026-01-02T03:04:05Z"
+    },
+    {
+      "id": "a2",
+      "tool": "make",
+      "argv": ["build"],
+      "binary_path": "/usr/bin/make",
+      "binary_hash": "cc",
+      "tool_version": "4.3",
+      "class": "slow",
+      "side_effect": "test",
+      "exec_hash": "dd"
+    }
+  ]
+}`
+		if err := os.WriteFile(env.AnchorsCatalog(), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		rep, err := runDoctor(t, env, out, Options{})
+		if err != nil {
+			t.Fatalf("a valid catalog failed doctor: %v\n%+v", err, rep)
+		}
+		if len(rep.Anchors) != 2 {
+			t.Fatalf("anchors %+v, want 2", rep.Anchors)
+		}
+
+		a1 := anchorRow(t, rep, "a1")
+		wantA1 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		if !a1.Consented || !a1.ConsentedAt.Equal(wantA1) || a1.State != "" {
+			t.Fatalf("a1 %+v, want consented=true consented_at=%s state=\"\"", a1, wantA1)
+		}
+
+		a2 := anchorRow(t, rep, "a2")
+		if !a2.Consented {
+			t.Fatalf("a2 %+v, want consented — presence in the store is the daemon's whole meaning of consent, a missing timestamp does not undo it", a2)
+		}
+		if !a2.ConsentedAt.IsZero() {
+			t.Fatalf("a2 %+v, want zero consented_at (fixture omits it)", a2)
+		}
+
+		// The human render must carry the same two facts, not just the JSON.
+		var buf bytes.Buffer
+		renderHuman(&buf, &rep)
+		human := buf.String()
+		if !strings.Contains(human, "anchor        a1 consented=true") || !strings.Contains(human, "2026-01-02T03:04:05Z") {
+			t.Fatalf("human render missing a1's consent/timestamp:\n%s", human)
+		}
+		if !strings.Contains(human, "anchor        a2 consented=true") {
+			t.Fatalf("human render missing a2's consent:\n%s", human)
+		}
+	})
+
+	t.Run("the bug's own fixture: the old {\"anchors\":[...]} shape", func(t *testing.T) {
+		env, out := enrolledEnv(t)
+		if err := os.MkdirAll(filepath.Dir(env.AnchorsCatalog()), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		const oldBody = `{"anchors":[{"id":"x","consented":true,"state":"ok"}]}`
+		if err := os.WriteFile(env.AnchorsCatalog(), []byte(oldBody), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		rep, err := runDoctor(t, env, out, Options{})
+		var ee *cli.ExitError
+		if !errors.As(err, &ee) || ee.Code != cli.ExitRuntime {
+			t.Fatalf("got %v, want exit 1 — the old shape has no version the reader recognises", err)
+		}
+		if len(rep.Anchors) != 0 {
+			t.Fatalf("anchors %+v, want none: the old shape has no \"entries\" key the daemon writes", rep.Anchors)
+		}
+		found := false
+		for _, c := range rep.Health {
+			if c.Name == "anchors_catalog_version" {
+				found = true
+				if c.OK {
+					t.Fatalf("finding %+v, want OK=false", c)
+				}
+				if !strings.Contains(c.Detail, "version 0") {
+					t.Fatalf("detail %q does not name the bad version", c.Detail)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("health %+v, want an anchors_catalog_version finding — an empty anchor list must be named, not silent (that silence is the bug)", rep.Health)
+		}
+	})
+}
+
 func fragmentRow(t *testing.T, rep Report, name string) Fragment {
 	t.Helper()
 	for _, f := range rep.Fragments {

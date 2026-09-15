@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric/fabrictest"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/policy"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
@@ -187,7 +188,7 @@ func TestPhase2RetryLoopArrestedAtTheKnee(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	spoolDir := filepath.Join(dir, "spool")
-	socket := filepath.Join(dir, "sock", "m1p.sock")
+	socket := filepath.Join(fabrictest.SocketDir(t), "sock", "m1p.sock")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}

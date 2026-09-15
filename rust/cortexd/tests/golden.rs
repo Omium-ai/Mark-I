@@ -190,6 +190,117 @@ fn incremental_touch_rehashes_only_the_affected_subtree() {
         .is_none());
 }
 
+/// FR-CORTEX-007 / 04 §6.1: the CAS `grammar_rev` component is the rev of the
+/// grammar that produced the row, so a bump of one grammar pin misses exactly
+/// that language's rows and every other language still hits. The bump is
+/// staged on disk (rows re-keyed under the old Python pin), then a cold-merkle
+/// pass re-probes every file with the live revs and the counters do the sum.
+#[test]
+fn grammar_rev_bump_misses_only_that_language() {
+    use cortexd::l1_tags::{grammar_rev, Lang};
+    let store = tempfile::tempdir().unwrap();
+    let (shared, cas) = cortexd::bootstrap(fixture(), store.path().join("store"), 2000).unwrap();
+    cortexd::full_index(&shared, &cas).unwrap();
+    let hits_misses = || {
+        (
+            shared.cas_hits.load(Ordering::Relaxed),
+            shared.cas_misses.load(Ordering::Relaxed),
+        )
+    };
+    assert_eq!(
+        hits_misses(),
+        (0, 6),
+        "cold CAS: every source file is a miss"
+    );
+    assert_ne!(grammar_rev(Lang::Python), grammar_rev(Lang::Rust));
+
+    // Stage a Python pin bump: the two .py rows were derived under an older
+    // grammar_rev. Rust and TypeScript rows are untouched by definition.
+    let db = rusqlite::Connection::open(shared.store.join("cas.sqlite")).unwrap();
+    let rekeyed = db
+        .execute(
+            "UPDATE artifacts SET grammar_rev = 'py0.22' WHERE grammar_rev = ?1",
+            [grammar_rev(Lang::Python)],
+        )
+        .unwrap();
+    assert_eq!(rekeyed, 2, "exactly the Python rows carry the Python pin");
+
+    // Cold merkle + shards, warm CAS: every file is re-probed (04 §6.1 "one
+    // CAS probe + one re-parse" for the bumped grammar only).
+    std::fs::remove_file(shared.store.join("l0.merkle")).unwrap();
+    std::fs::remove_dir_all(shared.store.join("graph")).unwrap();
+    cortexd::full_index(&shared, &cas).unwrap();
+    assert_eq!(
+        hits_misses(),
+        (4, 8),
+        "4 hits (2 .rs + 2 .ts), 2 new misses (the .py rows under the bumped pin)"
+    );
+}
+
+/// FR-CORTEX-006 / 04 §6.6: `.mark1ignore` scopes the index itself — an
+/// ignored file never enters L0 or L1 while its sibling does — and neither
+/// the walk nor the incremental path follows a symlink, so a link out of the
+/// root cannot pull foreign bytes into the tree.
+#[test]
+fn mark1ignore_and_symlink_escape_never_enter_the_index() {
+    let work = tempfile::tempdir().unwrap();
+    copy_dir(&fixture(), work.path());
+    std::fs::write(work.path().join(".mark1ignore"), "web/index.ts\n").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("leak.py"), b"def leaked():\n    pass\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        symlink(
+            outside.path().join("leak.py"),
+            work.path().join("core/leak.py"),
+        )
+        .unwrap();
+        symlink(outside.path(), work.path().join("core/escape")).unwrap();
+    }
+
+    let store = tempfile::tempdir().unwrap();
+    let (shared, cas) =
+        cortexd::bootstrap(work.path().to_path_buf(), store.path().join("store"), 2000).unwrap();
+    cortexd::full_index(&shared, &cas).unwrap();
+    // The watcher path too: a symlinked dir arriving whole must not be walked.
+    cortexd::incremental_index(
+        &shared,
+        &cas,
+        &["core/escape".to_string(), "core/leak.py".to_string()],
+    )
+    .unwrap();
+
+    let idx = shared.index.read_recover();
+    assert!(
+        idx.merkle.file_hash("web/index.ts").is_none(),
+        "mark1ignored: absent from L0"
+    );
+    assert!(
+        !idx.tags.contains_key("web/index.ts"),
+        "mark1ignored: absent from L1"
+    );
+    assert!(
+        idx.merkle.file_hash("web/render.ts").is_some(),
+        "sibling present in L0"
+    );
+    assert!(
+        idx.tags.contains_key("web/render.ts"),
+        "sibling present in L1"
+    );
+    for escaped in ["core/leak.py", "core/escape/leak.py"] {
+        assert!(
+            idx.merkle.file_hash(escaped).is_none(),
+            "{escaped} must not be indexed"
+        );
+        assert!(!idx.tags.contains_key(escaped));
+    }
+    assert!(
+        !idx.tags.values().flatten().any(|t| t.name == "leaked"),
+        "no symbol from outside the root"
+    );
+}
+
 #[test]
 fn watcher_delivers_changed_paths() {
     let work = tempfile::tempdir().unwrap();

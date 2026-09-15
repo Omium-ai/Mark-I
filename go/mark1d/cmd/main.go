@@ -87,8 +87,14 @@ const dropGateTimeout spool.DropReason = 5
 const dropUnsupportedAgentVersion spool.DropReason = 3
 
 type config struct {
-	stateDir  string
-	spoolDir  string
+	stateDir string
+	spoolDir string
+	// spoolCap is 07 §6's spool byte cap (spool.DefaultCap, ~2 GiB); zero
+	// takes the spool's default. The only operator-visible spool limit: past
+	// it diagnostics shed (accounted DROP_REASON_SPOOL_SHED, FR-SPINE-007)
+	// and billing-grade blocks. The 95 % disk hard stop is deliberately NOT a
+	// flag (see diskUsage below).
+	spoolCap  int64
 	socket    string
 	workspace string
 	saltHex   string
@@ -142,6 +148,7 @@ func main() {
 	var cfg config
 	flag.StringVar(&cfg.stateDir, "state-dir", stateDefault, "mark1d state root (epoch counter, tailer cursors, OFF marker)")
 	flag.StringVar(&cfg.spoolDir, "spool-dir", "", "spool directory (default <state-dir>/spool)")
+	flag.Int64Var(&cfg.spoolCap, "spool-cap", spool.DefaultCap, "spool byte cap (07 §6): past it diagnostics shed, accounted, and billing-grade blocks; below one 64 MiB segment the spool can never free space")
 	flag.StringVar(&cfg.socket, "socket", "", "fabric UDS path (default per 07 §5: $XDG_RUNTIME_DIR/omium-mark1/m1p.sock, else ~/.omium/mark1/m1p.sock)")
 	flag.StringVar(&cfg.workspace, "workspace", "", "additive workspace root to tail besides <state-dir>/workspaces.json (mark1 enable writes the file)")
 	flag.StringVar(&cfg.saltHex, "tenant-salt", "", "hex tenant HMAC root for Usage idem_key derivation; DEV SEAM — enrollment delivers the real root into identity custody (04 §2.9)")
@@ -235,7 +242,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		return errors.New("mark1d: --workspace requires --tenant-salt (non-empty hex) until enrollment delivers the root")
 	}
 
-	sp, err := spool.Open(spool.Config{Dir: cfg.spoolDir, DiskUsage: cfg.diskUsage})
+	sp, err := spool.Open(spool.Config{Dir: cfg.spoolDir, SpoolCap: cfg.spoolCap, DiskUsage: cfg.diskUsage})
 	if err != nil {
 		return err
 	}
@@ -521,6 +528,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	gate.OnDropped = func(string) { adm.AccountDropped(dropGateTimeout, spool.ClassDiagnostic, 1) }
 	gate.Health = health
 	srv.Health = health
+	srv.Sync = sp.Sync // FlushAck attests to fsynced records (NFR-DURABILITY-004)
 	srv.SetGate(gate)
 	srv.SetContaminationHandler(contaminationRollback{log: log, stateDir: cfg.stateDir, adm: adm})
 	serveDone := make(chan error, 1)

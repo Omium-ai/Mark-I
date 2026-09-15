@@ -43,6 +43,12 @@ set -eu
 
 cd "$(dirname "$0")/../.."
 
+# The one comparator. The real check and the self-test both go through it, so a comparator
+# that stopped seeing one direction is caught by the self-test on this run rather than by
+# the incident. The first version of this self-test ran its own diff -q and stayed green
+# while the real comparison had been mutated to a single direction (lead mutation, 09-15).
+closure_differs() { ! diff -u "$1" "$2" > "$3"; }
+
 FAILED=0
 PARTIAL=''
 TMP=$(mktemp -d)
@@ -63,8 +69,14 @@ BIN=target/debug/mark1-verifier
 # green on Linux for no reason anyone could act on. The verifier ships to five triples; the
 # closure that matters is their union.
 #
-# --offline: a gate whose subject is "this binary needs no network" has no business needing
-# one itself. The build above has already populated whatever the registry cache lacks.
+# --offline, so the graph read is the LOCKFILE's and not whatever a registry happened to say
+# today. But the build above populates the cache for the HOST triple only, while --target all
+# walks every triple — so on a cold runner the Windows-only crates (anstyle-wincon) were never
+# downloaded and `cargo tree --offline` failed to read the graph at all, which this gate then
+# correctly reported as "proved nothing". `cargo fetch` is target-agnostic: it pulls every
+# crate Cargo.lock names, after which --offline means "from the lockfile" rather than "from
+# whatever the host build touched". The subject of this gate is the shipped BINARY's network
+# needs, not this script's; the script may fetch.
 #
 # Versions are stripped. A version bump is not a new line to audit; a new CRATE is.
 cat > "$TMP/allowed.txt" <<'EOF'
@@ -131,6 +143,7 @@ closure() { # closure > stdout — sorted unique crate NAMES in mark1-verifier's
 }
 
 echo "== 1 CLOSURE =="
+cargo fetch --locked --quiet
 closure > "$TMP/actual.txt"
 N=$(wc -l < "$TMP/actual.txt" | tr -d ' ')
 
@@ -153,7 +166,7 @@ for d in mark1-verifier mark1-receipt clap serde_json; do
   }
 done
 
-if ! diff -u "$TMP/allowed.txt" "$TMP/actual.txt" > "$TMP/closure.diff"; then
+if closure_differs "$TMP/allowed.txt" "$TMP/actual.txt" "$TMP/closure.diff"; then
   echo "FAIL: mark1-verifier's dependency closure is not the audited one."
   sed -n '3,$p' "$TMP/closure.diff" | sed 's/^/        /'
   echo ""
@@ -174,7 +187,7 @@ fi
 # from a clean graph. So put a network crate in and require it to be caught, on this run.
 printf 'reqwest\n' >> "$TMP/actual.txt"
 sort -u -o "$TMP/actual.txt" "$TMP/actual.txt"
-if diff -q "$TMP/allowed.txt" "$TMP/actual.txt" > /dev/null 2>&1; then
+if ! closure_differs "$TMP/allowed.txt" "$TMP/actual.txt" "$TMP/selftest.diff"; then
   echo "FAIL: the closure comparator did not notice a synthetic 'reqwest' added to the graph."
   echo "      Whatever it reported above, it was not comparing anything."
   FAILED=1

@@ -62,6 +62,17 @@ fn fail_open_ceiling(deadline_ms: u64) -> Duration {
 /// edit cannot move it in either direction.
 const STOP_DEADLINE_MS: u64 = 240;
 
+/// The SessionEnd drain barrier's budget (`main::FLUSH_DEADLINE_MS`): the
+/// vendor's 1.5 s SessionEnd default (08 §5.1) minus 08 §4.4's 10 ms margin.
+/// Spelled out here for the same reason as `STOP_DEADLINE_MS`.
+const FLUSH_DEADLINE_MS: u64 = 1_490;
+
+/// How long `Mode::SlowFlushAck` sits on the Flush before acking: past
+/// `FAIL_OPEN_OVERHEAD`, so a shim that fired the Flush and left without
+/// waiting cannot hide inside the harness's own slack — and inside
+/// `FLUSH_DEADLINE_MS`, so a shim that waited gets its receipt.
+const FLUSH_ACK_DELAY: Duration = Duration::from_millis(1_000);
+
 fn fixture(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../conformance/hooks/claudecode/v2.1.251/hooks")
@@ -100,6 +111,12 @@ impl TestEnv {
     /// rollout is countable instead of just a fleet full of spill rings.
     fn handshake_refusals(&self) -> u64 {
         self.sidecar("hookshim.handshake_refused")
+    }
+
+    /// The missed-FlushAck ledger (NFR-DURABILITY-004): one byte per
+    /// SessionEnd whose drain the daemon never receipted.
+    fn flush_timeouts(&self) -> u64 {
+        self.sidecar("hookshim.flush_timeout")
     }
 
     fn sidecar(&self, name: &str) -> u64 {
@@ -144,16 +161,18 @@ impl TestEnv {
         let (conn_tx, connected) = mpsc::channel();
         let (ev_tx, events) = mpsc::channel();
         let (q_tx, queries) = mpsc::channel();
+        let (f_tx, frames) = mpsc::channel();
         std::thread::spawn(move || {
             while let Ok((stream, _addr)) = listener.accept() {
                 let _ = conn_tx.send(());
-                serve(stream, mode, &ev_tx, &q_tx);
+                serve(stream, mode, &ev_tx, &q_tx, &f_tx);
             }
         });
         Daemon {
             connected,
             events,
             queries,
+            frames,
         }
     }
 
@@ -230,6 +249,12 @@ enum Mode {
     /// billed the shim its whole budget twice: once on the handshake read,
     /// then again on a freshly-timed verdict read.
     SlowHello,
+    /// HelloAck{accepted}, FlushAck `FLUSH_ACK_DELAY` late but inside the
+    /// deadline — provable only by a shim that actually waits for it.
+    SlowFlushAck,
+    /// HelloAck{accepted}, then the Flush is read and never answered, the
+    /// connection held open so the shim sees silence, not EOF.
+    NoFlushAck,
 }
 
 /// How long `Mode::SlowHello` sits on the handshake before acking. Bigger than
@@ -262,9 +287,28 @@ struct Daemon {
     connected: mpsc::Receiver<()>,
     events: mpsc::Receiver<pb::Event>,
     queries: mpsc::Receiver<pb::GateQuery>,
+    /// Every frame the shim wrote, in arrival order — the only witness a
+    /// same-connection ordering claim can have.
+    frames: mpsc::Receiver<pb::fabric_frame::Kind>,
 }
 
 impl Daemon {
+    /// The frames written so far, labelled by arm (events by body), in order.
+    fn frame_log(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(k) = self.frames.recv_timeout(Duration::from_millis(300)) {
+            out.push(match k {
+                pb::fabric_frame::Kind::Event(ev) => match ev.body {
+                    Some(pb::event::Body::SessionEnd(_)) => "Event(SessionEnd)".to_owned(),
+                    other => format!("Event({other:?})"),
+                },
+                pb::fabric_frame::Kind::Hello(_) => "Hello".to_owned(),
+                pb::fabric_frame::Kind::Flush(_) => "Flush".to_owned(),
+                other => format!("{other:?}"),
+            });
+        }
+        out
+    }
     fn event(&self) -> pb::Event {
         self.events.recv_timeout(Duration::from_secs(2)).unwrap()
     }
@@ -294,6 +338,7 @@ fn serve(
     mode: Mode,
     events: &mpsc::Sender<pb::Event>,
     queries: &mpsc::Sender<pb::GateQuery>,
+    frames: &mpsc::Sender<pb::fabric_frame::Kind>,
 ) {
     if mode == Mode::Mute {
         // Hold the connection open so the shim sees silence, not EOF.
@@ -302,17 +347,23 @@ fn serve(
     }
     let mut dec = FrameDecoder::new();
     let mut buf = [0u8; 4096];
+    // Mirrors mark1d TODAY (fabric/session.go `ss.drained`): events admitted
+    // on this connection since Hello, echoed back in FlushAck. No Sync sits
+    // behind it yet — that is the daemon's half of NFR-DURABILITY-004.
+    let mut drained = 0u64;
     loop {
         let n = match stream.read(&mut buf) {
             Ok(0) | Err(_) => return,
             Ok(n) => n,
         };
-        let frames = match dec.feed_frames(&buf[..n]) {
+        let frames_in = match dec.feed_frames(&buf[..n]) {
             Ok(f) => f,
             Err(e) => panic!("the daemon could not decode what the shim wrote: {e}"),
         };
-        for frame in frames {
-            match frame.kind.unwrap() {
+        for frame in frames_in {
+            let kind = frame.kind.unwrap();
+            let _ = frames.send(kind.clone());
+            match kind {
                 pb::fabric_frame::Kind::Hello(h) => {
                     if mode == Mode::SlowHello {
                         std::thread::sleep(HELLO_DELAY);
@@ -336,7 +387,21 @@ fn serve(
                     }
                 }
                 pb::fabric_frame::Kind::Event(ev) => {
+                    drained += 1;
                     let _ = events.send(ev);
+                }
+                pb::fabric_frame::Kind::Flush(_) => {
+                    if mode == Mode::NoFlushAck {
+                        std::thread::sleep(Duration::from_secs(30));
+                        return;
+                    }
+                    if mode == Mode::SlowFlushAck {
+                        std::thread::sleep(FLUSH_ACK_DELAY);
+                    }
+                    write_frame(
+                        &mut stream,
+                        pb::fabric_frame::Kind::FlushAck(pb::FlushAck { drained }),
+                    );
                 }
                 pb::fabric_frame::Kind::GateQuery(q) => {
                     let _ = queries.send(q.clone());
@@ -972,6 +1037,68 @@ fn gate_off_short_circuits_before_any_socket_io() {
     );
     assert!(!env.ring_path().exists());
     assert_eq!(env.gate_timeouts(), 0, "off is not a fail-open, it is off");
+}
+
+// ---- the SessionEnd drain barrier (NFR-DURABILITY-004; 08 §4.2 Flush row) ----
+
+/// Event ordering IS the property: the Flush must follow the SessionEnd event
+/// on the same connection, or the daemon's drain does not cover it. And the
+/// ack must be waited for — a Flush fired on the way out the door is not a
+/// barrier — which only a late ack can prove.
+#[test]
+fn session_end_forces_a_flush_after_the_event_and_awaits_the_ack() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    let d = env.listen_as(Mode::SlowFlushAck);
+    let (ok, chatter, wall) = env.run(&fixture("SessionEnd"), &[]);
+    assert!(ok);
+    assert!(
+        chatter.is_empty(),
+        "SessionEnd has nothing returnable (08 §5.1)"
+    );
+    assert_eq!(
+        d.frame_log(),
+        ["Hello", "Event(SessionEnd)", "Flush"],
+        "the Flush must ride the same connection, after the SessionEnd event"
+    );
+    assert!(
+        wall > FLUSH_ACK_DELAY,
+        "the FlushAck was not actually waited on: {wall:?}"
+    );
+    assert!(wall < fail_open_ceiling(FLUSH_DEADLINE_MS), "took {wall:?}");
+    assert!(
+        !env.ring_path().exists(),
+        "a receipted drain must not spill"
+    );
+    assert_eq!(env.flush_timeouts(), 0, "a receipted drain is not a miss");
+}
+
+/// The daemon reads the Flush and never answers: the shim must return inside
+/// its stated deadline — a durability barrier is still never allowed to hold
+/// the agent past its budget (08 §4.4) — and the miss must be counted and the
+/// event spilled, because an unreceipted drain is exactly a lost SessionEnd.
+#[test]
+fn session_end_flush_unacked_returns_within_deadline_and_is_counted() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    let d = env.listen_as(Mode::NoFlushAck);
+    let (ok, chatter, wall) = env.run(&fixture("SessionEnd"), &[]);
+    assert!(ok, "a mute drain must still exit 0");
+    assert!(chatter.is_empty());
+    assert_eq!(d.frame_log(), ["Hello", "Event(SessionEnd)", "Flush"]);
+    assert!(wall < fail_open_ceiling(FLUSH_DEADLINE_MS), "took {wall:?}");
+    let entries = unseal_ring(&env);
+    assert_eq!(entries.len(), 1, "an unreceipted SessionEnd must spill");
+    match decode_one_event(&entries[0]).body.unwrap() {
+        pb::event::Body::SessionEnd(_) => {}
+        other => panic!("unexpected body {other:?}"),
+    }
+    assert_eq!(env.flush_timeouts(), 1, "the missed ack must be counted");
+    assert_eq!(
+        env.gate_timeouts(),
+        0,
+        "a missed drain is not a gate fail-open"
+    );
 }
 
 // ---- maps as data (FR-AGENT-001) ----

@@ -44,6 +44,12 @@ export M1_TEST_S3_ENDPOINT := env_var_or_default("M1_TEST_S3_ENDPOINT", "http://
 # called themselves "lint-go" and disagreed about whether the repo was clean. A pin only one
 # side checks is not a pin. ci.yml's GOLANGCI_VERSION is the only other copy of this number.
 export M1_GOLANGCI_VERSION := env_var_or_default("M1_GOLANGCI_VERSION", "2.1.6")
+# Same disease, second tool: the remote plugins in buf.gen.yaml are pinned, but the buf CLI
+# that feeds them source-info is not, and CLI versions disagree about trailing-comment
+# attachment. buf-setup-action's default (1.50.0) regenerated a different m1p.v1.rs than the
+# 1.72.0 that produced the committed one, so gen-check went red on a tree nobody had edited.
+# ci.yml's BUF_VERSION is the only other copy of this number.
+export M1_BUF_VERSION := env_var_or_default("M1_BUF_VERSION", "1.72.0")
 
 default: lint test
 
@@ -51,6 +57,7 @@ default: lint test
 
 # Regenerate committed proto bindings and stage the Rust gen into m1p-wire.
 gen:
+    @v=$(buf --version 2>/dev/null | head -1); [ "$v" = "$M1_BUF_VERSION" ] || { echo "gen: buf '${v:-<not found>}' on PATH, but the pin is $M1_BUF_VERSION. Versions disagree about comment attachment in generated code, so this output is not what gen-check compares against. Fix: install buf $M1_BUF_VERSION (scripts/bootstrap.sh)" >&2; exit 1; }
     cd proto && buf generate
     cp proto/gen/rust/m1p.v1.rs rust/m1p-wire/gen/m1p.v1.rs
 
@@ -263,6 +270,7 @@ gates:
     tools/ci/ci_matrix_gate.sh
     tools/ci/verifier_offline_gate.sh
     tools/ci/buf_breaking_gate.sh
+    tools/ci/tokenpath_deps_gate.sh
 
 # The requirement→test gate (12 §10.3). Deliberately NOT folded into `gates`: this one is built
 # to go red the moment a requirement loses its test, and a red `gates` that could mean any of five

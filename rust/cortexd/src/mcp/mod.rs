@@ -273,22 +273,25 @@ pub fn call_tool(shared: &Arc<Shared>, name: &str, args: &Value) -> Result<Value
 /// Every call emits a `CortexInjection`-family ledger event carrying
 /// `root_hash` + `index_clock` (08 §6) — refusals included, with used = 0.
 fn emit_and(shared: &Arc<Shared>, budget: u32, used: u32, out: Value) -> Value {
+    shared.turn_used.fetch_add(used, Ordering::Relaxed);
+    fabric::spawn_push(shared, injection_event(shared, budget, used));
+    out
+}
+
+/// The per-call event (04 §6.4): the live L0 root and index clock, stamped
+/// `McpPull`. Split from `emit_and` so a test can hold what the push drops.
+pub fn injection_event(shared: &Shared, budget: u32, used: u32) -> m1p_wire::pb::Event {
     let (root, clock) = {
         let idx = shared.snapshot();
         (idx.merkle.root(), shared.index_clock.load(Ordering::SeqCst))
     };
-    shared.turn_used.fetch_add(used, Ordering::Relaxed);
-    fabric::spawn_push(
-        shared,
-        fabric::cortex_injection_event(
-            root,
-            clock,
-            budget,
-            used,
-            m1p_wire::pb::InjectionChannel::McpPull,
-        ),
-    );
-    out
+    fabric::cortex_injection_event(
+        root,
+        clock,
+        budget,
+        used,
+        m1p_wire::pb::InjectionChannel::McpPull,
+    )
 }
 
 /// Per-call clamp (08 §6: 256..8000, default 2000) intersected with what is

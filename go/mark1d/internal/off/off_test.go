@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -37,6 +38,13 @@ func TestOffMarkerAndEnv(t *testing.T) {
 func TestOffFailsClosedOnUnreadableState(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores modes")
+	}
+	if runtime.GOOS == "windows" {
+		// Mkdir 0o000 is ignored here, so the fault cannot be constructed.
+		// Off's posture holds unchanged — an ACL-denied Lstat is
+		// ERROR_ACCESS_DENIED, not IsNotExist, and reads as off — but this
+		// test leaves that unproven on windows (08 §7.6 fail-closed).
+		t.Skip("windows: directory modes cannot make the state dir unreadable")
 	}
 	dir := t.TempDir()
 	locked := filepath.Join(dir, "locked")

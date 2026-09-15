@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -238,5 +239,78 @@ func TestEnableReportsProvisioningRefusal(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".claude")); err == nil {
 		t.Fatal("enable created the vendor's config dir")
+	}
+}
+
+// TestEnableRecordsConsentOnce is FR-CLI-002's "consent-recording": the first
+// enable of a root appends one 0600 consent line naming the OS user, the root,
+// the time, and the fragments provisioned in the same act; a re-run — silent
+// no-op or fragment reconcile alike — appends nothing, because neither changes
+// who consented to what.
+func TestEnableRecordsConsentOnce(t *testing.T) {
+	env, out, _ := enrolledEnv(t)
+	home, _ := claudeHome(t)
+	root := t.TempDir()
+	if err := Run(env, Options{Path: root, Home: home}); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := func() [][]byte {
+		b, err := os.ReadFile(env.ConsentPath())
+		if err != nil {
+			t.Fatalf("consent journal: %v", err)
+		}
+		return bytes.Split(bytes.TrimRight(b, "\n"), []byte("\n"))
+	}
+	got := lines()
+	if len(got) != 1 {
+		t.Fatalf("consent journal has %d lines after one enable, want 1:\n%s", len(got), got)
+	}
+	var c cli.Consent
+	if err := json.Unmarshal(got[0], &c); err != nil {
+		t.Fatalf("consent line %q: %v", got[0], err)
+	}
+	if _, err := time.Parse(time.RFC3339, c.TS); err != nil {
+		t.Fatalf("ts %q: %v", c.TS, err)
+	}
+	if c.Workspace != res.Workspace {
+		t.Fatalf("consent names %q, enable returned %q", c.Workspace, res.Workspace)
+	}
+	if len(c.AgentsProvisioned) != 1 || c.AgentsProvisioned[0] != "claudecode" {
+		t.Fatalf("agents_provisioned = %v, want [claudecode]", c.AgentsProvisioned)
+	}
+	// The OS user is recorded when the platform can name one, and left absent
+	// — never guessed from $USER — when it cannot.
+	if u, err := user.Current(); err == nil && (c.User != u.Username || c.UID != u.Uid) {
+		t.Fatalf("consent user %q/%q, want %q/%q", c.User, c.UID, u.Username, u.Uid)
+	}
+	fi, err := os.Stat(env.ConsentPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Fatalf("consent journal mode %o, want 0600", fi.Mode().Perm())
+	}
+
+	// Silent no-op re-run.
+	if err := Run(env, Options{Path: root, Home: home}); err != nil {
+		t.Fatal(err)
+	}
+	if got := lines(); len(got) != 1 {
+		t.Fatalf("a no-op re-enable appended a consent line (%d lines)", len(got))
+	}
+	// Reconcile-after-off re-run: Changed is true, the root is not new.
+	if _, err := claudecode.Revert(env.StateDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(env, Options{Path: root, Home: home}); err != nil {
+		t.Fatal(err)
+	}
+	if got := lines(); len(got) != 1 {
+		t.Fatalf("a fragment-reconcile re-enable appended a consent line (%d lines)", len(got))
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -389,6 +390,12 @@ func TestProxyPointerRegistersTheCredentialWithTheGuard(t *testing.T) {
 		fi, err := os.Stat(filepath.Join(state, name))
 		if err != nil {
 			t.Fatal(err)
+		}
+		if runtime.GOOS == "windows" {
+			// POSIX mode bits do not exist here; owner-only on Windows is an
+			// ACL, which nothing in the daemon sets yet — NFR-SECURITY-007
+			// residual. Go reports every writable file as 0666.
+			continue
 		}
 		if fi.Mode().Perm() != 0o600 {
 			t.Errorf("%s mode = %v, want 0600", name, fi.Mode().Perm())

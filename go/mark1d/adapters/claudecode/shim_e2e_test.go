@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric/fabrictest"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 )
 
@@ -293,7 +294,7 @@ func runShim(t *testing.T, home, xdg string, stdin []byte) shimRun {
 // transcribed row because every character of it is contract — Claude Code
 // discards stdout it cannot parse, which is silently an allow.
 func TestShimStopGateBlocksTheAgent(t *testing.T) {
-	home, xdg := t.TempDir(), t.TempDir()
+	home, xdg := t.TempDir(), fabrictest.SocketDir(t)
 	d := newDaemon(t, xdg, &m1pv1.GateVerdict{
 		Decision:    m1pv1.GateDecision_GATE_DECISION_BLOCK,
 		Verdict:     m1pv1.Verdict_VERDICT_VIOLATED,
@@ -345,7 +346,7 @@ func TestShimStopGateBlocksTheAgent(t *testing.T) {
 // That sub-row is BLOCKED on a lead ruling; pinning stdout == "" here would
 // quietly bless its absence as the contract.
 func TestShimStopGateAllowsSilently(t *testing.T) {
-	home, xdg := t.TempDir(), t.TempDir()
+	home, xdg := t.TempDir(), fabrictest.SocketDir(t)
 	d := newDaemon(t, xdg, &m1pv1.GateVerdict{
 		Decision: m1pv1.GateDecision_GATE_DECISION_ALLOW,
 		Verdict:  m1pv1.Verdict_VERDICT_SATISFIED,
@@ -373,7 +374,7 @@ func TestShimStopGateAllowsSilently(t *testing.T) {
 // either language's dialect drifts, this is where it surfaces — nothing here
 // is a Go restatement of what the daemon does.
 func TestShimStopGateAgainstTheRealServer(t *testing.T) {
-	home, xdg := t.TempDir(), t.TempDir()
+	home, xdg := t.TempDir(), fabrictest.SocketDir(t)
 	events := make(chan []byte, 8)
 	srv := fabric.NewServer(func(_ context.Context, inner []byte) error {
 		events <- inner
@@ -447,7 +448,7 @@ func (r stopReader) Get(id verdict.TaskID) (verdict.Cached, bool) { e, ok := r[i
 // payload was a bare Event), and any first frame that is not Hello (M1E-4003,
 // 08 §4.3 step 2).
 func TestFakeDaemonIsAsStrictAsTheRealOne(t *testing.T) {
-	xdg := t.TempDir()
+	xdg := fabrictest.SocketDir(t)
 	d := newDaemon(t, xdg, nil)
 
 	ev, err := proto.Marshal(&m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Event{Event: &m1pv1.Event{}}})
@@ -508,7 +509,7 @@ func TestShimStopHookFailsOpenWhenDaemonUnreachable(t *testing.T) {
 // asserts the accounting that DOES exist; it goes red the day a map reaches
 // the hook, which is when additionalContext must start being asserted.
 func TestShimSessionStartInjectsNothing(t *testing.T) {
-	home, xdg := t.TempDir(), t.TempDir()
+	home, xdg := t.TempDir(), fabrictest.SocketDir(t)
 	d := newDaemon(t, xdg, nil)
 
 	run := runShim(t, home, xdg, hookFixture(t, "SessionStart"))

@@ -69,4 +69,14 @@ var (
 		Name: "controld_ingest_quarantines_total",
 		Help: "Batches landed under the quarantine prefix (05 §2.3)",
 	})
+
+	schemaRefusals = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "controld_ingest_schema_refusals_total",
+		Help: "426 M1E-2007: M1P-Schema outside the tenant's registry window (08 §10.2)",
+	})
+
+	schemaRegistryFallbacks = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "controld_ingest_schema_registry_fallbacks_total",
+		Help: "Registry reads that failed and were served from the compiled-in window — fail-static, capture continues (08 §9)",
+	})
 )

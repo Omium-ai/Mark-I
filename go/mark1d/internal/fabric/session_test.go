@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 )
 
@@ -144,6 +146,71 @@ func TestFlushAckCountsOnlyAdmitted(t *testing.T) {
 	frameFabric(t, c, &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Flush{Flush: &m1pv1.Flush{}}})
 	if d := readFrame(t, c).GetFlushAck().GetDrained(); d != 3 {
 		t.Fatalf("drained %d, want 3 (the refused event is a loss, not a drain)", d)
+	}
+}
+
+// TestFlushAckFollowsTheSpoolFsync is NFR-DURABILITY-004's daemon half. The
+// shim sends Flush after SessionEnd and treats FlushAck as its only delivery
+// evidence (mark1-hookshim/src/fabric.rs flush), so the ack must be written
+// only once the spool's durable cursor covers what this connection admitted.
+// The spool here is real with its fsync cadence PARKED: nothing but the
+// Flush arm can make a record durable, so a durable cursor that covers the
+// records is proof of which side of the ack the sync ran on.
+func TestFlushAckFollowsTheSpoolFsync(t *testing.T) {
+	sp, err := spool.Open(spool.Config{Dir: t.TempDir(), After: func(time.Duration) <-chan time.Time { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sp.Close() })
+	var seq atomic.Uint64
+	var failSync atomic.Bool
+	l := listenLoopback(t)
+	srv := NewServer(func(ctx context.Context, p []byte) error {
+		var id [16]byte
+		binary.LittleEndian.PutUint64(id[:], seq.Add(1))
+		return sp.Append(ctx, id, spool.ClassBilling, p)
+	}, nil)
+	srv.Sync = func() error {
+		if failSync.Load() {
+			return errors.New("injected fsync failure")
+		}
+		return sp.Sync()
+	}
+	go func() { _ = srv.Serve(context.Background(), l) }()
+	t.Cleanup(func() { _ = l.Close(); srv.Close() })
+	addr := l.Addr().String()
+	ackCur, _ := sp.Cursors()
+
+	// Admit N, Flush: the ack must find every one of them below the durable
+	// cursor — the spool's own observable, and with the cadence parked the
+	// Flush arm is the only thing that could have put them there.
+	const n = 3
+	c := dial(t, addr)
+	hello(t, c)
+	for i := uint64(1); i <= n; i++ {
+		writeEvent(t, c, 1, i)
+	}
+	frameFabric(t, c, &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Flush{Flush: &m1pv1.Flush{}}})
+	if d := readFrame(t, c).GetFlushAck().GetDrained(); d != n {
+		t.Fatalf("drained %d, want %d", d, n)
+	}
+	recs, _, err := sp.Records(ackCur)
+	if err != nil || len(recs) != n {
+		t.Fatalf("FlushAck arrived with %d of %d records below the durable cursor (err %v): the ack attests to bytes that are not on disk", len(recs), n, err)
+	}
+
+	// The ordering half, timing-free: with the sync failing, a correct daemon
+	// writes NO ack and closes (the shim's cue to spill), so the stream holds
+	// nothing but EOF. An ack written before the sync would be the first byte
+	// read here.
+	failSync.Store(true)
+	c2 := dial(t, addr)
+	hello(t, c2)
+	writeEvent(t, c2, 1, n+1)
+	frameFabric(t, c2, &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Flush{Flush: &m1pv1.Flush{}}})
+	readClosed(t, c2)
+	if recs, _, err := sp.Records(ackCur); err != nil || len(recs) != n {
+		t.Fatalf("%d records durable after a failed sync (err %v), want the %d the earlier ack covered", len(recs), err, n)
 	}
 }
 

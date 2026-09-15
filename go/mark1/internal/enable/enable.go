@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -93,27 +94,42 @@ func Run(env *cli.Env, opts Options) error {
 			break
 		}
 	}
-	if added {
-		ws.Workspaces = append(ws.Workspaces, cli.WorkspaceEntry{Path: root, EnabledAt: time.Now().UTC()})
-		if err := env.SaveWorkspaces(ws); err != nil {
-			return cli.Failf(cli.ExitRuntime, "", "writing allow-list: %v", err)
-		}
-		if err := env.AppendCoverageTransition(map[string]any{
-			"ts": time.Now().UTC().Format(time.RFC3339), "kind": "enable", "workspace": root,
-		}); err != nil {
-			return cli.Failf(cli.ExitRuntime, "", "journaling coverage transition: %v", err)
-		}
-	}
 
 	// §7.2: "re-running reconciles fragments/consents". This runs whether or
 	// not the allow-list changed — a user who ran `mark1 off` and then
 	// `mark1 enable` again must get their hooks back, and an early return on
 	// an already-listed workspace would leave them permanently unprovisioned.
+	// It runs BEFORE the root lands in the allow-list so the consent record
+	// below can name what was provisioned, and so a provisioning I/O failure
+	// (exit 1) leaves nothing half-enabled for the re-run to skip.
 	wrote, err := provision(env, opts, &res)
 	if err != nil {
 		return err
 	}
 	res.Changed = added || wrote
+
+	if added {
+		now := time.Now().UTC()
+		ws.Workspaces = append(ws.Workspaces, cli.WorkspaceEntry{Path: root, EnabledAt: now})
+		if err := env.SaveWorkspaces(ws); err != nil {
+			return cli.Failf(cli.ExitRuntime, "", "writing allow-list: %v", err)
+		}
+		if err := env.AppendCoverageTransition(map[string]any{
+			"ts": now.Format(time.RFC3339), "kind": "enable", "workspace": root,
+		}); err != nil {
+			return cli.Failf(cli.ExitRuntime, "", "journaling coverage transition: %v", err)
+		}
+		// FR-CLI-002's consent record: who (the OS user running this command —
+		// the consent authority, 03 §2), to what, when. Once per root: a re-run
+		// that only reconciles fragments changes nothing about who consented.
+		c := cli.Consent{TS: now.Format(time.RFC3339), Workspace: root, AgentsProvisioned: res.AgentsProvisioned}
+		if u, err := user.Current(); err == nil {
+			c.User, c.UID = u.Username, u.Uid
+		}
+		if err := env.AppendConsent(c); err != nil {
+			return cli.Failf(cli.ExitRuntime, "", "recording consent: %v", err)
+		}
+	}
 
 	return env.Emit(res, func(w io.Writer) {
 		if added {

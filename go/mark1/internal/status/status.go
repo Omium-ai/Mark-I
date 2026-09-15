@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
@@ -69,7 +70,35 @@ type Workspace struct {
 type Spool struct {
 	Segments    int   `json:"segments"`
 	Bytes       int64 `json:"bytes"`
-	Quarantined int   `json:"quarantined"`
+	Quarantined int   `json:"quarantined"` // batches, i.e. len(Quarantine)
+	// Quarantine is NFR-OPERABILITY-003's listing: every 4xx-parked batch with
+	// the reason the daemon recorded beside its sealed bytes. Additive to
+	// §7.3's counts; nothing is renamed.
+	Quarantine []Quarantined `json:"quarantine"`
+	// QuarantineRetention is stated on every report because 08 §2.5 fixes only
+	// "never silently discarded and never auto-retried" — no doc names a
+	// retention window, so none is claimed.
+	QuarantineRetention string `json:"quarantine_retention"`
+}
+
+// quarantineRetention is the honest answer until a product decision names a
+// window: the bytes stay until an operator removes them.
+const quarantineRetention = "none — kept until removed by an operator (never auto-retried, 08 §2.5)"
+
+// Quarantined is one parked batch, read from the daemon's
+// <state>/quarantine/<batch_id>.manifest.json (go/mark1d/internal/uplink/
+// quarantine.go: manifest) plus the size of the sealed payload beside it.
+// Status/ErrCode/Note are the manifest's own fields, verbatim; Reason is the
+// operator line composed from them.
+type Quarantined struct {
+	BatchID       string `json:"batch_id"`
+	QuarantinedAt string `json:"quarantined_at"`
+	Bytes         int64  `json:"bytes"` // sealed payload on disk; 0 when it is gone
+	Events        int    `json:"events"`
+	Status        int    `json:"status,omitempty"`
+	ErrCode       string `json:"err_code,omitempty"`
+	Note          string `json:"note,omitempty"`
+	Reason        string `json:"reason"`
 }
 
 type Bundle struct {
@@ -133,7 +162,9 @@ func Run(env *cli.Env, opts Options) error {
 		}
 	}
 	rep.Spool.Segments, rep.Spool.Bytes = dirTally(env.SpoolDir(), ".m1s")
-	rep.Spool.Quarantined, _ = dirTally(env.QuarantineDir(), "")
+	rep.Spool.Quarantine = readQuarantine(env.QuarantineDir())
+	rep.Spool.Quarantined = len(rep.Spool.Quarantine)
+	rep.Spool.QuarantineRetention = quarantineRetention
 	rep.Bundle = readBundleMeta(env)
 	rep.Off = readOff(env)
 
@@ -160,6 +191,64 @@ func dirTally(dir, ext string) (int, int64) {
 		}
 	}
 	return n, bytes
+}
+
+// readQuarantine lists parked batches by their manifests — the daemon writes
+// the sealed payload first and the manifest second (quarantine.go:59-74), so
+// the manifest is the durable "report" half 08 §2.5 promises. A manifest that
+// will not parse is still listed (a torn write after a crash is exactly the
+// batch an operator most needs to see), with the parse error as its reason.
+func readQuarantine(dir string) []Quarantined {
+	manifests, _ := filepath.Glob(filepath.Join(dir, "*.manifest.json"))
+	var out []Quarantined
+	for _, path := range manifests {
+		id := strings.TrimSuffix(filepath.Base(path), ".manifest.json")
+		q := Quarantined{BatchID: id}
+		if fi, err := os.Stat(filepath.Join(dir, id+".m1p.zst.sealed")); err == nil {
+			q.Bytes = fi.Size()
+		}
+		var m struct {
+			Status        int    `json:"status"`
+			ErrCode       string `json:"err_code"`
+			EventCount    int    `json:"event_count"`
+			QuarantinedAt string `json:"quarantined_at"`
+			Note          string `json:"note"`
+		}
+		data, err := os.ReadFile(path)
+		if err == nil {
+			err = json.Unmarshal(data, &m)
+		}
+		switch {
+		case err != nil:
+			q.Reason = "manifest unreadable: " + err.Error()
+		default:
+			q.QuarantinedAt, q.Events = m.QuarantinedAt, m.EventCount
+			q.Status, q.ErrCode, q.Note = m.Status, m.ErrCode, m.Note
+			q.Reason = quarantineReason(m.Status, m.ErrCode, m.Note)
+		}
+		out = append(out, q)
+	}
+	return out
+}
+
+// quarantineReason renders the 08 §2.4 verdict the manifest carries. Every
+// daemon-written manifest has a status; the fallback names the absence rather
+// than inventing a verdict.
+func quarantineReason(status int, code, note string) string {
+	var parts []string
+	if status != 0 {
+		parts = append(parts, fmt.Sprintf("HTTP %d", status))
+	}
+	if code != "" {
+		parts = append(parts, code)
+	}
+	if note != "" {
+		parts = append(parts, note)
+	}
+	if len(parts) == 0 {
+		return "not recorded by daemon"
+	}
+	return strings.Join(parts, " ")
 }
 
 // readBundleMeta reads the last-applied bundle sidecar (<state>/bundle/,
@@ -235,6 +324,13 @@ func renderHuman(w io.Writer, r *Report) {
 	}
 	_, _ = fmt.Fprintf(w, "spool         %d segments / %d bytes, quarantined: %d\n",
 		r.Spool.Segments, r.Spool.Bytes, r.Spool.Quarantined)
+	for _, q := range r.Spool.Quarantine {
+		_, _ = fmt.Fprintf(w, "quarantine    %s parked %s, %d bytes, %d events — reason: %s\n",
+			q.BatchID, q.QuarantinedAt, q.Bytes, q.Events, q.Reason)
+	}
+	if len(r.Spool.Quarantine) > 0 {
+		_, _ = fmt.Fprintf(w, "quarantine    retention: %s\n", r.Spool.QuarantineRetention)
+	}
 	if r.Bundle == nil {
 		_, _ = fmt.Fprintf(w, "policy        no bundle applied yet\n")
 	} else {

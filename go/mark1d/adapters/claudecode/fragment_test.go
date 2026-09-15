@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -375,6 +376,13 @@ func TestFragmentRefusesMissingTarget(t *testing.T) {
 func TestFragmentManifestPrecedesTheTargetWrite(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the directory mode this test writes through")
+	}
+	if runtime.GOOS == "windows" {
+		// The read-only attribute on a directory does not deny file creation
+		// in it, so the fault cannot be constructed; the manifest-first
+		// ordering is the same platform-neutral code path — FR-AGENT-*
+		// (08 §8.2 manifest-before-target) unproven on windows only.
+		t.Skip("windows: a read-only directory attribute does not block the target write")
 	}
 	dir := t.TempDir()
 	settings := filepath.Join(dir, "settings.json")

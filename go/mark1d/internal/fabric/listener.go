@@ -9,12 +9,24 @@
 package fabric
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 )
+
+// sunPathMax is the longest pathname sockaddr_un.sun_path holds on this
+// platform: 107 on Linux, 103 on Darwin/BSD (the array minus its NUL). bind
+// reports an overflow as EINVAL, which tells the operator nothing; Listen
+// refuses first with ErrSocketPathTooLong so the fix is in the message.
+var sunPathMax = len(syscall.RawSockaddrUnix{}.Path) - 1
+
+// ErrSocketPathTooLong is returned by Listen when the path cannot fit in
+// sun_path — typically a long $HOME or XDG_RUNTIME_DIR on macOS.
+var ErrSocketPathTooLong = errors.New("fabric: socket path exceeds sun_path")
 
 // SocketPath resolves 07 §5's transport endpoint: $XDG_RUNTIME_DIR/omium-mark1/m1p.sock,
 // falling back to ~/.omium/mark1/m1p.sock. (08 §4.1's older mark1d.sock name
@@ -36,6 +48,9 @@ func SocketPath() (string, error) {
 // else. The fabric's threat model is other users; a permissive parent is the
 // one hole the mode bits exist to close.
 func Listen(path string) (net.Listener, error) {
+	if n := len(path); n > sunPathMax {
+		return nil, fmt.Errorf("%w: %d bytes, %s allows %d: %s — shorten the state dir", ErrSocketPathTooLong, n, runtime.GOOS, sunPathMax, path)
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err

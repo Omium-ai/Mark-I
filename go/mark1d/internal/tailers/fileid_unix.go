@@ -3,20 +3,25 @@
 package tailers
 
 import (
-	"io/fs"
+	"os"
 	"syscall"
 )
 
 // FileID is file identity — (dev, inode) on unix (04 §2.1) — so cursors
 // survive renames and rotation is detectable when a path's identity changes
-// under a held handle. fileid_windows.go declares the same type and refuses to
-// produce a value, for the reason given there.
+// under a held handle. fileid_windows.go declares the same type over
+// (volume serial, file index); both are read off an OPEN HANDLE, the one
+// lifetime the two platforms share.
 type FileID struct {
 	Dev uint64
 	Ino uint64
 }
 
-func fileID(fi fs.FileInfo) (FileID, bool) {
+func fileID(f *os.File) (FileID, bool) {
+	fi, err := f.Stat()
+	if err != nil {
+		return FileID{}, false
+	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
 		return FileID{}, false

@@ -60,6 +60,10 @@ pub struct Shared {
     /// and cortexd has no session identity to give until the MCP surface
     /// carries one (D-AV). Counting it is what makes that gap a number.
     pub fabric_handshake_refused: AtomicU64,
+    /// L1 CAS probe accounting (04 §6.1: a hit skips the parse). What makes
+    /// "a key bump invalidates exactly the affected entries" a number.
+    pub cas_hits: AtomicU64,
+    pub cas_misses: AtomicU64,
 }
 
 impl Shared {
@@ -77,6 +81,8 @@ impl Shared {
             default_budget: default_budget.clamp(MIN_CALL_TOKENS, MAX_CALL_TOKENS),
             fabric_dropped: AtomicU64::new(0),
             fabric_handshake_refused: AtomicU64::new(0),
+            cas_hits: AtomicU64::new(0),
+            cas_misses: AtomicU64::new(0),
         }
     }
 }

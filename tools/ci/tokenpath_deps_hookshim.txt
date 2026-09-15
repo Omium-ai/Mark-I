@@ -1,0 +1,76 @@
+# tokenpath_deps_hookshim.txt — the reviewed dependency closure of mark1-hookshim (the hook
+# path, 04 §5), checked by tools/ci/tokenpath_deps_gate.sh for NFR-SECURITY-008.
+#
+# One crate NAME per line, versions stripped (Cargo.lock pins those); every triple the shim
+# ships to, unioned. The gate requires this file to equal the resolved graph in BOTH
+# directions. Reviewed baseline: 68 crates (2026-09-15). Adding a line here is adding a crate
+# to a process that runs inside the agent's hook with the customer's file access — say why in
+# the same PR. Regenerate with the command in the gate's header comment.
+aead
+aho-corasick
+anyhow
+block-buffer
+bytes
+cfg-if
+chacha20
+chacha20poly1305
+cipher
+cpufeatures
+crypto-common
+curve25519-dalek
+curve25519-dalek-derive
+digest
+either
+fiat-crypto
+generic-array
+getrandom
+hmac
+inout
+itertools
+itoa
+libc
+m1p-wire
+mark1-hookshim
+mark1-redact
+memchr
+opaque-debug
+poly1305
+proc-macro2
+prost
+prost-derive
+prost-types
+quote
+r-efi
+rand_core
+regex
+regex-automata
+regex-syntax
+serde
+serde_core
+serde_derive
+serde_json
+sha2
+subtle
+syn
+thiserror
+thiserror-impl
+typenum
+unicode-ident
+universal-hash
+uuid
+wasi
+windows-link
+windows-sys
+windows-targets
+windows_aarch64_gnullvm
+windows_aarch64_msvc
+windows_i686_gnu
+windows_i686_gnullvm
+windows_i686_msvc
+windows_x86_64_gnu
+windows_x86_64_gnullvm
+windows_x86_64_msvc
+x25519-dalek
+zeroize
+zeroize_derive
+zmij

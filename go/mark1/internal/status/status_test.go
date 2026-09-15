@@ -195,3 +195,86 @@ func TestStatusBundleMeta(t *testing.T) {
 		t.Fatalf("bundle %+v (age 20m > max_age 10m must be stale — M1E-3006 surface)", rep.Bundle)
 	}
 }
+
+// TestStatusListsQuarantinedBatches is NFR-OPERABILITY-003: every 4xx-parked
+// batch is listed with the reason the daemon recorded and the retention that
+// applies, in the JSON and in the text an operator reads. The fixture is the
+// daemon's own on-disk format — <id>.m1p.zst.sealed beside <id>.manifest.json
+// with uplink's manifest fields (go/mark1d/internal/uplink/quarantine.go:28-36,
+// written at :59 and :74).
+func TestStatusListsQuarantinedBatches(t *testing.T) {
+	env, out := enrolledEnv(t)
+	if err := os.MkdirAll(env.QuarantineDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plant := func(id string, sealed int, manifest string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(env.QuarantineDir(), id+".m1p.zst.sealed"), make([]byte, sealed), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(env.QuarantineDir(), id+".manifest.json"), []byte(manifest), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const a, b, torn = "0192a1b2-0000-7000-8000-00000000000a", "0192a1b2-0000-7000-8000-00000000000b", "0192a1b2-0000-7000-8000-00000000000c"
+	plant(a, 512, `{
+  "batch_id": "`+a+`",
+  "status": 400,
+  "err_code": "M1E-2001",
+  "event_ids": ["e1", "e2", "e3"],
+  "event_count": 3,
+  "quarantined_at": "2026-09-14T10:00:00.123456789Z"
+}`)
+	plant(b, 64, `{
+  "batch_id": "`+b+`",
+  "status": 409,
+  "err_code": "M1E-2003",
+  "event_ids": ["e4"],
+  "event_count": 1,
+  "quarantined_at": "2026-09-14T11:00:00Z",
+  "note": "M1E-2003: batch_id landed with different bytes — local spool corruption suspected"
+}`)
+	plant(torn, 8, `{"batch_id": "`+torn+`", "status": 4`) // crash mid-write
+
+	if err := Run(env, Options{Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	var rep Report
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatalf("stdout %q: %v", out.String(), err)
+	}
+	if rep.Spool.Quarantined != 3 || len(rep.Spool.Quarantine) != 3 {
+		t.Fatalf("quarantined=%d, listed=%d, want 3 batches (not 6 files): %+v", rep.Spool.Quarantined, len(rep.Spool.Quarantine), rep.Spool.Quarantine)
+	}
+	byID := map[string]Quarantined{}
+	for _, q := range rep.Spool.Quarantine {
+		byID[q.BatchID] = q
+	}
+	if q := byID[a]; q.Status != 400 || q.ErrCode != "M1E-2001" || q.Bytes != 512 || q.Events != 3 ||
+		q.QuarantinedAt != "2026-09-14T10:00:00.123456789Z" || q.Reason != "HTTP 400 M1E-2001" {
+		t.Fatalf("batch a: %+v", q)
+	}
+	if q := byID[b]; q.Status != 409 || q.Bytes != 64 || !strings.HasPrefix(q.Reason, "HTTP 409 M1E-2003 ") || !strings.Contains(q.Reason, "spool corruption") {
+		t.Fatalf("batch b: %+v", q)
+	}
+	if q := byID[torn]; q.Bytes != 8 || !strings.HasPrefix(q.Reason, "manifest unreadable: ") {
+		t.Fatalf("torn manifest must be listed, not hidden: %+v", q)
+	}
+	if rep.Spool.QuarantineRetention != quarantineRetention || !strings.HasPrefix(rep.Spool.QuarantineRetention, "none") {
+		t.Fatalf("retention %q: no window exists anywhere, none may be claimed", rep.Spool.QuarantineRetention)
+	}
+
+	var human bytes.Buffer
+	renderHuman(&human, &rep)
+	for _, want := range []string{
+		"quarantined: 3",
+		a + " parked 2026-09-14T10:00:00.123456789Z, 512 bytes, 3 events — reason: HTTP 400 M1E-2001",
+		b + " parked 2026-09-14T11:00:00Z, 64 bytes, 1 events — reason: HTTP 409 M1E-2003 M1E-2003: batch_id landed",
+		torn + " parked , 8 bytes, 0 events — reason: manifest unreadable: ",
+		"retention: none — kept until removed by an operator",
+	} {
+		if !strings.Contains(human.String(), want) {
+			t.Fatalf("human render lacks %q:\n%s", want, human.String())
+		}
+	}
+}

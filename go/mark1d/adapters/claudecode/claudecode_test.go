@@ -5,6 +5,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -61,19 +63,45 @@ func TestSupportedRefusesAnUnsniffableVersion(t *testing.T) {
 	}
 }
 
-// TestTranscriptDirMunge pins 08 §5.1's fallback derivation verbatim —
-// '/' replaced by '-' under ~/.claude/projects/ — on the synthetic pair the
-// conformance corpus uses (never a real machine's home; the corpus's own
-// selfcheck forbids such leaks).
+// TestTranscriptDirMunge pins 08 §5.1's fallback derivation end to end under
+// ~/.claude/projects/ on the synthetic pair the conformance corpus uses (never
+// a real machine's home; the corpus's own selfcheck forbids such leaks). The
+// windows pair is the same shape under a drive letter: filepath.Abs would
+// prepend the test process's drive to a rooted unix path there.
 func TestTranscriptDirMunge(t *testing.T) {
-	a := &Adapter{Home: "/home/devuser"}
-	got, err := a.TranscriptDir("/home/devuser/workspace/acme-app")
+	home, cwd := "/home/devuser", "/home/devuser/workspace/acme-app"
+	want := "/home/devuser/.claude/projects/-home-devuser-workspace-acme-app"
+	if runtime.GOOS == "windows" {
+		home, cwd = `C:\Users\devuser`, `C:\Users\devuser\workspace\acme-app`
+		want = `C:\Users\devuser\.claude\projects\C--Users-devuser-workspace-acme-app`
+	}
+	a := &Adapter{Home: home}
+	got, err := a.TranscriptDir(cwd)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "/home/devuser/.claude/projects/-home-devuser-workspace-acme-app"
 	if got != want {
 		t.Fatalf("munge = %q, want %q", got, want)
+	}
+}
+
+// TestMungeCwdMatchesClaudeCode pins the slug rule to directory names real
+// installs wrote (the anthropics/claude-code issues cited on mungeCwd), pure
+// over strings so the windows cases are checked on every platform. A wrong
+// slug tails nothing and says nothing — the one failure this adapter may
+// never have.
+func TestMungeCwdMatchesClaudeCode(t *testing.T) {
+	for in, want := range map[string]string{
+		"/home/devuser/workspace/acme-app":           "-home-devuser-workspace-acme-app",
+		"/Users/u/Documents/projects/proj_b":         "-Users-u-Documents-projects-proj-b",         // #92734
+		"/home/u/projects/외주/app":                    "-home-u-projects----app",                    // #40946
+		`F:\myrepo\.claude\worktrees\feature-branch`: "F--myrepo--claude-worktrees-feature-branch", // #93231
+		`f:\myrepo`: "f--myrepo", // #93231, case kept
+		`C:\Users\u\Downloads\근평 웹만들기`: "C--Users-u-Downloads--------", // #93743
+	} {
+		if got := mungeCwd(in); got != want {
+			t.Errorf("mungeCwd(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -125,7 +153,9 @@ func TestStartTailFollowsDerivedDir(t *testing.T) {
 	session := "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55"
 	// cwd inside the enabled root: discovery's containment gate (04 §2.1)
 	// reads it from the stream head — a cwd-less line would never be tailed.
-	line := `{"type":"assistant","cwd":"` + root + `","requestId":"req_x","sessionId":"` + session + `","message":{"id":"msg_x","model":"claude-fable-5","usage":{"input_tokens":1,"output_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"service_tier":"standard"}}}` + "\n"
+	// strconv.Quote, not a bare splice: a windows root's backslashes must
+	// reach the JSON escaped or peekCwd refuses the stream as noise.
+	line := `{"type":"assistant","cwd":` + strconv.Quote(root) + `,"requestId":"req_x","sessionId":"` + session + `","message":{"id":"msg_x","model":"claude-fable-5","usage":{"input_tokens":1,"output_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"service_tier":"standard"}}}` + "\n"
 	if err := os.WriteFile(filepath.Join(dir, session+".jsonl"), []byte(line), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +216,7 @@ func TestMungeCollisionForeignWorkspaceNeverEmits(t *testing.T) {
 		t.Fatal(err)
 	}
 	usageLine := func(cwd, session, msg string) string {
-		return `{"type":"assistant","cwd":"` + cwd + `","requestId":"req_` + msg + `","sessionId":"` + session + `","message":{"id":"msg_` + msg + `","model":"claude-fable-5","usage":{"input_tokens":1,"output_tokens":7,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"service_tier":"standard"}}}` + "\n"
+		return `{"type":"assistant","cwd":` + strconv.Quote(cwd) + `,"requestId":"req_` + msg + `","sessionId":"` + session + `","message":{"id":"msg_` + msg + `","model":"claude-fable-5","usage":{"input_tokens":1,"output_tokens":7,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"service_tier":"standard"}}}` + "\n"
 	}
 	ours := "3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55"
 	theirs := "9b2d4f60-1e3a-4c58-8a7d-2f5b6c9d0e11"

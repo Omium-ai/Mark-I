@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"time"
 )
@@ -55,8 +56,22 @@ func (e *ExitError) Error() string {
 // Failf builds the one error shape every subcommand returns; cmd/main.go
 // maps anything else (cobra flag/arg noise) to ExitUsage.
 func Failf(code int, m1e, format string, a ...any) *ExitError {
-	return &ExitError{Code: code, M1E: m1e, Msg: fmt.Sprintf(format, a...)}
+	msg := fmt.Sprintf(format, a...)
+	// The M1E slot is parsed by customer scripts (08 §9), and five sites hand
+	// it the control plane's own error.code straight out of APIError. A server
+	// that sends free text there must not put free text into --json: keep the
+	// string for the human in the message and let EmitError fall back to the
+	// exit class, which is the documented meaning of an empty code.
+	if m1e != "" && !m1eShape.MatchString(m1e) {
+		msg = fmt.Sprintf("%s (server error code %q is not an M1E code)", msg, m1e)
+		m1e = ""
+	}
+	return &ExitError{Code: code, M1E: m1e, Msg: msg}
 }
+
+// m1eShape is 08 §9's code grammar. The exit-code test carries its own copy on
+// purpose: an oracle that reads the production regexp cannot catch it loosening.
+var m1eShape = regexp.MustCompile(`^M1E-\d{4}$`)
 
 // Env is the per-invocation world: injected so every subcommand test runs
 // against a temp state dir, an httptest server, and captured writers.
@@ -99,6 +114,7 @@ func (e *Env) WorkspacesPath() string { return filepath.Join(e.StateDir, "worksp
 func (e *Env) CoveragePath() string {
 	return filepath.Join(e.StateDir, "coverage", "transitions.jsonl")
 }
+func (e *Env) ConsentPath() string    { return filepath.Join(e.StateDir, "consent.jsonl") }
 func (e *Env) AnchorsCatalog() string { return filepath.Join(e.StateDir, "anchors", "catalog.json") }
 func (e *Env) ProvisionedDir() string { return filepath.Join(e.StateDir, "provisioned") }
 func (e *Env) BundleMetaPath() string { return filepath.Join(e.StateDir, "bundle", "meta.json") }
@@ -345,7 +361,7 @@ func (e *Env) SaveWorkspaces(ws *Workspaces) error {
 // is frozen at seven values and this command owns exactly two of them. A kind
 // outside that pair is refused rather than journalled: mark1d cannot receipt a
 // line it cannot classify, so a silent typo would cost the window entirely.
-func (e *Env) AppendCoverageTransition(rec map[string]any) (err error) {
+func (e *Env) AppendCoverageTransition(rec map[string]any) error {
 	switch rec["kind"] {
 	case "enable":
 		rec["reason"] = "user_enable"
@@ -354,15 +370,46 @@ func (e *Env) AppendCoverageTransition(rec map[string]any) (err error) {
 	default:
 		return fmt.Errorf("coverage transition kind %v is not one of 04 §2.7's CLI codes (enable, disable)", rec["kind"])
 	}
-	if err := os.MkdirAll(filepath.Dir(e.CoveragePath()), 0o700); err != nil {
+	return appendJSONL(e.CoveragePath(), rec)
+}
+
+// Consent is one line of <state>/consent.jsonl: the record FR-CLI-002 names
+// ("enable is per-workspace, consent-recording") for the consent 03 §2 gives
+// the developer authority over — this OS user admitted this workspace root to
+// the read surface, at this time, and the §8 fragments provisioned in the same
+// act. The allow-list is the live oracle and is rewritten in place, so it can
+// carry the current roots but never the history of who consented to them; the
+// journal is append-only, 0600, one object per FIRST enable of a root. Anchor
+// consent (08 §7.2 anchors_consented) is a different subject with its own
+// store (04 §2.2 anchors/catalog.json, written by mark1d) and is not here.
+type Consent struct {
+	TS        string `json:"ts"`
+	User      string `json:"user,omitempty"` // OS account; absent when the platform cannot say, never guessed
+	UID       string `json:"uid,omitempty"`
+	Workspace string `json:"workspace"`
+	// AgentsProvisioned names the agents whose config carries our fragment
+	// after this enable — empty when every adapter refused (M1E-71xx), which is
+	// itself the fact: consent to read, nothing yet capturing.
+	AgentsProvisioned []string `json:"agents_provisioned"`
+}
+
+// AppendConsent journals one Consent (see the type for what and why).
+func (e *Env) AppendConsent(c Consent) error {
+	return appendJSONL(e.ConsentPath(), c)
+}
+
+// appendJSONL is the one append-only journal writer under the state dir:
+// parent 0700, file 0600, one JSON object per line.
+func appendJSONL(path string, rec any) (err error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(e.CoveragePath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	// A close error on an appended journal is the write's real error surfacing
-	// late; swallowing it would report a transition that never hit the disk.
+	// late; swallowing it would report a line that never hit the disk.
 	defer func() {
 		if cerr := f.Close(); err == nil {
 			err = cerr

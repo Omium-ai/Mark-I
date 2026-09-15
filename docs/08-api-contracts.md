@@ -1145,6 +1145,8 @@ Three version axes, deliberately independent: the **schema** (`m1p.v1` — what 
                "notes_uri": "https://docs.omium.ai/mark1/upgrade/m1p-v2" } }
 ```
 
+`window_closes` is the close of the **presented** schema's window for this tenant (`m1_tenant_schema_windows.window_closes`; `null` when the tenant has no explicit row, i.e. the schema is retired globally or was never opened for them). `min_edge` and `notes_uri` come from the registry rows of the schemas in `accepted`. *(Pinned 2026-09-15: the field had no stated subject; FR-SPINE-023 built it as the presented schema's.)*
+
 4xx rule applies: quarantine-and-report, never a retry loop. A major bump is a **new package served in parallel** (`/m1p/v2/ingest` beside `/m1p/v1/ingest`); the tenant window is the retirement instrument, per-tenant, never a fleet-wide flag day.
 
 ### 10.3 Bundles an old edge cannot fully parse

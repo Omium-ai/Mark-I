@@ -26,6 +26,7 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/chproj"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/registry"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/s3land"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
@@ -209,7 +210,11 @@ type harness struct {
 	verifier *auth.HMACVerifier
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { return newHarnessWithRegistry(t, nil) }
+
+// newHarnessWithRegistry: reg nil ⇒ the compiled-in [m1p.v1] window (the
+// module's own default); the FR-SPINE-023 tests inject windows and outages.
+func newHarnessWithRegistry(t *testing.T, reg registry.Registry) *harness {
 	t.Helper()
 	h := &harness{
 		mux:    http.NewServeMux(),
@@ -232,6 +237,7 @@ func newHarness(t *testing.T) *harness {
 		Proj:     h.proj,
 		Sidefx:   h.sfx,
 		Security: h.sec,
+		Registry: reg,
 		PoolSize: 4,
 	})
 	m.RegisterRoutes(h.mux)
@@ -573,6 +579,10 @@ func TestAdmissionRefusals(t *testing.T) {
 			http.StatusUnsupportedMediaType, "M1E-2005"},
 		{"schema_out_of_window", func(r *http.Request) { r.Header.Set("M1P-Schema", "m1p.v9") },
 			http.StatusUpgradeRequired, "M1E-2007"},
+		{"schema_malformed_is_400_not_426", func(r *http.Request) { r.Header.Set("M1P-Schema", "m1p.v1; DROP") },
+			http.StatusBadRequest, "M1E-2001"},
+		{"schema_missing_is_400", func(r *http.Request) { r.Header.Del("M1P-Schema") },
+			http.StatusBadRequest, "M1E-2001"},
 		{"missing_batch_id", func(r *http.Request) { r.Header.Del("M1P-Batch-Id") },
 			http.StatusBadRequest, "M1E-2001"},
 		{"non_v7_batch_id", func(r *http.Request) { r.Header.Set("M1P-Batch-Id", uuid.New().String()) },
@@ -663,6 +673,81 @@ func TestBatchIDMismatchIs422(t *testing.T) {
 	rec := h.post(t, otherID, encodeBatch(t, b), nil)
 	if rec.Code != http.StatusUnprocessableEntity || errCode(t, rec) != "M1E-2006" {
 		t.Fatalf("want 422 M1E-2006, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// verdictEvent is a well-formed VerdictEvent (verify.proto: 4-vector
+// posterior, stage inside the enum); tests break one field at a time.
+func verdictEvent(t *testing.T, session uuid.UUID, seq uint64) *m1pv1.Event {
+	t.Helper()
+	ev := usageEvent(t, session, seq)
+	ev.Body = &m1pv1.Event_VerdictEvent{VerdictEvent: &m1pv1.VerdictEvent{
+		Stage:     m1pv1.VerdictStage_VERDICT_STAGE_PROVISIONAL,
+		Verdict:   m1pv1.Verdict_VERDICT_SATISFIED,
+		Posterior: []float64{0.86, 0.09, 0.03, 0.02},
+	}}
+	return ev
+}
+
+// assertVerdictRefused is the FR-VERIFY-020 shape: 422 M1E-2006 naming the
+// event and the kind, nothing landed, nothing projected — the same path a
+// Usage without its idem_key takes, never a null projection.
+func assertVerdictRefused(t *testing.T, h *harness, ev *m1pv1.Event, kind string) {
+	t.Helper()
+	b, id := testBatch(t, ev)
+	rec := h.post(t, id, encodeBatch(t, b), nil)
+	if rec.Code != http.StatusUnprocessableEntity || errCode(t, rec) != "M1E-2006" {
+		t.Fatalf("want 422 M1E-2006, got %d %s", rec.Code, rec.Body.String())
+	}
+	evID := uuid.Must(uuid.FromBytes(ev.EventId)).String()
+	if body := rec.Body.String(); !strings.Contains(body, evID) || !strings.Contains(body, `"`+kind+`"`) {
+		t.Fatalf("422 must name event %s and kind %q: %s", evID, kind, body)
+	}
+	h.drain()
+	if len(h.store.keys()) != 0 || h.ins.count() != 0 {
+		t.Fatalf("refused verdict must neither land nor project: keys=%v rows=%d", h.store.keys(), h.ins.count())
+	}
+}
+
+func TestVerdictEventWithBadPosteriorIsRefused(t *testing.T) {
+	for _, n := range []int{0, 3, 5} {
+		ev := verdictEvent(t, mustV7(t), 1)
+		ev.GetVerdictEvent().Posterior = make([]float64, n)
+		assertVerdictRefused(t, newHarness(t), ev, "verdict_posterior")
+	}
+}
+
+func TestVerdictEventWithUnspecifiedStageIsRefused(t *testing.T) {
+	// UNSPECIFIED (the proto zero) and a number the descriptor does not know
+	// are both "outside the enum"; hand-listing the members would let a
+	// regenerated enum drift past this check.
+	for _, st := range []m1pv1.VerdictStage{m1pv1.VerdictStage_VERDICT_STAGE_UNSPECIFIED, m1pv1.VerdictStage(99)} {
+		ev := verdictEvent(t, mustV7(t), 1)
+		ev.GetVerdictEvent().Stage = st
+		assertVerdictRefused(t, newHarness(t), ev, "verdict_stage")
+	}
+}
+
+// Positive control: the refusals above must not be satisfiable by a pipeline
+// that refuses every VerdictEvent.
+func TestWellFormedVerdictEventProjectsAllFourColumns(t *testing.T) {
+	h := newHarness(t)
+	b, id := testBatch(t, verdictEvent(t, mustV7(t), 1))
+	if rec := h.post(t, id, encodeBatch(t, b), nil); rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	h.drain()
+	if h.ins.count() != 1 {
+		t.Fatalf("want 1 projected row, got %d", h.ins.count())
+	}
+	row := h.ins.rows[0]
+	if got := projCol(t, row, "verdict_stage"); got != "provisional" {
+		t.Fatalf("verdict_stage: %v", got)
+	}
+	for c, want := range map[string]float32{"p_satisfied": 0.86, "p_violated": 0.09, "p_refused": 0.03, "p_error": 0.02} {
+		if got := projCol(t, row, c); got != want {
+			t.Fatalf("%s: want %v got %v (a null projection is the FR-VERIFY-020 failure)", c, want, got)
+		}
 	}
 }
 

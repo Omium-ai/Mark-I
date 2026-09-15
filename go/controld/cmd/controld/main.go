@@ -28,6 +28,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/enroll"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/chproj"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/registry"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/s3land"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
@@ -207,6 +208,7 @@ func main() {
 		Store:    store,
 		Proj:     proj,
 		Sidefx:   sfx,
+		Registry: registry.NewPG(tenantDB), // m1_063 schema windows (FR-SPINE-023)
 	}), enroll.New(enroll.Deps{
 		DB:            tenantDB,
 		PG:            tenantDB,

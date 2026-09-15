@@ -51,12 +51,19 @@ fn blank(out: &mut String, ch: char) {
     out.push(if ch == '\n' { '\n' } else { ' ' });
 }
 
-/// Replace every comment and every literal body with spaces. Handles nested
-/// block comments, raw and byte strings of any hash count, escapes, and the
-/// `'a` lifetime / `'a'` char-literal ambiguity.
-fn code_only(src: &str) -> String {
+/// Replace every comment — and, unless `keep_literals`, every literal — with
+/// spaces. Handles nested block comments, raw and byte strings of any hash
+/// count, escapes, and the `'a` lifetime / `'a'` char-literal ambiguity.
+/// `keep_literals` is the fingerprint mode: a sink's `format!` string is part of
+/// what it writes, while a comment beside it is not.
+fn code_only(src: &str, keep_literals: bool) -> String {
     let c: Vec<char> = src.chars().collect();
     let mut out = String::with_capacity(c.len());
+    let lit: fn(&mut String, char) = if keep_literals {
+        |o, ch| o.push(ch)
+    } else {
+        blank
+    };
     let mut i = 0;
     while i < c.len() {
         let ch = c[i];
@@ -113,27 +120,27 @@ fn code_only(src: &str) -> String {
             let hashes = j - hash_start;
             if c.get(j) == Some(&'"') {
                 while i <= j {
-                    blank(&mut out, c[i]);
+                    lit(&mut out, c[i]);
                     i += 1;
                 }
                 while i < c.len() {
                     if !raw && c[i] == '\\' {
-                        blank(&mut out, c[i]);
+                        lit(&mut out, c[i]);
                         i += 1;
                         if i < c.len() {
-                            blank(&mut out, c[i]);
+                            lit(&mut out, c[i]);
                             i += 1;
                         }
                         continue;
                     }
                     if c[i] == '"' && (1..=hashes).all(|k| c.get(i + k) == Some(&'#')) {
                         for _ in 0..=hashes {
-                            blank(&mut out, c[i]);
+                            lit(&mut out, c[i]);
                             i += 1;
                         }
                         break;
                     }
-                    blank(&mut out, c[i]);
+                    lit(&mut out, c[i]);
                     i += 1;
                 }
                 continue;
@@ -150,20 +157,20 @@ fn code_only(src: &str) -> String {
                 i += 1;
                 continue;
             }
-            blank(&mut out, c[i]);
+            lit(&mut out, c[i]);
             i += 1;
             while i < c.len() {
                 if c[i] == '\\' {
-                    blank(&mut out, c[i]);
+                    lit(&mut out, c[i]);
                     i += 1;
                     if i < c.len() {
-                        blank(&mut out, c[i]);
+                        lit(&mut out, c[i]);
                         i += 1;
                     }
                     continue;
                 }
                 let done = c[i] == '\'';
-                blank(&mut out, c[i]);
+                lit(&mut out, c[i]);
                 i += 1;
                 if done {
                     break;
@@ -246,7 +253,7 @@ fn depths(t: &[(String, usize)]) -> Vec<usize> {
 fn inspect(name: &str, src: &str, r: &mut Report) {
     r.files += 1;
     r.bytes += src.len();
-    let t = tokenize(&code_only(src));
+    let t = tokenize(&code_only(src, false));
     let d = depths(&t);
     let tok = |i: usize| t.get(i).map_or("", |(s, _)| s.as_str());
     let line = |i: usize| t.get(i).map_or(0, |(_, l)| *l);
@@ -430,43 +437,111 @@ const SPILL_GUARDS: &[(&str, &str)] = &[
     ("mark1-hookshim/src/spill.rs", "append"),
 ];
 
-/// Every non-test function in the two caller crates that emits bytes, and what
-/// it emits. `admit_guards_every_spill_write` proves the two ring writers keep
-/// their gate; this list is what stops a *third* writer appearing beside them
-/// unnoticed, which no amount of checking the existing two would catch.
-const REVIEWED_SINKS: &[(&str, &str)] = &[
+/// Every non-test function in the two caller crates that emits bytes, what it
+/// emits, and a fingerprint of its text as reviewed (`fn_fingerprint`).
+/// `admit_guards_every_spill_write` proves the two ring writers keep their
+/// gate; this list is what stops a *third* writer appearing beside them
+/// unnoticed, which no amount of checking the existing two would catch. The
+/// fingerprint is what stops a *reviewed* writer being widened in place: any
+/// edit to the function's code or literals turns the gate red, and the
+/// re-review is what re-pins it — a changed hash is a new consent, the same
+/// shape the anchor catalog uses.
+#[rustfmt::skip]
+const REVIEWED_SINKS: &[(&str, &str, &str)] = &[
     // Sealed ring records — the admit axis applies, and is asserted below.
-    ("mark1-proxy/src/tee/spill.rs", "append"),
-    ("mark1-hookshim/src/spill.rs", "append"),
+    ("mark1-proxy/src/tee/spill.rs", "append", "fad86f88270416d6"),
+    ("mark1-hookshim/src/spill.rs", "append", "a7e3c71a7c1230da"),
     // Fixed or non-event bytes: no event frame can reach these.
-    ("mark1-proxy/src/main.rs", "write_port"), // the listener port
-    ("mark1-proxy/src/router.rs", "record_kill"), // cred_ref + fingerprint + reason
-    ("mark1-hookshim/src/spill.rs", "count"),  // one constant byte, a counter
-    ("mark1-hookshim/src/gate.rs", "block"),   // block-decision JSON to stdout
+    ("mark1-proxy/src/main.rs", "write_port", "a061b025faee4a4f"), // the listener port
+    ("mark1-proxy/src/main.rs", "main", "f7551a83cf3d58a6"), // startup errors to stderr, pre-`run`
+    ("mark1-proxy/src/router.rs", "record_kill", "afc6365810cd742e"), // cred_ref + fingerprint + reason
+    ("mark1-hookshim/src/spill.rs", "count", "3c7cadf50427b079"), // one constant byte, a counter
+    ("mark1-hookshim/src/gate.rs", "block", "ec2a2117fd48220a"), // block-decision JSON to stdout
     // `write!` into a `String` — an in-memory formatter, no byte leaves the
-    // process. Listed rather than special-cased in `is_sink`: keeping the
+    // process. Listed rather than special-cased in `classify`: keeping the
     // detector over-eager and the judgement in this table is what makes a new
     // `write!` that *is* a file write show up in review.
-    ("mark1-proxy/src/guard/provenance.rs", "fingerprint_hex"),
+    ("mark1-proxy/src/guard/provenance.rs", "fingerprint_hex", "a432238306ab3c2b"),
     // Frames to the LOCAL mark1d socket. Not disk and not off-machine, so
     // invariant 5 does not bind here; mark1d owns redaction on its side.
     // Listed rather than filtered so the judgement is visible and reviewable.
-    ("mark1-proxy/src/fabric.rs", "send"),
-    ("mark1-hookshim/src/fabric.rs", "write_frame"),
+    ("mark1-proxy/src/fabric.rs", "send", "29738378eadc9c8e"),
+    ("mark1-hookshim/src/fabric.rs", "write_frame", "a9afcc9f2a24dbd3"),
 ];
 
-/// Byte-emitting calls. Deliberately narrow: `OpenOptions::write(true)`
-/// configures a handle and emits nothing, so it is not a sink, while
-/// `fs::write`, `write_all`, `write_fmt` and the `write!` family are.
-fn is_sink(t: &[(String, usize)], i: usize) -> bool {
+/// A write-like call, as this token walk can see it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Shape {
+    /// The bytes leave inside the enclosing `fn`, so that `fn` is what gets
+    /// admit-guarded or reviewed.
+    Sink,
+    /// A write-like name whose bytes the walk cannot attribute to a body: a
+    /// temp file persisted, a path renamed or linked into place, a bare
+    /// `copy(..)` that may be `io::copy` behind a `use`. The gate fails closed
+    /// on these until a human classifies the shape here — an allowlist entry
+    /// is not the fix, because the entry would pin the wrong function.
+    Unrecognised,
+}
+
+/// Byte-emitting call shapes. Over-eager by design (`write!` into a `String`
+/// counts; the judgement lives in `REVIEWED_SINKS`), but not blind: a handle
+/// being configured (`OpenOptions::write(true)`, `std::io::stdout()`) emits
+/// nothing and is not a sink, while the same names as a redirect or a partial
+/// write are. A write-like name in neither arm is invisible to this gate —
+/// that is the ceiling of a token walk, and the list below is its edge.
+fn classify(t: &[(String, usize)], i: usize) -> Option<Shape> {
     let tk = |k: usize| t.get(k).map_or("", |(s, _)| s.as_str());
-    match tk(i) {
-        "write_all" | "write_fmt" => true,
-        "write" | "writeln" => {
-            tk(i + 1) == "!" || (tk(i.wrapping_sub(1)) == "::" && tk(i.wrapping_sub(2)) == "fs")
-        }
-        _ => false,
+    let (prev, next) = (tk(i.wrapping_sub(1)), tk(i + 1));
+    if prev == "fn" {
+        // A definition emits nothing; its body is walked like any other.
+        return None;
     }
+    let call = next == "(";
+    let mac = next == "!";
+    let qualified = |m: &str| prev == "::" && tk(i.wrapping_sub(2)) == m;
+    let shape = match tk(i) {
+        // io::Write / fmt::Write / AsyncWriteExt, plus the `write!` family and
+        // `fs::write`. `.write(true)` is an `OpenOptions` flag; `.write(buf)`
+        // is the partial-write method and lands bytes like `write_all`.
+        // `flush` only as a method: the hookshim's `fabric::flush` is a drain
+        // barrier whose bytes leave through the pinned `write_frame`.
+        "write_all" | "write_fmt" | "write_str" | "write_char" | "write_vectored"
+        | "write_all_vectored" | "write_at" | "write_all_at" | "seek_write"
+            if call =>
+        {
+            Shape::Sink
+        }
+        "flush" if call && prev == "." => Shape::Sink,
+        "write" | "writeln" if mac || qualified("fs") => Shape::Sink,
+        "write" if call && prev == "." && !matches!(tk(i + 2), "true" | "false") => Shape::Sink,
+        // The shapes the CON-008 ledger named as invisible, now attributed:
+        // `io::copy` / `fs::copy` land bytes here; `to_writer` serialises
+        // straight into a handle; a `BufWriter` is pinned where it is built,
+        // because once handed off it is written through a generic `W: Write`
+        // this walk cannot follow; a `Command` redirect (`.stdout(..)`,
+        // `Stdio::from(file)`) puts a child's bytes on disk with no write call
+        // of ours; an mmap is a write with no call at all, so the mapping is
+        // the sink. `print!`-family macros are `write_all` to a std stream.
+        "copy" if call && (qualified("io") || qualified("fs")) => Shape::Sink,
+        "to_writer" | "to_writer_pretty" | "serialize_into" if call => Shape::Sink,
+        "BufWriter" | "LineWriter" | "Stdio" | "Mmap" | "MmapMut" | "MmapOptions"
+            if next == "::" =>
+        {
+            Shape::Sink
+        }
+        "stdout" | "stderr" if call && prev == "." => Shape::Sink,
+        "mmap" | "map_mut" | "map_copy" if call => Shape::Sink,
+        "print" | "println" | "eprint" | "eprintln" | "dbg" if mac => Shape::Sink,
+        // Write-like, but the bytes were landed somewhere this walk did not see.
+        "copy" | "persist" | "persist_noclobber" | "rename" | "hard_link" | "symlink"
+        | "copy_file_range" | "sendfile" | "splice" | "set_len" | "write_to" | "encode_into"
+            if call =>
+        {
+            Shape::Unrecognised
+        }
+        _ => return None,
+    };
+    Some(shape)
 }
 
 /// `(name, open_brace, one_past_close)` for every `fn NAME` at any nesting —
@@ -509,6 +584,101 @@ fn fn_spans(t: &[(String, usize)], d: &[usize]) -> Vec<(String, usize, usize)> {
             continue;
         }
         out.push((name, open, end));
+    }
+    out
+}
+
+/// Fingerprint of every `fn NAME` in a file: each one's `{`-line through its
+/// `}`-line with comments blanked, literals kept and whitespace collapsed,
+/// concatenated in source order and hashed. Same-named twins (`#[cfg(unix)]`
+/// / `#[cfg(not(unix))]` pairs) share one pin, so editing either re-pins.
+/// Sixteen hex chars: this pins consent, it does not resist an adversary who
+/// can edit the table in the same commit anyway.
+/// Returns `(line of the first such fn, fingerprint)`.
+fn fn_fingerprint(
+    src: &str,
+    t: &[(String, usize)],
+    d: &[usize],
+    name: &str,
+) -> Option<(usize, String)> {
+    let stripped = code_only(src, true);
+    let lines: Vec<&str> = stripped.lines().collect();
+    let mut text = String::new();
+    let mut line = None;
+    for (n, open, end) in fn_spans(t, d) {
+        if n != name {
+            continue;
+        }
+        let (first, last) = (t[open].1, t[end - 1].1);
+        line.get_or_insert(first);
+        for l in &lines[first - 1..last] {
+            text.push_str(l);
+            text.push(' ');
+        }
+    }
+    let normalised = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    use sha2::Digest;
+    let hash = format!("{:x}", sha2::Sha256::digest(normalised.as_bytes()))[..16].to_string();
+    line.map(|l| (l, hash))
+}
+
+/// Token ranges of every closure body and `async` block inside `open..end`,
+/// in the `(opener, one_past_close)` convention of `in_ranges`. A sink in one
+/// of these runs when the closure runs — later, repeatedly, or never — not
+/// where it is written, so textual order says nothing about it.
+fn deferred_ranges(
+    t: &[(String, usize)],
+    d: &[usize],
+    open: usize,
+    end: usize,
+) -> Vec<(usize, usize)> {
+    let tk = |k: usize| t.get(k).map_or("", |(s, _)| s.as_str());
+    // A `|` after something that can end an expression is binary-or, or the
+    // second bar of `||`; after anything else it opens a parameter list.
+    let ends_expr = |s: &str| {
+        matches!(s, ")" | "]" | "}" | "|")
+            || (s.starts_with(is_ident) && !matches!(s, "move" | "return" | "break"))
+    };
+    let mut out = Vec::new();
+    let mut i = open + 1;
+    while i < end {
+        // Index of the token that closes the head: the `{` of an async block,
+        // or the second `|` of a closure.
+        let head_close = if tk(i) == "async" && tk(i + 1) == "{" {
+            Some(i + 1)
+        } else if tk(i) == "async" && tk(i + 1) == "move" && tk(i + 2) == "{" {
+            Some(i + 2)
+        } else if tk(i) == "|" && !ends_expr(tk(i - 1)) {
+            (i + 1..end).find(|&j| tk(j) == "|")
+        } else {
+            None
+        };
+        let Some(hc) = head_close else {
+            i += 1;
+            continue;
+        };
+        let body = hc + 1;
+        let stop = if tk(hc) == "{" || tk(body) == "{" {
+            // Block body: the matching brace.
+            let b = if tk(hc) == "{" { hc } else { body };
+            brace_range(t, d, b).map_or(end, |(_, e)| e)
+        } else {
+            // Expression body: runs to the first separator at its own nesting.
+            let mut depth = 0i32;
+            let mut j = body;
+            while j < end {
+                match tk(j) {
+                    "(" | "[" | "{" => depth += 1,
+                    ")" | "]" | "}" | "," | ";" if depth == 0 => break,
+                    ")" | "]" | "}" => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            j
+        };
+        out.push((hc, stop));
+        i = body;
     }
     out
 }
@@ -786,8 +956,9 @@ fn empty_or_wrong_directory_is_not_a_pass() {
 ///
 /// What that is worth: those bodies are straight-line with early returns, so
 /// within one body "textually after the statement-depth `admit()`" *is*
-/// domination — which is why the loop ban is load-bearing rather than
-/// decorative. It says nothing about paths that never enter these functions;
+/// domination — which is why the loop ban, and the refusal of a sink inside a
+/// closure or async block, are load-bearing rather than decorative. It says
+/// nothing about paths that never enter these functions;
 /// `caller_crates_have_no_unreviewed_byte_sink` is what covers those.
 #[test]
 fn admit_guards_every_spill_write() {
@@ -822,7 +993,7 @@ fn admit_guards_every_spill_write() {
 fn guard_findings(file: &str, fname: &str, src: &str) -> Vec<String> {
     let mut findings: Vec<String> = Vec::new();
     {
-        let t = tokenize(&code_only(src));
+        let t = tokenize(&code_only(src, false));
         let d = depths(&t);
         let tk = |i: usize| t.get(i).map_or("", |(s, _)| s.as_str());
         let ln = |i: usize| t.get(i).map_or(0, |(_, l)| *l);
@@ -841,7 +1012,9 @@ fn guard_findings(file: &str, fname: &str, src: &str) -> Vec<String> {
         let admits: Vec<usize> = (open + 1..end)
             .filter(|&i| tk(i) == "admit" && tk(i + 1) == "(")
             .collect();
-        let sinks: Vec<usize> = (open + 1..end).filter(|&i| is_sink(&t, i)).collect();
+        let sinks: Vec<usize> = (open + 1..end)
+            .filter(|&i| classify(&t, i).is_some())
+            .collect();
 
         match admits.iter().copied().find(|&i| d[i] == stmt) {
             None if admits.is_empty() => findings.push(format!(
@@ -885,11 +1058,26 @@ fn guard_findings(file: &str, fname: &str, src: &str) -> Vec<String> {
             ));
         }
 
+        // Textual order is execution order only in straight-line code. A loop
+        // anywhere in the body is refused outright (none exists, so the ban is
+        // free); a closure is refused only when a sink sits inside it, because
+        // `.map(|m| m.len())` is everywhere and cannot reorder a write.
+        let deferred = deferred_ranges(&t, &d, open, end);
+        for &s in sinks.iter().filter(|&&s| in_ranges(&deferred, s)) {
+            findings.push(format!(
+                "{file}:{}: `{}` in `{fname}` sits inside a closure or async block — it runs \
+                 when that runs, not where it is written, so this gate cannot establish \
+                 domination by `admit()`; hoist the write into the function body",
+                ln(s),
+                tk(s)
+            ));
+        }
         for i in open + 1..end {
             if matches!(tk(i), "loop" | "while" | "for") {
                 findings.push(format!(
-                    "{file}:{}: `{}` in `{fname}` — this gate infers domination from textual \
-                     order, which a loop breaks; re-derive the ordering before allowing one",
+                    "{file}:{}: `{}` in `{fname}` — cannot establish domination: this gate \
+                     reads textual order as execution order, which a loop breaks; re-derive \
+                     the ordering before allowing one",
                     ln(i),
                     tk(i)
                 ));
@@ -915,14 +1103,30 @@ fn guard_findings(file: &str, fname: &str, src: &str) -> Vec<String> {
 }
 
 /// Byte sinks in one file as `(enclosing fn, token, line)` with test code
-/// excluded, plus any `cfg(feature = ..)` findings. Split out for the same
-/// reason as `guard_findings`: so the positive control can drive it.
+/// excluded, plus the findings that need no allowlist lookup: a `cfg(feature)`,
+/// an unrecognised sink shape (fails closed), and a reviewed sink whose text no
+/// longer matches its pinned fingerprint. Split out for the same reason as
+/// `guard_findings`: so the positive controls can drive it.
 fn file_sinks(file: &str, src: &str) -> (Vec<(String, String, usize)>, Vec<String>) {
-    let t = tokenize(&code_only(src));
+    let t = tokenize(&code_only(src, false));
     let d = depths(&t);
     let tests = test_ranges(&t, &d);
     let spans = fn_spans(&t, &d);
     let (mut sinks, mut findings) = (Vec::new(), Vec::new());
+
+    for &(f, name, want) in REVIEWED_SINKS.iter().filter(|(f, _, _)| *f == file) {
+        // A missing fn is the inventory test's "never re-found" failure; here
+        // only a present-but-edited one is a finding.
+        if let Some((line, got)) = fn_fingerprint(src, &t, &d, name) {
+            if got != want {
+                findings.push(format!(
+                    "{f}:{line}: `{name}` was edited since its CON-008 review (fingerprint \
+                     {got}, reviewed {want}) — re-review what it writes, then pin the new \
+                     fingerprint in REVIEWED_SINKS"
+                ));
+            }
+        }
+    }
 
     for i in 0..t.len() {
         if t[i].0 == "cfg" && t.get(i + 1).map(|(s, _)| s.as_str()) == Some("(") {
@@ -935,13 +1139,21 @@ fn file_sinks(file: &str, src: &str) -> (Vec<(String, String, usize)>, Vec<Strin
                 ));
             }
         }
-        if !is_sink(&t, i) || in_ranges(&tests, i) {
+        let Some(shape) = classify(&t, i).filter(|_| !in_ranges(&tests, i)) else {
             continue;
-        }
+        };
         let owner = enclosing_fn(&spans, i)
             .unwrap_or("<file scope>")
             .to_string();
-        sinks.push((owner, t[i].0.clone(), t[i].1));
+        match shape {
+            Shape::Sink => sinks.push((owner, t[i].0.clone(), t[i].1)),
+            Shape::Unrecognised => findings.push(format!(
+                "{file}:{}: unrecognised sink shape `{}` in `{owner}` — this gate cannot say \
+                 where those bytes land, so it fails closed; classify the shape in `classify` \
+                 (an allowlist entry would pin the wrong function) (CON-008)",
+                t[i].1, t[i].0
+            )),
+        }
     }
     (sinks, findings)
 }
@@ -950,6 +1162,28 @@ fn file_sinks(file: &str, src: &str) -> (Vec<(String, String, usize)>, Vec<Strin
 /// reviewed against CON-008, and neither crate carries a cargo feature gate.
 /// This is the check that makes deleting an `admit()` call hard to route
 /// around: a new writer has to be added to `REVIEWED_SINKS` by hand.
+/// One file's inventory: the `(file, fn)` sinks it re-found, and every finding
+/// — `file_sinks`'s own plus the `REVIEWED_SINKS` lookup. Split out so the
+/// positive controls exercise the allowlist path, not just the detector.
+fn inventory(file: &str, src: &str) -> (Vec<(String, String)>, Vec<String>) {
+    let (sinks, mut findings) = file_sinks(file, src);
+    let mut seen = Vec::new();
+    for (owner, tok, line) in sinks {
+        if !REVIEWED_SINKS
+            .iter()
+            .any(|&(f, n, _)| f == file && n == owner)
+        {
+            findings.push(format!(
+                "{file}:{line}: `{tok}` in `{owner}` emits bytes from an unreviewed path — \
+                 decide whether an event frame can reach it, put `admit()` in front of it if \
+                 it can, and only then add it to REVIEWED_SINKS (CON-008)"
+            ));
+        }
+        seen.push((file.to_string(), owner));
+    }
+    (seen, findings)
+}
+
 #[test]
 fn caller_crates_have_no_unreviewed_byte_sink() {
     let sources = caller_sources();
@@ -960,19 +1194,9 @@ fn caller_crates_have_no_unreviewed_byte_sink() {
     for (file, src) in &sources {
         files += 1;
         bytes += src.len();
-        let (sinks, cfgs) = file_sinks(file, src);
-        findings.extend(cfgs);
-
-        for (owner, tok, line) in sinks {
-            if !REVIEWED_SINKS.iter().any(|&(f, n)| f == file && n == owner) {
-                findings.push(format!(
-                    "{file}:{line}: `{tok}` in `{owner}` emits bytes from an unreviewed path — \
-                     decide whether an event frame can reach it, put `admit()` in front of it if \
-                     it can, and only then add it to REVIEWED_SINKS (CON-008)"
-                ));
-            }
-            seen.push((file.clone(), owner));
-        }
+        let (s, f) = inventory(file, src);
+        seen.extend(s);
+        findings.extend(f);
     }
 
     // Anti-vacuity before the emptiness claim: prove the walk saw both crates.
@@ -987,7 +1211,7 @@ fn caller_crates_have_no_unreviewed_byte_sink() {
     // The strongest marker available: every reviewed sink must actually be
     // re-found, which exercises the sink detector, the nested-`fn` mapping and
     // the test-range exclusion together on every known call site in both crates.
-    for &(f, n) in REVIEWED_SINKS {
+    for &(f, n, _) in REVIEWED_SINKS {
         assert!(
             seen.iter().any(|(sf, sn)| sf == f && sn == n),
             "vacuous or regressed: never re-found the reviewed byte sink {f}::{n} — the sink \
@@ -1106,7 +1330,7 @@ pub fn append(base: &Path, mut frame: Vec<u8>) {
 "#;
     let f = guard_findings("f.rs", "append", LOOPED).join("\n");
     assert!(
-        f.contains("this gate infers domination from textual order"),
+        f.contains("cannot establish domination"),
         "loop not flagged: {f}"
     );
 
@@ -1149,5 +1373,234 @@ mod tests {
     assert!(
         cfgs.iter().any(|c| c.contains("cfg(feature = ..)")),
         "caller-crate feature gate not flagged: {cfgs:?}"
+    );
+}
+
+/// Positive control for the fingerprint pin. A reviewed sink widened in place
+/// — one token, `sealed` → `frame`, the redacted-and-sealed record replaced by
+/// the raw event — changes nothing the inventory keys on (same file, same fn,
+/// same `write_all`), so only the fingerprint can catch it. A literal edit is
+/// also a widening (`format!` strings are what `record_kill` writes); a comment
+/// edit is not, and must not flip the pin, or the pin gets bumped unread.
+#[test]
+fn widened_reviewed_sink_is_named() {
+    const FILE: &str = "mark1-proxy/src/tee/spill.rs";
+    let sources = caller_sources();
+    let (_, real) = sources
+        .iter()
+        .find(|(p, _)| p == FILE)
+        .expect("vacuous: proxy spill.rs not found");
+    let (_, clean) = inventory(FILE, real);
+    assert!(
+        clean.is_empty(),
+        "control cannot start from a red gate: {clean:?}"
+    );
+
+    let widened = real.replace("file.write_all(&sealed)", "file.write_all(&frame)");
+    assert_ne!(
+        widened, *real,
+        "vacuous: the planted widening changed nothing"
+    );
+    let (_, f) = inventory(FILE, &widened);
+    assert!(
+        f.iter()
+            .any(|x| x.contains("`append` was edited since its CON-008 review")),
+        "a one-token widening of a reviewed sink went unnoticed: {f:?}"
+    );
+
+    let literal = real.replace("\"proxy.ring\"", "\"proxy.ring.plain\"");
+    assert_ne!(
+        literal, *real,
+        "vacuous: the planted literal edit changed nothing"
+    );
+    let (_, f) = inventory(FILE, &literal);
+    assert!(
+        f.iter().any(|x| x.contains("`append` was edited")),
+        "a literal edit inside a reviewed sink went unnoticed: {f:?}"
+    );
+
+    let commented = real.replace(
+        "    let _ = file.write_all(&sealed);",
+        "    // reviewed 2026-09: sealed only\n    let _ = file.write_all(&sealed);",
+    );
+    assert_ne!(
+        commented, *real,
+        "vacuous: the planted comment changed nothing"
+    );
+    let (_, f) = inventory(FILE, &commented);
+    assert!(
+        f.is_empty(),
+        "a comment flipped the fingerprint — a pin that moves on prose gets re-pinned \
+         without a re-review: {f:?}"
+    );
+}
+
+/// Positive control for the sink model. Each shape the ledger called invisible
+/// is planted alone in a fresh `fn` and must surface as an unreviewed sink (the
+/// allowlist path) and, ahead of `admit()`, as a pre-admit write (the
+/// domination path); a write-like name the model cannot attribute must fail
+/// closed as an unrecognised shape; and the look-alikes that emit nothing
+/// (`OpenOptions::write(true)`, a `stdout()` handle, a `BufWriter` type, a
+/// `fn flush` definition) must stay silent, because a gate that fires on its
+/// own plumbing gets disabled.
+#[test]
+fn sink_shapes_are_recognised_or_refused() {
+    // `(token the finding names, one statement that emits through that shape)`.
+    const RECOGNISED: &[(&str, &str)] = &[
+        (
+            "copy",
+            "let _ = std::io::copy(&mut frame.as_slice(), &mut file);",
+        ),
+        ("to_writer", "let _ = serde_json::to_writer(&file, &frame);"),
+        ("BufWriter", "let w = BufWriter::new(file);"),
+        (
+            "stdout",
+            "let _ = Command::new(\"tee\").stdout(file).spawn();",
+        ),
+        ("Stdio", "let s = Stdio::from(file);"),
+        (
+            "map_mut",
+            "let m = unsafe { MmapOptions::new().map_mut(&file) };",
+        ),
+        ("write", "let _ = file.write(&frame);"),
+        ("eprintln", "eprintln!(\"{frame:?}\");"),
+        (
+            "write_vectored",
+            "let _ = file.write_vectored(&[IoSlice::new(&frame)]);",
+        ),
+        ("flush", "let _ = file.flush();"),
+    ];
+    for &(tok, stmt) in RECOGNISED {
+        let src = format!("fn f(mut file: File, frame: Vec<u8>) {{ {stmt} }}");
+        let (seen, f) = inventory("scratch.rs", &src);
+        assert!(
+            seen.contains(&("scratch.rs".to_string(), "f".to_string())),
+            "`{tok}` not recognised as a sink in `f`: {f:?}"
+        );
+        assert!(
+            f.iter().any(|x| x.contains(&format!(
+                "`{tok}` in `f` emits bytes from an unreviewed path"
+            ))),
+            "`{tok}` recognised but not put through the allowlist: {f:?}"
+        );
+        // Ahead of admit() inside a guarded body, the same shape is a pre-admit write.
+        let guarded = format!(
+            "pub fn append(base: &Path, mut frame: Vec<u8>) {{\n    {stmt}\n    if \
+             scanner.admit(&mut frame) == AdmitOutcome::Quarantine {{ return; }}\n    let _ = \
+             ring.write_all(&frame);\n}}"
+        );
+        let g = guard_findings("g.rs", "append", &guarded).join("\n");
+        assert!(
+            g.contains(&format!("`{tok}` emits bytes before `admit()`")),
+            "`{tok}` ahead of admit() passed the domination check: {g}"
+        );
+    }
+
+    const UNRECOGNISED: &[(&str, &str)] = &[
+        (
+            "persist",
+            "fn f(t: NamedTempFile, p: &Path) { let _ = t.persist(p); }",
+        ),
+        (
+            "copy",
+            "fn f(mut a: File, mut b: File) { let _ = copy(&mut a, &mut b); }",
+        ),
+        (
+            "rename",
+            "fn f(a: &Path, b: &Path) { let _ = std::fs::rename(a, b); }",
+        ),
+        ("set_len", "fn f(file: &File) { let _ = file.set_len(0); }"),
+    ];
+    for &(tok, src) in UNRECOGNISED {
+        let (seen, f) = inventory("scratch.rs", src);
+        assert!(
+            f.iter()
+                .any(|x| x.contains(&format!("unrecognised sink shape `{tok}` in `f`"))),
+            "`{tok}` did not fail closed: {f:?}"
+        );
+        assert!(
+            seen.is_empty(),
+            "`{tok}` must be refused, not attributed as a reviewable sink: {seen:?}"
+        );
+    }
+
+    const SILENT: &str = r#"
+use std::io::BufWriter;
+fn open(p: &Path) -> std::io::Result<File> { OpenOptions::new().write(true).create(true).open(p) }
+fn handle() -> Stdout { std::io::stdout() }
+fn child(c: &mut Child) -> Option<ChildStdout> { c.stdout.take() }
+fn flush(home: Option<&Path>) { if fabric::flush(&frame, id, budget).is_err() { count(home) } }
+fn sink(w: BufWriter<File>) -> usize { w.capacity() }
+fn either(a: bool, b: bool) -> bool { a || b }
+"#;
+    let (seen, f) = inventory("silent.rs", SILENT);
+    assert!(
+        seen.is_empty() && f.is_empty(),
+        "false positive on a non-emitting shape — a gate that fires on its own plumbing gets \
+         disabled: seen {seen:?}, findings {f:?}"
+    );
+}
+
+/// Positive control for the domination refusal. Textual order is execution
+/// order only in straight-line code; a sink inside a closure or an `async`
+/// block runs when that runs. The clean shapes — a sink-free closure (the real
+/// `append` bodies have `.map(|m| m.len() ..)`), a logical `||`, a `|` in a
+/// match pattern — must stay silent, or the refusal gets allowlisted away.
+#[test]
+fn sink_inside_loop_or_closure_refuses_domination() {
+    const PLANTED: &[(&str, &str)] = &[
+        (
+            "block closure",
+            "pub fn append(base: &Path, mut frame: Vec<u8>) {\n    if scanner.admit(&mut frame) \
+             == AdmitOutcome::Quarantine { return; }\n    let w = move |b: &[u8]| { let _ = \
+             file.write_all(b); };\n    w(&frame);\n}",
+        ),
+        (
+            "expression closure",
+            "pub fn append(base: &Path, mut frame: Vec<u8>) {\n    if scanner.admit(&mut frame) \
+             == AdmitOutcome::Quarantine { return; }\n    let _ = frame.chunks(64).map(|c| \
+             file.write_all(c)).count();\n}",
+        ),
+        (
+            "empty-params closure",
+            "pub fn append(base: &Path, mut frame: Vec<u8>) {\n    if scanner.admit(&mut frame) \
+             == AdmitOutcome::Quarantine { return; }\n    later(|| file.write_all(&frame));\n}",
+        ),
+        (
+            "async block",
+            "pub fn append(base: &Path, mut frame: Vec<u8>) {\n    if scanner.admit(&mut frame) \
+             == AdmitOutcome::Quarantine { return; }\n    spawn(async move { let _ = \
+             file.write_all(&frame).await; });\n}",
+        ),
+        (
+            "loop after admit",
+            "pub fn append(base: &Path, mut frame: Vec<u8>) {\n    if scanner.admit(&mut frame) \
+             == AdmitOutcome::Quarantine { return; }\n    while retry() { let _ = \
+             file.write_all(&frame); }\n}",
+        ),
+    ];
+    for &(what, src) in PLANTED {
+        let f = guard_findings("g.rs", "append", src).join("\n");
+        assert!(
+            f.contains("cannot establish domination"),
+            "{what}: a sink whose execution point is not its textual position passed as \
+             dominated: {f}"
+        );
+    }
+
+    const CLEAN: &str = r#"
+pub fn append(base: &Path, mut frame: Vec<u8>) {
+    if scanner.admit(&mut frame) == AdmitOutcome::Quarantine { return; }
+    if frame.is_empty() || base.as_os_str().is_empty() { return; }
+    let full = file.metadata().map(|m| m.len() + frame.len() as u64 > MAX).unwrap_or(true);
+    match mode { Mode::A | Mode::B => {} _ => return }
+    if full { return; }
+    let _ = file.write_all(&frame);
+}
+"#;
+    let f = guard_findings("g.rs", "append", CLEAN);
+    assert!(
+        f.is_empty(),
+        "false positive on a sink-free closure, a logical `||` or a pattern `|`: {f:?}"
     );
 }

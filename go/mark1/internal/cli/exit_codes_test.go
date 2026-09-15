@@ -21,11 +21,12 @@ package cli
 //     implements exactly that by substituting exitClass(). So the assertion is
 //     the shape of the non-empty ones, and the class every code renders as.
 //
-// Ceiling, stated so a green is not read wider than it is: property 3 is a scan
-// of string LITERALS. Five call sites forward the server's own code verbatim out
-// of cli.APIError (cli.go:461-473, which does no shape check), and no static
-// scan can clear a value that arrives on the wire. Those sites are anchored by
-// file below rather than waved through, so a sixth one costs a human a decision.
+// Property 3 is a scan of string LITERALS, so it cannot see the five call sites
+// that forward the server's own code verbatim out of cli.APIError. Those are
+// covered at runtime instead: Failf normalises any non-M1E-dddd code to "" (the
+// documented "exit class" fallback) and keeps the raw string in the message —
+// TestFailfNormalisesAServerCodeThatIsNotM1E pins it. The echo sites are still
+// anchored by file below so a sixth one is a visible decision, not a drift.
 
 import (
 	"go/ast"
@@ -141,9 +142,9 @@ func m1eLiterals(f *ast.File) (lits []string, computed int) {
 }
 
 // serverEchoFiles forward cli.APIError's code straight into the M1E slot. The
-// server owns that string, so this scan cannot clear it; the list is here so a
-// NEW file doing the same thing turns this test red and asks a human whether
-// the value should be shape-checked before it reaches --json.
+// server owns that string; Failf shape-checks it at runtime (cli.go), so this
+// scan does not need to clear it. The list is here so a NEW file doing the same
+// thing turns this test red and is looked at rather than merged unseen.
 var serverEchoFiles = []string{
 	"internal/enroll/enroll.go",
 	"internal/report/report.go",
@@ -257,7 +258,7 @@ func TestExitCodeTaxonomyIsExhaustiveAndStable(t *testing.T) {
 	}
 	for f := range echoed {
 		if !slices.Contains(serverEchoFiles, f) {
-			t.Errorf("%s passes a computed value as the M1E code. Only the cli.APIError echo sites may (the server owns that string and cli.go:461-473 does not shape-check it) — if this is another one, decide whether it should be validated before it reaches --json, then anchor it in serverEchoFiles.", f)
+			t.Errorf("%s passes a computed value as the M1E code. Only the cli.APIError echo sites do today (Failf shape-checks the value at runtime, so this is about knowing where server strings enter) — if this is another one, read it, then anchor it in serverEchoFiles.", f)
 		}
 	}
 	t.Logf("%d Failf sites across %d files: %d carry an M1E-dddd code, %d are deliberately empty (cli.go:41), %d echo the server across %d files", sites, files, nonEmpty, sites-nonEmpty-echoSites, echoSites, len(echoed))
@@ -325,5 +326,25 @@ func f() {
 		if !m1eRe.MatchString(good) {
 			t.Errorf("%q is a real 08 §9 code and must pass; a check the taxonomy fails is a check that gets deleted", good)
 		}
+	}
+}
+
+// TestFailfNormalisesAServerCodeThatIsNotM1E is the runtime half of property 3:
+// the five APIError echo sites hand Failf whatever the control plane sent, and
+// --json's error.code must still be M1E-dddd or an exit class. Positive control
+// first, so a Failf that blanked every code would not pass.
+func TestFailfNormalisesAServerCodeThatIsNotM1E(t *testing.T) {
+	if got := Failf(ExitRuntime, "M1E-2007", "x"); got.M1E != "M1E-2007" || got.Msg != "x" {
+		t.Fatalf("a well-formed code was altered: %+v", got)
+	}
+	if got := Failf(ExitRuntime, "", "x"); got.M1E != "" || got.Msg != "x" {
+		t.Fatalf("the empty code (cli.go:41's documented contract) was altered: %+v", got)
+	}
+	got := Failf(ExitRuntime, "whatever the server said", "refresh failed")
+	if got.M1E != "" {
+		t.Fatalf("free text reached the M1E slot: %q — --json error.code is parsed by customers", got.M1E)
+	}
+	if !strings.Contains(got.Msg, "refresh failed") || !strings.Contains(got.Msg, `"whatever the server said"`) {
+		t.Fatalf("the server's string must survive in the message for the human: %q", got.Msg)
 	}
 }

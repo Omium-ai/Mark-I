@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
+	"regexp"
 	"sort"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/chproj"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/registry"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/s3land"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/scanner"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
@@ -22,9 +25,13 @@ import (
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
 
+// schemaSyntax is the shape of a well-formed M1P-Schema (07 §1: the package
+// name is the wire name). Anything else is malformed, not out-of-window —
+// refused as 400 before the registry is consulted.
+var schemaSyntax = regexp.MustCompile(`^m1p\.v[1-9][0-9]*$`)
+
 // The 05 §2.1 bounds, all normative.
 const (
-	schemaV1          = "m1p.v1"
 	maxCompressed     = 8 << 20  // stage 1: compressed-size cap
 	maxDecoded        = 32 << 20 // stage 4: decoded-size cap (08 §2.1)
 	maxExpansionRatio = 100      // stage 4: a 1 KiB body expanding to 32 MiB is an attack
@@ -83,13 +90,32 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, errMediaType("Content-Encoding must be zstd"))
 		return
 	}
-	if schema := r.Header.Get("M1P-Schema"); schema != schemaV1 {
-		writeUpgradeRequired(w, schema)
+	schema := r.Header.Get("M1P-Schema")
+	if !schemaSyntax.MatchString(schema) {
+		writeErr(w, errMalformed("M1P-Schema must be m1p.v<n>"))
 		return
 	}
 	headerBatchID, err := uuid.Parse(r.Header.Get("M1P-Batch-Id"))
 	if err != nil || headerBatchID.Version() != 7 {
 		writeErr(w, errMalformed("M1P-Batch-Id must be a uuidv7"))
+		return
+	}
+
+	// ---- Schema window (FR-SPINE-023; 08 §10.2) ---------------------------
+	// Per-TENANT, so it needs the stage-3 stamp above and sits after every
+	// header check that needs no lookup — but before the body is read: a
+	// batch the window refuses is refused before stage 4 spends on it. A
+	// registry read failure is fail-STATIC (08 §9: capture is fail-open for
+	// availability): the compiled-in window applies and capture continues.
+	win, err := m.registry.Window(r.Context(), tenant)
+	if err != nil {
+		schemaRegistryFallbacks.Inc()
+		log.Printf("WARN ingest: schema registry unavailable, serving the compiled-in window (fail-static): %v", err)
+		win = registry.Compiled
+	}
+	if !win.Accepts(schema) {
+		schemaRefusals.Inc()
+		writeUpgradeRequired(w, schema, win)
 		return
 	}
 
@@ -335,6 +361,22 @@ func checkInvariants(b *m1pv1.Batch, headerBatchID uuid.UUID) (apiErr, bool) {
 		if u := ev.GetUsage(); u != nil && len(u.GetIdemKey()) != 32 {
 			invariantViolations.WithLabelValues("usage_idem_key").Inc()
 			badIDs, kinds = append(badIDs, id.String()), append(kinds, "usage_idem_key")
+		}
+		// FR-VERIFY-020, same posture as the idem_key row: verify.proto says a
+		// receiver MUST reject a posterior whose length is not 4, and a stage
+		// outside the enum (UNSPECIFIED included) is not a verdict. Refused
+		// here so a billing-grade event never lands as a null projection.
+		if v := ev.GetVerdictEvent(); v != nil {
+			if len(v.GetPosterior()) != 4 {
+				invariantViolations.WithLabelValues("verdict_posterior").Inc()
+				badIDs, kinds = append(badIDs, id.String()), append(kinds, "verdict_posterior")
+			}
+			// Descriptor lookup, not a hand-list: a stage added to the proto is
+			// admitted by regeneration alone; the zero value never is.
+			if st := v.GetStage(); st.Number() == 0 || st.Descriptor().Values().ByNumber(st.Number()) == nil {
+				invariantViolations.WithLabelValues("verdict_stage").Inc()
+				badIDs, kinds = append(badIDs, id.String()), append(kinds, "verdict_stage")
+			}
 		}
 	}
 	if len(badIDs) > 0 || len(kinds) > 0 {

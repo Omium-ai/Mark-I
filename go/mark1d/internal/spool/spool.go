@@ -79,7 +79,9 @@ const (
 	// tolerate every other tick — see run().
 	billingSyncEvery = 250 * time.Millisecond
 	defaultSegSize   = 64 << 20
-	defaultCap       = 2 << 30
+	// DefaultCap is 07 §6's ~2 GiB spool cap, exported so cmd/main.go's
+	// --spool-cap flag can print it as its default rather than re-type it.
+	DefaultCap = 2 << 30
 	// NFR-FOOTPRINT-002: the second, independent limit. The ~2 GiB cap bounds
 	// what the spool costs; this bounds what it costs the HOST, because filling
 	// a developer's disk is a worse failure than shedding diagnostics.
@@ -173,7 +175,7 @@ func Open(cfg Config) (*Spool, error) {
 		cfg.SegmentSize = defaultSegSize
 	}
 	if cfg.SpoolCap == 0 {
-		cfg.SpoolCap = defaultCap
+		cfg.SpoolCap = DefaultCap
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -206,7 +208,14 @@ func Open(cfg Config) (*Spool, error) {
 		lock:     lock,
 	}
 	if err := s.recover(); err != nil {
-		_ = lock.Close()
+		// recover opens the ledger and the live segment before it can fail;
+		// a refused Open must not leak them — on Windows an open handle also
+		// pins the file against deletion.
+		for _, f := range []*os.File{s.f, s.ledger, lock} {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
 		return nil, err
 	}
 	// Sampled before the first Append rather than at the first tick: booting
@@ -630,12 +639,15 @@ func (s *Spool) openSegmentLocked(seq uint64) error {
 	// created_at is u64 unix nanoseconds on disk (07 §6); a pre-1970 clock is
 	// misconfiguration toU64 turns into a loud stop, not a wrapped timestamp.
 	hdr := encodeSegHeader(seq, toU64(s.cfg.Now().UnixNano()))
-	if _, err := f.WriteAt(hdr[:], 0); err != nil {
-		return err
-	}
 	// Header fsync before any record: the ledger may point into this segment
 	// on the next sync, and recovery validates the header it points at.
-	if err := f.Sync(); err != nil {
+	if _, err = f.WriteAt(hdr[:], 0); err == nil {
+		err = f.Sync()
+	}
+	if err != nil {
+		// Not yet s.f: nothing else will ever close it, and on Windows the
+		// open handle would pin a segment recovery must be free to discard.
+		_ = f.Close()
 		return err
 	}
 	s.f = f

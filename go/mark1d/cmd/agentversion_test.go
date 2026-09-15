@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -18,20 +19,45 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// fakeClaude puts a `claude` on PATH that reports version, and returns the
-// state dir tailWorkspaces should run against. The version sniff execs the
-// real binary, so a version fixture has to be an executable, not a stub type.
-func fakeClaude(t *testing.T, version string) (state string, adm *capture.Admitter, sp *spool.Spool) {
+// fakeClaudeOnPath puts a `claude` on PATH that reports version. The version
+// sniff execs the real binary, so a version fixture has to be an executable,
+// not a stub type. Every daemon-level test that expects the tailer to RUN
+// needs this: a runner has no `claude` at all, and a developer's is whatever
+// npm installed this week, neither of which is the pinned version.
+func fakeClaudeOnPath(t *testing.T, version string) {
 	t.Helper()
 	bin := t.TempDir()
-	script := "#!/bin/sh\necho '" + version + " (Claude Code)'\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: it must be executable
+	name, script := "claude", "#!/bin/sh\necho '"+version+" (Claude Code)'\n"
+	if runtime.GOOS == "windows" {
+		// What npm puts on a Windows PATH is claude.cmd, and LookPath("claude")
+		// resolves it through PATHEXT — the same route Detect takes there.
+		name, script = "claude.cmd", "@echo "+version+" (Claude Code)\r\n"
+	}
+	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil { //nolint:gosec // G306: it must be executable
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)
 	// Detect reads ANTHROPIC_API_KEY to classify the regime. Unset it so the
 	// test does not depend on the developer's environment.
 	t.Setenv("ANTHROPIC_API_KEY", "")
+}
+
+// pinnedAgentVersion is any version the conformance corpus pins — the one
+// input under which capture must run.
+func pinnedAgentVersion(t *testing.T) string {
+	t.Helper()
+	for v := range claudecode.SupportedVersions {
+		return v
+	}
+	t.Fatal("SupportedVersions is empty; capture is disabled for every version")
+	return ""
+}
+
+// fakeClaude is fakeClaudeOnPath plus the state dir, spool and admitter
+// tailWorkspaces runs against.
+func fakeClaude(t *testing.T, version string) (state string, adm *capture.Admitter, sp *spool.Spool) {
+	t.Helper()
+	fakeClaudeOnPath(t, version)
 
 	state = t.TempDir()
 	var err error
@@ -133,14 +159,7 @@ func TestAnUnsniffableAgentIsAlsoDropped(t *testing.T) {
 // everything. The pinned version must reach the tailer fleet and raise no drop
 // row at all.
 func TestSupportedAgentVersionKeepsTailing(t *testing.T) {
-	var pinned string
-	for v := range claudecode.SupportedVersions {
-		pinned = v
-		break
-	}
-	if pinned == "" {
-		t.Fatal("SupportedVersions is empty; capture is disabled for every version")
-	}
+	pinned := pinnedAgentVersion(t)
 	state, adm, _ := fakeClaude(t, pinned)
 
 	if runTail(t, state, adm, coverage.New(adm.Admit, nil)) {
@@ -220,11 +239,7 @@ func TestUnsupportedAgentVersionReceiptsTheBypassWindow(t *testing.T) {
 // tailWorkspaces that declares a bypass on every boot, which would drag every
 // tenant's band down for no reason.
 func TestSupportedAgentVersionReceiptsNoBypass(t *testing.T) {
-	var pinned string
-	for v := range claudecode.SupportedVersions {
-		pinned = v
-		break
-	}
+	pinned := pinnedAgentVersion(t)
 	state, adm, sp := fakeClaude(t, pinned)
 	if runTail(t, state, adm, coverage.New(adm.Admit, nil)) {
 		t.Fatalf("tailWorkspaces refused %s, which conformance/hooks/claudecode pins", pinned)

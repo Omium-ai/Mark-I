@@ -26,6 +26,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric/fabrictest"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
@@ -150,7 +151,7 @@ func uplinkPaths(t *testing.T) (stateDir, spoolDir, socket string) {
 	stateDir = filepath.Join(dir, "state")
 	spoolDir = filepath.Join(dir, "spool")
 	// A fresh subdir so fabric.Listen creates it 0700 itself (main_test.go).
-	socket = filepath.Join(dir, "sock", "m1p.sock")
+	socket = filepath.Join(fabrictest.SocketDir(t), "sock", "m1p.sock")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -270,6 +271,55 @@ func TestEdgeLossLedgersBothReachTheWire(t *testing.T) {
 	waitUpTo(t, 20*time.Second, "the refused event's local quarantine to reach the wire", func() bool {
 		return tap.dropped(m1pv1.DropReason_DROP_REASON_LOCAL_QUARANTINE,
 			m1pv1.DurabilityClass_DURABILITY_CLASS_DIAGNOSTIC) == 1
+	})
+}
+
+// TestSpoolShedReachesTheWire is NFR-OPERABILITY-001's spool-shed seam at the
+// daemon level: DROP_REASON_SPOOL_SHED raised by the daemon's OWN spool refusing
+// a diagnostic past --spool-cap, read back off the wire. Neither half is new
+// (spool_test proves the shed, uplink_test proves a stub row rides a batch);
+// what was missing was any way to drive the shed through cmd/ — no cap knob
+// existed, so the row was never once observed leaving an assembled daemon.
+//
+// A rows-only batch does not exist (compose returns nil on a drained spool),
+// so the shed rows ride the batch that carries the prompts that DID fit. Every
+// prompt is admitted or shed before the Flush ack returns, and the first
+// compose that can carry them needs a durable record — ≥250 ms after the first
+// append — so the rows are always on the ledger by the time it drains them.
+func TestSpoolShedReachesTheWire(t *testing.T) {
+	tap := newWireTap(t)
+	stateDir, spoolDir, socket := uplinkPaths(t)
+
+	stop := runDaemon(t, config{
+		stateDir:    stateDir,
+		spoolDir:    spoolDir,
+		spoolCap:    1 << 10, // ~a handful of Turn records; the rest shed
+		socket:      socket,
+		ingestURL:   tap.url,
+		deviceToken: "tok-test",
+		offPoll:     10 * time.Millisecond,
+	})
+	defer stop()
+	waitFor(t, "fabric socket", func() bool {
+		_, err := os.Stat(socket)
+		return err == nil
+	})
+
+	// Turn is diagnostic class (07 §6's billing-grade set is closed at
+	// {usage, verdict_event, receipt_checkpoint}), so past the cap it sheds
+	// rather than blocks — and the connection lives on to send the next.
+	session := uuid.New()
+	c := dialFabric(t, socket, session)
+	for i := 0; i < 32; i++ {
+		c.prompt(session)
+	}
+	if c.flush().GetDrained() >= 32 {
+		t.Fatal("all 32 prompts were admitted under a 1 KiB cap — nothing shed, the test cannot observe the seam")
+	}
+
+	waitUpTo(t, 20*time.Second, "the spool shed to reach the wire", func() bool {
+		return tap.dropped(m1pv1.DropReason_DROP_REASON_SPOOL_SHED,
+			m1pv1.DurabilityClass_DURABILITY_CLASS_DIAGNOSTIC) > 0
 	})
 }
 

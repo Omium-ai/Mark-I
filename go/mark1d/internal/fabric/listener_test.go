@@ -5,10 +5,13 @@ package fabric
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/capture"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric/fabrictest"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 )
 
@@ -37,7 +41,7 @@ func TestSocketPathResolution(t *testing.T) {
 // TestListenRejectsBadPerms pins the 07 §5 boundary: a parent dir with any
 // group/world grant is refused, never chmod'd into compliance.
 func TestListenRejectsBadPerms(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "sock")
+	dir := filepath.Join(fabrictest.SocketDir(t), "sock")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +65,55 @@ func TestListenRejectsBadPerms(t *testing.T) {
 	}
 }
 
+// TestListenRefusesOverlongPath pins the legible refusal: a path that cannot fit
+// sockaddr_un.sun_path (108 bytes on Linux, 104 on Darwin) is ErrSocketPathTooLong
+// naming the limit, not bind's bare EINVAL. Built from a t.TempDir() root so the
+// refusal is on length alone, and long enough to overflow every platform.
+func TestListenRefusesOverlongPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), strings.Repeat("x", 120), "m1p.sock")
+	_, err := Listen(path)
+	if !errors.Is(err, ErrSocketPathTooLong) {
+		t.Fatalf("got %v, want ErrSocketPathTooLong", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("allows %d", sunPathMax)) || !strings.Contains(err.Error(), runtime.GOOS) {
+		t.Fatalf("refusal must name the limit and platform: %v", err)
+	}
+	if _, serr := os.Lstat(filepath.Dir(path)); serr == nil {
+		t.Fatal("Listen created the parent dir of a path it refused")
+	}
+}
+
+// TestListenSunPathBoundaryIsExact pins the off-by-one the test above cannot:
+// it overflows by 120 bytes, so dropping the "- 1" from sunPathMax leaves it
+// green while a path of exactly len(Path) bytes slips past the guard and dies
+// at bind with the EINVAL the guard exists to replace. sunPathMax bytes must
+// clear the guard; sunPathMax+1 must not.
+func TestListenSunPathBoundaryIsExact(t *testing.T) {
+	dir := fabrictest.SocketDir(t)
+	exact := func(n int) string {
+		pad := n - len(dir) - len("/m1p.sock") - len("/")
+		if pad < 1 {
+			t.Fatalf("fabrictest.SocketDir returned %q, too long to build a %d-byte path under", dir, n)
+		}
+		p := filepath.Join(dir, strings.Repeat("x", pad), "m1p.sock")
+		if len(p) != n {
+			t.Fatalf("built %d bytes, want %d: %q", len(p), n, p)
+		}
+		return p
+	}
+	if _, err := Listen(exact(sunPathMax + 1)); !errors.Is(err, ErrSocketPathTooLong) {
+		t.Fatalf("%d bytes: got %v, want ErrSocketPathTooLong", sunPathMax+1, err)
+	}
+	l, err := Listen(exact(sunPathMax))
+	if errors.Is(err, ErrSocketPathTooLong) {
+		t.Fatalf("%d bytes was refused by the guard — the limit is off by one", sunPathMax)
+	}
+	if err != nil {
+		t.Fatalf("%d bytes cleared the guard but bind refused it: %v — the guard is looser than the kernel", sunPathMax, err)
+	}
+	_ = l.Close()
+}
+
 // fabric_symlink_refusal (04 §10). Listen removes a stale socket so a dead daemon cannot
 // wedge the next boot, and that remove is the whole reason the check above it has to be
 // Lstat: under Stat a symlink reports its TARGET's type, so one planted at the socket path
@@ -71,7 +124,7 @@ func TestListenRejectsBadPerms(t *testing.T) {
 // object is still there afterwards, because "we refused" and "we deleted the attacker's
 // symlink and then refused" are the same error string and very different behaviours.
 func TestListenRefusesSymlinkAtSocketPath(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "sock")
+	dir := filepath.Join(fabrictest.SocketDir(t), "sock")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +134,7 @@ func TestListenRefusesSymlinkAtSocketPath(t *testing.T) {
 	// of this test that can fail: against a regular file Stat and Lstat both report "not a
 	// socket" and refuse identically, so the test would pass under the bug it exists to catch.
 	// Pointed at a live socket, Stat reports ModeSocket and the stale-socket branch claims it.
-	target := filepath.Join(t.TempDir(), "elsewhere")
+	target := filepath.Join(fabrictest.SocketDir(t), "elsewhere")
 	victim, err := net.Listen("unix", target)
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +175,7 @@ func startDaemon(t *testing.T, dir string) (path string, sp *spool.Spool, adm *c
 	if err != nil {
 		t.Fatal(err)
 	}
-	path = filepath.Join(dir, "run", "m1p.sock")
+	path = filepath.Join(fabrictest.SocketDir(t), "run", "m1p.sock")
 	l, err := Listen(path)
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +207,8 @@ func TestHandshakeDeadlineReclaimsSilentPeers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l, err := Listen(filepath.Join(dir, "run", "m1p.sock"))
+	sock := filepath.Join(fabrictest.SocketDir(t), "run", "m1p.sock")
+	l, err := Listen(sock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,14 +217,14 @@ func TestHandshakeDeadlineReclaimsSilentPeers(t *testing.T) {
 	go func() { _ = srv.Serve(context.Background(), l) }()
 	t.Cleanup(func() { _ = l.Close(); srv.Close() })
 
-	silent, err := net.Dial("unix", filepath.Join(dir, "run", "m1p.sock"))
+	silent, err := net.Dial("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = silent.Close() }()
 	readClosed(t, silent) // says nothing, ever
 
-	live, err := net.Dial("unix", filepath.Join(dir, "run", "m1p.sock"))
+	live, err := net.Dial("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}

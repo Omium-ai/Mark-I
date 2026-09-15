@@ -551,8 +551,20 @@ func validateGates(g GatesSection) error {
 		// local hard cap, never raise it (07; FR-POLICY-006).
 		return reject("M1E-3001", "gates.max_consecutive_blocks = %d exceeds the hard cap of 3; a bundle may lower the local cap, never raise it", g.MaxConsecutiveBlocks)
 	}
+	if g.HourlyBlockCeiling > maxHourlyBlockCeiling {
+		// Same direction as mcb (FR-VERIFY-010): lower only. 0 is "edge default".
+		return reject("M1E-3001", "gates.hourly_block_ceiling = %d exceeds the edge's built-in ceiling of %d; a bundle may lower the local ceiling, never raise it", g.HourlyBlockCeiling, maxHourlyBlockCeiling)
+	}
 	return nil
 }
+
+// maxHourlyBlockCeiling mirrors mark1d/internal/fabric/gate.go
+// DefaultHourlyCeiling. 07's CDDL types hourly_block_ceiling as a bare `uint`
+// and 06 names no number; the edge's built-in is the only ceiling that exists,
+// so a bundle above it is a raise the edge would have to clamp.
+// ponytail: provisional until 07 pins a number; a different module's const,
+// hand-copied — bump both or neither.
+const maxHourlyBlockCeiling = 30
 
 func validateAgentMaps(a AgentMapsSection) error {
 	for i, m := range a.Agents {

@@ -41,7 +41,7 @@ func newTailer(path, stateDir string, str stream) (*Tailer, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	id, ok := fileID(fi)
+	id, ok := fileID(f)
 	if !ok {
 		_ = f.Close()
 		return nil, errors.New("tailers: no file identity on this platform")
@@ -79,8 +79,14 @@ func (t *Tailer) poll(now time.Time, emit func([]*m1pv1.Event) error) error {
 		t.gone = true
 		return t.flushAndSave(emit)
 	default:
-		id, ok := fileID(fi)
-		if ok && id != t.id {
+		// os.SameFile is the one identity comparison the stdlib makes on every
+		// platform (dev/ino on unix, volume/index on windows); the held
+		// handle's own Stat is the identity this tailer opened.
+		held, err := t.f.Stat()
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(fi, held) {
 			// Rotation: drain the old handle to EOF — the old inode stays
 			// readable while held, so nothing is lost — then follow the new
 			// identity from offset 0 (04 §2.1).
@@ -90,6 +96,11 @@ func (t *Tailer) poll(now time.Time, emit func([]*m1pv1.Event) error) error {
 			f, err := os.Open(t.path)
 			if err != nil {
 				return err
+			}
+			id, ok := fileID(f)
+			if !ok {
+				_ = f.Close()
+				return errors.New("tailers: no file identity on this platform")
 			}
 			_ = t.f.Close()
 			t.f, t.id, t.off = f, id, 0

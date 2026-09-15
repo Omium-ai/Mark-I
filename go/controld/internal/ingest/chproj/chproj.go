@@ -66,6 +66,10 @@ var (
 		Name: "controld_ingest_ch_project_queue_dropped_total",
 		Help: "Projection jobs dropped on queue overflow — recovered only by replay (05 §2.5)",
 	})
+	unknownEventTypes = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "controld_ingest_ch_project_unknown_event_types_total",
+		Help: "Events whose body is a type this binary does not know: skipped in projection, retained whole in the landing object, re-projected on upgrade (08 §10.2 skip-and-retain)",
+	})
 )
 
 // ---------------------------------------------------------------------------
@@ -94,6 +98,16 @@ func RowsFromBatch(b *m1pv1.Batch, tenant, device uuid.UUID, receivedAt time.Tim
 	}
 
 	for _, ev := range b.GetEvents() {
+		if IsUnknownType(ev) {
+			// Skip-and-retain (08 §10.2; 07 §1): a newer edge's event family
+			// this binary has no case for. The landing object already holds
+			// it byte-for-byte (stage 8 precedes decoding), so the row is
+			// deferred to a post-upgrade replay — NOT written as a nameless
+			// diagnostic row, which is what an empty BodyTypeName would have
+			// produced, and NOT an error. Counted so the deferral is visible.
+			unknownEventTypes.Inc()
+			continue
+		}
 		rows = append(rows, eventRow(ev, tenant, device, agent, fallbackAt))
 	}
 	for i, d := range b.GetDropped() {
@@ -142,7 +156,10 @@ func eventRow(ev *m1pv1.Event, tenant, device uuid.UUID, agent string, fallbackA
 		row[17] = enumSuffix(v.GetVerdict().String(), "VERDICT_")
 		row[18] = enumSuffix(v.GetStage().String(), "VERDICT_STAGE_")
 		if p := v.GetPosterior(); len(p) == 4 {
-			// posterior[4] order frozen: [satisfied, violated, refused, error]
+			// posterior[4] order frozen: [satisfied, violated, refused, error].
+			// Stage 6 (pipeline.go checkInvariants, FR-VERIFY-020) refuses any
+			// other arity before landing; this guard only keeps a pre-fix
+			// landing object replayable without a panic.
 			row[19], row[20], row[21], row[22] = float32(p[0]), float32(p[1]), float32(p[2]), float32(p[3])
 		}
 		if id, err := uuid.Parse(v.GetNoiseCertId()); err == nil {
@@ -267,6 +284,14 @@ func BodyTypeName(ev *m1pv1.Event) string {
 		return ""
 	}
 	return string(fd.Message().Name())
+}
+
+// IsUnknownType reports an event whose body oneof carries a field number this
+// binary was not generated with: protoc-gen-go leaves the body unset and
+// parks the bytes in the message's unknown fields. An event with neither is a
+// body-less event, which is a different (edge-side) defect and is not this.
+func IsUnknownType(ev *m1pv1.Event) bool {
+	return ev.GetBody() == nil && len(ev.ProtoReflect().GetUnknown()) > 0
 }
 
 // payloadJSON is the "canonical JSON remainder" column: the body message in

@@ -31,6 +31,7 @@ env:
   # Tool pins. A floating tool version is a statement about *time* (13 §9.5).
   GO_VERSION: "1.25.14"
   GOLANGCI_VERSION: "v2.1.6"
+  BUF_VERSION: "1.72.0"          # justfile M1_BUF_VERSION is the only other copy
   GOVULNCHECK_VERSION: "v1.1.4"
   PIP_AUDIT_VERSION: "2.9.0"
 
@@ -47,6 +48,7 @@ jobs:
           fetch-depth: 0          # buf breaking --against '.git#branch=main' needs history
       - uses: bufbuild/buf-setup-action@v1
         with:
+          version: ${{ env.BUF_VERSION }}
           github_token: ${{ github.token }}
       - uses: astral-sh/setup-uv@v5
         with:
@@ -138,14 +140,39 @@ jobs:
         run: |
           uv sync --frozen --all-packages
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      # FR-VERIFY-002: the anchor sandbox (anchors/sandbox_linux.go) IS the security boundary, and
+      # its in-sandbox probes skip on a kernel that refuses unprivileged user namespaces. The stock
+      # ubuntu-24.04 image is that kernel: Ubuntu ≥ 23.10 ships
+      # kernel.apparmor_restrict_unprivileged_userns=1 (24.04 release notes, "Unprivileged user
+      # namespace restrictions"), and the image KEEPS it — runner-images
+      # images/ubuntu/scripts/build/install-container-tools.sh grants `userns` to podman alone via
+      # an AppArmor profile, and PR #11489 (lift it image-wide) was closed unmerged. An unconfined
+      # Go test binary gets EPERM from clone(CLONE_NEWUSER), so every network-denial, AF_UNIX,
+      # env-scrub, write-confinement and resource-kill probe t.Skip()ped and this job read green
+      # on zero denials asserted (runner-images issue #10443). The VM is discarded after the job,
+      # so lifting it here costs nothing; `unshare` proves it took before a single test runs, and
+      # the lsm list shows whether Landlock (in Ubuntu's CONFIG_LSM since 5.13, LP #1950381) is
+      # stacked on this kernel — the write-confinement probes need it and fail loudly if not.
+      - if: matrix.os == 'ubuntu-24.04'
+        name: Allow unprivileged user namespaces for the anchor sandbox probes
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare -Un true
+          cat /sys/kernel/security/lsm; echo
       # M1_REQUIRE_STORES turns that skip into a failure. It is the existing gate for exactly this
       # shape — a suite whose external dependency is absent — and already covers a non-store
       # binary (receipts/integration_test.go gates `cargo` on it). Every other test that reads it
       # is //go:build integration, which test-go does not compile, so this changes the behaviour
       # of precisely one test.
+      #
+      # M1_REQUIRE_SANDBOX is the same inversion for the kernel features the sandbox needs: with
+      # it set, anchors/sandbox_linux_test.go fails instead of skipping when userns or Landlock
+      # is refused, and TestSandboxProbesNotVacuous asserts the probes actually executed. Linux
+      # only by subject — the sandbox is //go:build linux; macOS and Windows have no probes to arm.
       - run: just test-go
         env:
           M1_REQUIRE_STORES: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}
+          M1_REQUIRE_SANDBOX: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}
 
   # NFR-PORTABILITY-001's "any red platform blocks merge", made a single stable check name.
   # Requiring the six expanded matrix legs by name would work until the day someone adds a
@@ -208,6 +235,7 @@ jobs:
       # bump: unlike lint-proto, that gate baselines against the WORKING TREE, not a git ref.
       - uses: bufbuild/buf-setup-action@v1
         with:
+          version: ${{ env.BUF_VERSION }}
           github_token: ${{ github.token }}
       - run: just gates
       - run: just conformance

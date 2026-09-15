@@ -14,10 +14,18 @@ pub const QUERY_REV: u32 = 1;
 /// Bump when extraction logic changes shape (kind mapping, signature rules).
 pub const INDEXER_REV: u32 = 1;
 
-/// Grammar revision = the pinned grammar-crate versions, concatenated. The
-/// root Cargo.toml calls these pins load-bearing for exactly this key.
-pub fn grammar_rev() -> &'static str {
-    "py0.23+rs0.24+go0.23+ts0.23+js0.23"
+/// Grammar revision = the pinned grammar-crate version of the grammar that
+/// produced the entry — per language, so bumping one pin invalidates exactly
+/// that language's CAS rows (04 §6.1). The root Cargo.toml calls these pins
+/// load-bearing for exactly this key. TypeScript and TSX share one crate.
+pub fn grammar_rev(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Python => "py0.23",
+        Lang::Rust => "rs0.24",
+        Lang::Go => "go0.23",
+        Lang::TypeScript | Lang::Tsx => "ts0.23",
+        Lang::JavaScript => "js0.23",
+    }
 }
 
 /// One extracted tag. `kind` uses the 08 §6.2 enum vocabulary for defs;
