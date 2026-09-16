@@ -57,6 +57,36 @@ fn fail_open_ceiling(deadline_ms: u64) -> Duration {
     FAIL_OPEN_OVERHEAD + Duration::from_millis(deadline_ms)
 }
 
+/// Scheduler slack for the gate path's OWN timer (`hookshim.gate_elapsed_ms`,
+/// `MARK1_HOOKSHIM_TIMING=1`): this window never spawns a process, loads a
+/// map, or compiles the redact ruleset, so it can stay tight under load where
+/// `fail_open_ceiling`'s process-wall number cannot (measured: 20/20 runs of
+/// `gate_deadline_exceeded_allows_within_budget` + `gate_mute_daemon_allows_within_budget`
+/// blew fail_open_ceiling under 24x CPU oversubscription, 666ms-3.45s wall,
+/// while this internal timer is the shim's own `Instant` arithmetic).
+const GATE_TIMER_SLACK_MS: u64 = 300;
+
+/// The property: the fail-open branch fired within the shim's OWN deadline
+/// (never early past a lower bound the map states, never late past this
+/// slack) — a property of `gate.rs`'s timer, not of the OS scheduler.
+fn assert_gate_timer_honored_deadline(elapsed_ms: u64, deadline_ms: u64) {
+    assert!(
+        elapsed_ms + 5 >= deadline_ms,
+        "fail-open fired before its own deadline: {elapsed_ms}ms < {deadline_ms}ms"
+    );
+    assert!(
+        elapsed_ms <= deadline_ms + GATE_TIMER_SLACK_MS,
+        "the shim's own timer overran its deadline: {elapsed_ms}ms (budget {deadline_ms}ms, slack {GATE_TIMER_SLACK_MS}ms)"
+    );
+}
+
+/// A loose wall-clock sanity net, 5x the process-overhead ceiling: catches an
+/// actual hang (the fail-open branch never firing at all), not scheduler
+/// noise. The precise property lives in `assert_gate_timer_honored_deadline`.
+fn loose_wall_ceiling(deadline_ms: u64) -> Duration {
+    5 * fail_open_ceiling(deadline_ms)
+}
+
 /// The deadline the SHIPPED map makes the shim state for `Stop`: its 250 ms
 /// gate budget minus 08 §4.4's 10 ms margin. Spelled out here so a silent map
 /// edit cannot move it in either direction.
@@ -123,6 +153,18 @@ impl TestEnv {
         std::fs::metadata(self.home.path().join(".omium/mark1/spill").join(name))
             .map(|m| m.len())
             .unwrap_or(0)
+    }
+
+    /// The `MARK1_HOOKSHIM_TIMING=1` sidecar `spill::record_timing` writes:
+    /// the gate path's own elapsed millis for its most recent fail-open.
+    fn gate_elapsed_ms(&self) -> u64 {
+        let raw = std::fs::read(
+            self.home
+                .path()
+                .join(".omium/mark1/spill/hookshim.gate_elapsed_ms"),
+        )
+        .unwrap();
+        u64::from_le_bytes(raw[..8].try_into().unwrap())
     }
 
     /// The shipped map with only the Stop gate's budget shrunk, pushed the way
@@ -234,6 +276,10 @@ enum Mode {
     Allow,
     /// HelloAck{accepted}, GateQuery answered BLOCK.
     Block,
+    /// HelloAck{accepted}, GateQuery answered ALLOW at the knee: `system_message` set.
+    Knee,
+    /// HelloAck{accepted}, ContextQuery answered with a queued correction.
+    Correction,
     /// HelloAck{accepted}, then the verdict arrives well past the deadline
     /// the shim stated in the query.
     SlowVerdict,
@@ -256,6 +302,10 @@ enum Mode {
     /// connection held open so the shim sees silence, not EOF.
     NoFlushAck,
 }
+
+/// What mark1d says at the knee (fabric/gate.go) and on a queued correction (Gate.Context), verbatim.
+const KNEE_MESSAGE: &str = "mark1 stop-gate: retry loop arrested at the knee — verdict violated; knee governor: stop at attempt 3 — p̂_LCB 0.150 · V 10.00 ≤ c(n) 2.00 under usd; evidence: cargo-check-warm:E0001 errors=1 warnings=0 files=1";
+const CORRECTION_TEXT: &str = "[mark1 correction] a slow verifier finished after the last verdict: violated was revised to satisfied";
 
 /// How long `Mode::SlowHello` sits on the handshake before acking. Bigger than
 /// `FAIL_OPEN_OVERHEAD`, so the double-spend it provokes cannot hide inside
@@ -428,6 +478,23 @@ fn serve(
                             posterior: vec![0.02, 0.95, 0.02, 0.01],
                             reason: "two anchors report the build is broken".into(),
                             evidence_ref: "evidence/abc123".into(),
+                            system_message: if mode == Mode::Knee {
+                                KNEE_MESSAGE.into()
+                            } else {
+                                String::new()
+                            },
+                        }),
+                    );
+                }
+                pb::fabric_frame::Kind::ContextQuery(_) => {
+                    write_frame(
+                        &mut stream,
+                        pb::fabric_frame::Kind::ContextReply(pb::ContextReply {
+                            additional_context: if mode == Mode::Correction {
+                                CORRECTION_TEXT.into()
+                            } else {
+                                String::new()
+                            },
                         }),
                     );
                 }
@@ -880,17 +947,108 @@ fn gate_block_emits_the_vendor_block_json() {
 }
 
 #[test]
+fn gate_knee_exits_zero_with_system_message() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    let d = env.listen_as(Mode::Knee);
+    let (ok, chatter, _wall) = env.run(&fixture("Stop"), &[]);
+    assert!(ok, "at the knee the shim exits 0 (08 §5.1: Claude stops)");
+    // 08 §5.1's Stop row at the knee: no `decision`, and `systemMessage` — the
+    // vendor's human-facing field — carrying the daemon's verdict + evidence
+    // byte for byte. Nothing else: an extra key is a contract Claude Code did
+    // not sign.
+    let want = serde_json::to_vec(&serde_json::json!({ "systemMessage": KNEE_MESSAGE })).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&chatter),
+        String::from_utf8_lossy(&want)
+    );
+    assert_eq!(u64::from(d.query().deadline_ms), STOP_DEADLINE_MS);
+    match d.event().body.unwrap() {
+        pb::event::Body::Turn(b) => assert_eq!(b.initiator, pb::Initiator::Agent as i32),
+        other => panic!("unexpected body {other:?}"),
+    }
+    assert!(!env.ring_path().exists());
+    assert_eq!(env.gate_timeouts(), 0);
+}
+
+#[test]
+fn post_tool_use_pulls_the_next_turn_correction() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    let d = env.listen_as(Mode::Correction);
+    let (ok, chatter, _wall) = env.run(&fixture("PostToolUse"), &[]);
+    assert!(ok);
+    // 08 §5.1 PostToolUse row: additionalContext only when a REVISED verdict
+    // was queued since the last turn — rendered under the vendor's event name.
+    let want = serde_json::to_vec(&serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": CORRECTION_TEXT,
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&chatter),
+        String::from_utf8_lossy(&want)
+    );
+    // One connection: Hello, the ToolUse observer event, then the pull with
+    // channel CORRECTION under the pack's budget and nothing of the payload.
+    let log = d.frame_log();
+    assert_eq!(log.len(), 3, "{log:?}");
+    assert_eq!(log[0], "Hello");
+    assert!(log[1].starts_with("Event(Some(ToolUse("), "{}", log[1]);
+    assert_eq!(
+        log[2],
+        format!(
+            "{:?}",
+            pb::fabric_frame::Kind::ContextQuery(pb::ContextQuery {
+                channel: pb::InjectionChannel::Correction as i32,
+                deadline_ms: 240,
+                ..Default::default()
+            })
+        )
+    );
+    assert!(
+        !env.ring_path().exists(),
+        "a delivered event must not spill"
+    );
+    assert_eq!(env.sidecar("hookshim.context_timeout"), 0);
+}
+
+#[test]
+fn post_tool_use_with_nothing_queued_prints_nothing() {
+    let env = TestEnv::new();
+    env.install_spill_pubkey();
+    let d = env.listen_as(Mode::Allow);
+    let (ok, chatter, _wall) = env.run(&fixture("PostToolUse"), &[]);
+    assert!(ok);
+    assert!(
+        chatter.is_empty(),
+        "an empty ContextReply is no output at all, not an empty additionalContext"
+    );
+    let log = d.frame_log();
+    assert!(
+        log.iter().any(|f| f.starts_with("ContextQuery(")),
+        "the pull must still happen: {log:?}"
+    );
+    assert!(!env.ring_path().exists());
+    assert_eq!(env.sidecar("hookshim.context_timeout"), 0);
+}
+
+#[test]
 fn gate_deadline_exceeded_allows_within_budget() {
     let env = TestEnv::new();
     env.install_spill_pubkey();
     env.install_short_gate_map(60);
     let d = env.listen_as(Mode::SlowVerdict);
-    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[]);
+    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok);
     assert!(chatter.is_empty(), "a blown deadline is allow, not block");
     assert_eq!(d.query().deadline_ms, 50, "60 ms budget − 08 §4.4's 10 ms");
-    // The daemon answers LATE_BY past the deadline; the shim answered before.
-    assert!(wall < fail_open_ceiling(50), "took {wall:?}");
+    // The daemon answers LATE_BY past the deadline; the shim's own timer, not
+    // the OS scheduler, is what must have answered before.
+    assert_gate_timer_honored_deadline(env.gate_elapsed_ms(), 50);
+    assert!(wall < loose_wall_ceiling(50), "took {wall:?}");
     // The daemon never answered, so it never accounted the event either.
     assert_eq!(unseal_ring(&env).len(), 1, "the event must reach the ring");
     assert_eq!(env.gate_timeouts(), 1, "the fail-open must be counted");
@@ -936,10 +1094,11 @@ fn gate_mute_daemon_allows_within_budget() {
     // handshake this was indistinguishable from a healthy daemon and the
     // event vanished with Ok(()) returned and nothing spilled.
     let _d = env.listen_as(Mode::Mute);
-    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[]);
+    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok);
     assert!(chatter.is_empty());
-    assert!(wall < fail_open_ceiling(50), "took {wall:?}");
+    assert_gate_timer_honored_deadline(env.gate_elapsed_ms(), 50);
+    assert!(wall < loose_wall_ceiling(50), "took {wall:?}");
     assert_eq!(
         unseal_ring(&env).len(),
         1,
@@ -967,10 +1126,11 @@ fn shipped_stop_budget_bounds_a_wedged_daemon() {
     // Deliberately NO install_short_gate_map: the map under test is the one in
     // the binary.
     let _d = env.listen_as(Mode::Mute);
-    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[]);
+    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok);
     assert!(chatter.is_empty(), "silence is allow, not block");
-    assert!(wall < fail_open_ceiling(STOP_DEADLINE_MS), "took {wall:?}");
+    assert_gate_timer_honored_deadline(env.gate_elapsed_ms(), STOP_DEADLINE_MS);
+    assert!(wall < loose_wall_ceiling(STOP_DEADLINE_MS), "took {wall:?}");
     assert_eq!(
         unseal_ring(&env).len(),
         1,
@@ -988,10 +1148,11 @@ fn gate_blocked_connect_allows_within_budget() {
     env.install_spill_pubkey();
     env.install_short_gate_map(510);
     let listener = starve_backlog(&env);
-    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[]);
+    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok, "a parked connect must still exit 0");
     assert!(chatter.is_empty());
-    assert!(wall < fail_open_ceiling(500), "took {wall:?}");
+    assert_gate_timer_honored_deadline(env.gate_elapsed_ms(), 500);
+    assert!(wall < loose_wall_ceiling(500), "took {wall:?}");
     assert_eq!(unseal_ring(&env).len(), 1);
     assert_eq!(env.gate_timeouts(), 1);
     drop(listener);
@@ -1006,10 +1167,11 @@ fn gate_silence_after_slow_handshake_spends_one_budget() {
     env.install_spill_pubkey();
     env.install_short_gate_map(2_010);
     let _d = env.listen_as(Mode::SlowHello);
-    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[]);
+    let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok);
     assert!(chatter.is_empty());
-    assert!(wall < fail_open_ceiling(2_000), "took {wall:?}");
+    assert_gate_timer_honored_deadline(env.gate_elapsed_ms(), 2_000);
+    assert!(wall < loose_wall_ceiling(2_000), "took {wall:?}");
     assert!(
         wall > HELLO_DELAY,
         "the handshake was not actually waited on: {wall:?}"

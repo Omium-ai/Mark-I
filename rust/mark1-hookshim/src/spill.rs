@@ -135,6 +135,24 @@ pub fn count_context_timeout(home: Option<&Path>) {
     count(home, "hookshim.context_timeout");
 }
 
+/// Test-only observable (`MARK1_HOOKSHIM_TIMING=1`): the fail-open branch's
+/// own elapsed time, isolated from process spawn/harden/map-load noise, so a
+/// test can assert the shim's timer honored its deadline without measuring
+/// the OS scheduler.
+pub fn record_timing(home: Option<&Path>, name: &str, elapsed: std::time::Duration) {
+    if std::env::var_os("MARK1_HOOKSHIM_TIMING").is_none() {
+        return;
+    }
+    let Some(home) = home else { return };
+    let dir = home.join(".omium/mark1/spill");
+    if create_private_dir(&dir).is_err() {
+        return;
+    }
+    if let Ok(mut f) = open_private_append(&dir.join(name)) {
+        let _ = f.write_all(&(elapsed.as_millis() as u64).to_le_bytes());
+    }
+}
+
 fn count(home: Option<&Path>, name: &str) {
     let Some(home) = home else { return };
     let dir = home.join(".omium/mark1/spill");

@@ -67,15 +67,17 @@ pub fn run(
     };
     let budget = Duration::from_millis(u64::from(deadline_ms));
 
+    let waited = std::time::Instant::now();
     match crate::fabric::gate_query(&event_frame, query, session_id, budget) {
         Ok(v) if v.decision == pb::GateDecision::Block as i32 => block(&v),
+        Ok(v) if !v.system_message.is_empty() => knee(&v),
         // ALLOW, and anything else the daemon can say: allow.
         Ok(_) => {}
         Err(_) => {
-            // The daemon never answered, so it also never accounted this
-            // event: spill both the event and the fail-open count.
+            let elapsed = waited.elapsed(); // before the spill: redaction + sealing is real work, not the deadline
             crate::spill::append(home, event_frame);
             crate::spill::count_gate_timeout(home);
+            crate::spill::record_timing(home, "hookshim.gate_elapsed_ms", elapsed);
         }
     }
 }
@@ -124,13 +126,21 @@ fn block(v: &pb::GateVerdict) {
         reason.push_str(&v.evidence_ref);
         reason.push(']');
     }
-    let Ok(json) = serde_json::to_vec(&serde_json::json!({
+    answer(serde_json::json!({
         "decision": "block",
         "reason": reason,
-    })) else {
+    }));
+}
+
+/// 08 §5.1's at-the-knee sub-row: no `decision` (Claude stops), `systemMessage` for the human, never the model.
+fn knee(v: &pb::GateVerdict) {
+    answer(serde_json::json!({ "systemMessage": v.system_message }));
+}
+
+/// The gate path's one stdout sink; a partial write is unparseable JSON, which Claude Code discards — the allow answer.
+fn answer(json: serde_json::Value) {
+    let Ok(bytes) = serde_json::to_vec(&json) else {
         return;
     };
-    // A partial write would hand Claude Code truncated JSON; it discards
-    // unparseable output, which is the allow answer — the safe failure.
-    let _ = std::io::stdout().write_all(&json);
+    let _ = std::io::stdout().write_all(&bytes);
 }

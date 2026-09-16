@@ -11,6 +11,7 @@ const ARM_REPLY: u64 = 9;
 /// m1p.v1.InjectionChannel values (intelligence.proto).
 const CHANNEL_HOOK_CONTEXT: u64 = 2;
 const CHANNEL_REACTIVE_PITFALL: u64 = 4;
+const CHANNEL_CORRECTION: u64 = 5;
 /// Round-trip budgets: a pack is a daemon cache read (the gate's sizing); a pitfall may reach the server fuzz tier.
 const PACK_BUDGET_MS: u32 = 250;
 const PITFALL_BUDGET_MS: u32 = 1_500;
@@ -28,7 +29,7 @@ pub struct ContextQuery {
     pub is_interrupt: bool,
 }
 
-/// The query a hook warrants, by binary-fixed kind: `turn_human` opens the task (pack), `tool_close_error` is the pitfall row.
+/// The query a hook warrants, by binary-fixed kind: `turn_human` opens the task (pack), `tool_close_ok` pulls the next-turn correction (08 §5.1 PostToolUse row), `tool_close_error` is the pitfall row.
 pub fn plan(rule: &EventRule, payload: &serde_json::Value) -> Option<ContextQuery> {
     let field = |logical: &str| -> String {
         rule.fields
@@ -39,8 +40,12 @@ pub fn plan(rule: &EventRule, payload: &serde_json::Value) -> Option<ContextQuer
             .to_owned()
     };
     match rule.kind.as_str() {
-        "turn_human" => Some(ContextQuery {
-            channel: CHANNEL_HOOK_CONTEXT,
+        "turn_human" | "tool_close_ok" => Some(ContextQuery {
+            channel: if rule.kind == "turn_human" {
+                CHANNEL_HOOK_CONTEXT
+            } else {
+                CHANNEL_CORRECTION
+            },
             tool_name: String::new(),
             error: String::new(),
             deadline_ms: PACK_BUDGET_MS.saturating_sub(SHIM_MARGIN_MS).max(1),
@@ -213,6 +218,9 @@ mod tests {
     const REPLY_HEX: &str = "4a1e0a1c5b6d61726b31206d656d6f72795d2072656d6564793a207265747279";
     const REPLY_EMPTY_HEX: &str = "4a00";
     const REPLY_TEXT: &str = "[mark1 memory] remedy: retry";
+    const CORRECTION_QUERY_HEX: &str = "4205080520f001";
+    const CORRECTION_REPLY_HEX: &str = "4a670a655b6d61726b3120636f7272656374696f6e5d206120736c6f772076657269666965722066696e697368656420616674657220746865206c61737420766572646963743a2076696f6c6174656420776173207265766973656420746f20736174697366696564";
+    const CORRECTION_TEXT: &str = "[mark1 correction] a slow verifier finished after the last verdict: violated was revised to satisfied";
 
     fn unhex(s: &str) -> Vec<u8> {
         (0..s.len())
@@ -254,12 +262,24 @@ mod tests {
             is_interrupt: true,
         };
         assert_eq!(hex(&encode_query(&flag)), QUERY_FLAG_HEX);
+        let correction = ContextQuery {
+            channel: CHANNEL_CORRECTION,
+            tool_name: String::new(),
+            error: String::new(),
+            deadline_ms: 240,
+            is_interrupt: false,
+        };
+        assert_eq!(hex(&encode_query(&correction)), CORRECTION_QUERY_HEX);
     }
 
     #[test]
     fn reply_bytes_agree_with_mark1d() {
         assert_eq!(decode_reply(&unhex(REPLY_HEX)).as_deref(), Some(REPLY_TEXT));
         assert_eq!(decode_reply(&unhex(REPLY_EMPTY_HEX)).as_deref(), Some(""));
+        assert_eq!(
+            decode_reply(&unhex(CORRECTION_REPLY_HEX)).as_deref(),
+            Some(CORRECTION_TEXT)
+        );
         // A foreign arm (GateVerdict), a truncated frame, a bad wire type: none is a reply.
         assert_eq!(decode_reply(&unhex("2a00")), None);
         assert_eq!(decode_reply(&unhex("4a1e0a1c5b6d")), None);
@@ -302,13 +322,17 @@ mod tests {
         let pack = plan(&rule("turn_human", &[]), &payload).unwrap();
         assert_eq!(pack.channel, CHANNEL_HOOK_CONTEXT);
         assert_eq!(pack.deadline_ms, PACK_BUDGET_MS - SHIM_MARGIN_MS);
-        for observer in [
-            "session_start",
-            "tool_open",
-            "tool_close_ok",
-            "turn_agent",
-            "none",
-        ] {
+        // PostToolUse pulls the correction on the pack's budget: a daemon queue read, nothing of the payload.
+        let correction = plan(
+            &rule("tool_close_ok", &[("tool_name", "tool_name")]),
+            &payload,
+        )
+        .unwrap();
+        assert_eq!(correction.channel, CHANNEL_CORRECTION);
+        assert_eq!(correction.deadline_ms, PACK_BUDGET_MS - SHIM_MARGIN_MS);
+        assert!(correction.tool_name.is_empty() && correction.error.is_empty());
+        assert_eq!(hex(&encode_query(&correction)), CORRECTION_QUERY_HEX);
+        for observer in ["session_start", "tool_open", "turn_agent", "none"] {
             assert!(plan(&rule(observer, &[]), &payload).is_none(), "{observer}");
         }
 
