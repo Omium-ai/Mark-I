@@ -328,3 +328,106 @@ func TestAdjudicatedPublishIsEmitted(t *testing.T) {
 		t.Fatal("the emit path replaced the publish instead of following it")
 	}
 }
+
+// decisiveBundle is one verifier whose every column is decisive, so a single
+// vote's verdict is its own: satisfied ⇒ SATISFIED, violated ⇒ VIOLATED and
+// error ⇒ ERROR (Thm 5.2's infra-dominant path). The knee rows are kneeBundle's.
+func decisiveBundle() BundleMatrices {
+	m := kneeBundle()
+	m.Verifiers = map[string]VerifierParams{"build": {Confusion: Confusion{
+		{0.98, 0.01, 0.01},
+		{0.02, 0.97, 0.01},
+		{0.10, 0.10, 0.80},
+		{0.34, 0.33, 0.33},
+	}}}
+	return m
+}
+
+func buildVote(v m1pv1.Verdict) []AnchorVote { return []AnchorVote{{AnchorID: "build", Vote: v}} }
+
+// TestRevisedThatChangesTheVerdictQueuesACorrection pins 04 §2.3's fast/slow
+// split at the wire's source: a REVISED publish whose argmax differs from the
+// entry it supersedes queues one Correction for the task's session; a REVISED
+// that agrees, a REVISED with nothing to supersede, and a second revision back
+// to the verdict the agent saw all queue nothing. One pull drains the queue.
+func TestRevisedThatChangesTheVerdictQueuesACorrection(t *testing.T) {
+	const (
+		satisfied = m1pv1.Verdict_VERDICT_SATISFIED
+		violated  = m1pv1.Verdict_VERDICT_VIOLATED
+		errored   = m1pv1.Verdict_VERDICT_ERROR
+	)
+	sid := [16]byte{0xAA, 7}
+	e := NewEngine(decisiveBundle(), NewBlocks(), nil)
+	e.SessionFor = func(TaskID) ([16]byte, bool) { return sid, true }
+	task := TaskID{21}
+	publish := func(revised bool, v m1pv1.Verdict) {
+		t.Helper()
+		if revised {
+			e.PublishRevised(task, buildVote(v), 1)
+		} else {
+			e.Recompute(task, buildVote(v), 1)
+		}
+		e.drainOne(t)
+		if got, _ := e.Reader().Get(task); got.Verdict.GetVerdict() != v {
+			t.Fatalf("build:%v fused to %v — the decisive bundle is no longer decisive", v, got.Verdict.GetVerdict())
+		}
+	}
+
+	publish(false, violated)
+	publish(true, satisfied)
+	got := e.TakeCorrections(sid)
+	if len(got) != 1 || got[0] != (Correction{Task: task, Previous: violated, Revised: satisfied}) {
+		t.Fatalf("corrections %+v, want exactly one violated→satisfied", got)
+	}
+	if again := e.TakeCorrections(sid); len(again) != 0 {
+		t.Fatalf("a second pull re-delivered %+v", again)
+	}
+
+	// Same argmax: superseded, not corrected.
+	publish(true, satisfied)
+	if got := e.TakeCorrections(sid); len(got) != 0 {
+		t.Fatalf("an agreeing REVISED queued %+v", got)
+	}
+	// Revised, then revised back before the pull: the agent saw nothing wrong.
+	publish(true, violated)
+	publish(true, satisfied)
+	if got := e.TakeCorrections(sid); len(got) != 0 {
+		t.Fatalf("a revision undone before the pull still queued %+v", got)
+	}
+	// Two revisions away from what the agent saw collapse to one correction
+	// naming the verdict it saw, not the intermediate one.
+	publish(true, violated)
+	publish(true, errored)
+	got = e.TakeCorrections(sid)
+	if len(got) != 1 || got[0] != (Correction{Task: task, Previous: satisfied, Revised: errored}) {
+		t.Fatalf("two revisions queued %+v, want one satisfied→error", got)
+	}
+
+	// A REVISED with no entry to supersede corrects nothing: no gate ever
+	// answered on a verdict for this task.
+	e.PublishRevised(TaskID{22}, buildVote(violated), 1)
+	e.drainOne(t)
+	if got := e.TakeCorrections(sid); len(got) != 0 {
+		t.Fatalf("first-ever REVISED queued %+v", got)
+	}
+	// A fast PROVISIONAL that disagrees is a recompute, never a correction.
+	publish(false, violated)
+	if got := e.TakeCorrections(sid); len(got) != 0 {
+		t.Fatalf("a PROVISIONAL publish queued %+v", got)
+	}
+
+	// Unscoped: no session, no queue.
+	for _, sf := range []func(TaskID) ([16]byte, bool){nil, func(TaskID) ([16]byte, bool) { return [16]byte{}, false }} {
+		e.SessionFor = sf
+		publish(false, violated)
+		publish(true, satisfied)
+		if got := e.TakeCorrections(sid); len(got) != 0 {
+			t.Fatalf("session-less engine queued %+v", got)
+		}
+		// D-AT: no connection can ever Hello as the all-zero session, so a
+		// correction parked under it is a leak nothing drains.
+		if got := e.TakeCorrections([16]byte{}); len(got) != 0 {
+			t.Fatalf("session-less engine queued %+v under the zero sentinel", got)
+		}
+	}
+}

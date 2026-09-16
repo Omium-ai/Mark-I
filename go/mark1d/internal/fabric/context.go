@@ -29,6 +29,18 @@ type ContextHandler interface {
 
 func (s *Server) SetContextHandler(h ContextHandler) { s.context = h }
 
+// ContextChain answers from the first handler with something to say; each channel has one owner (Gate: CORRECTION; memory.Cache: the rest).
+type ContextChain []ContextHandler
+
+func (c ContextChain) Context(ctx context.Context, q ContextQuery, session [16]byte) string {
+	for _, h := range c {
+		if text := h.Context(ctx, q, session); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
 func decodeContextQuery(b []byte) (ContextQuery, error) {
 	var q ContextQuery
 	for len(b) > 0 {

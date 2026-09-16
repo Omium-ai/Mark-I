@@ -9,10 +9,12 @@
 package fabric
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
@@ -74,10 +76,13 @@ type Gate struct {
 	// typed evidence for a task, rendered by whoever still holds the votes.
 	// The cache does not — verdict.Cached carries the fused VerdictEvent and
 	// the knee, and the anchors tee strips EvidenceRecord before fusion — so
-	// this is a lookup seam exactly like TaskFor, read on BLOCK only and never
-	// a computation. nil, or an empty answer, leaves evidence_ref empty and the
-	// shim renders no `[evidence: …]` suffix (mark1-hookshim/src/gate.rs).
+	// this is a lookup seam exactly like TaskFor, read on BLOCK, at the knee
+	// and on a correction, never a computation. nil, or an empty answer, leaves
+	// evidence_ref empty and the shim renders no `[evidence: …]` suffix
+	// (mark1-hookshim/src/gate.rs).
 	Evidence func(task verdict.TaskID) string
+	// Corrections is the CORRECTION channel's source (verdict.Engine.TakeCorrections); nil ⇒ the channel answers empty.
+	Corrections func(session [16]byte) []verdict.Correction
 	// Health counts answers and the read latency SLO-7 is judged on; nil is
 	// legal — an unwired gauge must never change what the gate answers.
 	Health *obs.Health
@@ -138,6 +143,36 @@ func ExplorationEpsilon(stateDir string, eps float64) float64 {
 		return eps
 	}
 	return 0
+}
+
+// armed is FR-POLICY-006: opted in on disk AND the applied policy left the gate closed.
+func (g *Gate) armed() bool { return !g.opened && optedIn(g.stateDir).StopGate }
+
+func (g *Gate) evidence(task verdict.TaskID) string {
+	if g.Evidence == nil {
+		return ""
+	}
+	return g.Evidence(task)
+}
+
+func verdictName(v m1pv1.Verdict) string {
+	return strings.ToLower(strings.TrimPrefix(v.String(), "VERDICT_"))
+}
+
+// Context answers ContextQuery{CORRECTION} (08 §5.1 PostToolUse row): the session's queued revisions, one line each, facts only; other channels are another ContextChain handler's.
+func (g *Gate) Context(_ context.Context, q ContextQuery, session [16]byte) string {
+	if q.Channel != uint32(m1pv1.InjectionChannel_INJECTION_CHANNEL_CORRECTION) || g.Corrections == nil {
+		return ""
+	}
+	var lines []string
+	for _, c := range g.Corrections(session) {
+		line := fmt.Sprintf("[mark1 correction] a slow verifier finished after the last verdict: %s was revised to %s", verdictName(c.Previous), verdictName(c.Revised))
+		if ev := g.evidence(c.Task); ev != "" {
+			line += "; evidence: " + ev
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (g *Gate) now() time.Time {
@@ -293,9 +328,7 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		// FR-VERIFY-011: below the knee the failure evidence IS the
 		// continuation reason. Only here — an ALLOW has no failing anchor to
 		// name, and a knee stop surfaces the verdict, not a retry target.
-		if g.Evidence != nil {
-			v.EvidenceRef = g.Evidence(task)
-		}
+		v.EvidenceRef = g.evidence(task)
 		// D-AN(c): !Stop is also how "no knee table", "n below the first row"
 		// (D-Y(b)) and "no p_lcb on the row" (D-Z) arrive here. Printing the
 		// inequality then states a false one (0.000 · V > c) and reads as
@@ -311,6 +344,13 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 	g.blocks.RecordAllow(task)
 	if e.Knee.Stop {
 		v.Reason = fmt.Sprintf("knee governor: stop at attempt %d — p̂_LCB %.3f · V %.2f ≤ c(n) %.2f under %s", e.Knee.N, e.Knee.PLCB, e.Knee.VTask, e.Knee.CostN, e.Knee.CostBasis)
+		// 08 §5.1 Stop row at the knee: the human is told, never the model — and only where a BLOCK was otherwise due.
+		if e.Verdict.GetVerdict() == m1pv1.Verdict_VERDICT_VIOLATED && g.armed() {
+			v.SystemMessage = "mark1 stop-gate: retry loop arrested at the knee — verdict violated; " + v.Reason
+			if ev := g.evidence(task); ev != "" {
+				v.SystemMessage += "; evidence: " + ev
+			}
+		}
 	}
 	return note(v, e.UnknownVoters)
 }

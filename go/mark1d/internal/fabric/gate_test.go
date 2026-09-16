@@ -2,6 +2,7 @@ package fabric
 
 import (
 	"context"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -727,5 +728,200 @@ func TestGateReadDoesNoFusionOrAnchorWork(t *testing.T) {
 	after, _ := eng.Reader().Get(task)
 	if after.Verdict != before.Verdict || !after.ComputedAt.Equal(before.ComputedAt) {
 		t.Fatal("the cache entry changed under gate reads — something published")
+	}
+}
+
+// TestGateKneeCarriesSystemMessage is FR-VERIFY-011's at-knee half at the
+// daemon (08 §5.1 Stop row, founder ruling 2026-09-16): an armed gate that
+// would have BLOCKed but for the knee answers ALLOW with system_message
+// naming the verdict, the knee economics and the typed evidence — for the
+// human, so it is not the continuation reason and evidence_ref stays empty.
+// Below the knee, on a non-violated knee stop, on an unarmed gate and on a
+// stale bundle it is empty: the shim prints nothing it did not get.
+func TestGateKneeCarriesSystemMessage(t *testing.T) {
+	const ref = "cargo-check-warm:E0001 errors=1 warnings=0 files=1"
+	satisfiedAtKnee := violatedEntry(true, false)
+	satisfiedAtKnee.Verdict.Verdict = m1pv1.Verdict_VERDICT_SATISFIED
+	entries := stubReader{{1}: violatedEntry(true, false), {2}: violatedEntry(false, false), {3}: satisfiedAtKnee, {4}: violatedEntry(true, true)}
+	g := blockableGate(t, entries)
+	g.Evidence = func(task verdict.TaskID) string {
+		if task == (verdict.TaskID{1}) {
+			return ref
+		}
+		return ""
+	}
+
+	v := g.Answer(query(1, 5000), testSession)
+	if v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || v.GetEvidenceRef() != "" {
+		t.Fatalf("knee answered %v evidence_ref %q, want ALLOW with none (the shim reads evidence_ref on BLOCK only)", v.GetDecision(), v.GetEvidenceRef())
+	}
+	want := "mark1 stop-gate: retry loop arrested at the knee — verdict violated; knee governor: stop at attempt 2 — p̂_LCB 0.400 · V 10.00 ≤ c(n) 1.00 under usd; evidence: " + ref
+	if v.GetSystemMessage() != want {
+		t.Fatalf("system_message\n got: %q\nwant: %q", v.GetSystemMessage(), want)
+	}
+	if strings.Contains(v.GetSystemMessage(), "/") {
+		t.Fatalf("system_message carries a path: %q", v.GetSystemMessage())
+	}
+	for name, task := range map[string]byte{"below the knee": 2, "satisfied at the knee": 3, "stale at the knee": 4} {
+		if v := g.Answer(query(task, 5000), testSession); v.GetSystemMessage() != "" {
+			t.Fatalf("%s: system_message %q, want empty", name, v.GetSystemMessage())
+		}
+	}
+	// No evidence seam: the message still surfaces the verdict and the knee.
+	g.Evidence = nil
+	if v := g.Answer(query(1, 5000), testSession); v.GetSystemMessage() != strings.TrimSuffix(want, "; evidence: "+ref) {
+		t.Fatalf("unwired evidence: system_message %q", v.GetSystemMessage())
+	}
+	// Unarmed: the gate never forced a loop, so there is nothing to arrest.
+	g.ApplyGates(gates(false, 0, 0))
+	if v := g.Answer(query(1, 5000), testSession); v.GetSystemMessage() != "" {
+		t.Fatalf("gate opened by policy: system_message %q, want empty", v.GetSystemMessage())
+	}
+	g = NewGate(entries, verdict.NewBlocks(), t.TempDir())
+	g.TaskFor = ownAll
+	if v := g.Answer(query(1, 5000), testSession); v.GetSystemMessage() != "" || v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW {
+		t.Fatalf("not opted in: %v system_message %q, want ALLOW with empty", v.GetDecision(), v.GetSystemMessage())
+	}
+}
+
+// correctionEngine is the shipping verdict.Engine under a decisive verifier,
+// scoped to testSession, publishing on the test's say-so.
+func correctionEngine(t *testing.T) (*verdict.Engine, func(task verdict.TaskID, revised bool, v m1pv1.Verdict)) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	eng := verdict.NewEngine(verdict.BundleMatrices{
+		Priors: verdict.DefaultPriors,
+		Verifiers: map[string]verdict.VerifierParams{"build": {Confusion: verdict.Confusion{
+			{0.98, 0.01, 0.01},
+			{0.02, 0.97, 0.01},
+			{0.10, 0.10, 0.80},
+			{0.34, 0.33, 0.33},
+		}}},
+		VTask: 10, CostBasis: "usd",
+	}, verdict.NewBlocks(), nil)
+	eng.SessionFor = func(verdict.TaskID) ([16]byte, bool) { return testSession, true }
+	go eng.Run(ctx)
+	publish := func(task verdict.TaskID, revised bool, v m1pv1.Verdict) {
+		t.Helper()
+		prev, _ := eng.Reader().Get(task)
+		votes := []verdict.AnchorVote{{AnchorID: "build", Vote: v}}
+		if revised {
+			eng.PublishRevised(task, votes, 1)
+		} else {
+			eng.Recompute(task, votes, 1)
+		}
+		for range 200 {
+			if e, ok := eng.Reader().Get(task); ok && e.ComputedAt.After(prev.ComputedAt) {
+				if e.Verdict.GetVerdict() != v {
+					t.Fatalf("build:%v fused to %v", v, e.Verdict.GetVerdict())
+				}
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatal("the engine never published")
+	}
+	return eng, publish
+}
+
+// TestGateCorrectionChannelDrainsTheSessionQueue is FR-VERIFY-008's
+// correction at the daemon's handler: the CORRECTION pull renders every
+// revision the engine queued for the pulling session since its last pull —
+// verdict names and the typed evidence, no paths — and a second pull is empty.
+// Other channels are not this handler's and answer empty whatever is queued.
+func TestGateCorrectionChannelDrainsTheSessionQueue(t *testing.T) {
+	eng, publish := correctionEngine(t)
+	g := NewGate(eng.Reader(), verdict.NewBlocks(), t.TempDir())
+	g.Corrections = eng.TakeCorrections
+	g.Evidence = func(task verdict.TaskID) string {
+		if task == (verdict.TaskID{1}) {
+			return "build:E0001 errors=1 warnings=0 files=1"
+		}
+		return ""
+	}
+	correction := ContextQuery{Channel: uint32(m1pv1.InjectionChannel_INJECTION_CHANNEL_CORRECTION), DeadlineMs: 240}
+	ctx := context.Background()
+
+	if got := g.Context(ctx, correction, testSession); got != "" {
+		t.Fatalf("nothing queued, yet %q", got)
+	}
+	publish(verdict.TaskID{1}, false, m1pv1.Verdict_VERDICT_SATISFIED)
+	publish(verdict.TaskID{1}, true, m1pv1.Verdict_VERDICT_VIOLATED)
+	publish(verdict.TaskID{2}, false, m1pv1.Verdict_VERDICT_VIOLATED)
+	publish(verdict.TaskID{2}, true, m1pv1.Verdict_VERDICT_SATISFIED)
+	for _, ch := range []m1pv1.InjectionChannel{m1pv1.InjectionChannel_INJECTION_CHANNEL_HOOK_CONTEXT, m1pv1.InjectionChannel_INJECTION_CHANNEL_REACTIVE_PITFALL, m1pv1.InjectionChannel_INJECTION_CHANNEL_UNSPECIFIED} {
+		if got := g.Context(ctx, ContextQuery{Channel: uint32(ch), Error: "Exit code 1"}, testSession); got != "" {
+			t.Fatalf("channel %v answered %q from the gate", ch, got)
+		}
+	}
+	if got := g.Context(ctx, correction, [16]byte{0xBB}); got != "" {
+		t.Fatalf("another session pulled this session's corrections: %q", got)
+	}
+	want := "[mark1 correction] a slow verifier finished after the last verdict: satisfied was revised to violated; evidence: build:E0001 errors=1 warnings=0 files=1\n" +
+		ctxCorrectionText
+	if got := g.Context(ctx, correction, testSession); got != want {
+		t.Fatalf("correction\n got: %q\nwant: %q", got, want)
+	}
+	if got := g.Context(ctx, correction, testSession); got != "" {
+		t.Fatalf("a second pull re-delivered %q", got)
+	}
+	g.Corrections = nil
+	publish(verdict.TaskID{1}, true, m1pv1.Verdict_VERDICT_SATISFIED)
+	if got := g.Context(ctx, correction, testSession); got != "" {
+		t.Fatalf("unwired seam answered %q", got)
+	}
+}
+
+// TestContextChainServesBothChannelsOnOneSession is the wiring cmd/main.go
+// installs: ContextChain{gate, memory} behind SetContextHandler. Over the real
+// session, a CORRECTION pull is answered by the gate and never reaches the
+// memory handler's text, and a pitfall pull is answered by the memory handler
+// with the gate silent — both replies pinned to the shim's bytes.
+func TestContextChainServesBothChannelsOnOneSession(t *testing.T) {
+	eng, publish := correctionEngine(t)
+	g := NewGate(eng.Reader(), verdict.NewBlocks(), t.TempDir())
+	g.Corrections = eng.TakeCorrections
+	mem := &recordingContext{got: make(chan ContextQuery, 4), session: make(chan [16]byte, 4), text: ctxReplyText}
+	l := listenLoopback(t)
+	srv := NewServer(func(context.Context, []byte) error { return nil }, nil)
+	srv.SetContextHandler(ContextChain{g, mem})
+	go srv.Serve(context.Background(), l) //nolint:errcheck // closed by cleanup
+	t.Cleanup(func() { _ = l.Close(); srv.Close() })
+	c := dial(t, l.Addr().String())
+	hello(t, c)
+
+	publish(verdict.TaskID{1}, false, m1pv1.Verdict_VERDICT_VIOLATED)
+	publish(verdict.TaskID{1}, true, m1pv1.Verdict_VERDICT_SATISFIED)
+	if err := WriteFrame(c, mustHex(t, ctxCorrectionQueryHex)); err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(readRawFrame(t, c)); got != ctxCorrectionReplyHex {
+		t.Fatalf("correction reply %s, want %s", got, ctxCorrectionReplyHex)
+	}
+	select {
+	case q := <-mem.got:
+		t.Fatalf("the memory handler saw the CORRECTION query %+v", q)
+	default:
+	}
+	if err := WriteFrame(c, mustHex(t, ctxQueryHex)); err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(readRawFrame(t, c)); got != ctxReplyHex {
+		t.Fatalf("pitfall reply %s, want the memory handler's %s", got, ctxReplyHex)
+	}
+	if q := <-mem.got; q.Channel != uint32(m1pv1.InjectionChannel_INJECTION_CHANNEL_REACTIVE_PITFALL) {
+		t.Fatalf("memory handler saw %+v", q)
+	}
+	// Drained: the next CORRECTION pull falls through to memory, which owns
+	// no such channel — an empty reply, the query visible to it only as a miss.
+	if err := WriteFrame(c, mustHex(t, ctxCorrectionQueryHex)); err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(readRawFrame(t, c)); got != ctxReplyEmpty {
+		t.Fatalf("drained correction reply %s, want %s", got, ctxReplyEmpty)
+	}
+	if q := <-mem.got; q.Channel != uint32(m1pv1.InjectionChannel_INJECTION_CHANNEL_CORRECTION) {
+		t.Fatalf("memory handler saw %+v after the drain", q)
 	}
 }

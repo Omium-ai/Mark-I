@@ -20,6 +20,10 @@ const (
 	ctxReplyHex     = "4a1e0a1c5b6d61726b31206d656d6f72795d2072656d6564793a207265747279"
 	ctxReplyEmpty   = "4a00"
 	ctxReplyText    = "[mark1 memory] remedy: retry"
+	// The CORRECTION channel (08 §5.1 PostToolUse row): the shim's pull and one rendered correction.
+	ctxCorrectionQueryHex = "4205080520f001"
+	ctxCorrectionReplyHex = "4a670a655b6d61726b3120636f7272656374696f6e5d206120736c6f772076657269666965722066696e697368656420616674657220746865206c61737420766572646963743a2076696f6c6174656420776173207265766973656420746f20736174697366696564"
+	ctxCorrectionText     = "[mark1 correction] a slow verifier finished after the last verdict: violated was revised to satisfied"
 )
 
 func mustHex(t *testing.T, s string) []byte {
@@ -60,6 +64,17 @@ func TestContextFrameBytesAgreeWithTheShim(t *testing.T) {
 	field, _, err = unwrap(mustHex(t, ctxReplyEmpty))
 	if err != nil || field != frameContextReply {
 		t.Fatalf("an empty reply must still carry arm 9: field %d err %v", field, err)
+	}
+	// The CORRECTION arm: channel 5 under the pack's 240 ms deadline, nothing else set.
+	field, inner, err = unwrap(mustHex(t, ctxCorrectionQueryHex))
+	if err != nil || field != frameContextQuery {
+		t.Fatalf("unwrap correction: field %d err %v", field, err)
+	}
+	if q, err = decodeContextQuery(inner); err != nil || q != (ContextQuery{Channel: uint32(m1pv1.InjectionChannel_INJECTION_CHANNEL_CORRECTION), DeadlineMs: 240}) {
+		t.Fatalf("correction vector decoded %+v err %v", q, err)
+	}
+	if got := hex.EncodeToString(encodeContextReply(ctxCorrectionText)); got != ctxCorrectionReplyHex {
+		t.Fatalf("correction reply bytes %s, want %s", got, ctxCorrectionReplyHex)
 	}
 }
 
@@ -109,9 +124,13 @@ type recordingContext struct {
 	text    string
 }
 
+// Context answers the pitfall channel only, as memory.Cache does; anything else is a recorded miss.
 func (r *recordingContext) Context(_ context.Context, q ContextQuery, session [16]byte) string {
 	r.got <- q
 	r.session <- session
+	if q.Channel != uint32(m1pv1.InjectionChannel_INJECTION_CHANNEL_REACTIVE_PITFALL) {
+		return ""
+	}
 	return r.text
 }
 

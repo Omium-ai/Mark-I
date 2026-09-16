@@ -186,6 +186,12 @@ func kneeFor(m *BundleMatrices, n int) KneeState {
 	return k
 }
 
+// Correction is 04 §2.3's next-turn correction: a REVISED verdict differing from the one the gate answered on.
+type Correction struct {
+	Task              TaskID
+	Previous, Revised m1pv1.Verdict
+}
+
 // job is one recompute request. Attempt is the retry index n the knee is
 // evaluated at — the caller (anchor orchestration) owns attempt counting.
 type job struct {
@@ -217,6 +223,11 @@ type Engine struct {
 	// record of anything. They still resolve the denominator — D-AS has the
 	// segmenter read this cache at task close, which is once per task.
 	Emit func(context.Context, *m1pv1.VerdictEvent, TaskID)
+	// SessionFor scopes a Correction to the session whose next PostToolUse pulls it; nil, or a miss, queues nothing.
+	SessionFor func(TaskID) ([16]byte, bool)
+
+	cmu         sync.Mutex
+	corrections map[[16]byte][]Correction
 }
 
 func NewEngine(m BundleMatrices, blocks *Blocks, now func() time.Time) *Engine {
@@ -229,6 +240,8 @@ func NewEngine(m BundleMatrices, blocks *Blocks, now func() time.Time) *Engine {
 		fast:   make(chan job, 1),
 		slow:   make(chan job, 16),
 		now:    now,
+
+		corrections: map[[16]byte][]Correction{},
 	}
 	e.m.Store(&m)
 	return e
@@ -292,6 +305,9 @@ func (e *Engine) step(ctx context.Context, j job) {
 	// before the snapshot, or the entry the gate reads would still carry the
 	// capped count and per-task blocking would stay dead for the task's life.
 	e.blocks.ResetTask(j.task)
+	if prev, ok := e.cache.Get(j.task); ok && j.revised {
+		e.queueCorrection(j.task, prev.Verdict.GetVerdict(), ve.GetVerdict())
+	}
 	e.cache.publish(j.task, Cached{
 		Verdict:       ve,
 		Knee:          kneeFor(m, j.attempt),
@@ -307,4 +323,35 @@ func (e *Engine) step(ctx context.Context, j job) {
 	if e.Emit != nil && ve.GetStage() == m1pv1.VerdictStage_VERDICT_STAGE_REVISED {
 		e.Emit(ctx, ve, j.task)
 	}
+}
+
+// queueCorrection: a second revision before the pull corrects the verdict the agent saw, not the intermediate one.
+func (e *Engine) queueCorrection(task TaskID, prev, rev m1pv1.Verdict) {
+	if e.SessionFor == nil {
+		return
+	}
+	sid, ok := e.SessionFor(task)
+	if !ok {
+		return
+	}
+	e.cmu.Lock()
+	defer e.cmu.Unlock()
+	q := e.corrections[sid]
+	if n := len(q); n > 0 && q[n-1].Task == task {
+		prev = q[n-1].Previous
+		q = q[:n-1]
+	}
+	if prev != rev {
+		q = append(q, Correction{Task: task, Previous: prev, Revised: rev})
+	}
+	e.corrections[sid] = q
+}
+
+// TakeCorrections drains the session's queue: one pull, nothing delivered twice.
+func (e *Engine) TakeCorrections(session [16]byte) []Correction {
+	e.cmu.Lock()
+	defer e.cmu.Unlock()
+	q := e.corrections[session]
+	delete(e.corrections, session)
+	return q
 }

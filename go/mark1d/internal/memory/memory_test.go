@@ -554,3 +554,28 @@ func readRaw(t *testing.T, c net.Conn) []byte {
 	}
 	return payload
 }
+
+// TestMemoryNeverAnswersTheCorrectionChannel: CORRECTION is the gate's
+// channel in the ContextChain. A synced cache full of injectable artifacts
+// answers it with nothing and admits no MemoryInjection, so a correction can
+// never be laundered into an artifact delivery or counted against MInject.
+func TestMemoryNeverAnswersTheCorrectionChannel(t *testing.T) {
+	rs := newRetrievalServer(t, plantedSet())
+	sk := &sink{}
+	c := newCache(t, rs, sk, m1pv1.Verdict_VERDICT_SATISFIED)
+	if err := c.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	q := query(m1pv1.InjectionChannel_INJECTION_CHANNEL_CORRECTION, planted)
+	q.DeadlineMs = 240
+	if got := c.Context(context.Background(), q, session); got != "" {
+		t.Fatalf("memory answered the CORRECTION channel: %q", got)
+	}
+	if n := len(sk.injections()); n != 0 {
+		t.Fatalf("%d MemoryInjection events admitted on a correction pull", n)
+	}
+	// The pack is still owed to the task afterwards: the miss consumed nothing.
+	if got := c.Context(context.Background(), query(m1pv1.InjectionChannel_INJECTION_CHANNEL_HOOK_CONTEXT, ""), session); got == "" {
+		t.Fatal("the correction miss consumed the task's pack")
+	}
+}

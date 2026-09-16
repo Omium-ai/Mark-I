@@ -401,7 +401,8 @@ func TestChaosMark1dKill9MidSession(t *testing.T) {
 	// ---- the dead window: the agent keeps working ----
 	dead := []string{"toolu_chaos_dead_1", "toolu_chaos_dead_2", "toolu_chaos_dead_3"}
 	for _, id := range dead {
-		r.assertWall("PostToolUse", r.hook("PostToolUse", r.postToolUse(id)), observerBudget)
+		// PostToolUse pulls the next-turn CORRECTION under the pack budget since D-EI (context.rs tool_close_ok), so its dead-daemon ceiling is the gate's, not the observer's.
+		r.assertWall("PostToolUse", r.hook("PostToolUse", r.postToolUse(id)), stopBudget)
 	}
 	r.assertWall("Stop", r.hook("Stop", r.fixture("Stop")), stopBudget)
 	r.assertWall("SessionEnd", r.hook("SessionEnd", r.fixture("SessionEnd")), sessionEndBudget)
