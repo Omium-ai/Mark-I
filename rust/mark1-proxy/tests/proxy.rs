@@ -342,16 +342,32 @@ async fn request_in_frames(addr: SocketAddr, headers: &str, frames: &[&[u8]]) ->
     let head = format!(
         "POST /v1/messages HTTP/1.1\r\nhost: {addr}\r\nconnection: close\r\n{headers}content-length: {len}\r\n\r\n"
     );
-    let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
-    sock.write_all(head.as_bytes()).await.unwrap();
+    let sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut rd, mut wr) = sock.into_split();
+    // Read concurrently: a proxy that answers (and closes) before the last frame lands is a
+    // legitimate outcome, and on macOS the late writes then RST the socket, which would turn a
+    // sequential read into ECONNRESET with the response already in flight.
+    let reader = tokio::spawn(async move {
+        let mut raw = Vec::new();
+        let _ = rd.read_to_end(&mut raw).await;
+        raw
+    });
+    wr.write_all(head.as_bytes()).await.unwrap();
+    let frames: Vec<Vec<u8>> = frames.iter().map(|f| f.to_vec()).collect();
     for (i, frame) in frames.iter().enumerate() {
         if i > 0 {
             tokio::time::sleep(Duration::from_millis(60)).await;
         }
-        sock.write_all(frame).await.unwrap();
+        if wr.write_all(frame).await.is_err() {
+            break;
+        }
     }
-    let mut raw = Vec::new();
-    sock.read_to_end(&mut raw).await.unwrap();
+    let raw = reader.await.unwrap();
+    drop(wr);
+    assert!(
+        !raw.is_empty(),
+        "no response bytes before the connection closed"
+    );
 
     let split = raw
         .windows(4)
@@ -1440,7 +1456,12 @@ async fn tee_report_is_emitted_as_model_request_and_response_events() {
                     _ => None,
                 })
                 .collect();
-            if found.len() >= 2 {
+            let has = |pred: fn(&m1p_wire::pb::event::Body) -> bool| {
+                found.iter().any(|e| e.body.as_ref().is_some_and(pred))
+            };
+            if has(|b| matches!(b, m1p_wire::pb::event::Body::ModelRequest(_)))
+                && has(|b| matches!(b, m1p_wire::pb::event::Body::ModelResponse(_)))
+            {
                 return found;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
