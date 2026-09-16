@@ -4,19 +4,31 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/copilot"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
 )
 
 func enrolledEnv(t *testing.T) (*cli.Env, *bytes.Buffer) {
 	t.Helper()
+	// Hermetic PATH: the developer's own `claude`/`codex`/`gemini`/`opencode` must not be what doctor sniffs.
+	t.Setenv("PATH", t.TempDir())
+	for _, v := range []string{"CODEX_HOME", "GEMINI_CLI_HOME", "GEMINI_API_KEY", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "COPILOT_HOME", "COPILOT_PROVIDERS_CONFIG", "COPILOT_PROVIDER_BASE_URL", "COPILOT_PROVIDER_API_KEY"} {
+		t.Setenv(v, "")
+	}
 	out := &bytes.Buffer{}
 	stateDir := t.TempDir()
 	// t.TempDir is 0700 already; assert rather than assume, since the
@@ -472,9 +484,9 @@ func damage(t *testing.T, target string) {
 	}
 }
 
-// TestDoctorListsEveryAgentSlot: six of 08 §5's seven adapters are declared and
-// unbuilt. Doctor says so out loud — a cursor user must not have to infer it
-// from an empty fragment list.
+// TestDoctorListsEveryAgentSlot: one of 08 §5's seven adapters (crush) is declared
+// and unbuilt. Doctor says so out loud — its user must not have to infer it from
+// an empty fragment list.
 func TestDoctorListsEveryAgentSlot(t *testing.T) {
 	env, out := enrolledEnv(t)
 	rep, err := runDoctor(t, env, out, Options{})
@@ -484,19 +496,17 @@ func TestDoctorListsEveryAgentSlot(t *testing.T) {
 	if len(rep.Agents) != 7 {
 		t.Fatalf("%d agent slots, want 08 §5's seven: %+v", len(rep.Agents), rep.Agents)
 	}
-	built := 0
+	want := map[string]string{"claudecode": "B", "codex": "A/B", "gemini": "B", "opencode": "A", "copilot": "A", "cursor": "A/B"}
+	built := map[string]string{}
 	for _, a := range rep.Agents {
 		if a.Implemented {
-			built++
-			if a.Name != "claudecode" || a.Mechanism != "B" {
-				t.Fatalf("implemented slot %+v", a)
-			}
+			built[a.Name] = a.Mechanism
 		} else if a.Mechanism != "" {
 			t.Fatalf("slot %s claims mechanism %q with no code behind it", a.Name, a.Mechanism)
 		}
 	}
-	if built != 1 {
-		t.Fatalf("%d implemented adapters claimed, want exactly claudecode", built)
+	if !maps.Equal(built, want) {
+		t.Fatalf("implemented adapters %v, want %v", built, want)
 	}
 }
 
@@ -680,5 +690,638 @@ func TestDoctorListsCandidatesWithState(t *testing.T) {
 	renderHuman(&buf, &rep)
 	if !strings.Contains(buf.String(), "no workspace enabled") {
 		t.Fatalf("human render:\n%s", buf.String())
+	}
+}
+
+// TestDoctorShowsStopGatePosture: the same FR-POLICY-006 posture `status`
+// prints, on the CI-facing surface, and never a failure — not opted in is the
+// default every install ships with.
+func TestDoctorShowsStopGatePosture(t *testing.T) {
+	env, out := enrolledEnv(t)
+	rep, err := runDoctor(t, env, out, Options{})
+	if err != nil || rep.StopGate.State != "not_opted_in" {
+		t.Fatalf("report %+v %v, want ok and not_opted_in", rep.StopGate, err)
+	}
+	if err := env.WriteStopGateOptIn("2026-09-15T00:00:00Z", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	rep, err = runDoctor(t, env, out, Options{})
+	if err != nil || rep.StopGate.State != "opted_in" || rep.StopGate.User != "alice" || rep.StopGate.TS != "2026-09-15T00:00:00Z" {
+		t.Fatalf("report %+v %v, want ok and opted_in by alice", rep.StopGate, err)
+	}
+}
+
+// codexHome plants a fake codex home with our fragment applied (mechanism B
+// over the user's own PreToolUse handler) and a `codex` stub on PATH.
+func codexHome(t *testing.T, env *cli.Env) (home string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script codex stub")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\necho codex-cli 0.154.0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	home = filepath.Join(t.TempDir(), ".codex")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hooks := filepath.Join(home, "hooks.json")
+	const body = "{\n  \"hooks\": {\"PreToolUse\": [ {\"matcher\":\"shell\", \"hooks\": [ {\"type\":\"command\",\"command\":\"echo hi\"} ] } ]}\n}\n"
+	if err := os.WriteFile(hooks, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := codex.ApplyFragment(hooks, env.StateDir, ""); err != nil || !res.Changed {
+		t.Fatalf("setup apply: %v %+v", err, res)
+	}
+	return home
+}
+
+func codexRow(t *testing.T, rep Report) Agent {
+	t.Helper()
+	for _, a := range rep.Agents {
+		if a.Name == "codex" {
+			return a
+		}
+	}
+	t.Fatalf("no codex row in %+v", rep.Agents)
+	return Agent{}
+}
+
+// trustToml writes config.toml trusting every one of our handlers via the
+// discovery.rs hook_key shape, minus the keys named in except, with extra
+// appended verbatim.
+func trustToml(t *testing.T, env *cli.Env, home string, except map[string]bool, extra string) {
+	t.Helper()
+	m, err := codex.LoadManifest(env.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, p := range m.Pointers {
+		rest := strings.TrimPrefix(p, "/hooks/")
+		event, idx, _ := strings.Cut(rest, "/")
+		key := m.TargetPath + ":" + snake(event) + ":" + idx + ":0"
+		if except[event] {
+			continue
+		}
+		b.WriteString("[hooks.state." + strconv.Quote(key) + "]\ntrusted_hash = \"sha256:deadbeef\"\n\n")
+	}
+	b.WriteString(extra)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDoctorCodexRowSaysWhetherCodexTrustsOurHooks: the row is informational
+// (doctor stays green) and never silently "ok" — untrusted names the step.
+func TestDoctorCodexRowSaysWhetherCodexTrustsOurHooks(t *testing.T) {
+	env, out := enrolledEnv(t)
+	home := codexHome(t, env)
+	opts := Options{CodexHome: home}
+
+	rep, err := runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatalf("an untrusted hook set must not fail doctor: %v", err)
+	}
+	row := codexRow(t, rep)
+	if row.Version != "0.154.0" || row.Regime != "subscription" || row.HooksTrusted != "no" || !strings.Contains(row.Note, "0/11 handlers trusted, run codex once and accept the hooks review") {
+		t.Fatalf("no config.toml: %+v", row)
+	}
+	if len(rep.Fragments) != 1 || rep.Fragments[0].Agent != "codex" || rep.Fragments[0].State != "OK" || len(rep.Fragments[0].Lines) != 11 {
+		t.Fatalf("codex fragment row %+v", rep.Fragments)
+	}
+
+	trustToml(t, env, home, nil, "")
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := codexRow(t, rep); row.HooksTrusted != "yes" || row.Note != "" {
+		t.Fatalf("all trusted: %+v", row)
+	}
+	env.JSON = false
+	out.Reset()
+	if err := Run(env, Options{CodexHome: home, ClaudeSettings: noRetention(t), Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "agent         codex        mechanism A/B version 0.154.0 regime subscription hooks_trusted: yes") {
+		t.Fatalf("human row:\n%s", out.String())
+	}
+	env.JSON = true
+
+	trustToml(t, env, home, map[string]bool{"Stop": true}, "")
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := codexRow(t, rep); row.HooksTrusted != "no" || !strings.Contains(row.Note, "10/11 handlers trusted") {
+		t.Fatalf("one untrusted: %+v", row)
+	}
+
+	// A trusted but disabled handler does not run either.
+	m, _ := codex.LoadManifest(env.StateDir)
+	stopKey := m.TargetPath + ":stop:0:0"
+	trustToml(t, env, home, nil, "[hooks.state."+strconv.Quote(stopKey)+"]\nenabled = false\n")
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := codexRow(t, rep); row.HooksTrusted != "no" || !strings.Contains(row.Note, "10/11") {
+		t.Fatalf("disabled handler counted as trusted: %+v", row)
+	}
+
+	// The inline-table spelling of the same state.
+	var inline strings.Builder
+	inline.WriteString("[hooks.state]\n")
+	for _, p := range m.Pointers {
+		event, idx, _ := strings.Cut(strings.TrimPrefix(p, "/hooks/"), "/")
+		inline.WriteString(strconv.Quote(m.TargetPath+":"+snake(event)+":"+idx+":0") + " = { enabled = true, trusted_hash = \"sha256:abc\" }\n")
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(inline.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := codexRow(t, rep); row.HooksTrusted != "yes" {
+		t.Fatalf("inline tables: %+v", row)
+	}
+
+	// A trusted_hash under some OTHER hooks.json path, or outside
+	// [hooks.state], is not ours.
+	for _, foreign := range []string{
+		strings.ReplaceAll(inline.String(), m.TargetPath, "/elsewhere/hooks.json"),
+		strings.Replace(inline.String(), "[hooks.state]", "[hooks.review]", 1),
+	} {
+		if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(foreign), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rep, _ = runDoctor(t, env, out, opts)
+		if row := codexRow(t, rep); row.HooksTrusted != "no" {
+			t.Fatalf("foreign state counted as ours: %+v\n%s", row, foreign)
+		}
+	}
+}
+
+// TestDoctorCodexRowWithoutCodex: not installed is said, and with no fragment
+// there is no trust verdict to fake.
+func TestDoctorCodexRowWithoutCodex(t *testing.T) {
+	env, out := enrolledEnv(t)
+	rep, err := runDoctor(t, env, out, Options{CodexHome: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row := codexRow(t, rep); row.Note != "codex not on PATH" || row.HooksTrusted != "" || row.Version != "" || row.Regime != "" {
+		t.Fatalf("row %+v", row)
+	}
+	// API-key regime is read from the codex home's auth.json.
+	home := codexHome(t, env)
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(`{"auth_mode":"apikey"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep, _ = runDoctor(t, env, out, Options{CodexHome: home})
+	if row := codexRow(t, rep); row.Regime != "apikey" {
+		t.Fatalf("row %+v", row)
+	}
+}
+
+// TestDoctorFixRepairsACodexFragment: a hand edit inside our entry is
+// FRAGMENT-DAMAGED (exit 1) and --fix re-applies it.
+func TestDoctorFixRepairsACodexFragment(t *testing.T) {
+	env, out := enrolledEnv(t)
+	home := codexHome(t, env)
+	hooks := filepath.Join(home, "hooks.json")
+	b, _ := os.ReadFile(hooks)
+	b = []byte(strings.Replace(string(b), `"timeout": 30`, `"timeout": 31`, 1))
+	if err := os.WriteFile(hooks, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := runDoctor(t, env, out, Options{CodexHome: home})
+	if err == nil || rep.OK || rep.Fragments[0].State != "FRAGMENT-DAMAGED" {
+		t.Fatalf("damaged fragment: %v %+v", err, rep.Fragments)
+	}
+	rep, err = runDoctor(t, env, out, Options{CodexHome: home, Fix: true})
+	if err != nil || rep.Fragments[0].State != "OK" || !rep.Fragments[0].Fixed {
+		t.Fatalf("--fix: %v %+v", err, rep.Fragments)
+	}
+}
+
+func TestDoctorShowsExplorationPosture(t *testing.T) {
+	env, out := enrolledEnv(t)
+	if err := env.UpdateOptIn("2026-09-15T00:00:00Z", "alice", func(a *cli.OptIn) { a.Exploration = true }); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := runDoctor(t, env, out, Options{})
+	if err != nil || rep.Exploration.State != "opted_in" || rep.Exploration.User != "alice" || rep.StopGate.State != "not_opted_in" {
+		t.Fatalf("%v %+v %+v", err, rep.Exploration, rep.StopGate)
+	}
+	env.JSON = false
+	out.Reset()
+	if err := Run(env, Options{ClaudeSettings: noRetention(t), Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "exploration   opted_in (by alice at 2026-09-15T00:00:00Z)") {
+		t.Fatalf("human output:\n%s", out.String())
+	}
+}
+
+// fakeBin puts a shell stub answering --version on the hermetic PATH.
+func fakeBin(t *testing.T, name, banner string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\necho "+banner+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func agentRow(t *testing.T, rep Report, name string) Agent {
+	t.Helper()
+	for _, a := range rep.Agents {
+		if a.Name == name {
+			return a
+		}
+	}
+	t.Fatalf("no %s row in %+v", name, rep.Agents)
+	return Agent{}
+}
+
+func writeFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDoctorGeminiAndOpenCodeRowsWithoutBinaries: not installed is said, with
+// nothing sniffed to fake a version or regime from.
+func TestDoctorGeminiAndOpenCodeRowsWithoutBinaries(t *testing.T) {
+	env, out := enrolledEnv(t)
+	rep, err := runDoctor(t, env, out, Options{Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"gemini", "opencode"} {
+		if row := agentRow(t, rep, name); row.Note != name+" not on PATH" || row.Version != "" || row.Regime != "" {
+			t.Fatalf("row %+v", row)
+		}
+	}
+}
+
+const geminiSettingsBody = "{\n  \"theme\": \"mine\",\n  \"hooks\": {\"BeforeTool\": [ {\"matcher\":\"*\", \"hooks\": [ {\"type\":\"command\",\"command\":\"echo hi\"} ] } ]}\n}\n"
+
+// TestDoctorGeminiRow: version and regime ride the row; an absent or JSONC
+// settings.json is named because mechanism B can never fence one; the
+// fragment row classifies through the adapter and --fix repairs a hand edit.
+func TestDoctorGeminiRow(t *testing.T) {
+	env, out := enrolledEnv(t)
+	fakeBin(t, "gemini", "0.59.0")
+	home := t.TempDir()
+	settings := filepath.Join(home, ".gemini", "settings.json")
+	opts := Options{Home: home}
+
+	rep, err := runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatalf("an absent settings file must not fail doctor: %v", err)
+	}
+	if row := agentRow(t, rep, "gemini"); row.Version != "0.59.0" || row.Regime != "subscription" || !strings.Contains(row.Note, "no ~/.gemini/settings.json") {
+		t.Fatalf("absent settings: %+v", row)
+	}
+
+	writeFile(t, settings, "// comments\n"+geminiSettingsBody)
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := agentRow(t, rep, "gemini"); !strings.Contains(row.Note, "not strict JSON") {
+		t.Fatalf("JSONC settings: %+v", row)
+	}
+
+	writeFile(t, settings, `{"security":{"auth":{"selectedType":"gemini-api-key"}}}`)
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := agentRow(t, rep, "gemini"); row.Regime != "apikey" || row.Note != "" {
+		t.Fatalf("apikey settings: %+v", row)
+	}
+
+	fakeBin(t, "gemini", "0.1.0")
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := agentRow(t, rep, "gemini"); row.Version != "0.1.0" || !strings.Contains(row.Note, "no pinned fixture") {
+		t.Fatalf("unsupported version: %+v", row)
+	}
+	fakeBin(t, "gemini", "0.59.0")
+
+	writeFile(t, settings, geminiSettingsBody)
+	if res, err := gemini.ApplyFragment(settings, env.StateDir, ""); err != nil || !res.Changed {
+		t.Fatalf("setup apply: %v %+v", err, res)
+	}
+	rep, err = runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatalf("a healthy gemini fragment failed doctor: %v\n%+v", err, rep.Fragments)
+	}
+	if len(rep.Fragments) != 1 || rep.Fragments[0].Agent != "gemini" || rep.Fragments[0].Mechanism != "B" || rep.Fragments[0].State != "OK" || len(rep.Fragments[0].Lines) != 7 {
+		t.Fatalf("gemini fragment row %+v", rep.Fragments)
+	}
+	env.JSON = false
+	out.Reset()
+	if err := Run(env, Options{Home: home, ClaudeSettings: noRetention(t), Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "agent         gemini       mechanism B version 0.59.0 regime subscription") {
+		t.Fatalf("human row:\n%s", out.String())
+	}
+	env.JSON = true
+
+	b, _ := os.ReadFile(settings)
+	writeFile(t, settings, strings.Replace(string(b), `"timeout": 10000`, `"timeout": 10001`, 1))
+	rep, err = runDoctor(t, env, out, opts)
+	if err == nil || rep.OK || rep.Fragments[0].State != "FRAGMENT-DAMAGED" {
+		t.Fatalf("damaged fragment: %v %+v", err, rep.Fragments)
+	}
+	rep, err = runDoctor(t, env, out, Options{Home: home, Fix: true})
+	if err != nil || rep.Fragments[0].State != "OK" || !rep.Fragments[0].Fixed {
+		t.Fatalf("--fix: %v %+v", err, rep.Fragments)
+	}
+
+	writeFile(t, gemini.ManifestPath(env.StateDir), "not json")
+	rep, err = runDoctor(t, env, out, opts)
+	if err == nil || len(rep.Fragments) != 1 || rep.Fragments[0].State != "FRAGMENT-DAMAGED" || !strings.Contains(rep.Fragments[0].Detail, gemini.CodeManifestCorrupt) {
+		t.Fatalf("corrupt manifest: %v %+v", err, rep.Fragments)
+	}
+}
+
+// TestDoctorOpenCodeRow: version and regime ride the row; once provisioned the
+// row says the plugin only loads at opencode start; the owned file classifies
+// OK / FRAGMENT-DAMAGED through the adapter and --fix rewrites it.
+func TestDoctorOpenCodeRow(t *testing.T) {
+	env, out := enrolledEnv(t)
+	fakeBin(t, "opencode", "1.18.31")
+	home := t.TempDir()
+	cfg := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(cfg, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{Home: home}
+
+	rep, err := runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row := agentRow(t, rep, "opencode"); row.Version != "1.18.31" || row.Regime != "subscription" || row.Note != "" {
+		t.Fatalf("unprovisioned: %+v", row)
+	}
+
+	writeFile(t, filepath.Join(cfg, "opencode.json"), `{"model":"anthropic/claude-sonnet-4"}`)
+	writeFile(t, filepath.Join(home, ".local", "share", "opencode", "auth.json"), `{"anthropic":{"type":"api","key":"sk-x"}}`)
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := agentRow(t, rep, "opencode"); row.Regime != "apikey" {
+		t.Fatalf("apikey auth.json: %+v", row)
+	}
+
+	fakeBin(t, "opencode", "0.0.1")
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := agentRow(t, rep, "opencode"); row.Version != "0.0.1" || !strings.Contains(row.Note, "no pinned fixture") {
+		t.Fatalf("unsupported version: %+v", row)
+	}
+	fakeBin(t, "opencode", "1.18.31")
+
+	plugin := filepath.Join(cfg, "plugins", "mark1.js")
+	if res, err := opencode.ApplyFragment(plugin, env.StateDir, ""); err != nil || !res.Changed {
+		t.Fatalf("setup apply: %v %+v", err, res)
+	}
+	rep, err = runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatalf("a healthy plugin failed doctor: %v\n%+v", err, rep.Fragments)
+	}
+	if row := agentRow(t, rep, "opencode"); !strings.Contains(row.Note, "loads at opencode start") {
+		t.Fatalf("provisioned row must say the plugin is inert until restart: %+v", row)
+	}
+	if len(rep.Fragments) != 1 || rep.Fragments[0].Agent != "opencode" || rep.Fragments[0].Mechanism != "A" || rep.Fragments[0].State != "OK" || rep.Fragments[0].Target != plugin {
+		t.Fatalf("opencode fragment row %+v", rep.Fragments)
+	}
+	env.JSON = false
+	out.Reset()
+	if err := Run(env, Options{Home: home, ClaudeSettings: noRetention(t), Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "agent         opencode     mechanism A version 1.18.31 regime apikey (plugin loads at opencode start") {
+		t.Fatalf("human row:\n%s", out.String())
+	}
+	env.JSON = true
+
+	b, _ := os.ReadFile(plugin)
+	writeFile(t, plugin, string(b)+"\n// mine\n")
+	rep, err = runDoctor(t, env, out, opts)
+	if err == nil || rep.OK || rep.Fragments[0].State != "FRAGMENT-DAMAGED" {
+		t.Fatalf("damaged plugin: %v %+v", err, rep.Fragments)
+	}
+	rep, err = runDoctor(t, env, out, Options{Home: home, Fix: true})
+	if err != nil || rep.Fragments[0].State != "OK" || !rep.Fragments[0].Fixed {
+		t.Fatalf("--fix: %v %+v", err, rep.Fragments)
+	}
+	if got, _ := os.ReadFile(plugin); !bytes.Equal(got, b) {
+		t.Fatal("--fix did not restore the owned bytes")
+	}
+
+	writeFile(t, opencode.ManifestPath(env.StateDir), "not json")
+	rep, err = runDoctor(t, env, out, opts)
+	if err == nil || len(rep.Fragments) != 1 || rep.Fragments[0].State != "FRAGMENT-DAMAGED" || !strings.Contains(rep.Fragments[0].Detail, opencode.CodeManifestCorrupt) {
+		t.Fatalf("corrupt manifest: %v %+v", err, rep.Fragments)
+	}
+}
+
+// TestDoctorCopilotAndCursorRowsWithoutBinaries: not installed is said, with
+// nothing sniffed to fake a version or regime from.
+func TestDoctorCopilotAndCursorRowsWithoutBinaries(t *testing.T) {
+	env, out := enrolledEnv(t)
+	rep, err := runDoctor(t, env, out, Options{Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"copilot", "cursor"} {
+		if row := agentRow(t, rep, name); row.Note != name+" not on PATH" || row.Version != "" || row.Regime != "" {
+			t.Fatalf("row %+v", row)
+		}
+	}
+}
+
+// TestDoctorCopilotRow: version and regime ride the row; the row always says the
+// BYOK base URL has no fenced file target (no proxy pointer is provisioned, and
+// doctor must not pretend otherwise); an absent $COPILOT_HOME is named; the owned
+// file classifies OK / FRAGMENT-DAMAGED through the adapter and --fix rewrites it.
+func TestDoctorCopilotRow(t *testing.T) {
+	env, out := enrolledEnv(t)
+	fakeBin(t, "copilot", "1.0.85")
+	home := t.TempDir()
+	copilotHome := filepath.Join(home, ".copilot")
+	opts := Options{Home: home}
+
+	rep, err := runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatalf("an absent vendor dir must not fail doctor: %v", err)
+	}
+	row := agentRow(t, rep, "copilot")
+	if row.Version != "1.0.85" || row.Regime != "subscription" || !strings.Contains(row.Note, "no ~/.copilot") || !strings.Contains(row.Note, "COPILOT_PROVIDER_BASE_URL is an env var with no fenced file target") {
+		t.Fatalf("absent vendor dir: %+v", row)
+	}
+	if err := os.MkdirAll(copilotHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COPILOT_PROVIDER_BASE_URL", "https://api.openai.com/v1")
+	t.Setenv("COPILOT_PROVIDER_API_KEY", "sk-synth")
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := agentRow(t, rep, "copilot"); row.Regime != "apikey" || strings.Contains(row.Note, "no ~/.copilot") || !strings.Contains(row.Note, "no proxy pointer") {
+		t.Fatalf("BYOK env: %+v", row)
+	}
+	t.Setenv("COPILOT_PROVIDER_BASE_URL", "")
+	t.Setenv("COPILOT_PROVIDER_API_KEY", "")
+
+	fakeBin(t, "copilot", "0.0.1")
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := agentRow(t, rep, "copilot"); row.Version != "0.0.1" || !strings.Contains(row.Note, "no pinned fixture") {
+		t.Fatalf("unsupported version: %+v", row)
+	}
+	fakeBin(t, "copilot", "1.0.85")
+
+	hooks := filepath.Join(copilotHome, "hooks", "mark1.json")
+	if res, err := copilot.ApplyFragment(hooks, env.StateDir, ""); err != nil || !res.Changed {
+		t.Fatalf("setup apply: %v %+v", err, res)
+	}
+	rep, err = runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatalf("a healthy owned file failed doctor: %v\n%+v", err, rep.Fragments)
+	}
+	if len(rep.Fragments) != 1 || rep.Fragments[0].Agent != "copilot" || rep.Fragments[0].Mechanism != "A" || rep.Fragments[0].State != "OK" || rep.Fragments[0].Target != hooks {
+		t.Fatalf("copilot fragment row %+v", rep.Fragments)
+	}
+	env.JSON = false
+	out.Reset()
+	if err := Run(env, Options{Home: home, ClaudeSettings: noRetention(t), Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "agent         copilot      mechanism A version 1.0.85 regime subscription (no proxy pointer: COPILOT_PROVIDER_BASE_URL") {
+		t.Fatalf("human row:\n%s", out.String())
+	}
+	env.JSON = true
+
+	b, _ := os.ReadFile(hooks)
+	writeFile(t, hooks, strings.Replace(string(b), "|| true", "|| false", 1))
+	rep, err = runDoctor(t, env, out, opts)
+	if err == nil || rep.OK || rep.Fragments[0].State != "FRAGMENT-DAMAGED" {
+		t.Fatalf("damaged owned file: %v %+v", err, rep.Fragments)
+	}
+	rep, err = runDoctor(t, env, out, Options{Home: home, Fix: true})
+	if err != nil || rep.Fragments[0].State != "OK" || !rep.Fragments[0].Fixed {
+		t.Fatalf("--fix: %v %+v", err, rep.Fragments)
+	}
+	if got, _ := os.ReadFile(hooks); !bytes.Equal(got, b) {
+		t.Fatal("--fix did not restore the owned bytes")
+	}
+
+	if err := os.Remove(hooks); err != nil {
+		t.Fatal(err)
+	}
+	rep, err = runDoctor(t, env, out, opts)
+	if err == nil || rep.Fragments[0].State != "MISSING" {
+		t.Fatalf("deleted owned file: %v %+v", err, rep.Fragments)
+	}
+	rep, err = runDoctor(t, env, out, Options{Home: home, Fix: true})
+	if err != nil || rep.Fragments[0].State != "OK" || !rep.Fragments[0].Fixed {
+		t.Fatalf("--fix of MISSING: %v %+v", err, rep.Fragments)
+	}
+
+	writeFile(t, copilot.ManifestPath(env.StateDir), "not json")
+	rep, err = runDoctor(t, env, out, opts)
+	if err == nil || len(rep.Fragments) != 1 || rep.Fragments[0].State != "FRAGMENT-DAMAGED" || !strings.Contains(rep.Fragments[0].Detail, copilot.CodeManifestCorrupt) {
+		t.Fatalf("corrupt manifest: %v %+v", err, rep.Fragments)
+	}
+}
+
+const cursorHooksBody = "{\n  \"version\": 1,\n  \"hooks\": {\"preToolUse\": [ {\"command\": \"echo hi\", \"timeout\": 5} ]}\n}\n"
+
+// TestDoctorCursorRow: version rides the row and the regime is subscription
+// whatever is configured (the wire path is a permanent NO-GO); an absent ~/.cursor
+// is named; once the claudecode fragment is provisioned the row says Cursor runs
+// it too with MARK1_AGENT unset; the fence classifies through the adapter with
+// its lines and --fix repairs a hand edit.
+func TestDoctorCursorRow(t *testing.T) {
+	env, out := enrolledEnv(t)
+	fakeBin(t, "cursor-agent", "2026.09.10-fd3934a")
+	home := t.TempDir()
+	hooks := filepath.Join(home, ".cursor", "hooks.json")
+	opts := Options{Home: home}
+
+	rep, err := runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatalf("an absent vendor dir must not fail doctor: %v", err)
+	}
+	if row := agentRow(t, rep, "cursor"); row.Version != "2026.09.10-fd3934a" || row.Regime != "subscription" || !strings.Contains(row.Note, "no ~/.cursor") || strings.Contains(row.Note, "MARK1_AGENT") {
+		t.Fatalf("absent vendor dir: %+v", row)
+	}
+
+	writeFile(t, hooks, cursorHooksBody)
+	provision(t, env)
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := agentRow(t, rep, "cursor"); strings.Contains(row.Note, "no ~/.cursor") || !strings.Contains(row.Note, "claudecode fragment") || !strings.Contains(row.Note, "MARK1_AGENT unset") {
+		t.Fatalf("claudecode provisioned: %+v", row)
+	}
+	if err := os.Remove(claudecode.ManifestPath(env.StateDir)); err != nil {
+		t.Fatal(err)
+	}
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := agentRow(t, rep, "cursor"); row.Note != "" {
+		t.Fatalf("nothing to say once claudecode is unprovisioned: %+v", row)
+	}
+
+	fakeBin(t, "cursor-agent", "2026.01.01-0000000")
+	rep, _ = runDoctor(t, env, out, opts)
+	if row := agentRow(t, rep, "cursor"); row.Version != "2026.01.01-0000000" || !strings.Contains(row.Note, "no pinned fixture") {
+		t.Fatalf("unsupported version: %+v", row)
+	}
+	fakeBin(t, "cursor-agent", "2026.09.10-fd3934a")
+
+	if res, err := cursor.ApplyFragment(hooks, env.StateDir, ""); err != nil || !res.Changed || res.Mechanism != "B" {
+		t.Fatalf("setup apply: %v %+v", err, res)
+	}
+	rep, err = runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatalf("a healthy cursor fragment failed doctor: %v\n%+v", err, rep.Fragments)
+	}
+	if len(rep.Fragments) != 1 || rep.Fragments[0].Agent != "cursor" || rep.Fragments[0].Mechanism != "B" || rep.Fragments[0].State != "OK" || len(rep.Fragments[0].Lines) != 8 {
+		t.Fatalf("cursor fragment row %+v", rep.Fragments)
+	}
+	env.JSON = false
+	out.Reset()
+	if err := Run(env, Options{Home: home, ClaudeSettings: noRetention(t), Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "agent         cursor       mechanism A/B version 2026.09.10-fd3934a regime subscription") || !strings.Contains(out.String(), "/hooks/stop/") {
+		t.Fatalf("human row:\n%s", out.String())
+	}
+	env.JSON = true
+
+	// A user edit outside the fence is USER-EDITED: healthy (exit 0) and --fix leaves the bytes alone.
+	b, _ := os.ReadFile(hooks)
+	edited := strings.Replace(string(b), "{\n", "{\n  \"mine\": true,\n", 1)
+	writeFile(t, hooks, edited)
+	rep, err = runDoctor(t, env, out, Options{Home: home, Fix: true})
+	if err != nil || !rep.OK || rep.Fragments[0].State != "USER-EDITED" || rep.Fragments[0].Fixed {
+		t.Fatalf("user edit outside the fence: %v %+v", err, rep.Fragments)
+	}
+	if got, _ := os.ReadFile(hooks); string(got) != edited {
+		t.Fatalf("--fix rewrote a healthy file:\n%s", got)
+	}
+	writeFile(t, hooks, string(b))
+
+	writeFile(t, hooks, strings.Replace(string(b), `"timeout": 30`, `"timeout": 90`, 1))
+	rep, err = runDoctor(t, env, out, opts)
+	if err == nil || rep.OK || rep.Fragments[0].State != "FRAGMENT-DAMAGED" {
+		t.Fatalf("damaged fragment: %v %+v", err, rep.Fragments)
+	}
+	rep, err = runDoctor(t, env, out, Options{Home: home, Fix: true})
+	if err != nil || rep.Fragments[0].State != "OK" || !rep.Fragments[0].Fixed {
+		t.Fatalf("--fix: %v %+v", err, rep.Fragments)
+	}
+	if got, _ := os.ReadFile(hooks); !bytes.Equal(got, b) || !strings.Contains(string(got), "echo hi") {
+		t.Fatalf("--fix did not restore the fence beside the user's entry:\n%s", got)
+	}
+
+	writeFile(t, cursor.ManifestPath(env.StateDir), "not json")
+	rep, err = runDoctor(t, env, out, opts)
+	if err == nil || len(rep.Fragments) != 1 || rep.Fragments[0].State != "FRAGMENT-DAMAGED" || !strings.Contains(rep.Fragments[0].Detail, cursor.CodeManifestCorrupt) {
+		t.Fatalf("corrupt manifest: %v %+v", err, rep.Fragments)
 	}
 }

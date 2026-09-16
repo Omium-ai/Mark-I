@@ -12,11 +12,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"time"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/copilot"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
 )
 
 type Options struct {
@@ -44,6 +50,8 @@ type Result struct {
 	// verbatim deserves to know which file and why, not just `false`.
 	Reverted    []Reverted `json:"reverted,omitempty"`
 	NotReverted []string   `json:"not_reverted,omitempty"`
+	// StopGate: removed | not_opted_in | opted_in (removal failed, listed in NotReverted).
+	StopGate string `json:"stop_gate"`
 }
 
 // Reverted is one fragment taken back out, in 08 §8.4's own vocabulary.
@@ -110,6 +118,20 @@ func Run(env *cli.Env, opts Options) error {
 	// regardless (08 §8.4 note), which is why a failed revert does not stop
 	// the marker from landing above.
 	res.Reverted, res.NotReverted = revertFragments(env)
+	// FR-POLICY-006: a paused install must not block; the exploration sibling (D-EF) is a contract, not an arming, and stays.
+	res.StopGate = "not_opted_in"
+	was := env.ReadOptIn().StopGate
+	who := ""
+	if u, err := user.Current(); err == nil {
+		who = u.Username
+	}
+	switch err := env.UpdateOptIn(m.WrittenAt, who, func(a *cli.OptIn) { a.StopGate = false }); {
+	case err != nil:
+		res.StopGate = "opted_in"
+		res.NotReverted = append(res.NotReverted, env.StopGateOptInPath())
+	case was:
+		res.StopGate = "removed"
+	}
 	for _, r := range res.Reverted {
 		if !r.ByteEquality {
 			res.ByteEquality = false
@@ -136,6 +158,9 @@ func Run(env *cli.Env, opts Options) error {
 		}
 		for _, p := range res.NotReverted {
 			_, _ = fmt.Fprintf(w, "NOT REVERTED: %s (run `mark1 doctor`)\n", p)
+		}
+		if res.StopGate == "removed" {
+			_, _ = fmt.Fprintln(w, "stop gate     opt-in removed; re-arm with `mark1 enable --stop-gate`")
 		}
 	})
 	if emitErr != nil {
@@ -203,6 +228,24 @@ func revertFragments(env *cli.Env) (done []Reverted, notReverted []string) {
 		// still in the user's file.
 	case res.Kind != "not-provisioned":
 		done = append(done, Reverted{"claudecode", res.Target, res.Kind, res.ByteEquality})
+	}
+
+	if res, err := codex.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" {
+		done = append(done, Reverted{"codex", res.Target, res.Kind, res.ByteEquality})
+	}
+	if res, err := gemini.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" {
+		done = append(done, Reverted{"gemini", res.Target, res.Kind, res.ByteEquality})
+	}
+	// A hand-edited plugin is retained with its manifest (fragment-damaged), so the leftover scan lists it.
+	if res, err := opencode.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" && len(res.Retained) == 0 {
+		done = append(done, Reverted{"opencode", res.Target, res.Kind, res.ByteEquality})
+	}
+	// Same owned-file rule for copilot's hooks/mark1.json.
+	if res, err := copilot.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" && len(res.Retained) == 0 {
+		done = append(done, Reverted{"copilot", res.Target, res.Kind, res.ByteEquality})
+	}
+	if res, err := cursor.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" {
+		done = append(done, Reverted{"cursor", res.Target, res.Kind, res.ByteEquality})
 	}
 
 	matches, _ := filepath.Glob(filepath.Join(env.ProvisionedDir(), "*", "*.manifest.json"))

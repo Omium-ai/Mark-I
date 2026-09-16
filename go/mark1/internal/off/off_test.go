@@ -17,6 +17,11 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/enable"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/copilot"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
 )
 
 func testEnv(t *testing.T) (*cli.Env, *bytes.Buffer) {
@@ -458,5 +463,366 @@ func TestOffCoverageJournal(t *testing.T) {
 	var rec map[string]any
 	if err := json.Unmarshal(bytes.TrimSpace(data), &rec); err != nil || rec["kind"] != "disable" {
 		t.Fatalf("journal %q: %v", data, err)
+	}
+}
+
+// TestOffRemovesTheStopGateOptIn: a paused install must not block (FR-POLICY-006),
+// so off takes the opt-in artifact out with the fragments and says so; `mark1 on`
+// does not bring it back — only `mark1 enable --stop-gate` at a terminal does.
+func TestOffRemovesTheStopGateOptIn(t *testing.T) {
+	env, out := testEnv(t)
+	if err := env.WriteStopGateOptIn("2026-09-15T00:00:00Z", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{Socket: shortSocket(t), ObserveGrace: 50 * time.Millisecond}
+	if err := Run(env, opts); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("stdout %q: %v", out.String(), err)
+	}
+	if res.StopGate != "removed" || !res.OK {
+		t.Fatalf("result %+v, want stop_gate removed", res)
+	}
+	if _, err := os.Stat(env.StopGateOptInPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("opt-in still on disk after off: %v", err)
+	}
+	if err := On(env); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(env.StopGateOptInPath()); err == nil {
+		t.Fatal("`mark1 on` restored the opt-in")
+	}
+	out.Reset()
+	if err := Run(env, opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil || res.StopGate != "not_opted_in" {
+		t.Fatalf("second off %+v %v, want stop_gate not_opted_in", res, err)
+	}
+}
+
+// TestEnableThenOffIsByteEqualForCodex: 08 §8.4 through the CLI for both codex
+// mechanisms — a user's hooks.json comes back byte-equal (B); an absent one
+// is created by enable and gone again after off (A).
+func TestEnableThenOffIsByteEqualForCodex(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script codex stub")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\necho codex-cli 0.154.0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("CODEX_HOME", "")
+	const original = "{\n  \"description\": \"mine\",\n  \"hooks\": {\"PreToolUse\": [ {\"matcher\":\"shell\", \"hooks\": [ {\"type\":\"command\",\"command\":\"echo hi\"} ] } ]}\n}\n"
+	for _, tc := range []struct{ name, body, kind string }{
+		{"fenced (B)", original, "verbatim"},
+		{"owned (A)", "", "verbatim"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, out := testEnv(t)
+			if err := env.SaveEnrollment(&cli.Enrollment{
+				Version: 1, State: "active", DeviceID: "dev-1",
+				DeviceToken: "tok", TokenExpiresAt: time.Now().Add(time.Hour),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			home := t.TempDir()
+			hooks := filepath.Join(home, ".codex", "hooks.json")
+			if err := os.MkdirAll(filepath.Dir(hooks), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.body != "" {
+				if err := os.WriteFile(hooks, []byte(tc.body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := enable.Run(env, enable.Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+				t.Fatal(err)
+			}
+			provisioned, err := os.ReadFile(hooks)
+			if err != nil || !bytes.Contains(provisioned, []byte(`"_mark1"`)) || bytes.Equal(provisioned, []byte(tc.body)) {
+				t.Fatalf("enable did not fence hooks.json (%v):\n%s", err, provisioned)
+			}
+			out.Reset()
+			if err := Run(env, Options{Socket: shortSocket(t), ObserveGrace: 50 * time.Millisecond}); err != nil {
+				t.Fatalf("off: %v", err)
+			}
+			got, rerr := os.ReadFile(hooks)
+			switch {
+			case tc.body == "" && !os.IsNotExist(rerr):
+				t.Fatalf("mechanism A off must delete the owned file: %v\n%s", rerr, got)
+			case tc.body != "" && !bytes.Equal(got, []byte(tc.body)):
+				t.Fatalf("enable -> off is not byte-equal\n--- want\n%s\n--- got\n%s", tc.body, got)
+			}
+			var res Result
+			if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+				t.Fatalf("stdout %q: %v", out.String(), err)
+			}
+			if !res.OK || !res.ByteEquality {
+				t.Fatalf("result %+v", res)
+			}
+			kinds := map[string]string{}
+			for _, r := range res.Reverted {
+				kinds[r.Agent] = r.Kind
+			}
+			if kinds["codex"] != tc.kind {
+				t.Fatalf("reverted %+v, want codex %s", res.Reverted, tc.kind)
+			}
+			if _, err := os.Stat(codex.ManifestPath(env.StateDir)); !os.IsNotExist(err) {
+				t.Fatalf("codex manifest survived off: %v", err)
+			}
+		})
+	}
+}
+
+// TestOffKeepsTheExplorationOptIn: off disarms blocking; D-EF's contractual
+// exploration half is not an arming and survives in the same artifact.
+func TestOffKeepsTheExplorationOptIn(t *testing.T) {
+	env, out := testEnv(t)
+	if err := env.UpdateOptIn("2026-09-15T00:00:00Z", "alice", func(a *cli.OptIn) { a.StopGate, a.Exploration = true, true }); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(env, Options{Socket: shortSocket(t), ObserveGrace: 50 * time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil || res.StopGate != "removed" {
+		t.Fatalf("result %+v %v, want stop_gate removed", res, err)
+	}
+	if a := env.ReadOptIn(); a.StopGate || !a.Exploration {
+		t.Fatalf("artifact after off %+v, want stop_gate false and exploration kept", a)
+	}
+}
+
+// enrolledWithBin is an enrolled env plus a fake home and a hermetic PATH
+// holding one shell stub answering --version; the vendor HOME vars are blanked.
+func enrolledWithBin(t *testing.T, name, banner string) (*cli.Env, *bytes.Buffer, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\necho "+banner+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	for _, v := range []string{"CODEX_HOME", "GEMINI_CLI_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "COPILOT_HOME", "COPILOT_PROVIDERS_CONFIG", "COPILOT_PROVIDER_BASE_URL", "COPILOT_PROVIDER_API_KEY"} {
+		t.Setenv(v, "")
+	}
+	env, out := testEnv(t)
+	if err := env.SaveEnrollment(&cli.Enrollment{
+		Version: 1, State: "active", DeviceID: "dev-1",
+		DeviceToken: "tok", TokenExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return env, out, t.TempDir()
+}
+
+func revertedKinds(t *testing.T, out *bytes.Buffer) (Result, map[string]string) {
+	t.Helper()
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("stdout %q: %v", out.String(), err)
+	}
+	kinds := map[string]string{}
+	for _, r := range res.Reverted {
+		kinds[r.Agent] = r.Kind
+	}
+	return res, kinds
+}
+
+// TestEnableThenOffIsByteEqualForGemini: 08 §8.4 through the CLI for mechanism
+// B — the user's ~/.gemini/settings.json comes back byte-equal.
+func TestEnableThenOffIsByteEqualForGemini(t *testing.T) {
+	env, out, home := enrolledWithBin(t, "gemini", "0.59.0")
+	const original = "{\n  \"theme\": \"mine\",\n  \"hooks\": {\"BeforeTool\": [ {\"matcher\":\"*\", \"hooks\": [ {\"type\":\"command\",\"command\":\"echo hi\"} ] } ]}\n}\n"
+	settings := filepath.Join(home, ".gemini", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := enable.Run(env, enable.Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	provisioned, err := os.ReadFile(settings)
+	if err != nil || !bytes.Contains(provisioned, []byte(`"_mark1"`)) {
+		t.Fatalf("enable did not fence settings.json (%v):\n%s", err, provisioned)
+	}
+	out.Reset()
+	if err := Run(env, Options{Socket: shortSocket(t), ObserveGrace: 50 * time.Millisecond}); err != nil {
+		t.Fatalf("off: %v", err)
+	}
+	if got, _ := os.ReadFile(settings); !bytes.Equal(got, []byte(original)) {
+		t.Fatalf("enable -> off is not byte-equal\n--- want\n%s\n--- got\n%s", original, got)
+	}
+	res, kinds := revertedKinds(t, out)
+	if !res.OK || !res.ByteEquality || kinds["gemini"] != "verbatim" {
+		t.Fatalf("result %+v", res)
+	}
+	if _, err := os.Stat(gemini.ManifestPath(env.StateDir)); !os.IsNotExist(err) {
+		t.Fatalf("gemini manifest survived off: %v", err)
+	}
+}
+
+// TestEnableThenOffDeletesTheOpenCodePlugin: mechanism A through the CLI — the
+// owned plugin is gone after off; one the user edited is retained, listed as
+// not reverted, and makes the command partial (exit 1).
+func TestEnableThenOffDeletesTheOpenCodePlugin(t *testing.T) {
+	for _, edited := range []bool{false, true} {
+		t.Run(map[bool]string{false: "owned", true: "user-edited"}[edited], func(t *testing.T) {
+			env, out, home := enrolledWithBin(t, "opencode", "1.18.31")
+			plugin := filepath.Join(home, ".config", "opencode", "plugins", "mark1.js")
+			if err := os.MkdirAll(filepath.Dir(filepath.Dir(plugin)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := enable.Run(env, enable.Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(plugin); err != nil {
+				t.Fatalf("enable did not plant the plugin: %v", err)
+			}
+			mine := []byte("// mine\n")
+			if edited {
+				if err := os.WriteFile(plugin, mine, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out.Reset()
+			err := Run(env, Options{Socket: shortSocket(t), ObserveGrace: 50 * time.Millisecond})
+			res, kinds := revertedKinds(t, out)
+			if !edited {
+				if err != nil {
+					t.Fatalf("off: %v", err)
+				}
+				if _, serr := os.Stat(plugin); !os.IsNotExist(serr) {
+					t.Fatalf("mechanism A off must delete the owned file: %v", serr)
+				}
+				if !res.OK || !res.ByteEquality || kinds["opencode"] != "verbatim" {
+					t.Fatalf("result %+v", res)
+				}
+				if _, err := os.Stat(opencode.ManifestPath(env.StateDir)); !os.IsNotExist(err) {
+					t.Fatalf("opencode manifest survived off: %v", err)
+				}
+				return
+			}
+			var ee *cli.ExitError
+			if !errors.As(err, &ee) || ee.Code != cli.ExitRuntime {
+				t.Fatalf("got %v, want exit 1 (a retained plugin is partial)", err)
+			}
+			if got, _ := os.ReadFile(plugin); !bytes.Equal(got, mine) {
+				t.Fatalf("off touched a file whose bytes are no longer ours:\n%s", got)
+			}
+			if _, ok := kinds["opencode"]; ok || res.OK || res.ByteEquality || len(res.NotReverted) != 1 || res.NotReverted[0] != opencode.ManifestPath(env.StateDir) {
+				t.Fatalf("result %+v", res)
+			}
+		})
+	}
+}
+
+// TestEnableThenOffDeletesTheCopilotHooksFile: mechanism A through the CLI — the
+// owned $COPILOT_HOME/hooks/mark1.json is gone after off; one the user edited is
+// retained, listed as not reverted, and makes the command partial (exit 1).
+func TestEnableThenOffDeletesTheCopilotHooksFile(t *testing.T) {
+	for _, edited := range []bool{false, true} {
+		t.Run(map[bool]string{false: "owned", true: "user-edited"}[edited], func(t *testing.T) {
+			env, out, home := enrolledWithBin(t, "copilot", "1.0.85")
+			hooks := filepath.Join(home, ".copilot", "hooks", "mark1.json")
+			if err := os.MkdirAll(filepath.Dir(filepath.Dir(hooks)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := enable.Run(env, enable.Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(hooks); err != nil {
+				t.Fatalf("enable did not write the owned file: %v", err)
+			}
+			mine := []byte("{\"version\":1,\"hooks\":{}}\n")
+			if edited {
+				if err := os.WriteFile(hooks, mine, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out.Reset()
+			err := Run(env, Options{Socket: shortSocket(t), ObserveGrace: 50 * time.Millisecond})
+			res, kinds := revertedKinds(t, out)
+			if !edited {
+				if err != nil {
+					t.Fatalf("off: %v", err)
+				}
+				if _, serr := os.Stat(hooks); !os.IsNotExist(serr) {
+					t.Fatalf("mechanism A off must delete the owned file: %v", serr)
+				}
+				if !res.OK || !res.ByteEquality || kinds["copilot"] != "verbatim" {
+					t.Fatalf("result %+v", res)
+				}
+				if _, err := os.Stat(copilot.ManifestPath(env.StateDir)); !os.IsNotExist(err) {
+					t.Fatalf("copilot manifest survived off: %v", err)
+				}
+				return
+			}
+			var ee *cli.ExitError
+			if !errors.As(err, &ee) || ee.Code != cli.ExitRuntime {
+				t.Fatalf("got %v, want exit 1 (a retained hooks file is partial)", err)
+			}
+			if got, _ := os.ReadFile(hooks); !bytes.Equal(got, mine) {
+				t.Fatalf("off touched a file whose bytes are no longer ours:\n%s", got)
+			}
+			if _, ok := kinds["copilot"]; ok || res.OK || res.ByteEquality || len(res.NotReverted) != 1 || res.NotReverted[0] != copilot.ManifestPath(env.StateDir) {
+				t.Fatalf("result %+v", res)
+			}
+		})
+	}
+}
+
+// TestEnableThenOffIsByteEqualForCursor: 08 §8.4 through the CLI for both of
+// cursor's mechanisms — a pre-existing ~/.cursor/hooks.json comes back byte-equal
+// (B) and an owned one is deleted (A).
+func TestEnableThenOffIsByteEqualForCursor(t *testing.T) {
+	const original = "{\n  \"version\": 1,\n  \"hooks\": {\"preToolUse\": [ {\"command\": \"echo hi\", \"timeout\": 5} ]}\n}\n"
+	for _, owned := range []bool{false, true} {
+		t.Run(map[bool]string{false: "fenced", true: "owned"}[owned], func(t *testing.T) {
+			env, out, home := enrolledWithBin(t, "cursor-agent", "2026.09.10-fd3934a")
+			hooks := filepath.Join(home, ".cursor", "hooks.json")
+			if err := os.MkdirAll(filepath.Dir(hooks), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if !owned {
+				if err := os.WriteFile(hooks, []byte(original), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := enable.Run(env, enable.Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+				t.Fatal(err)
+			}
+			provisioned, err := os.ReadFile(hooks)
+			if err != nil || !bytes.Contains(provisioned, []byte(`"_mark1"`)) {
+				t.Fatalf("enable did not fence hooks.json (%v):\n%s", err, provisioned)
+			}
+			out.Reset()
+			if err := Run(env, Options{Socket: shortSocket(t), ObserveGrace: 50 * time.Millisecond}); err != nil {
+				t.Fatalf("off: %v", err)
+			}
+			got, serr := os.ReadFile(hooks)
+			if owned {
+				if !os.IsNotExist(serr) {
+					t.Fatalf("mechanism A off must delete the owned file: %v\n%s", serr, got)
+				}
+			} else if !bytes.Equal(got, []byte(original)) {
+				t.Fatalf("enable -> off is not byte-equal\n--- want\n%s\n--- got\n%s", original, got)
+			}
+			res, kinds := revertedKinds(t, out)
+			if !res.OK || !res.ByteEquality || kinds["cursor"] != "verbatim" {
+				t.Fatalf("result %+v", res)
+			}
+			if _, err := os.Stat(cursor.ManifestPath(env.StateDir)); !os.IsNotExist(err) {
+				t.Fatalf("cursor manifest survived off: %v", err)
+			}
+		})
 	}
 }

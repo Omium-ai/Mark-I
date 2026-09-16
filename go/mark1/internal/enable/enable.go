@@ -5,6 +5,7 @@ package enable
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,11 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/copilot"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
 )
 
 type Options struct {
@@ -28,6 +34,14 @@ type Options struct {
 	// IDs (08 §7.2). NoAnchors is --no-anchors: offer nothing.
 	Anchors   []string
 	NoAnchors bool
+	// StopGate is --stop-gate: opt in, at a terminal only, to fail-closed
+	// blocking (FR-POLICY-006). NoStopGate is --no-stop-gate: remove the opt-in.
+	StopGate   bool
+	NoStopGate bool
+	// Exploration is --exploration: D-EF's local half of ε>0 consent;
+	// NoExploration is --no-exploration.
+	Exploration   bool
+	NoExploration bool
 	// Stdin is where the consent prompt reads its answer; TTY says whether
 	// that is a terminal. cmd/main.go wires os.Stdin and the char-device
 	// check; tests simulate both. Without a TTY nothing is ever consented.
@@ -56,6 +70,13 @@ type Result struct {
 	// terminal. AnchorsNote says why nothing was offered when nothing was.
 	AnchorsPending []string `json:"anchors_pending"`
 	AnchorsNote    string   `json:"anchors_note,omitempty"`
+	// StopGate is the opt-in posture after this run; StopGatePending says
+	// --stop-gate was asked and nothing was written (no terminal, or declined).
+	StopGate        cli.StopGate `json:"stop_gate"`
+	StopGatePending bool         `json:"stop_gate_pending,omitempty"`
+	StopGateNote    string       `json:"stop_gate_note,omitempty"`
+	Exploration     cli.StopGate `json:"exploration"`
+	ExplorationNote string       `json:"exploration_note,omitempty"`
 	// AgentsRefused is additive to §7.2's shape and deliberately not an error:
 	// M1E-7101/7102 are refusals by design, and §7.2's exit table names no
 	// provisioning-refusal class. Failing the enable would punish a user who
@@ -160,6 +181,12 @@ func Run(env *cli.Env, opts Options) error {
 	if err := consentAnchors(env, opts, root, &res); err != nil {
 		return err
 	}
+	if err := stopGate(env, opts, root, &res); err != nil {
+		return err
+	}
+	if err := exploration(env, opts, root, &res); err != nil {
+		return err
+	}
 
 	return env.Emit(res, func(w io.Writer) {
 		if added {
@@ -174,9 +201,27 @@ func Run(env *cli.Env, opts Options) error {
 		if res.AnchorsNote != "" {
 			_, _ = fmt.Fprintf(w, "anchors       %s\n", res.AnchorsNote)
 		}
+		_, _ = fmt.Fprintf(w, "stop gate     %s\n", res.StopGate)
+		if res.StopGateNote != "" {
+			_, _ = fmt.Fprintf(w, "stop gate     %s\n", res.StopGateNote)
+		}
+		_, _ = fmt.Fprintf(w, "exploration   %s\n", res.Exploration)
+		if res.ExplorationNote != "" {
+			_, _ = fmt.Fprintf(w, "exploration   %s\n", res.ExplorationNote)
+		}
 		if wrote {
 			for _, a := range res.AgentsProvisioned {
 				_, _ = fmt.Fprintf(w, "provisioned   %s\n", a)
+			}
+		}
+		for _, a := range res.AgentsProvisioned {
+			switch a {
+			case "codex":
+				_, _ = fmt.Fprintln(w, "note          codex hooks run only after `codex` itself trusts them: run codex once and accept the hooks review (`mark1 doctor` shows hooks_trusted)")
+			case "opencode":
+				_, _ = fmt.Fprintln(w, "note          the opencode plugin loads at startup: restart any running opencode")
+			case "copilot":
+				_, _ = fmt.Fprintln(w, "note          "+copilotPointerNote)
 			}
 		}
 		if res.ProxyPointer == "provisioned" {
@@ -306,6 +351,85 @@ func printCandidate(w io.Writer, c cli.AnchorCandidate) {
 	_, _ = fmt.Fprintln(w, "  sandboxed: no network, writes confined to the worktree; re-consent is asked if the binary, version or argv changes")
 }
 
+// stopGate is FR-POLICY-006's CLI half: the opt-in that lets mark1d BLOCK is a
+// human act at a terminal, under the same TTY-only rule as anchor consent.
+func stopGate(env *cli.Env, opts Options, root string, res *Result) error {
+	if opts.NoStopGate {
+		was := env.ReadOptIn().StopGate
+		name, _ := osUser()
+		if err := env.UpdateOptIn(time.Now().UTC().Format(time.RFC3339), name, func(a *cli.OptIn) { a.StopGate = false }); err != nil {
+			return cli.Failf(cli.ExitRuntime, "", "removing stop-gate opt-in: %v", err)
+		}
+		res.StopGate = env.ReadStopGate()
+		if was {
+			res.StopGateNote = "opt-in removed (--no-stop-gate)"
+		}
+		return nil
+	}
+	res.StopGate = env.ReadStopGate()
+	if res.StopGate.State == "opted_in" {
+		return nil
+	}
+	if !opts.StopGate {
+		res.StopGateNote = "blocking disarmed; `mark1 off` removes the opt-in and enable never restores it — pass --stop-gate at a terminal"
+		return nil
+	}
+	res.StopGatePending = true
+	if !opts.TTY || env.JSON || env.Quiet {
+		res.StopGateNote = "not opted in: no terminal (or --json/--quiet); run `mark1 enable --stop-gate` at a terminal"
+		return nil
+	}
+	_, _ = fmt.Fprintln(env.Stdout, "stop gate     opting in lets mark1d BLOCK an agent's Stop while its verdict is violated below the knee (≤3 consecutive, hourly ceiling; `mark1 off` disarms)")
+	_, _ = fmt.Fprint(env.Stdout, "  opt in? [y/N] ")
+	line, _ := bufio.NewReader(opts.Stdin).ReadString('\n')
+	if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
+		res.StopGateNote = "not opted in: declined"
+		return nil
+	}
+	c := cli.Consent{TS: time.Now().UTC().Format(time.RFC3339), Workspace: root, AgentsProvisioned: res.AgentsProvisioned, StopGate: true}
+	if u, err := user.Current(); err == nil {
+		c.User, c.UID = u.Username, u.Uid
+	}
+	if err := env.WriteStopGateOptIn(c.TS, c.User); err != nil {
+		return cli.Failf(cli.ExitRuntime, "", "writing stop-gate opt-in: %v", err)
+	}
+	if err := env.AppendConsent(c); err != nil {
+		return cli.Failf(cli.ExitRuntime, "", "recording stop-gate consent: %v", err)
+	}
+	res.StopGate, res.StopGatePending = env.ReadStopGate(), false
+	return nil
+}
+
+func osUser() (name, uid string) {
+	if u, err := user.Current(); err == nil {
+		return u.Username, u.Uid
+	}
+	return "", ""
+}
+
+// D-EF, one line: the bundle's signed half and this local half are both required.
+const explorationRule = "D-EF: ε>0 applies only if the tenant's signed bundle also carries exploration_opt_in; either half absent ⇒ ε=0, propensity 1.0"
+
+// exploration writes D-EF's local half beside the stop-gate opt-in; no terminal gate, a fleet script is its normal author.
+func exploration(env *cli.Env, opts Options, root string, res *Result) error {
+	if opts.Exploration || opts.NoExploration {
+		ts := time.Now().UTC().Format(time.RFC3339)
+		c := cli.Consent{TS: ts, Workspace: root, AgentsProvisioned: res.AgentsProvisioned, Exploration: true}
+		c.User, c.UID = osUser()
+		if err := env.UpdateOptIn(ts, c.User, func(a *cli.OptIn) { a.Exploration = opts.Exploration }); err != nil {
+			return cli.Failf(cli.ExitRuntime, "", "writing exploration opt-in: %v", err)
+		}
+		if opts.Exploration {
+			if err := env.AppendConsent(c); err != nil {
+				return cli.Failf(cli.ExitRuntime, "", "recording exploration consent: %v", err)
+			}
+		}
+		res.ExplorationNote = explorationRule
+	}
+	res.Exploration = env.ReadExploration()
+	return nil
+}
+
 // candidatesFor returns the daemon-published candidates for root. A root that
 // was just enabled is derived by mark1d only after the allow-list write above,
 // so — when the daemon is reachable — this waits a bounded time for the file
@@ -341,10 +465,10 @@ func candidatesFor(env *cli.Env, opts Options, root string) ([]cli.AnchorCandida
 }
 
 // provision applies the 08 §8 config fragments and reports whether anything
-// was actually written. Only claudecode has an implementation
-// (adapters.Roster carries the other six as declared-but-unbuilt, and
-// `mark1 doctor` prints the whole roster); calling the one adapter directly
-// beats a loop with a type switch inside it.
+// was actually written. claudecode, codex, gemini, opencode, copilot and cursor
+// are the built adapters (adapters.Roster carries crush as declared-but-unbuilt,
+// and `mark1 doctor` prints the whole roster); calling each directly beats a
+// loop with a type switch inside it.
 func provision(env *cli.Env, opts Options, res *Result) (wrote bool, err error) {
 	a := &claudecode.Adapter{Home: opts.Home, StateDir: env.StateDir}
 	applied, err := a.Apply()
@@ -374,8 +498,86 @@ func provision(env *cli.Env, opts Options, res *Result) (wrote bool, err error) 
 	default:
 		return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s base URL: %v", a.Name(), perr)
 	}
+
+	// Codex, gemini, opencode, copilot and cursor only when installed: an owned file (A) would otherwise be planted for an agent the user does not run, and a fence (B) refused for one they never configured.
+	cx := &codex.Adapter{Home: opts.Home, StateDir: env.StateDir}
+	if d, _ := cx.Detect(); d.Installed {
+		applied, err := cx.Apply()
+		switch code := codex.RefusalCode(err); {
+		case err == nil:
+			res.AgentsProvisioned = append(res.AgentsProvisioned, cx.Name())
+			wrote = wrote || applied.Changed
+		case code != "":
+			res.AgentsRefused = append(res.AgentsRefused, Refusal{cx.Name(), code, err.Error()})
+		default:
+			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", cx.Name(), err)
+		}
+	}
+
+	gm := &gemini.Adapter{Home: opts.Home, StateDir: env.StateDir}
+	if d, _ := gm.Detect(); d.Installed {
+		applied, err := gm.Apply()
+		var syntax *json.SyntaxError
+		switch code := gemini.RefusalCode(err); {
+		case err == nil:
+			res.AgentsProvisioned = append(res.AgentsProvisioned, gm.Name())
+			wrote = wrote || applied.Changed
+		case code != "":
+			res.AgentsRefused = append(res.AgentsRefused, Refusal{gm.Name(), code, err.Error()})
+		case errors.As(err, &syntax):
+			// Gemini itself reads JSONC; a settings.json Mark 1 cannot parse is the user's to keep, not a failure of ours.
+			res.AgentsRefused = append(res.AgentsRefused, Refusal{gm.Name(), "", "~/.gemini/settings.json is not strict JSON (comments?), so mechanism B cannot fence it: " + err.Error()})
+		default:
+			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", gm.Name(), err)
+		}
+	}
+
+	oc := &opencode.Adapter{Home: opts.Home, StateDir: env.StateDir}
+	if d, _ := oc.Detect(); d.Installed {
+		applied, err := oc.Apply()
+		switch code := opencode.RefusalCode(err); {
+		case err == nil:
+			res.AgentsProvisioned = append(res.AgentsProvisioned, oc.Name())
+			wrote = wrote || applied.Changed
+		case code != "":
+			res.AgentsRefused = append(res.AgentsRefused, Refusal{oc.Name(), code, err.Error()})
+		default:
+			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", oc.Name(), err)
+		}
+	}
+
+	cp := &copilot.Adapter{Home: opts.Home, StateDir: env.StateDir}
+	if d, _ := cp.Detect(); d.Installed {
+		applied, err := cp.Apply()
+		switch code := copilot.RefusalCode(err); {
+		case err == nil:
+			res.AgentsProvisioned = append(res.AgentsProvisioned, cp.Name())
+			wrote = wrote || applied.Changed
+		case code != "":
+			res.AgentsRefused = append(res.AgentsRefused, Refusal{cp.Name(), code, err.Error()})
+		default:
+			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", cp.Name(), err)
+		}
+	}
+
+	cu := &cursor.Adapter{Home: opts.Home, StateDir: env.StateDir}
+	if d, _ := cu.Detect(); d.Installed {
+		applied, err := cu.Apply()
+		switch code := cursor.RefusalCode(err); {
+		case err == nil:
+			res.AgentsProvisioned = append(res.AgentsProvisioned, cu.Name())
+			wrote = wrote || applied.Changed
+		case code != "":
+			res.AgentsRefused = append(res.AgentsRefused, Refusal{cu.Name(), code, err.Error()})
+		default:
+			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", cu.Name(), err)
+		}
+	}
 	return wrote, nil
 }
+
+// copilotPointerNote: 08 §5.5's BYOK base URL is an env var, so there is no fenced file for a proxy pointer to land in.
+const copilotPointerNote = "copilot: no proxy pointer provisioned; COPILOT_PROVIDER_BASE_URL is an env var with no fenced file target"
 
 // optedOut reports whether the root .mark1ignore ignores the whole repo —
 // a bare `*` (or `**`) line in gitignore syntax. Finer-grained

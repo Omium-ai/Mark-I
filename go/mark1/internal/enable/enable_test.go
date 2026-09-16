@@ -15,6 +15,11 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/copilot"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
 )
 
 // enrolledEnv also returns a FAKE home. Every Run below passes it: enable now
@@ -22,6 +27,11 @@ import (
 // forgot the seam would edit the developer's own agent config.
 func enrolledEnv(t *testing.T) (*cli.Env, *bytes.Buffer, string) {
 	t.Helper()
+	// Hermetic PATH: the developer's own `codex`/`gemini`/`opencode` must not be what enable detects.
+	t.Setenv("PATH", t.TempDir())
+	for _, v := range []string{"CODEX_HOME", "GEMINI_CLI_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "COPILOT_HOME", "COPILOT_PROVIDERS_CONFIG", "COPILOT_PROVIDER_BASE_URL", "COPILOT_PROVIDER_API_KEY"} {
+		t.Setenv(v, "")
+	}
 	out := &bytes.Buffer{}
 	env := &cli.Env{StateDir: t.TempDir(), JSON: true, Stdout: out, Stderr: os.Stderr}
 	if err := env.SaveEnrollment(&cli.Enrollment{
@@ -473,6 +483,660 @@ func TestEnableAnchorsApprovesOnTTYOnly(t *testing.T) {
 		}
 		if lines := approvalLines(t, env); len(lines) != 0 {
 			t.Fatalf("--no-anchors wrote approvals %+v", lines)
+		}
+	})
+}
+
+// TestEnableStopGateWritesTheArtifactOnTTYOnly is FR-POLICY-006's CLI half:
+// the opt-in that lets mark1d BLOCK is written only by a human at a terminal,
+// byte-for-byte as fabric.OptInPath reads it; --json or piped stdin writes
+// nothing and says stop_gate_pending; a re-run is idempotent; --no-stop-gate
+// removes it; a plain re-enable never restores it and says so.
+func TestEnableStopGateWritesTheArtifactOnTTYOnly(t *testing.T) {
+	root := t.TempDir()
+	optIn := func(env *cli.Env) string { return filepath.Join(env.StateDir, "gates", "opt-in.json") }
+
+	t.Run("--json and piped stdin write nothing", func(t *testing.T) {
+		env, out, home := enrolledEnv(t)
+		if err := Run(env, Options{Path: root, Home: home, NoAnchors: true, StopGate: true, Stdin: strings.NewReader("y\n"), TTY: true}); err != nil {
+			t.Fatal(err)
+		}
+		var res Result
+		if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+			t.Fatal(err)
+		}
+		if !res.StopGatePending || res.StopGate.State != "not_opted_in" || !strings.Contains(res.StopGateNote, "no terminal") {
+			t.Fatalf("--json result %+v, want stop_gate_pending and not_opted_in", res)
+		}
+		if _, err := os.Stat(optIn(env)); err == nil {
+			t.Fatal("--json wrote the opt-in; a script must not arm blocking")
+		}
+		env.JSON = false
+		if err := Run(env, Options{Path: root, Home: home, NoAnchors: true, StopGate: true, Stdin: strings.NewReader("y\n"), TTY: false}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(optIn(env)); err == nil {
+			t.Fatal("piped stdin wrote the opt-in")
+		}
+	})
+
+	t.Run("a terminal answering y writes it; n does not", func(t *testing.T) {
+		env, out, home := enrolledEnv(t)
+		env.JSON = false
+		if err := Run(env, Options{Path: root, Home: home, NoAnchors: true, StopGate: true, Stdin: strings.NewReader("n\n"), TTY: true}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "opt in? [y/N]") || !strings.Contains(out.String(), "declined") {
+			t.Fatalf("prompt and refusal must be visible:\n%s", out.String())
+		}
+		if _, err := os.Stat(optIn(env)); err == nil {
+			t.Fatal("`n` wrote the opt-in")
+		}
+		out.Reset()
+		if err := Run(env, Options{Path: root, Home: home, NoAnchors: true, StopGate: true, Stdin: strings.NewReader("y\n"), TTY: true}); err != nil {
+			t.Fatal(err)
+		}
+		fi, err := os.Stat(optIn(env))
+		if err != nil {
+			t.Fatalf("no opt-in after y: %v", err)
+		}
+		if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+			t.Fatalf("opt-in mode %o, want 0600", fi.Mode().Perm())
+		}
+		// The exact shape mark1d's fabric.optedIn decodes: stop_gate true, ts, user.
+		raw, _ := os.ReadFile(optIn(env))
+		var a struct {
+			StopGate bool   `json:"stop_gate"`
+			TS       string `json:"ts"`
+			User     string `json:"user"`
+		}
+		if err := json.Unmarshal(raw, &a); err != nil || !a.StopGate {
+			t.Fatalf("opt-in %q: %v, want stop_gate true", raw, err)
+		}
+		if _, err := time.Parse(time.RFC3339, a.TS); err != nil {
+			t.Fatalf("ts %q: %v", a.TS, err)
+		}
+		if u, err := user.Current(); err == nil && a.User != u.Username {
+			t.Fatalf("user %q, want %q", a.User, u.Username)
+		}
+		if !strings.Contains(out.String(), "stop gate     opted_in (by "+a.User+" at "+a.TS+")") {
+			t.Fatalf("human output must state the posture:\n%s", out.String())
+		}
+		// consent.jsonl carries the act: the enable line plus one stop_gate line.
+		b, _ := os.ReadFile(env.ConsentPath())
+		if n := strings.Count(string(b), `"stop_gate":true`); n != 1 {
+			t.Fatalf("consent journal has %d stop_gate lines, want 1:\n%s", n, b)
+		}
+
+		// Idempotent: a second --stop-gate neither prompts nor rewrites.
+		out.Reset()
+		if err := Run(env, Options{Path: root, Home: home, NoAnchors: true, StopGate: true, Stdin: strings.NewReader("n\n"), TTY: true}); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), "opt in?") {
+			t.Fatal("an opted-in install was prompted again")
+		}
+		if again, _ := os.ReadFile(optIn(env)); !bytes.Equal(again, raw) {
+			t.Fatalf("re-run rewrote the artifact:\n%s\n%s", raw, again)
+		}
+		if b, _ := os.ReadFile(env.ConsentPath()); strings.Count(string(b), `"stop_gate":true`) != 1 {
+			t.Fatal("re-run appended a second stop_gate consent line")
+		}
+
+		// --no-stop-gate removes it; a plain re-enable does not bring it back and says so.
+		if err := Run(env, Options{Path: root, Home: home, NoAnchors: true, NoStopGate: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(optIn(env)); err == nil {
+			t.Fatal("--no-stop-gate left the opt-in in place")
+		}
+		env.JSON = true
+		out.Reset()
+		if err := Run(env, Options{Path: root, Home: home, NoAnchors: true, Stdin: strings.NewReader("y\n"), TTY: true}); err != nil {
+			t.Fatal(err)
+		}
+		var res Result
+		if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+			t.Fatal(err)
+		}
+		if res.StopGate.State != "not_opted_in" || res.StopGatePending || !strings.Contains(res.StopGateNote, "never restores") {
+			t.Fatalf("plain re-enable %+v, want not_opted_in with the note", res)
+		}
+		if _, err := os.Stat(optIn(env)); err == nil {
+			t.Fatal("a plain re-enable restored the opt-in")
+		}
+	})
+}
+
+// fakeCodex puts a `codex` answering --version on PATH and plants ~/.codex
+// (with hooksBody as hooks.json when non-empty) under home.
+func fakeCodex(t *testing.T, home, hooksBody string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script codex stub")
+	}
+	fakeBins(t, map[string]string{"codex": "codex-cli 0.154.0"})
+	hooks := filepath.Join(home, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooks), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if hooksBody != "" {
+		if err := os.WriteFile(hooks, []byte(hooksBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return hooks
+}
+
+const codexHooksBody = "{\n  \"description\": \"mine\",\n  \"hooks\": {\"PreToolUse\": [ {\"matcher\":\"shell\", \"hooks\": [ {\"type\":\"command\",\"command\":\"echo hi\"} ] } ]}\n}\n"
+
+// TestEnableProvisionsCodexBesideClaudeCode: with `codex` on PATH the fenced
+// entries land in ~/.codex/hooks.json next to the user's own handler, the
+// manifest lands under the state root, and the trust note is printed.
+func TestEnableProvisionsCodexBesideClaudeCode(t *testing.T) {
+	env, out, _ := enrolledEnv(t)
+	home, _ := claudeHome(t)
+	hooks := fakeCodex(t, home, codexHooksBody)
+	env.JSON = false
+	if err := Run(env, Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "provisioned   codex") || !strings.Contains(out.String(), "accept the hooks review") {
+		t.Fatalf("human output must name codex and the trust step:\n%s", out.String())
+	}
+	b, err := os.ReadFile(hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"_mark1"`) || !strings.Contains(string(b), "MARK1_AGENT=codex") || !strings.Contains(string(b), "echo hi") {
+		t.Fatalf("hooks.json after enable:\n%s", b)
+	}
+	if _, err := os.Stat(codex.ManifestPath(env.StateDir)); err != nil {
+		t.Fatalf("no codex manifest under the CLI's state root: %v", err)
+	}
+	env.JSON = true
+	out.Reset()
+	if err := Run(env, Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(res.AgentsProvisioned, ",") != "claudecode,codex" {
+		t.Fatalf("agents_provisioned = %v", res.AgentsProvisioned)
+	}
+}
+
+// TestEnableCodexOnlyWhenInstalled: mechanism A creates hooks.json, so an
+// install without `codex` on PATH gets neither a file nor a refusal row.
+func TestEnableCodexOnlyWhenInstalled(t *testing.T) {
+	env, out, home := enrolledEnv(t)
+	hooks := filepath.Join(home, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooks), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(env, Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res.AgentsRefused {
+		if r.Agent == "codex" {
+			t.Fatalf("codex reported without being installed: %+v", res.AgentsRefused)
+		}
+	}
+	if _, err := os.Stat(hooks); err == nil {
+		t.Fatal("enable created hooks.json for an agent that is not installed")
+	}
+
+	// Installed but ~/.codex absent: the refusal is reported, never invented.
+	env2, out2, home2 := enrolledEnv(t)
+	fakeCodex(t, home2, "")
+	if err := os.RemoveAll(filepath.Join(home2, ".codex")); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(env2, Options{Path: t.TempDir(), Home: home2, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out2.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range res.AgentsRefused {
+		found = found || (r.Agent == "codex" && r.Code == codex.CodeNoTarget)
+	}
+	if !found {
+		t.Fatalf("agents_refused = %+v, want codex %s", res.AgentsRefused, codex.CodeNoTarget)
+	}
+}
+
+// TestEnableExplorationWritesTheSiblingField: D-EF's local half shares the
+// artifact with the stop-gate opt-in and neither write drops the other.
+func TestEnableExplorationWritesTheSiblingField(t *testing.T) {
+	env, out, home := enrolledEnv(t)
+	root := t.TempDir()
+	env.JSON = false
+	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true, StopGate: true, Stdin: strings.NewReader("y\n"), TTY: true}); err != nil {
+		t.Fatal(err)
+	}
+	env.JSON = true
+	out.Reset()
+	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true, Exploration: true}); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Exploration.State != "opted_in" || res.StopGate.State != "opted_in" || !strings.Contains(res.ExplorationNote, "signed bundle") {
+		t.Fatalf("result %+v", res)
+	}
+	a := env.ReadOptIn()
+	if !a.StopGate || !a.Exploration || a.TS == "" {
+		t.Fatalf("artifact %+v, want both fields true", a)
+	}
+	if b, _ := os.ReadFile(env.ConsentPath()); strings.Count(string(b), `"exploration":true`) != 1 {
+		t.Fatalf("consent journal must carry one exploration line:\n%s", b)
+	}
+
+	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true, NoStopGate: true}); err != nil {
+		t.Fatal(err)
+	}
+	if a := env.ReadOptIn(); a.StopGate || !a.Exploration {
+		t.Fatalf("--no-stop-gate dropped the exploration sibling: %+v", a)
+	}
+	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true, NoExploration: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(env.StopGateOptInPath()); err == nil {
+		t.Fatal("artifact with neither opt-in must be removed")
+	}
+	out.Reset()
+	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	var again Result
+	if err := json.Unmarshal(out.Bytes(), &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.Exploration.State != "not_opted_in" || again.ExplorationNote != "" {
+		t.Fatalf("plain re-enable %+v", again)
+	}
+}
+
+// fakeBins prepends shell stubs answering --version to the hermetic PATH.
+func fakeBins(t *testing.T, banners map[string]string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stubs")
+	}
+	bin := t.TempDir()
+	for name, banner := range banners {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\necho "+banner+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+const geminiSettingsBody = "{\n  \"theme\": \"mine\",\n  \"hooks\": {\"BeforeTool\": [ {\"matcher\":\"*\", \"hooks\": [ {\"type\":\"command\",\"command\":\"echo hi\"} ] } ]}\n}\n"
+
+// geminiAndOpenCodeHomes plants ~/.gemini/settings.json (when body is non-empty) and the
+// opencode config dir (when wantConfig) under home, and puts both binaries on PATH.
+func geminiAndOpenCodeHomes(t *testing.T, home, body string, wantConfig bool) (settings, plugin string) {
+	t.Helper()
+	fakeBins(t, map[string]string{"gemini": "0.59.0", "opencode": "1.18.31"})
+	settings = filepath.Join(home, ".gemini", "settings.json")
+	if body != "" {
+		if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(settings, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plugin = filepath.Join(home, ".config", "opencode", "plugins", "mark1.js")
+	if wantConfig {
+		if err := os.MkdirAll(filepath.Dir(filepath.Dir(plugin)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return settings, plugin
+}
+
+// TestEnableProvisionsGeminiAndOpenCode: with both binaries on PATH the fenced
+// entries land in ~/.gemini/settings.json beside the user's handler (B) and the
+// owned plugin lands under the opencode config dir (A), each with its manifest.
+func TestEnableProvisionsGeminiAndOpenCode(t *testing.T) {
+	env, out, _ := enrolledEnv(t)
+	home, _ := claudeHome(t)
+	fakeCodex(t, home, codexHooksBody)
+	settings, plugin := geminiAndOpenCodeHomes(t, home, geminiSettingsBody, true)
+	root := t.TempDir()
+	env.JSON = false
+	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"provisioned   gemini", "provisioned   opencode", "restart any running opencode"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("human output lacks %q:\n%s", want, out.String())
+		}
+	}
+	b, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"_mark1"`) || !strings.Contains(string(b), `"MARK1_AGENT": "gemini"`) || !strings.Contains(string(b), "echo hi") {
+		t.Fatalf("settings.json after enable:\n%s", b)
+	}
+	if p, err := os.ReadFile(plugin); err != nil || !strings.Contains(string(p), "mark1-hookshim") {
+		t.Fatalf("plugin after enable (%v):\n%s", err, p)
+	}
+	for _, m := range []string{gemini.ManifestPath(env.StateDir), opencode.ManifestPath(env.StateDir)} {
+		if _, err := os.Stat(m); err != nil {
+			t.Fatalf("no manifest under the CLI's state root: %v", err)
+		}
+	}
+	env.JSON = true
+	out.Reset()
+	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(res.AgentsProvisioned, ",") != "claudecode,codex,gemini,opencode" || len(res.AgentsRefused) != 0 {
+		t.Fatalf("agents_provisioned = %v refused = %+v", res.AgentsProvisioned, res.AgentsRefused)
+	}
+	if res.Changed {
+		t.Fatal("a re-run over unchanged fragments reported changed=true")
+	}
+}
+
+// TestEnableGeminiAndOpenCodeOnlyWhenInstalled: no binary, no row of either
+// kind — and no plugin file planted for an agent the user does not run.
+func TestEnableGeminiAndOpenCodeOnlyWhenInstalled(t *testing.T) {
+	env, out, home := enrolledEnv(t)
+	plugin := filepath.Join(home, ".config", "opencode", "plugins", "mark1.js")
+	if err := os.MkdirAll(filepath.Dir(filepath.Dir(plugin)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(env, Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res.AgentsRefused {
+		if r.Agent == "gemini" || r.Agent == "opencode" {
+			t.Fatalf("%s reported without being installed: %+v", r.Agent, res.AgentsRefused)
+		}
+	}
+	if _, err := os.Stat(plugin); err == nil {
+		t.Fatal("enable planted the opencode plugin for an agent that is not installed")
+	}
+}
+
+// TestEnableReportsGeminiAndOpenCodeRefusals: installed but unprovisionable is
+// a refusal row with the adapter's code, never a failed enable — the workspace
+// still lands and claudecode still provisions.
+func TestEnableReportsGeminiAndOpenCodeRefusals(t *testing.T) {
+	codes := func(t *testing.T, out *bytes.Buffer) map[string]Refusal {
+		t.Helper()
+		var res Result
+		if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(res.AgentsProvisioned, ",") != "claudecode" {
+			t.Fatalf("agents_provisioned = %v", res.AgentsProvisioned)
+		}
+		by := map[string]Refusal{}
+		for _, r := range res.AgentsRefused {
+			by[r.Agent] = r
+		}
+		return by
+	}
+	t.Run("absent settings and config dir", func(t *testing.T) {
+		env, out, _ := enrolledEnv(t)
+		home, _ := claudeHome(t)
+		settings, plugin := geminiAndOpenCodeHomes(t, home, "", false)
+		root := t.TempDir()
+		if err := Run(env, Options{Path: root, Home: home, NoAnchors: true}); err != nil {
+			t.Fatalf("a provisioning refusal failed the enable: %v", err)
+		}
+		by := codes(t, out)
+		if by["gemini"].Code != gemini.CodeNoTarget || by["opencode"].Code != opencode.CodeNoTarget {
+			t.Fatalf("agents_refused = %+v, want gemini and opencode %s", by, gemini.CodeNoTarget)
+		}
+		if _, err := os.Stat(settings); err == nil {
+			t.Fatal("enable invented ~/.gemini/settings.json")
+		}
+		if _, err := os.Stat(filepath.Dir(filepath.Dir(plugin))); err == nil {
+			t.Fatal("enable created the vendor's config dir")
+		}
+		ws, err := env.LoadWorkspaces()
+		if err != nil || len(ws.Workspaces) != 1 {
+			t.Fatalf("workspace not enabled: %v %+v", err, ws)
+		}
+	})
+	t.Run("JSONC settings", func(t *testing.T) {
+		env, out, _ := enrolledEnv(t)
+		home, _ := claudeHome(t)
+		settings, _ := geminiAndOpenCodeHomes(t, home, "// gemini tolerates comments\n"+geminiSettingsBody, false)
+		if err := Run(env, Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+			t.Fatalf("a JSONC settings file crashed the enable: %v", err)
+		}
+		r, ok := codes(t, out)["gemini"]
+		if !ok || r.Code != "" || !strings.Contains(r.Detail, "not strict JSON") {
+			t.Fatalf("gemini refusal %+v, want a coded-empty parse refusal", r)
+		}
+		if b, _ := os.ReadFile(settings); !strings.HasPrefix(string(b), "// gemini") {
+			t.Fatalf("the user's JSONC file was rewritten:\n%s", b)
+		}
+		if _, err := os.Stat(gemini.ManifestPath(env.StateDir)); err == nil {
+			t.Fatal("a refused apply left a manifest behind")
+		}
+	})
+}
+
+const cursorHooksBody = "{\n  \"version\": 1,\n  \"hooks\": {\"preToolUse\": [ {\"command\": \"echo hi\", \"timeout\": 5} ]}\n}\n"
+
+// copilotAndCursorHomes plants ~/.copilot (when wantCopilotHome) and ~/.cursor holding
+// hooks.json (when body is non-empty; the dir alone when wantCursorDir) under home, and
+// puts both binaries on PATH.
+func copilotAndCursorHomes(t *testing.T, home, body string, wantCopilotHome, wantCursorDir bool) (copilotHooks, cursorHooks string) {
+	t.Helper()
+	fakeBins(t, map[string]string{"copilot": "1.0.85", "cursor-agent": "2026.09.10-fd3934a"})
+	copilotHooks = filepath.Join(home, ".copilot", "hooks", "mark1.json")
+	if wantCopilotHome {
+		if err := os.MkdirAll(filepath.Dir(filepath.Dir(copilotHooks)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cursorHooks = filepath.Join(home, ".cursor", "hooks.json")
+	if wantCursorDir || body != "" {
+		if err := os.MkdirAll(filepath.Dir(cursorHooks), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if body != "" {
+		if err := os.WriteFile(cursorHooks, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return copilotHooks, cursorHooks
+}
+
+// TestEnableProvisionsCopilotAndCursor: with both binaries on PATH the owned hook
+// file lands under ~/.copilot/hooks (A, `|| true` because the vendor fails closed)
+// and the fenced entries land in ~/.cursor/hooks.json beside the user's (B), each
+// with its manifest; the human output says the BYOK pointer is not provisioned.
+func TestEnableProvisionsCopilotAndCursor(t *testing.T) {
+	env, out, _ := enrolledEnv(t)
+	home, _ := claudeHome(t)
+	copilotHooks, cursorHooks := copilotAndCursorHomes(t, home, cursorHooksBody, true, true)
+	root := t.TempDir()
+	env.JSON = false
+	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"provisioned   copilot", "provisioned   cursor", "COPILOT_PROVIDER_BASE_URL is an env var with no fenced file target"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("human output lacks %q:\n%s", want, out.String())
+		}
+	}
+	b, err := os.ReadFile(copilotHooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "mark1-hookshim || true") || !strings.Contains(string(b), `"MARK1_AGENT": "copilot"`) {
+		t.Fatalf("copilot hooks file after enable:\n%s", b)
+	}
+	c, err := os.ReadFile(cursorHooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(c), `"_mark1"`) || !strings.Contains(string(c), "MARK1_AGENT=cursor") || !strings.Contains(string(c), "echo hi") {
+		t.Fatalf("cursor hooks.json after enable:\n%s", c)
+	}
+	for _, m := range []string{copilot.ManifestPath(env.StateDir), cursor.ManifestPath(env.StateDir)} {
+		if _, err := os.Stat(m); err != nil {
+			t.Fatalf("no manifest under the CLI's state root: %v", err)
+		}
+	}
+	if m, err := cursor.LoadManifest(env.StateDir); err != nil || m.Mechanism != "B" {
+		t.Fatalf("cursor manifest %+v %v, want mechanism B over an existing hooks.json", m, err)
+	}
+	env.JSON = true
+	out.Reset()
+	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(res.AgentsProvisioned, ",") != "claudecode,copilot,cursor" || len(res.AgentsRefused) != 0 {
+		t.Fatalf("agents_provisioned = %v refused = %+v", res.AgentsProvisioned, res.AgentsRefused)
+	}
+	if res.Changed {
+		t.Fatal("a re-run over unchanged fragments reported changed=true")
+	}
+
+	// No hooks.json at all: cursor takes mechanism A and owns the file.
+	env2, out2, _ := enrolledEnv(t)
+	home2, _ := claudeHome(t)
+	_, cursorHooks2 := copilotAndCursorHomes(t, home2, "", true, true)
+	if err := Run(env2, Options{Path: t.TempDir(), Home: home2, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out2.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(res.AgentsProvisioned, ",") != "claudecode,copilot,cursor" {
+		t.Fatalf("agents_provisioned = %v", res.AgentsProvisioned)
+	}
+	if m, err := cursor.LoadManifest(env2.StateDir); err != nil || m.Mechanism != "A" {
+		t.Fatalf("cursor manifest %+v %v, want mechanism A over an absent hooks.json", m, err)
+	}
+	if c, err := os.ReadFile(cursorHooks2); err != nil || !strings.Contains(string(c), `"version": 1`) {
+		t.Fatalf("owned hooks.json (%v):\n%s", err, c)
+	}
+}
+
+// TestEnableCopilotAndCursorOnlyWhenInstalled: no binary, no row of either kind,
+// and no owned file planted for an agent the user does not run.
+func TestEnableCopilotAndCursorOnlyWhenInstalled(t *testing.T) {
+	env, out, home := enrolledEnv(t)
+	copilotHooks := filepath.Join(home, ".copilot", "hooks", "mark1.json")
+	cursorHooks := filepath.Join(home, ".cursor", "hooks.json")
+	for _, d := range []string{filepath.Dir(filepath.Dir(copilotHooks)), filepath.Dir(cursorHooks)} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Run(env, Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res.AgentsRefused {
+		if r.Agent == "copilot" || r.Agent == "cursor" {
+			t.Fatalf("%s reported without being installed: %+v", r.Agent, res.AgentsRefused)
+		}
+	}
+	for _, f := range []string{copilotHooks, cursorHooks} {
+		if _, err := os.Stat(f); err == nil {
+			t.Fatalf("enable planted %s for an agent that is not installed", f)
+		}
+	}
+}
+
+// TestEnableReportsCopilotAndCursorRefusals: installed but unprovisionable is a
+// refusal row with the adapter's code, never a failed enable — the workspace
+// still lands and claudecode still provisions.
+func TestEnableReportsCopilotAndCursorRefusals(t *testing.T) {
+	codes := func(t *testing.T, out *bytes.Buffer) map[string]Refusal {
+		t.Helper()
+		var res Result
+		if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(res.AgentsProvisioned, ",") != "claudecode" {
+			t.Fatalf("agents_provisioned = %v", res.AgentsProvisioned)
+		}
+		by := map[string]Refusal{}
+		for _, r := range res.AgentsRefused {
+			by[r.Agent] = r
+		}
+		return by
+	}
+	t.Run("absent vendor dirs", func(t *testing.T) {
+		env, out, _ := enrolledEnv(t)
+		home, _ := claudeHome(t)
+		copilotHooks, cursorHooks := copilotAndCursorHomes(t, home, "", false, false)
+		if err := Run(env, Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+			t.Fatalf("a provisioning refusal failed the enable: %v", err)
+		}
+		by := codes(t, out)
+		if by["copilot"].Code != copilot.CodeNoTarget || by["cursor"].Code != cursor.CodeNoTarget {
+			t.Fatalf("agents_refused = %+v, want copilot and cursor %s", by, copilot.CodeNoTarget)
+		}
+		for _, d := range []string{filepath.Dir(filepath.Dir(copilotHooks)), filepath.Dir(cursorHooks)} {
+			if _, err := os.Stat(d); err == nil {
+				t.Fatalf("enable created the vendor's config dir %s", d)
+			}
+		}
+		for _, m := range []string{copilot.ManifestPath(env.StateDir), cursor.ManifestPath(env.StateDir)} {
+			if _, err := os.Stat(m); err == nil {
+				t.Fatalf("a refused apply left %s behind", m)
+			}
+		}
+		ws, err := env.LoadWorkspaces()
+		if err != nil || len(ws.Workspaces) != 1 {
+			t.Fatalf("workspace not enabled: %v %+v", err, ws)
+		}
+	})
+	t.Run("duplicate key in cursor hooks.json", func(t *testing.T) {
+		env, out, _ := enrolledEnv(t)
+		home, _ := claudeHome(t)
+		const dup = `{"version":1,"hooks":{},"hooks":{}}`
+		_, cursorHooks := copilotAndCursorHomes(t, home, dup, false, true)
+		if err := Run(env, Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+			t.Fatalf("a duplicate-key hooks.json failed the enable: %v", err)
+		}
+		if r := codes(t, out)["cursor"]; r.Code != cursor.CodeDuplicateKey {
+			t.Fatalf("cursor refusal %+v, want %s", r, cursor.CodeDuplicateKey)
+		}
+		if b, _ := os.ReadFile(cursorHooks); string(b) != dup {
+			t.Fatalf("the user's hooks.json was rewritten:\n%s", b)
 		}
 	})
 }

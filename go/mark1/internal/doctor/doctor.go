@@ -24,6 +24,11 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/copilot"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
 )
 
 type Options struct {
@@ -32,14 +37,20 @@ type Options struct {
 	// ClaudeSettings overrides the transcript-retention probe target
 	// (default ~/.claude/settings.json); a test seam.
 	ClaudeSettings string
+	// CodexHome overrides $CODEX_HOME/~/.codex for the regime sniff (test seam).
+	CodexHome string
+	// Home overrides $HOME for the gemini, opencode, copilot and cursor config sniffs (test seam).
+	Home string
 }
 
 type Report struct {
-	OK        bool       `json:"ok"`
-	Anchors   []Anchor   `json:"anchors"`
-	Agents    []Agent    `json:"agents"`
-	Fragments []Fragment `json:"fragments"`
-	Health    []Check    `json:"health"`
+	OK          bool         `json:"ok"`
+	Anchors     []Anchor     `json:"anchors"`
+	Agents      []Agent      `json:"agents"`
+	Fragments   []Fragment   `json:"fragments"`
+	Health      []Check      `json:"health"`
+	StopGate    cli.StopGate `json:"stop_gate"`
+	Exploration cli.StopGate `json:"exploration"`
 }
 
 // Anchor is one row of the FR-CLI-004 join between what mark1d can run
@@ -64,6 +75,11 @@ type Agent struct {
 	Implemented bool   `json:"implemented"`
 	Mechanism   string `json:"mechanism,omitempty"`
 	Phase       string `json:"phase,omitempty"`
+	// Live sniff for every built adapter but claudecode (whose rides the agent_version health row); HooksTrusted is codex's yes|no once provisioned.
+	Version      string `json:"version,omitempty"`
+	Regime       string `json:"regime,omitempty"`
+	HooksTrusted string `json:"hooks_trusted,omitempty"`
+	Note         string `json:"note,omitempty"`
 }
 
 // Fragment is §7.4's row, in §7.4's own vocabulary: OK | USER-EDITED |
@@ -102,9 +118,10 @@ func Run(env *cli.Env, opts Options) error {
 	rep := Report{OK: true}
 	anchors, anchorChecks := readAnchors(env)
 	rep.Anchors = anchors
-	rep.Agents = roster()
+	rep.Agents = roster(env, opts)
 	rep.Fragments = scanFragments(env, opts)
 	rep.Health = append(healthChecks(env, opts), anchorChecks...)
+	rep.StopGate, rep.Exploration = env.ReadStopGate(), env.ReadExploration()
 
 	for _, f := range rep.Fragments {
 		if f.State != string(claudecode.StateOK) && f.State != string(claudecode.StateUserEdited) {
@@ -218,10 +235,38 @@ func readAnchors(env *cli.Env) ([]Anchor, []Check) {
 	return out, checks
 }
 
-func roster() []Agent {
+func roster(env *cli.Env, opts Options) []Agent {
 	out := make([]Agent, 0, len(adapters.Roster))
 	for _, s := range adapters.Roster {
-		out = append(out, Agent{s.Name, s.Implemented, s.Mechanism, s.Phase})
+		a := Agent{Name: s.Name, Implemented: s.Implemented, Mechanism: s.Mechanism, Phase: s.Phase}
+		switch s.Name {
+		case "codex":
+			codexAgent(env, opts, &a)
+		case "gemini":
+			geminiAgent(env, opts, &a)
+		case "opencode":
+			opencodeAgent(env, opts, &a)
+		case "copilot":
+			copilotAgent(env, opts, &a)
+		case "cursor":
+			cursorAgent(env, opts, &a)
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func regimeWord(r adapters.Regime) string {
+	if r == adapters.RegimeAPIKey {
+		return "apikey"
+	}
+	return "subscription"
+}
+
+func lines[L codex.Line | gemini.Line | cursor.Line](in []L) []claudecode.Line {
+	out := make([]claudecode.Line, 0, len(in))
+	for _, l := range in {
+		out = append(out, claudecode.Line(l))
 	}
 	return out
 }
@@ -235,12 +280,32 @@ func scanFragments(env *cli.Env, opts Options) []Fragment {
 	classified := map[string]bool{
 		claudecode.ManifestPath(env.StateDir):        true,
 		claudecode.BaseURLManifestPath(env.StateDir): true,
+		codex.ManifestPath(env.StateDir):             true,
+		gemini.ManifestPath(env.StateDir):            true,
+		opencode.ManifestPath(env.StateDir):          true,
+		copilot.ManifestPath(env.StateDir):           true,
+		cursor.ManifestPath(env.StateDir):            true,
 	}
 	if _, err := os.Stat(claudecode.ManifestPath(env.StateDir)); err == nil {
 		out = append(out, inspectClaudeCode(env, opts))
 	}
 	if _, err := os.Stat(claudecode.BaseURLManifestPath(env.StateDir)); err == nil {
 		out = append(out, inspectBaseURL(env, opts))
+	}
+	if _, err := os.Stat(codex.ManifestPath(env.StateDir)); err == nil {
+		out = append(out, inspectCodex(env, opts))
+	}
+	if _, err := os.Stat(gemini.ManifestPath(env.StateDir)); err == nil {
+		out = append(out, inspectGemini(env, opts))
+	}
+	if _, err := os.Stat(opencode.ManifestPath(env.StateDir)); err == nil {
+		out = append(out, inspectOpenCode(env, opts))
+	}
+	if _, err := os.Stat(copilot.ManifestPath(env.StateDir)); err == nil {
+		out = append(out, inspectCopilot(env, opts))
+	}
+	if _, err := os.Stat(cursor.ManifestPath(env.StateDir)); err == nil {
+		out = append(out, inspectCursor(env, opts))
 	}
 	// Any OTHER manifest under <state>/provisioned/ belongs to an agent this
 	// build cannot classify. Listing it beats hiding it: an unclassifiable
@@ -350,8 +415,29 @@ func healthChecks(env *cli.Env, opts Options) []Check {
 		}
 	}
 
-	checks = append(checks, retentionCheck(opts))
+	checks = append(checks, retentionCheck(opts), agentVersionCheck())
 	return checks
+}
+
+// agentVersionCheck is D-EE's admission as doctor sees it: pinned,
+// compatible_unpinned (captured, unverified, receipted as a bypass window) or
+// incompatible (capture inert). Informational — a developer's `claude` is
+// whatever npm installed this week, and doctor's exit code is CI's.
+func agentVersionCheck() Check {
+	cc := &claudecode.Adapter{}
+	d, _ := cc.Detect()
+	if !d.Installed {
+		return Check{"agent_version", true, "claude not on PATH; transcript capture inert"}
+	}
+	c, why := cc.Compatibility(d.Version)
+	detail := fmt.Sprintf("claude %s %s", d.Version, c)
+	switch c {
+	case claudecode.CompatibleUnpinned:
+		detail += " — structural probe passed, capture runs UNVERIFIED under an unsupported_agent_version bypass receipt; record a corpus: `mark1 corpus record`"
+	case claudecode.Incompatible:
+		detail += fmt.Sprintf(" — transcript capture DISABLED: %v", why)
+	}
+	return Check{"agent_version", true, detail}
 }
 
 // retentionCheck is §7.4's transcript-retention probe: warn when Claude
@@ -401,11 +487,24 @@ func renderHuman(w io.Writer, r *Report) {
 			a.ID, a.Consented, a.State, a.ConsentedAt.Format(time.RFC3339), a.Workspace)
 	}
 	for _, a := range r.Agents {
-		if a.Implemented {
-			_, _ = fmt.Fprintf(w, "agent         %-12s mechanism %s\n", a.Name, a.Mechanism)
-		} else {
+		if !a.Implemented {
 			_, _ = fmt.Fprintf(w, "agent         %-12s not implemented (phase %s)\n", a.Name, a.Phase)
+			continue
 		}
+		line := "mechanism " + a.Mechanism
+		if a.Version != "" {
+			line += " version " + a.Version
+		}
+		if a.Regime != "" {
+			line += " regime " + a.Regime
+		}
+		if a.HooksTrusted != "" {
+			line += " hooks_trusted: " + a.HooksTrusted
+		}
+		if a.Note != "" {
+			line += " (" + a.Note + ")"
+		}
+		_, _ = fmt.Fprintf(w, "agent         %-12s %s\n", a.Name, line)
 	}
 	if len(r.Fragments) == 0 {
 		_, _ = fmt.Fprintln(w, "fragments     none provisioned")
@@ -433,4 +532,6 @@ func renderHuman(w io.Writer, r *Report) {
 		}
 		_, _ = fmt.Fprintf(w, "health        %-22s %-4s %s\n", c.Name, state, c.Detail)
 	}
+	_, _ = fmt.Fprintf(w, "stop gate     %s\n", r.StopGate)
+	_, _ = fmt.Fprintf(w, "exploration   %s\n", r.Exploration)
 }
