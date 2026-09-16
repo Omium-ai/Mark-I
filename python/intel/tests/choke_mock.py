@@ -18,15 +18,30 @@ Writes: POST /internal/v1/rollup/tvo_tenant_day — the ADR-0010 §2.2 internal 
 body: module.go rollupRequest's exact field set (job_key + tenant_id + the 13 row
 fields), bearer is the SERVICE credential, and the 200 ack is {"status": "written",
 "job_key": …} — identical for a dedup-dropped re-run (idempotent by design; the no-op
-signal belongs to the driving job's ledger, layer 1)."""
+signal belongs to the driving job's ledger, layer 1).
 
+Receipts: POST /internal/v1/receipts/append — receipts/append.go handleAppend, the ONE
+writer of m1_receipts (m1_002 §5). Body {tenant_id, record_type, subject_id,
+idempotency_key, payload}; a repeat under the same (tenant, record_type, idempotency_key)
+answers the identical ack (m1_072); the ack is {receipt_id, seq, receipt_hash, payload}
+with payload the canonical signed text. Fixture-locked both ways:
+go/controld/internal/receipts/testdata/receipt_append_body.json."""
+
+import hashlib
 import json
+import uuid
 
 import httpx
+from mark1_receipts import DOMAIN_PREFIX, canonical_json
 
 QUERY_PATH = "/api/v1/query"
 ROLLUP_WRITE_PATH = "/internal/v1/rollup/tvo_tenant_day"
 WRITE_TEMPLATE = "tvo_rollup_tenant_day"
+APPEND_PATH = "/internal/v1/receipts/append"
+APPEND_FIELDS = frozenset({"tenant_id", "record_type", "subject_id", "idempotency_key", "payload"})
+INTERNAL_RECORD_TYPES = frozenset(
+    {"noise_certificate", "memory_admission", "bundle_publication", "corpus_export"}
+)
 
 # module.go rollupRequest, exact — a field intel adds or drops without controld
 # shipping the same change goes red here.
@@ -58,6 +73,9 @@ class MockChoke:
         self.requests: list[tuple[str, dict, str | None]] = []
         self.rollup_store: dict[str, dict] = {}  # job_key -> body, dedupe-keyed
         self.fail_with: tuple[int, str, str] | None = None  # (status, code, message)
+        self.appended: list[dict] = []  # every accepted append body, in order
+        self.receipts: dict[tuple[str, str, str], dict] = {}  # (tenant, type, key) -> ack
+        self.append_fail_with: tuple[int, str, str] | None = None  # the chain-side failure
 
     def _error(self, status: int, code: str, message: str) -> httpx.Response:
         return httpx.Response(status, json={"error": {"code": code, "message": message}})
@@ -66,6 +84,8 @@ class MockChoke:
         assert request.method == "POST"
         if request.url.path == ROLLUP_WRITE_PATH:
             return self._rollup_write(request)
+        if request.url.path == APPEND_PATH:
+            return self._receipt_append(request)
         assert request.url.path == QUERY_PATH, request.url.path
         body = json.loads(request.content)
         assert set(body) == {"template", "params"}, body  # the §3.3 read body, exact
@@ -110,6 +130,40 @@ class MockChoke:
         # 200 too — the no-op signal belongs to the driving job's ledger").
         self.rollup_store.setdefault(body["job_key"], body)
         return httpx.Response(200, json={"status": "written", "job_key": body["job_key"]})
+
+    def _receipt_append(self, request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization")
+        if not auth or not auth.startswith("Bearer ") or auth == "Bearer ":
+            return self._error(403, "M1E-1001", "service credential required")
+        body = json.loads(request.content)
+        assert set(body) == APPEND_FIELDS, set(body) ^ APPEND_FIELDS
+        assert body["record_type"] in INTERNAL_RECORD_TYPES, body["record_type"]
+        assert uuid.UUID(body["subject_id"]) != uuid.UUID(int=0) and body["idempotency_key"]
+        if self.append_fail_with is not None:
+            return self._error(*self.append_fail_with)
+        key = (body["tenant_id"], body["record_type"], body["idempotency_key"])
+        if key not in self.receipts:
+            seq = 1 + sum(1 for k in self.receipts if k[0] == body["tenant_id"])
+            text = canonical_json(
+                {
+                    **body["payload"],
+                    "v": 1,
+                    "type": body["record_type"],
+                    "tenant_id": body["tenant_id"],
+                    "seq": seq,
+                    "prev_receipt_hash": "00" * 32,
+                    "issued_at": "2026-09-16T00:00:00Z",
+                    "subject_id": body["subject_id"],
+                }
+            )
+            self.appended.append(body)
+            self.receipts[key] = {
+                "receipt_id": str(uuid.uuid4()),
+                "seq": seq,
+                "receipt_hash": hashlib.sha256(DOMAIN_PREFIX + text.encode()).hexdigest(),
+                "payload": text,
+            }
+        return httpx.Response(200, json=self.receipts[key])
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handler)

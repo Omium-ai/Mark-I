@@ -14,6 +14,7 @@ dependencies = [
     "pyarrow>=18.0.0",             # Parquet corpus mirrors + receipted export (06 §12)
     "boto3>=1.34.0",               # S3 corpus/replay access (estate pin floor)
     "xxhash>=3.4.0",               # holdout bucket hash, estate-identical so buckets match the trainer's
+    "anthropic>=1.0",              # memory extraction cascade on the Batch API ONLY (06 §9.1)
     "mark1-receipts",
     "m1p-proto",
 ]

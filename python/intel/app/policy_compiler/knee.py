@@ -141,9 +141,15 @@ def implied_knee(rows: tuple[KneeRow, ...] | list[KneeRow], v_task: float) -> in
     return next((r.n for r in rows if r.p_lcb is not None and r.p_lcb * v_task <= r.c_n), None)
 
 
-def _coster(inputs: KneeInputs, basis: Basis) -> Callable[[AttemptCost], float]:
+def coster(
+    basis: Basis,
+    *,
+    price: ModelPrice | None = None,
+    window_limit_tokens: int | None = None,
+    shadow_price_usd: float = DEFAULT_SHADOW_PRICE_USD,
+) -> Callable[[AttemptCost], float]:
+    """E[cost of one attempt] under exactly one basis (06 §8.4) — shared by knee and CPVS."""
     if basis == COST_BASIS_USD:
-        price = inputs.price
         if price is None:
             raise ValueError("usd basis needs a pinned model_prices row (06 §8.4)")
         return lambda a: usd_cost(
@@ -155,11 +161,19 @@ def _coster(inputs: KneeInputs, basis: Basis) -> Callable[[AttemptCost], float]:
             a.verifier_spend_usd,
         )
     if basis == COST_BASIS_QUOTA:
-        window = inputs.window_limit_tokens
-        if window is None:
+        if window_limit_tokens is None:
             raise ValueError("quota basis needs a fitted window_limit_tokens (06 §8.4)")
-        return lambda a: quota_cost(a.tokens_consumed, window, inputs.shadow_price_usd)
+        return lambda a: quota_cost(a.tokens_consumed, window_limit_tokens, shadow_price_usd)
     raise ValueError(f"cost_basis={basis!r} not in ('usd', 'quota') — never mixed")
+
+
+def _coster(inputs: KneeInputs, basis: Basis) -> Callable[[AttemptCost], float]:
+    return coster(
+        basis,
+        price=inputs.price,
+        window_limit_tokens=inputs.window_limit_tokens,
+        shadow_price_usd=inputs.shadow_price_usd,
+    )
 
 
 def knee_table(inputs: KneeInputs, basis: Basis, previous: KneeTable | None = None) -> KneeTable:

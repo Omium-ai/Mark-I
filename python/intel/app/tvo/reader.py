@@ -187,11 +187,11 @@ class QuerychokeReader:
     async def attempt_window(
         self, window_start: date, window_end: date, *, bearer: str
     ) -> LedgerWindow:
-        """`tvo_task_window` template over [window_start, window_end): attempt-grain rows
-        from mark1.tvo_task (06 §8.1 sources c, v, p from attempt grain — the day-grain
-        `tvo_report` rollup read cannot supply them). This name is NOT yet in the choke's
-        v1 registry: adding a read template is a registry PR (05 §6.3), and until it
-        lands a live call refuses loudly with M1E-2008 — a refusal, never a wrong shape."""
+        """`tvo_task_window` template over [window_start, window_end) — half-open on the
+        choke side too (templates.go `>= from AND < to`, never widened): attempt-grain rows
+        from m1p_events, an attempt being 07's span between stage-final verdicts. The choke's
+        TestTvoTaskWindowServesAttemptWindow locks the column set to the same
+        testdata/rollup_write_body.json rows test_tvo_rollup.py drives through here."""
         result = await self.run_template(
             "tvo_task_window",
             {"from": window_start.isoformat(), "to": window_end.isoformat()},
@@ -212,7 +212,14 @@ class QuerychokeReader:
                     verdict_stage=str(_require(row, "verdict_stage", "tvo_task_window")),
                 )
             )
-            seg_by_task[task_id] = str(_require(row, "task_seg_version", "tvo_task_window"))
+            version = str(_require(row, "task_seg_version", "tvo_task_window"))
+            if not version:
+                # ADR-0001 midnight split at task grain: refuse by name, never mint a '' series.
+                raise ValueError(
+                    f"tvo_task_window: task {task_id} has no task_seg_version in "
+                    f"[{window_start}, {window_end}) — its TaskOpen lies outside the window"
+                )
+            seg_by_task[task_id] = version
             cost_by_task[task_id] = cost_by_task.get(task_id, 0.0) + float(row.get("cost_usd", 0))
         return LedgerWindow(
             attempts=tuple(attempts),

@@ -17,15 +17,21 @@ import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
+from uuid import UUID
 
+import asyncpg
 import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from app.db import set_local_tenant
+from app.policy_compiler.cpvs import Regime
+from app.pricing import UnpinnedModel
+from app.regime import RegimeUnset, load_regime
 from app.tvo.coverage import coverage_band
 from app.tvo.engine import AttemptRow, NoiseCertificate, group_by_task, tvo_from_ledger
 from app.tvo.reader import QuerychokeReader
-from app.tvo.report import ModelPrice, assemble_report
+from app.tvo.report import COST_BASIS_QUOTA, COST_BASIS_USD, ModelPrice, assemble_report
 from app.tvo.waste import waste_taxonomy
 
 router = APIRouter()
@@ -72,16 +78,41 @@ def get_cert_provider(request: Request) -> CertProvider:
     return fetch
 
 
-def get_price_row() -> ModelPrice | None:
-    """ponytail: no model_prices table lands in this wave, so usd-basis reports carry the
-    'no pinned model_prices row' refusal (report.py, 06 §8.4) and issue as indicative —
-    honest, not broken. Upgrade path: a Postgres lookup here when the billing row ships."""
-    return None
+def get_pool(request: Request) -> asyncpg.Pool:
+    return request.state.pool
 
 
-def get_shadow_price() -> tuple[float | None, bool]:
-    """(S, confirmed) for the quota basis. D22 default stays a placeholder until a tenant
-    settings row confirms it — unconfirmed is a refusal reason, by design (06 §8.4)."""
+async def get_regime(
+    tenant_id: str, pool: Annotated[asyncpg.Pool, Depends(get_pool)]
+) -> Regime | None:
+    """The tenant's m1_075 row (app/regime), or None: unset, not a tenant id at all, or pinned
+    to a model the current price table no longer carries. Either way the basis stays unresolved
+    and the report issues as indicative (06 §8.5) — a downgrade, never a 500, never a guess."""
+    try:
+        UUID(tenant_id)
+    except ValueError:
+        return None
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        try:
+            return await load_regime(conn, tenant_id)
+        except (RegimeUnset, UnpinnedModel):
+            return None
+
+
+def get_price_row(regime: Annotated[Regime | None, Depends(get_regime)]) -> ModelPrice | None:
+    """The pinned model_prices row for a usd tenant (06 §8.4) — from app/pricing via the
+    regime, so its price_table_version is the table digest the report stamps."""
+    return regime.price if regime is not None and regime.cost_basis == COST_BASIS_USD else None
+
+
+def get_shadow_price(
+    regime: Annotated[Regime | None, Depends(get_regime)],
+) -> tuple[float | None, bool]:
+    """(S, confirmed) for the quota basis: confirmed iff the tenant's regime row carries it
+    (D22 — the $200 default is a placeholder, never a confirmation)."""
+    if regime is not None and regime.cost_basis == COST_BASIS_QUOTA:
+        return (regime.shadow_price_usd, True)
     return (None, False)
 
 

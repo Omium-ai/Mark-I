@@ -15,6 +15,7 @@ from fastapi import FastAPI  # noqa: E402
 from app.config import load_settings  # noqa: E402
 from app.db import create_pool  # noqa: E402
 from app.errors import install_exception_handlers  # noqa: E402
+from app.memory.routes import router as memory_router  # noqa: E402
 from app.tvo.reader import QuerychokeReader  # noqa: E402
 from app.tvo.routes import router as tvo_router  # noqa: E402
 
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI) -> Any:
 app = FastAPI(title="mark1-intel", lifespan=lifespan)
 install_exception_handlers(app)
 app.include_router(tvo_router)
+app.include_router(memory_router)
 
 
 @app.get("/healthz")

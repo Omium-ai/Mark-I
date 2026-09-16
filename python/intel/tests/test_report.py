@@ -215,4 +215,5 @@ def test_body_snapshot():
             "beta": "measured",
             "D": "configured",
         },
+        "price_table_version": "prices-v3",  # 06 §8.4: the report pins the version it used
     }

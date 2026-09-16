@@ -125,6 +125,8 @@ class TvoReport:
             "cert_status": self.cert_status,
             "input_provenance": self.input_provenance,
         }
+        if self.price_table_version is not None:
+            body["price_table_version"] = self.price_table_version
         if self.refusals:
             # 08 §3.3: the number still renders, the guarantee is refused — refused
             # outright, not footnoted.

@@ -1,0 +1,158 @@
+"""06 §9.4/§9.5 retrieval: the admitted pack source and the one halfvec fuzzy match
+(FR-REMEMBER-004/008). Delivery and the per-task decision live at the edge (mark1d/memory)."""
+
+import hashlib
+import json
+import math
+import re
+import uuid
+from collections.abc import Sequence
+from typing import Any
+
+import asyncpg
+
+from app.db import set_local_tenant
+
+DIM = 1024
+FUZZ_DISTANCE = 0.15
+M_INJECT = 3
+SIGNATURE_LINES = 2
+SIGNATURE_MAX_CHARS = 240
+# Allowlist: the DB enum's 'preference' is 06 §9.2's routing_hint class, bundles only, never served.
+INJECTABLE_KINDS = frozenset({"pitfall", "fix_pattern", "invariant"})
+
+_LINE = re.compile(r"\r\n|\r|\n")
+_PATH = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][A-Za-z0-9_.\-]+){2,}")
+_TOKEN = re.compile(r"[a-z0-9]+")
+_NUM = re.compile(r"[0-9]+")
+_WS = re.compile(r"[ \t\r\n]+")
+_STRIP = " \t\r\n\f\v"
+
+
+def normalize_signature(text: str) -> str:
+    """The Go twin is memory.NormalizeSignature (go/mark1d/internal/memory/signature.go);
+    test_signature_digest_agrees_with_go pins them to one vector."""
+    lines = [ln.strip(_STRIP) for ln in _LINE.split(text)]
+    s = " ".join([ln for ln in lines if ln][:SIGNATURE_LINES])[:SIGNATURE_MAX_CHARS].lower()
+    s = _PATH.sub("<path>", s)
+    s = _TOKEN.sub(_hex_token, s)
+    s = _NUM.sub("0", s)
+    return _WS.sub(" ", s).strip(_STRIP)
+
+
+def _hex_token(m: re.Match[str]) -> str:
+    t = m.group(0)
+    if len(t) >= 6 and any(c.isdigit() for c in t) and all(c in "0123456789abcdef" for c in t):
+        return "<hex>"
+    return t
+
+
+def signature_digest(normalized: str) -> str:
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def embed(normalized: str) -> list[float] | None:
+    """ponytail: feature-hashed char 3-5-grams (sha256 bucket + sign), unit-normalized; 06 fixes no
+    embedder, so this is deterministic and model-free. Swap the model behind this one function and
+    re-run embed_missing."""
+    if not normalized:
+        return None
+    v = [0.0] * DIM
+    s = f" {normalized} "
+    for n in (3, 4, 5):
+        for i in range(len(s) - n + 1):
+            h = hashlib.sha256(s[i : i + n].encode("utf-8")).digest()
+            v[int.from_bytes(h[:4], "little") % DIM] += 1.0 if h[4] & 1 else -1.0
+    scale = math.sqrt(sum(x * x for x in v))
+    if scale == 0.0:
+        return None
+    return [x / scale for x in v]
+
+
+def vector_literal(v: Sequence[float]) -> str:
+    return "[" + ",".join(f"{x:.6g}" for x in v) + "]"
+
+
+def _row(r: asyncpg.Record) -> dict[str, Any]:
+    body = json.loads(r["body"]) if isinstance(r["body"], str) else dict(r["body"])
+    out = {
+        "artifact_id": str(r["id"]),
+        "kind": str(r["kind"]),
+        "trigger": str(body.get("trigger", "")),
+        "guidance": str(body.get("guidance", "")),
+        "utility_lcb": float(r["lcb"]) if r["lcb"] is not None else 0.0,
+    }
+    if out["kind"] == "pitfall":
+        out["error_sig_digest"] = signature_digest(normalize_signature(out["trigger"]))
+    return out
+
+
+async def admitted(conn: asyncpg.Connection, tenant_id: str) -> list[dict[str, Any]]:
+    """The edge cache's sync source: every admitted injectable artifact, LCB-ranked (06 §9.4 with
+    d̂ = 0 — no unlabeled repo features reach this service yet, so λ·d̂ is the owed term)."""
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        rows = await conn.fetch(
+            "SELECT id, kind, body, lcb FROM memory_artifacts WHERE tenant_id = $1 "
+            "AND state = 'admitted' AND kind::text = ANY($2::text[]) "
+            "ORDER BY lcb DESC NULLS LAST, id",
+            uuid.UUID(tenant_id),
+            sorted(INJECTABLE_KINDS),
+        )
+    return [_row(r) for r in rows]
+
+
+async def fuzzy_match(
+    conn: asyncpg.Connection,
+    tenant_id: str,
+    normalized: str,
+    *,
+    limit: int = M_INJECT,
+    max_distance: float = FUZZ_DISTANCE,
+) -> list[dict[str, Any]]:
+    """06 §9.5 D29: admitted pitfalls within cosine 0.15 over ix_artifacts_error_signature."""
+    v = embed(normalized)
+    if v is None:
+        return []
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        rows = await conn.fetch(
+            "SELECT id, kind, body, lcb, error_signature <=> $2::text::halfvec AS distance "
+            "FROM memory_artifacts WHERE tenant_id = $1 AND state = 'admitted' "
+            "AND kind = 'pitfall' AND error_signature IS NOT NULL "
+            "ORDER BY error_signature <=> $2::text::halfvec LIMIT $3",
+            uuid.UUID(tenant_id),
+            vector_literal(v),
+            limit,
+        )
+    out = []
+    for r in rows:
+        if r["distance"] <= max_distance:
+            out.append({**_row(r), "distance": float(r["distance"])})
+    return out
+
+
+async def embed_missing(conn: asyncpg.Connection, tenant_id: str) -> int:
+    """Stamp error_signature on pitfall rows that lack one, from body.trigger (the extractor
+    inserts none). Idempotent: a stamped row is never rewritten."""
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        rows = await conn.fetch(
+            "SELECT id, body FROM memory_artifacts WHERE tenant_id = $1 AND kind = 'pitfall' "
+            "AND error_signature IS NULL",
+            uuid.UUID(tenant_id),
+        )
+        n = 0
+        for r in rows:
+            body = json.loads(r["body"]) if isinstance(r["body"], str) else dict(r["body"])
+            v = embed(normalize_signature(str(body.get("trigger", ""))))
+            if v is None:
+                continue
+            await conn.execute(
+                "UPDATE memory_artifacts SET error_signature = $2::text::halfvec, "
+                "updated_at = now() WHERE id = $1 AND error_signature IS NULL",
+                r["id"],
+                vector_literal(v),
+            )
+            n += 1
+    return n

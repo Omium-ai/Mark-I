@@ -109,3 +109,12 @@ async def test_missing_column_names_template_and_field():
     choke.templates["tvo_task_window"] = broken
     with pytest.raises(ValueError, match="tvo_task_window.*verdict_stage"):
         await _reader(choke).attempt_window(*WINDOW, bearer=BEARER)
+
+
+async def test_unstamped_task_is_refused_not_blank_series():
+    """A task whose TaskOpen fell outside the window renders task_seg_version '' at the
+    choke; rollup.py would otherwise mint a '' series the write template refuses later."""
+    choke = MockChoke()
+    choke.templates["tvo_task_window"] = [{**TASK_WINDOW_ROWS[0], "task_seg_version": ""}]
+    with pytest.raises(ValueError, match="t1.*outside the window"):
+        await _reader(choke).attempt_window(*WINDOW, bearer=BEARER)

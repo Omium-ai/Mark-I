@@ -1,0 +1,70 @@
+{
+  "version": "model_prices.v1",
+  "unit": "usd_per_mtok",
+  "retrieved_at": "2026-09-16",
+  "notes": [
+    "06 s8.4: prices live in a versioned model_prices table; a report pins the version it used. This file IS that table for intel; app/pricing stamps '<version>@sha256:<sha256 of this file's bytes>' on every ModelPrice it hands out.",
+    "effective_from is the retrieval date: no vendor page states an effective date. Anthropic's page notes Sonnet 5's $2/$10 is now the standard price (the scheduled 2026-09-01 increase did not occur).",
+    "cache_write is the vendor's per-token price for writing a prompt cache. Anthropic: the 5-minute cache write ($1.25x input); the ledger carries one cache-creation token class, so 1-hour writes (2x input) are under-priced by this table. OpenAI GPT-5.5 and earlier: 'No additional cache-write charge' (prompt-caching guide), so cache_write equals input; GPT-5.6 and later carry the page's explicit cache-write column. Google: the Gemini pricing page publishes a context-caching (read) price and an hourly storage price but no per-token cache-write price, so cache_write is null and app/pricing refuses to price those models rather than infer a number.",
+    "A null in any of input/output/cache_write/cache_read makes the row unpinned: it stays here for the record and price_for() refuses it by name.",
+    "Omitted on purpose (not invented): retired Anthropic models (Opus 4.1, Opus 4, Sonnet 4, Haiku 3.5) and Mythos (limited availability); OpenAI -pro models (no cached-input price on the page) and pre-GPT-4.1 legacy rows; Gemini models with prompt-size-tiered prices (gemini-2.5-pro, gemini-3.1-pro-preview) or time-limited prices (gemini-3.8/3.7/3.6-flash through 2026-12-31), image/audio/video/tts/embedding models."
+  ],
+  "sources": {
+    "anthropic": {
+      "prices": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "model_ids": "https://platform.claude.com/docs/en/about-claude/models/overview",
+      "retrieved_at": "2026-09-16"
+    },
+    "openai": {
+      "prices": "https://developers.openai.com/api/docs/pricing",
+      "cache_write_rule": "https://developers.openai.com/api/docs/guides/prompt-caching",
+      "retrieved_at": "2026-09-16"
+    },
+    "google": {
+      "prices": "https://ai.google.dev/gemini-api/docs/pricing",
+      "retrieved_at": "2026-09-16"
+    }
+  },
+  "rows": [
+    {"provider": "anthropic", "model_id": "claude-fable-5-1", "input": 10.0, "output": 50.0, "cache_write": 12.5, "cache_read": 0.25, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-fable-5", "input": 10.0, "output": 50.0, "cache_write": 12.5, "cache_read": 1.0, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-opus-5", "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-opus-4-8", "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-opus-4-7", "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-opus-4-6", "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-opus-4-5", "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/models/opus-4-5/overview", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-opus-4-5-20251101", "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/models/opus-4-5/overview", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-sonnet-5", "input": 2.0, "output": 10.0, "cache_write": 2.5, "cache_read": 0.2, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-sonnet-4-6", "input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.3, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-sonnet-4-5", "input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.3, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/models/sonnet-4-5/overview", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-sonnet-4-5-20250929", "input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.3, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/models/sonnet-4-5/overview", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-haiku-4-5", "input": 1.0, "output": 5.0, "cache_write": 1.25, "cache_read": 0.1, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "anthropic", "model_id": "claude-haiku-4-5-20251001", "input": 1.0, "output": 5.0, "cache_write": 1.25, "cache_read": 0.1, "effective_from": "2026-09-16", "source": "https://platform.claude.com/docs/en/about-claude/models/overview", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-6-astra", "input": 10.0, "output": 50.0, "cache_write": 12.5, "cache_read": 1.0, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5.6-sol", "input": 4.0, "output": 20.0, "cache_write": 5.0, "cache_read": 0.4, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5.6-terra", "input": 2.0, "output": 12.0, "cache_write": 2.5, "cache_read": 0.2, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5.6-luna", "input": 0.2, "output": 1.2, "cache_write": 0.25, "cache_read": 0.02, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5.5", "input": 5.0, "output": 30.0, "cache_write": 5.0, "cache_read": 0.5, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5.4", "input": 2.5, "output": 15.0, "cache_write": 2.5, "cache_read": 0.25, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5.4-mini", "input": 0.75, "output": 4.5, "cache_write": 0.75, "cache_read": 0.075, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5.4-nano", "input": 0.2, "output": 1.25, "cache_write": 0.2, "cache_read": 0.02, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5.2", "input": 1.75, "output": 14.0, "cache_write": 1.75, "cache_read": 0.175, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5.1", "input": 1.25, "output": 10.0, "cache_write": 1.25, "cache_read": 0.125, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5", "input": 1.25, "output": 10.0, "cache_write": 1.25, "cache_read": 0.125, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5-mini", "input": 0.25, "output": 2.0, "cache_write": 0.25, "cache_read": 0.025, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-5-nano", "input": 0.05, "output": 0.4, "cache_write": 0.05, "cache_read": 0.005, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-4.1", "input": 2.0, "output": 8.0, "cache_write": 2.0, "cache_read": 0.5, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-4.1-mini", "input": 0.4, "output": 1.6, "cache_write": 0.4, "cache_read": 0.1, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-4.1-nano", "input": 0.1, "output": 0.4, "cache_write": 0.1, "cache_read": 0.025, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-4o", "input": 2.5, "output": 10.0, "cache_write": 2.5, "cache_read": 1.25, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "gpt-4o-mini", "input": 0.15, "output": 0.6, "cache_write": 0.15, "cache_read": 0.075, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "o3", "input": 2.0, "output": 8.0, "cache_write": 2.0, "cache_read": 0.5, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "o4-mini", "input": 1.1, "output": 4.4, "cache_write": 1.1, "cache_read": 0.275, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "openai", "model_id": "o3-mini", "input": 1.1, "output": 4.4, "cache_write": 1.1, "cache_read": 0.55, "effective_from": "2026-09-16", "source": "https://developers.openai.com/api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "google", "model_id": "gemini-3.5-flash", "input": 1.5, "output": 9.0, "cache_write": null, "cache_read": 0.15, "effective_from": "2026-09-16", "source": "https://ai.google.dev/gemini-api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "google", "model_id": "gemini-3.5-flash-lite", "input": 0.3, "output": 2.5, "cache_write": null, "cache_read": 0.03, "effective_from": "2026-09-16", "source": "https://ai.google.dev/gemini-api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "google", "model_id": "gemini-3-flash-preview", "input": 0.5, "output": 3.0, "cache_write": null, "cache_read": 0.05, "effective_from": "2026-09-16", "source": "https://ai.google.dev/gemini-api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "google", "model_id": "gemini-2.5-flash", "input": 0.3, "output": 2.5, "cache_write": null, "cache_read": 0.03, "effective_from": "2026-09-16", "source": "https://ai.google.dev/gemini-api/docs/pricing", "retrieved_at": "2026-09-16"},
+    {"provider": "google", "model_id": "gemini-2.5-flash-lite", "input": 0.1, "output": 0.4, "cache_write": null, "cache_read": 0.01, "effective_from": "2026-09-16", "source": "https://ai.google.dev/gemini-api/docs/pricing", "retrieved_at": "2026-09-16"}
+  ]
+}
