@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.omium.mark1d</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/mark1/mark1d</string>
+		<string>--state-dir</string>
+		<string>/home/dev/.omium/mark1</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/home/dev/.omium/mark1/logs/mark1d.log</string>
+	<key>StandardErrorPath</key>
+	<string>/home/dev/.omium/mark1/logs/mark1d.log</string>
+</dict>
+</plist>

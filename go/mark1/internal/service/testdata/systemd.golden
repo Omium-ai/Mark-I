@@ -1,0 +1,11 @@
+[Unit]
+Description=Omium Mark 1 daemon (mark1d)
+After=default.target
+
+[Service]
+ExecStart="/opt/mark1/mark1d" --state-dir "/home/dev/.omium/mark1"
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Omium Mark 1 daemon
+Exec="/opt/mark1/mark1d" --state-dir "/home/dev/.omium/mark1"
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

@@ -23,6 +23,8 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/enroll"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/off"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/report"
+	"github.com/Omium-ai/omium-mark1/go/mark1/internal/selfupdate"
+	"github.com/Omium-ai/omium-mark1/go/mark1/internal/service"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/status"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/verifyreceipts"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/verifyrelease"
@@ -203,7 +205,40 @@ func main() {
 	verifyReleaseCmd.Flags().StringVar(&vrelOpts.Provenance, "provenance", "", "Sigstore bundle (default <artifact>.sigstore.json; or the .jsonl gh attestation download writes)")
 	verifyReleaseCmd.Flags().StringVar(&vrelOpts.TrustedRoot, "trusted-root", "", "Sigstore trusted_root.json[l] (default: the snapshot built into this binary)")
 
-	root.AddCommand(enrollCmd, enableCmd, statusCmd, doctorCmd, reportCmd, offCmd, onCmd, verifyCmd, corpusCmd, verifyReleaseCmd)
+	var svcOpts service.Options
+	serviceCmd := &cobra.Command{Use: "service", Short: "Register mark1d as a login item of the current user (04 §11.4: launchd / systemd --user / Task Scheduler)"}
+	serviceCmd.PersistentFlags().StringVar(&svcOpts.Daemon, "daemon", "", "mark1d binary (default: beside this executable, then PATH)")
+	for _, sub := range []struct {
+		use, short string
+		run        func(*cli.Env, service.Options) error
+	}{
+		{"install", "Register mark1d to run at login and start it (idempotent)", service.Install},
+		{"uninstall", "Stop mark1d and remove exactly what install wrote", service.Uninstall},
+		{"status", "registered / running / pid", service.Query},
+		{"start", "Start the registered mark1d", service.Start},
+		{"stop", "Stop the registered mark1d", service.Stop},
+	} {
+		serviceCmd.AddCommand(&cobra.Command{
+			Use: sub.use, Short: sub.short, Args: cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, args []string) error { return sub.run(env, svcOpts) },
+		})
+	}
+
+	var updOpts selfupdate.Options
+	updateCmd := &cobra.Command{
+		Use:   "update",
+		Short: "Apply the release the update manifest names for this ring, SLSA-verified through verify-release (09 §11.2, FR-POLICY-009)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return selfupdate.Run(ctx, env, updOpts)
+		},
+	}
+	updateCmd.Flags().BoolVar(&updOpts.Check, "check", false, "print the available version; apply nothing")
+	updateCmd.Flags().StringVar(&updOpts.Manifest, "manifest", selfupdate.DefaultManifestURL, "update manifest URL")
+	updateCmd.Flags().StringVar(&updOpts.InstallDir, "install-dir", "", "where the edge binaries live (default: this executable's directory)")
+	updateCmd.Flags().StringVar(&updOpts.Ring, "ring", "", "manifest ring (default: the enrollment channel, else stable)")
+
+	root.AddCommand(enrollCmd, enableCmd, statusCmd, doctorCmd, reportCmd, offCmd, onCmd, verifyCmd, corpusCmd, verifyReleaseCmd, serviceCmd, updateCmd)
 
 	if err := root.Execute(); err != nil {
 		var ee *cli.ExitError
