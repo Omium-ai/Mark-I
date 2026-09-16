@@ -1,7 +1,7 @@
-// A stub httptest server proves the client's §3.3 contract; the integration
-// test against a live controld is skipped with reason — controld's report
-// surface (controld.query-choke) is doc-only today (its internal/querychoke
-// package is a doc.go), so there is nothing real to drive yet.
+// A stub httptest server proves the client's §3.3 contract. The guarantee-grade
+// case serves controld's own fixture (querychoke/testdata/tvo_report_guarantee_body.json,
+// asserted there against the real handler's output), so the CLI renders exactly
+// what controld emits — one fixture, two asserters.
 package report
 
 import (
@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,7 +138,65 @@ func TestReportNotEnrolled(t *testing.T) {
 	}
 }
 
-func TestReportAgainstLiveControld(t *testing.T) {
-	t.Skip("controld has no report surface yet: 08 §3.3 routes GET /api/v1/reports/tvo to controld.query-choke, " +
-		"whose go/controld/internal/querychoke is a doc.go stub — the tvoStub tests above are the executable contract until it lands")
+// TestReportGuaranteeGradeEndToEnd: FR-CLI-005's positive control — the body
+// controld's handler emits for a covered, shed-free day under a usd regime
+// pinned to the price table (querychoke TestTVOReportGuaranteeGradeFromRegime
+// locks the fixture to the handler) renders as a guarantee-grade report with
+// its band, basis and price-table pin, and --guarantee-grade exits 0.
+func TestReportGuaranteeGradeEndToEnd(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "controld", "internal", "querychoke", "testdata", "tvo_report_guarantee_body.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["guarantee_grade"] != true || !strings.HasPrefix(body["price_table_version"].(string), "model_prices.v1@sha256:") {
+		t.Fatalf("fixture is not a guarantee-grade usd body: %s", raw)
+	}
+	body["trend"] = []map[string]any{{"day": "2026-09-16", "tvo": body["tvo"]}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/reports/tvo", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok-1" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(body)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	for _, jsonOut := range []bool{true, false} {
+		env, out := enrolledEnv(t, srv.URL)
+		env.JSON = jsonOut
+		if err := Run(context.Background(), env, Options{Window: "30d", GuaranteeGrade: true}); err != nil {
+			t.Fatalf("json=%v: guarantee-grade report refused: %v", jsonOut, err)
+		}
+		if jsonOut {
+			var res struct {
+				OK     bool           `json:"ok"`
+				Report map[string]any `json:"report"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+				t.Fatal(err)
+			}
+			if !res.OK || res.Report["guarantee_grade"] != true || res.Report["price_table_version"] != body["price_table_version"] ||
+				res.Report["cost_basis"] != "usd" || res.Report["coverage_band"] == nil {
+				t.Fatalf("json passthrough narrowed the report: %s", out.String())
+			}
+			continue
+		}
+		for _, line := range []string{
+			"tvo           100 (usd basis)",
+			"prices        " + body["price_table_version"].(string),
+			"coverage      0.98 observed (floor 0.95)",
+			"waste         retry_loop=10 re_exploration=20 over_model=30",
+			"guarantee     GRADE OK",
+		} {
+			if !strings.Contains(out.String(), line+"\n") {
+				t.Fatalf("human render lacks %q:\n%s", line, out.String())
+			}
+		}
+	}
 }

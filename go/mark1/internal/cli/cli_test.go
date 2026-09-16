@@ -154,3 +154,48 @@ func TestCoverageJournalRefusesAnUnplaceableKind(t *testing.T) {
 		t.Errorf("a refused transition still created the journal: %v", err)
 	}
 }
+
+// TestOptInWriterKeepsTheSiblingField: gates/opt-in.json carries stop_gate and
+// exploration together; writing one never drops the other, and the file goes
+// away only once neither remains.
+func TestOptInWriterKeepsTheSiblingField(t *testing.T) {
+	env := &Env{StateDir: t.TempDir()}
+	if err := env.WriteStopGateOptIn("2026-09-15T00:00:00Z", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(env.StopGateOptInPath())
+	if string(raw) != `{"stop_gate":true,"exploration":false,"ts":"2026-09-15T00:00:00Z","user":"alice"}` {
+		t.Fatalf("artifact %s", raw)
+	}
+	if err := env.UpdateOptIn("2026-09-16T00:00:00Z", "bob", func(a *OptIn) { a.Exploration = true }); err != nil {
+		t.Fatal(err)
+	}
+	if a := env.ReadOptIn(); !a.StopGate || !a.Exploration || a.User != "bob" {
+		t.Fatalf("exploration write dropped stop_gate: %+v", a)
+	}
+	if sg, ex := env.ReadStopGate(), env.ReadExploration(); sg.State != "opted_in" || ex.State != "opted_in" || ex.TS != "2026-09-16T00:00:00Z" {
+		t.Fatalf("postures %+v %+v", sg, ex)
+	}
+	if err := env.UpdateOptIn("2026-09-17T00:00:00Z", "bob", func(a *OptIn) { a.StopGate = false }); err != nil {
+		t.Fatal(err)
+	}
+	if a := env.ReadOptIn(); a.StopGate || !a.Exploration {
+		t.Fatalf("stop_gate clear dropped exploration: %+v", a)
+	}
+	if err := env.UpdateOptIn("2026-09-18T00:00:00Z", "bob", func(a *OptIn) { a.Exploration = false }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(env.StopGateOptInPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("artifact with neither field must be removed: %v", err)
+	}
+	if err := env.UpdateOptIn("2026-09-19T00:00:00Z", "bob", func(a *OptIn) { a.Exploration = false }); err != nil {
+		t.Fatalf("clearing an absent artifact must be a no-op: %v", err)
+	}
+	// Garbage reads as neither, exactly as mark1d's fabric.optedIn does.
+	if err := os.WriteFile(env.StopGateOptInPath(), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if a := env.ReadOptIn(); a.StopGate || a.Exploration {
+		t.Fatalf("garbage decoded as %+v", a)
+	}
+}

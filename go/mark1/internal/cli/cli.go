@@ -127,6 +127,9 @@ func (e *Env) BundleMetaPath() string { return filepath.Join(e.StateDir, "bundle
 func (e *Env) SpoolDir() string       { return filepath.Join(e.StateDir, "spool") }
 func (e *Env) QuarantineDir() string  { return filepath.Join(e.StateDir, "quarantine") }
 
+// StopGateOptInPath must byte-equal mark1d's fabric.OptInPath (FR-POLICY-006).
+func (e *Env) StopGateOptInPath() string { return filepath.Join(e.StateDir, "gates", "opt-in.json") }
+
 // KeyCustody names the rung of 04 §2.9's ladder the device key actually sits
 // on — keychain/TPM where available, the 0600 file floor otherwise — and, when
 // it is not the top rung, why. NFR-PORTABILITY-004: the ladder is allowed to
@@ -221,10 +224,15 @@ type Enrollment struct {
 	TenantID       string    `json:"tenant_id"`
 	DeviceToken    string    `json:"device_token"`
 	TokenExpiresAt time.Time `json:"token_expires_at"` // ≤24h per §3.1
-	Server         string    `json:"server"`
-	Channel        string    `json:"channel"`
-	ServerMinEdge  string    `json:"server_min_edge,omitempty"`
-	KeyManifestURI string    `json:"key_manifest_uri,omitempty"`
+	// TenantRootHex is 04 §2.9's per-tenant HMAC root ("delivered at
+	// enrollment"), the hex the daemon keys Usage idem_key / task digests /
+	// anchor output HMACs from — the same custody as the token (this 0600
+	// file). Additive to 08 §3.1's poll body (server key tenant_root_hex).
+	TenantRootHex  string `json:"tenant_root_hex,omitempty"`
+	Server         string `json:"server"`
+	Channel        string `json:"channel"`
+	ServerMinEdge  string `json:"server_min_edge,omitempty"`
+	KeyManifestURI string `json:"key_manifest_uri,omitempty"`
 	Endpoints      struct {
 		Ingest       string `json:"ingest,omitempty"`
 		Attach       string `json:"attach,omitempty"`
@@ -397,11 +405,77 @@ type Consent struct {
 	// after this enable — empty when every adapter refused (M1E-71xx), which is
 	// itself the fact: consent to read, nothing yet capturing.
 	AgentsProvisioned []string `json:"agents_provisioned"`
+	// StopGate marks the line that armed fail-closed blocking (FR-POLICY-006).
+	StopGate bool `json:"stop_gate,omitempty"`
+	// Exploration marks the line that gave D-EF's local half of ε>0 consent.
+	Exploration bool `json:"exploration,omitempty"`
 }
 
 // AppendConsent journals one Consent (see the type for what and why).
 func (e *Env) AppendConsent(c Consent) error {
 	return appendJSONL(e.ConsentPath(), c)
+}
+
+// StopGate is the FR-POLICY-006 opt-in posture every surface prints.
+type StopGate struct {
+	State string `json:"state"` // opted_in | not_opted_in
+	TS    string `json:"ts,omitempty"`
+	User  string `json:"user,omitempty"`
+}
+
+func (s StopGate) String() string {
+	if s.State != "opted_in" {
+		return s.State
+	}
+	return fmt.Sprintf("%s (by %s at %s)", s.State, s.User, s.TS)
+}
+
+// OptIn is <state>/gates/opt-in.json, byte-compatible with mark1d's fabric.optIn (FR-POLICY-006 + D-EF); ts/user stamp the last write.
+type OptIn struct {
+	StopGate    bool   `json:"stop_gate"`
+	Exploration bool   `json:"exploration"`
+	TS          string `json:"ts"`
+	User        string `json:"user,omitempty"`
+}
+
+// ReadOptIn answers as mark1d's fabric.optedIn does: absent, garbage or false is not opted in, per field.
+func (e *Env) ReadOptIn() (a OptIn) {
+	if data, err := os.ReadFile(e.StopGateOptInPath()); err != nil || json.Unmarshal(data, &a) != nil {
+		return OptIn{}
+	}
+	return a
+}
+
+func (e *Env) ReadStopGate() StopGate    { a := e.ReadOptIn(); return posture(a.StopGate, a) }
+func (e *Env) ReadExploration() StopGate { a := e.ReadOptIn(); return posture(a.Exploration, a) }
+
+func posture(on bool, a OptIn) StopGate {
+	if !on {
+		return StopGate{State: "not_opted_in"}
+	}
+	return StopGate{State: "opted_in", TS: a.TS, User: a.User}
+}
+
+// UpdateOptIn read-modify-writes one field, keeps the sibling, and removes the file only once neither remains.
+func (e *Env) UpdateOptIn(ts, user string, set func(*OptIn)) error {
+	a := e.ReadOptIn()
+	set(&a)
+	if !a.StopGate && !a.Exploration {
+		if err := os.Remove(e.StopGateOptInPath()); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	a.TS, a.User = ts, user
+	data, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	return WriteFileAtomic(e.StopGateOptInPath(), data, 0o600)
+}
+
+func (e *Env) WriteStopGateOptIn(ts, user string) error {
+	return e.UpdateOptIn(ts, user, func(a *OptIn) { a.StopGate = true })
 }
 
 // AnchorCandidates is <state>/anchors/candidates.json: mark1d's answer to

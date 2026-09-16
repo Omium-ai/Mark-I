@@ -39,8 +39,10 @@ type TVO struct {
 		ReExplorationTokens json.Number `json:"re_exploration_tokens"`
 		OverModelTokens     json.Number `json:"over_model_tokens"`
 	} `json:"waste"`
-	GuaranteeGrade bool   `json:"guarantee_grade"`
-	Refusal        string `json:"refusal,omitempty"`
+	// PriceTableVersion is stamped on usd reports (08 §3.3): the pinned table the figures were priced under (06 §8.4).
+	PriceTableVersion string `json:"price_table_version,omitempty"`
+	GuaranteeGrade    bool   `json:"guarantee_grade"`
+	Refusal           string `json:"refusal,omitempty"`
 }
 
 func Run(ctx context.Context, env *cli.Env, opts Options) error {
@@ -127,6 +129,9 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 
 func renderHuman(w io.Writer, t *TVO) {
 	_, _ = fmt.Fprintf(w, "tvo           %s (%s basis)\n", t.TVO, t.CostBasis)
+	if t.PriceTableVersion != "" {
+		_, _ = fmt.Fprintf(w, "prices        %s\n", t.PriceTableVersion)
+	}
 	_, _ = fmt.Fprintf(w, "coverage      %.2f observed (floor %.2f)\n",
 		t.CoverageBand.ObservedFraction, t.CoverageBand.Floor)
 	_, _ = fmt.Fprintf(w, "waste         retry_loop=%s re_exploration=%s over_model=%s\n",

@@ -43,6 +43,7 @@ type pollResponse struct {
 	TenantID      string `json:"tenant_id"`
 	DeviceToken   string `json:"device_token"`
 	ExpiresIn     int    `json:"expires_in"`
+	TenantRootHex string `json:"tenant_root_hex"` // 04 §2.9 root; additive to 08 §3.1
 	ServerMinEdge string `json:"server_min_edge"`
 	Endpoints     struct {
 		Ingest       string `json:"ingest"`
@@ -171,6 +172,7 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 		TenantID:       poll.TenantID,
 		DeviceToken:    poll.DeviceToken,
 		TokenExpiresAt: time.Now().Add(time.Duration(poll.ExpiresIn) * time.Second),
+		TenantRootHex:  poll.TenantRootHex,
 		Server:         env.BaseURL(),
 		Channel:        opts.Channel,
 		ServerMinEdge:  poll.ServerMinEdge,

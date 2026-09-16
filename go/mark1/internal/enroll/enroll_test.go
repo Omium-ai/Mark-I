@@ -103,6 +103,7 @@ func enrollStub(t *testing.T, pendings int) (*httptest.Server, *atomic.Int32) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status": "active", "device_id": "dev-1", "tenant_id": "ten-1",
 			"device_token": "tok-1", "expires_in": 86400,
+			"tenant_root_hex": stubTenantRoot,
 			"server_min_edge": "1.0.0",
 			"endpoints":       map[string]string{"ingest": "https://ingest.example"},
 		})
@@ -110,6 +111,28 @@ func enrollStub(t *testing.T, pendings int) (*httptest.Server, *atomic.Int32) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv, polls
+}
+
+// stubTenantRoot is the 04 §2.9 root the stub server delivers (32 bytes hex).
+const stubTenantRoot = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+
+// TestEnrollPersistsTenantRoot: the root rides the ACTIVE poll body as
+// tenant_root_hex and lands in enrollment.json beside the token — the 0600
+// file mark1d reads its identity from, so the daemon never needs --tenant-salt.
+func TestEnrollPersistsTenantRoot(t *testing.T) {
+	srv, _ := enrollStub(t, 0)
+	env, _ := testEnv(t, srv.URL)
+	if err := Run(context.Background(), env, Options{Tenant: testTenant}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := env.LoadEnrollment()
+	if err != nil || doc.TenantRootHex != stubTenantRoot {
+		t.Fatalf("persisted tenant_root_hex %q, want %q (%v)", doc.TenantRootHex, stubTenantRoot, err)
+	}
+	raw, err := os.ReadFile(env.EnrollmentPath())
+	if err != nil || !bytes.Contains(raw, []byte(`"tenant_root_hex": "`+stubTenantRoot+`"`)) {
+		t.Fatalf("enrollment.json lacks the wire key tenant_root_hex:\n%s", raw)
+	}
 }
 
 func TestEnrollHappyPath(t *testing.T) {

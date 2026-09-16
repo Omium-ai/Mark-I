@@ -278,3 +278,51 @@ func TestStatusListsQuarantinedBatches(t *testing.T) {
 		}
 	}
 }
+
+// TestStatusShowsStopGatePosture: FR-POLICY-006's opt-in is visible where an
+// operator reads — opted_in with the artifact's ts/user, not_opted_in when the
+// file is absent, and (exactly as mark1d's optedIn reads it) when it is
+// garbage or says false.
+func TestStatusShowsStopGatePosture(t *testing.T) {
+	env, out := enrolledEnv(t)
+	sock := filepath.Join(t.TempDir(), "no.sock")
+	report := func() Report {
+		t.Helper()
+		out.Reset()
+		if err := Run(env, Options{Socket: sock}); err != nil {
+			t.Fatal(err)
+		}
+		var rep Report
+		if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+			t.Fatal(err)
+		}
+		return rep
+	}
+	if rep := report(); rep.StopGate.State != "not_opted_in" || rep.StopGate.TS != "" {
+		t.Fatalf("absent artifact reported %+v", rep.StopGate)
+	}
+	if err := env.WriteStopGateOptIn("2026-09-15T00:00:00Z", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	rep := report()
+	if rep.StopGate.State != "opted_in" || rep.StopGate.TS != "2026-09-15T00:00:00Z" || rep.StopGate.User != "alice" {
+		t.Fatalf("opted-in artifact reported %+v", rep.StopGate)
+	}
+	env.JSON = false
+	out.Reset()
+	if err := Run(env, Options{Socket: sock}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "stop gate     opted_in (by alice at 2026-09-15T00:00:00Z)") {
+		t.Fatalf("human output must state the posture:\n%s", out.String())
+	}
+	env.JSON = true
+	for _, body := range []string{`{"stop_gate":false}`, `not json`} {
+		if err := os.WriteFile(env.StopGateOptInPath(), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if rep := report(); rep.StopGate.State != "not_opted_in" {
+			t.Fatalf("artifact %q reported %+v; the daemon would not arm on it", body, rep.StopGate)
+		}
+	}
+}

@@ -25,14 +25,15 @@ type Options struct {
 }
 
 type Report struct {
-	OK         bool        `json:"ok"`
-	Enrollment *Enrollment `json:"enrollment"`
-	KeyCustody KeyCustody  `json:"key_custody"`
-	Daemon     Daemon      `json:"daemon"`
-	Workspaces []Workspace `json:"workspaces"`
-	Spool      Spool       `json:"spool"`
-	Bundle     *Bundle     `json:"bundle"` // null until the policy client persists one
-	Off        Off         `json:"off"`
+	OK         bool         `json:"ok"`
+	Enrollment *Enrollment  `json:"enrollment"`
+	KeyCustody KeyCustody   `json:"key_custody"`
+	Daemon     Daemon       `json:"daemon"`
+	Workspaces []Workspace  `json:"workspaces"`
+	Spool      Spool        `json:"spool"`
+	Bundle     *Bundle      `json:"bundle"` // null until the policy client persists one
+	Off        Off          `json:"off"`
+	StopGate   cli.StopGate `json:"stop_gate"`
 }
 
 type Enrollment struct {
@@ -167,6 +168,7 @@ func Run(env *cli.Env, opts Options) error {
 	rep.Spool.QuarantineRetention = quarantineRetention
 	rep.Bundle = readBundleMeta(env)
 	rep.Off = readOff(env)
+	rep.StopGate = env.ReadStopGate()
 
 	return env.Emit(rep, func(w io.Writer) { renderHuman(w, &rep) })
 }
@@ -342,4 +344,5 @@ func renderHuman(w io.Writer, r *Report) {
 	} else {
 		_, _ = fmt.Fprintf(w, "off           inactive\n")
 	}
+	_, _ = fmt.Fprintf(w, "stop gate     %s\n", r.StopGate)
 }

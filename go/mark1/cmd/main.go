@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
+	"github.com/Omium-ai/omium-mark1/go/mark1/internal/corpus"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/doctor"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/enable"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/enroll"
@@ -24,6 +25,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/report"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/status"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/verifyreceipts"
+	"github.com/Omium-ai/omium-mark1/go/mark1/internal/verifyrelease"
 )
 
 // Injected at release via -ldflags "-X main.version=..." (13 §9).
@@ -96,6 +98,12 @@ func main() {
 	}
 	enableCmd.Flags().StringSliceVar(&enableOpts.Anchors, "anchors", nil, "consent non-interactively to exactly these catalog IDs (comma-separated)")
 	enableCmd.Flags().BoolVar(&enableOpts.NoAnchors, "no-anchors", false, "skip anchor consent prompts")
+	enableCmd.Flags().BoolVar(&enableOpts.StopGate, "stop-gate", false, "opt in (at a terminal) to fail-closed blocking below the knee (FR-POLICY-006); `mark1 off` removes it")
+	enableCmd.Flags().BoolVar(&enableOpts.NoStopGate, "no-stop-gate", false, "remove the stop-gate opt-in")
+	enableCmd.MarkFlagsMutuallyExclusive("stop-gate", "no-stop-gate")
+	enableCmd.Flags().BoolVar(&enableOpts.Exploration, "exploration", false, "opt in to ε>0 exploration (D-EF local half; the tenant's signed bundle must also carry it)")
+	enableCmd.Flags().BoolVar(&enableOpts.NoExploration, "no-exploration", false, "remove the exploration opt-in")
+	enableCmd.MarkFlagsMutuallyExclusive("exploration", "no-exploration")
 
 	statusCmd := &cobra.Command{
 		Use:   "status",
@@ -169,7 +177,33 @@ func main() {
 	verifyCmd.Flags().StringVar(&vrOpts.Keys, "keys", "", "local key-manifest snapshot (default: fetched from /api/v1/receipts/keys)")
 	verifyCmd.Flags().StringVar(&vrOpts.Witness, "witness", "", "local witness snapshot file")
 
-	root.AddCommand(enrollCmd, enableCmd, statusCmd, doctorCmd, reportCmd, offCmd, onCmd, verifyCmd)
+	var corpusOpts corpus.Options
+	corpusRecordCmd := &cobra.Command{
+		Use:   "record",
+		Short: "Record a conformance corpus from the installed `claude` (12 §3.2 recording lane)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return corpus.Record(ctx, env, corpusOpts)
+		},
+	}
+	corpusRecordCmd.Flags().StringVar(&corpusOpts.Out, "out", "conformance/hooks/claudecode", "corpus root; writes v<installed-version>/ under it")
+	corpusCmd := &cobra.Command{Use: "corpus", Short: "Conformance corpus tooling"}
+	corpusCmd.AddCommand(corpusRecordCmd)
+
+	var vrelOpts verifyrelease.Options
+	verifyReleaseCmd := &cobra.Command{
+		Use:   "verify-release <artifact>",
+		Short: "Verify a release artifact's SLSA provenance before executing it (09 §11.2, FR-POLICY-009)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vrelOpts.Artifact = args[0]
+			return verifyrelease.Run(env, vrelOpts)
+		},
+	}
+	verifyReleaseCmd.Flags().StringVar(&vrelOpts.Provenance, "provenance", "", "Sigstore bundle (default <artifact>.sigstore.json; or the .jsonl gh attestation download writes)")
+	verifyReleaseCmd.Flags().StringVar(&vrelOpts.TrustedRoot, "trusted-root", "", "Sigstore trusted_root.json[l] (default: the snapshot built into this binary)")
+
+	root.AddCommand(enrollCmd, enableCmd, statusCmd, doctorCmd, reportCmd, offCmd, onCmd, verifyCmd, corpusCmd, verifyReleaseCmd)
 
 	if err := root.Execute(); err != nil {
 		var ee *cli.ExitError
