@@ -1,0 +1,51 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"   # 12 §2.2: the rolling 7-day fail-static soak and the chaos slow set run nightly, not per PR
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  GO_VERSION: "1.25.14"
+
+jobs:
+  soak-and-chaos-slow:
+    name: soak + chaos slow set
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      M1_REQUIRE_STORES: "1"
+      M1_TEST_PG_DSN: postgres://mark1:mark1@127.0.0.1:5432/mark1_test
+      M1_MIGRATE_PG_DSN: postgres://m1_bootstrap@127.0.0.1:5432/mark1_test
+      M1_TEST_CH_DSN: http://127.0.0.1:8123/?database=default
+      M1_TEST_S3_ENDPOINT: http://127.0.0.1:9002
+      CLICKHOUSE_HOST: "127.0.0.1"
+      CLICKHOUSE_CLIENT: ".stores/bin/clickhouse client --host 127.0.0.1 --port 9000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: extractions/setup-just@v2
+      - name: userns for the tmpfs disk-full leg
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 && unshare -rn true
+      - name: 7-day fail-static soak
+        run: just test-soak
+      - name: Provision Postgres + ClickHouse + MinIO
+        run: just stores-up
+      - name: Migrate
+        run: just migrate "$M1_MIGRATE_PG_DSN"
+      - name: chaos slow set
+        run: just test-chaos-slow
+      - name: Store logs on failure
+        if: failure()
+        run: tail -n 200 .stores/log/*.log || true

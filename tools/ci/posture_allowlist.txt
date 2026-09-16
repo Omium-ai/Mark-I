@@ -1,0 +1,60 @@
+# posture_allowlist.txt -- path:rowid:slug<TAB>reason, checked by tools/ci/posture_gate.sh
+# (CON-007). Every line here is a 04 Sec.10 / 05 Sec.9 failure-mode-catalog row whose named
+# test slug does not resolve to anything in go/**/_test.go (func or t.Run), rust fn, python
+# def test_, conformance/e2e or the justfile -- a genuine, reviewed backlog item, not a silent
+# exemption. Seeded 2026-09-16: of 46 edge rows (04 Sec.10) and 11 cloud rows (05 Sec.9), only
+# three edge rows resolve today -- F-01 (chaos_daemon_kill9) and F-03/F-05, the two legs of
+# chaos_process_kill that are wired -- go/mark1d/internal/spool/chaos_kill9_test.go and
+# go/mark1d/cmd/chaos_process_kill_test.go are the entire built chaos harness (justfile
+# test-chaos, 12 Sec.6.2's "fast set"). Everything below is 12 Sec.6's full/nightly tier,
+# named in the LLD and not yet landed. A new hit fails until it lands a real test (preferred)
+# or a line here with a reason.
+docs/04-lld-edge.md:F-02:chaos_daemon_crashloop	unbuilt: 12 Sec.6.2 names this beside chaos_daemon_kill9; only the kill9 leg is wired, the crash-loop-counter leg is not
+docs/04-lld-edge.md:F-04:cortex_shard_corrupt	unbuilt, 12 Sec.6 full/nightly tier -- no cortexd chaos harness exists yet
+docs/04-lld-edge.md:F-06:bench_proxy_latency_rss	unbuilt -- bench/ is a placeholder (RUNNER.md only, no bench code); 12 Sec.7's per-request self-timer + RSS-poll CI thresholds are not wired to this slug
+docs/04-lld-edge.md:F-07:chaos_proxy_stream_suite	unbuilt, 12 Sec.6.1 names 5 sub-cases (chaos_proxy_upstream_stall/midstream_reset/slow_client/tls_fail_midbody/kill_midstream) as a suite; none exist as tests yet, kill_midstream included
+docs/04-lld-edge.md:F-08:proxy_tee_saturation	unbuilt, 12 Sec.6 full/nightly tier -- no tee-saturation chaos harness exists yet
+docs/04-lld-edge.md:F-10:shim_spill_replay	unbuilt, 12 Sec.6 full/nightly tier -- no shim-spill chaos harness exists yet
+docs/04-lld-edge.md:F-11:gate_timeout_allows	unbuilt as a chaos test (SIGSTOP the daemon mid-query); TestGateDeadlineExpired in go/mark1d/internal/fabric/gate_test.go covers the in-process deadline logic, a different test, not this slug
+docs/04-lld-edge.md:F-12:adapter_version_sniff_drop	unbuilt, 12 Sec.6 full/nightly tier -- no adapter-version-drop chaos harness exists yet
+docs/04-lld-edge.md:F-13:tailer_rotation	unbuilt, 12 Sec.6 full/nightly tier -- no tailer-rotation chaos harness exists yet
+docs/04-lld-edge.md:F-14:tailer_truncation_replay	unbuilt, 12 Sec.6 full/nightly tier -- no tailer-truncation chaos harness exists yet
+docs/04-lld-edge.md:F-15:tailer_cursor_loss	unbuilt, 12 Sec.6 full/nightly tier -- no tailer-cursor-loss chaos harness exists yet
+docs/04-lld-edge.md:F-16:tailer_retention_gap	unbuilt, 12 Sec.6 full/nightly tier -- no tailer-retention-gap chaos harness exists yet
+docs/04-lld-edge.md:F-17:spool_billing_blocks_on_full	unbuilt as this slug; go/mark1d/internal/spool/spool_test.go asserts billing-blocks-on-full behaviour under an ordinary unit test, not a chaos test named for this row
+docs/04-lld-edge.md:F-18:spool_diag_shed_accounted	unbuilt, 12 Sec.6 full/nightly tier -- no diagnostics-shed chaos harness exists yet
+docs/04-lld-edge.md:F-19:spool_disk_hardstop	unbuilt as this slug; spool_test.go's disk-hardstop coverage is an ordinary unit test (TestDiskHardStop, per CON-007's own FR-SPINE-006 row), not a chaos test named for this row
+docs/04-lld-edge.md:F-20:spool_kill9_taillos_accounted	unbuilt, 12 Sec.6 full/nightly tier -- the typo is adopted-as-is per 12 Sec.1.2; no test carries this exact slug yet
+docs/04-lld-edge.md:F-21:spool_midfile_crc	unbuilt, 12 Sec.6 full/nightly tier -- no mid-file-CRC chaos harness exists yet
+docs/04-lld-edge.md:F-22:uplink_park_requeue	unbuilt, 12 Sec.6 full/nightly tier -- no uplink-park chaos harness exists yet
+docs/04-lld-edge.md:F-23:uplink_4xx_quarantine	unbuilt, 12 Sec.6 full/nightly tier -- no uplink-quarantine chaos harness exists yet
+docs/04-lld-edge.md:F-24:uplink_409_divergence	unbuilt, 12 Sec.6 full/nightly tier -- no batch-divergence chaos harness exists yet
+docs/04-lld-edge.md:F-25:identity_refresh_outage	unbuilt, 12 Sec.6 full/nightly tier -- no identity-refresh-outage chaos harness exists yet
+docs/04-lld-edge.md:F-26:identity_revoked_purge	unbuilt, 12 Sec.6 full/nightly tier -- no revocation-purge chaos harness exists yet
+docs/04-lld-edge.md:F-27:bundle_invalid_keeps_lkg	unbuilt as this slug; go/mark1d/internal/bundle's LKG coverage (client_test.go, client_rotation_test.go) is ordinary unit tests, not a chaos/negative test named for this row
+docs/04-lld-edge.md:F-28:bundle_command_string_rejects	unbuilt, 12 Sec.6 full/nightly tier -- no dedicated test carries this slug yet
+docs/04-lld-edge.md:F-29:bundle_maxage_builtins	unbuilt, 12 Sec.6 full/nightly tier -- no dedicated test carries this slug yet
+docs/04-lld-edge.md:F-30:bundle_skip_and_retain	unbuilt, 12 Sec.6 full/nightly tier -- no dedicated test carries this slug yet
+docs/04-lld-edge.md:F-31:anchor_error_not_violated	unbuilt, 12 Sec.6 full/nightly tier -- no dedicated test carries this slug yet
+docs/04-lld-edge.md:F-32:antitamper_path_shim	unbuilt, 12 Sec.6 full/nightly tier -- no antitamper chaos harness exists yet
+docs/04-lld-edge.md:F-33:antitamper_worktree_suppression	unbuilt, 12 Sec.6 full/nightly tier -- no antitamper chaos harness exists yet
+docs/04-lld-edge.md:F-34:anchor_integrity_incomplete	unbuilt, 12 Sec.6 full/nightly tier -- no dedicated test carries this slug yet
+docs/04-lld-edge.md:F-35:redact_fails_closed	unbuilt as this slug; rust/mark1-redact has extensive fail-closed unit/property coverage (see CON-008's ledger row) under other test names, not one named for this row
+docs/04-lld-edge.md:F-39:loopback_host_origin	unbuilt as this slug; go/mark1d/internal/fabric/loopback_test.go covers Host/Origin refusal under other test names (see FR-SPINE-005's ledger row), not one named for this row
+docs/04-lld-edge.md:F-40:fabric_symlink_refusal	unbuilt, 12 Sec.6 full/nightly tier -- no dedicated test carries this slug yet
+docs/04-lld-edge.md:F-41:fuzz_m1pl_frames	unbuilt under this name; a related fuzzer exists (rust/m1p-wire fuzz/frame_decode, cited FR-SPINE-004) but nothing is named or tagged fuzz_m1pl_frames
+docs/04-lld-edge.md:F-42:custody_floor	unbuilt, 12 Sec.6 full/nightly tier -- no dedicated test carries this slug yet
+docs/04-lld-edge.md:F-43:chaos_sleep_wake	unbuilt, 12 Sec.6 full/nightly tier -- no sleep/wake chaos harness exists yet
+docs/04-lld-edge.md:F-44:skew_ordering_invariance	unbuilt, 12 Sec.6 full/nightly tier -- no dedicated test carries this slug yet
+docs/04-lld-edge.md:F-45:fragment_user_edit_refusal	unbuilt, 12 Sec.6 full/nightly tier -- no dedicated test carries this slug yet
+docs/05-lld-cloud.md:S3 unavailable (ingest bucket):chaos_s3_outage_no_false_ack	unbuilt, 12 Sec.6.3 slow set -- 05 Sec.9's cloud chaos suite ("adopted verbatim") has zero tests in go/controld yet
+docs/05-lld-cloud.md:ClickHouse unavailable:chaos_ch_outage_ingest_unaffected	unbuilt, 12 Sec.6.3 slow set; see the S3-unavailable row, same suite
+docs/05-lld-cloud.md:Postgres failover (multi-AZ RDS, ~30–60 s):chaos_pg_failover_bounded_window	unbuilt, 12 Sec.6.3 slow set; see the S3-unavailable row, same suite
+docs/05-lld-cloud.md:KMS throttling:chaos_kms_throttle_tenant_isolated	unbuilt, 12 Sec.6.3 slow set; see the S3-unavailable row, same suite
+docs/05-lld-cloud.md:Poison batch (decodes but crashes projection):negative_poison_batch_parks_not_loops	unbuilt, 12 Sec.6.3 slow set; see the S3-unavailable row, same suite
+docs/05-lld-cloud.md:Clock skew (edge clock wrong):conformance_skewed_device_ordering	unbuilt, 12 Sec.6.3 slow set; see the S3-unavailable row, same suite
+docs/05-lld-cloud.md:Duplicate flood (edge replay bug re-sends history):negative_duplicate_flood_no_double_count	unbuilt, 12 Sec.6.3 slow set; see the S3-unavailable row, same suite
+docs/05-lld-cloud.md:Compromised device token:negative_revoked_token_60s_cutoff	unbuilt, 12 Sec.6.3 slow set; see the S3-unavailable row, same suite
+docs/05-lld-cloud.md:Envelope/token identity disagreement:negative_envelope_tenant_spoof_rejected	unbuilt, 12 Sec.6.3 slow set; see the S3-unavailable row, same suite
+docs/05-lld-cloud.md:Transparency log unavailable (serving side):chaos_tlog_outage_publication_halts	unbuilt, 12 Sec.6.3 slow set; see the S3-unavailable row, same suite
+docs/05-lld-cloud.md:Budget-exhausted ε ledger:negative_epsilon_exhaustion_refuses	unbuilt, 12 Sec.6.3 slow set; see the S3-unavailable row, same suite

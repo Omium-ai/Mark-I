@@ -11,6 +11,7 @@ run:
     # chaos: the kill-9 harnesses. Without this the linter never opens them -- a planted
     # unchecked os.Remove was invisible to `just lint-go` and errcheck with the tag (09-15).
     - chaos
+    - soak
 
 linters:
   default: none

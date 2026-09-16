@@ -118,9 +118,18 @@ test-rust:
 #   integration -> `just test-integration`      (in `just ci`; CI job `integration`)
 #   chaos       -> `just test-chaos`            (in `just ci`; CI job `integration`, Linux-only
 #                  per 12 §11.1 stage 2e). The ⚡ fast set is chaos_daemon_kill9 (spool writer)
-#                  plus cmd/chaos_process_kill (mark1d and mark1-proxy SIGKILLed under a live
-#                  hookshim session; cortexd is a named skip until internal/cortex exists). The
-#                  slow set (network partition, clock skew, disk-full) is nightly and unbuilt.
+#                  plus cmd/chaos_process_kill (mark1d, mark1-proxy and cortexd SIGKILLed under
+#                  the real daemon).
+#                  `just test-chaos-slow`       (nightly per 12 §6, not in `just ci`). The slow set:
+#                  network partition (internal/uplink + cmd chaos_network_partition), clock skew /
+#                  sleep-wake (internal/uplink chaos_clock_skew), disk-full (internal/spool
+#                  chaos_disk_full{,_linux}), and the cloud legs in go/controld
+#                  (internal/ingest chaos_cloud, internal/policydist chaos_tlog), which need the
+#                  stores and carry `integration && chaos` so the test-integration tag gate still
+#                  sees them.
+#   soak        -> `just test-soak`             (nightly per 12 §2.2, not in `just ci`). The 7-day
+#                  fail-static soak: internal/soak drives the real bundle client, uplink, spool and
+#                  gate under one injected clock through a control-plane blackhole.
 #
 # PLATFORM tags hide suites from a CI LEG rather than from a recipe, and the inventory missed
 # them entirely — which is how `go (windows-2022)` sat red-and-unread (D-BZ). They are listed
@@ -165,11 +174,12 @@ conformance:
 #     two hook invocations of a live mark1-hookshim session (hooks fail open inside the 08 §4.4
 #     budgets, the ring drains on restart, Usage still arrives, Dropped{} audited off the wire);
 #     the supervised mark1-proxy killed under a client mid-request, six times to FAILED (D-CM
-#     revert + the proxy_failed bypass receipt); cortexd is a named t.Skip until internal/cortex
-#     exists. Linux-only (build tag): it finds the sidecar's pid through /proc.
-# Needs no stores. Needs the Rust toolchain: cmd/chaos_process_kill drives the REAL hookshim and
-# proxy binaries and runs `cargo build --locked` itself (a warm build is a no-op; the line below
-# only makes the cold build a visible step instead of a slow-looking Go test).
+#     revert + the proxy_failed bypass receipt); the supervised cortexd killed and the MCP wall
+#     asserted back after backoff. Linux-only (build tag): it finds each child's pid through
+#     /proc.
+# Needs no stores. Needs the Rust toolchain: cmd/chaos_process_kill drives the REAL hookshim,
+# proxy and cortexd binaries and runs `cargo build --locked` itself (a warm build is a no-op; the
+# line below only makes the cold build a visible step instead of a slow-looking Go test).
 #
 # `-list` before `-run` because `-run` with no match prints "no tests to run" and exits 0, which
 # is the false green this whole lane exists to prevent — and here it is one dropped `-tags chaos`
@@ -186,6 +196,42 @@ test-chaos:
     @cd go/mark1d && n=$(go test -tags chaos -list '^TestChaos(Mark1dKill9MidSession|ProxyKill9MidStream|CortexdKill9)$' ./cmd/ | grep -c '^TestChaos' || true); [ "$n" = "3" ] || { echo "test-chaos: the process-kill harness did not select. 'go test -tags chaos -list' matched $n tests in cmd/, want 3 — either the build tag stopped selecting chaos_process_kill_test.go or a leg was renamed. Running -run against that would print 'no tests to run' and exit 0." >&2; exit 1; }
     cd go/mark1d && go test -tags chaos -count=1 -run '^TestChaosDaemonKill9$' ./internal/spool/
     cd go/mark1d && go test -tags chaos -count=1 -v -run '^TestChaos(Mark1dKill9MidSession|ProxyKill9MidStream|CortexdKill9)$' ./cmd/
+
+# The slow chaos set (12 §6.2 rows uplink_park_requeue / chaos_sleep_wake / skew_ordering_invariance /
+# spool_billing_blocks_on_full / spool_disk_hardstop, and 12 §6.3's S3, ClickHouse and transparency-log
+# rows). Edge legs need no stores; the controld legs need `just stores-up` and run under
+# `-tags integration,chaos`. Same `-list` guard and `-count=1` reasoning as test-chaos.
+#   internal/uplink  chaos_network_partition — F-22: real spool + real automaton under a black-holing
+#     controld mid-load; ladder, PARKED and the network-change re-queue observed, Dropped{} exact.
+#   cmd              chaos_network_partition — CON-007: the assembled daemon loses ingest AND the control
+#     plane; capture and gating continue, last-known-good holds (304 on heal), every Usage lands once.
+#   internal/uplink  chaos_clock_skew — F-43/F-44: capture, receipts, bundle and uplink on one injected
+#     clock through ±hours jumps, a max_age crossing and a 10-minute sleep; seq/UUIDv7/chain intact.
+#   internal/spool   chaos_disk_full — F-17/F-18/F-19 under concurrent load via the statfs seam, plus a
+#     real 1 MiB tmpfs in an unprivileged user namespace (Linux; skips itself if the host refuses).
+#   controld ingest  chaos_cloud — S3 cut mid-load (no ack without an object), ClickHouse cut mid-load
+#     (acks hold, replay makes the ledger exact). controld policydist chaos_tlog — log key down:
+#     publication halts, seq 1 keeps serving with its proof, continuity verifiable after the heal.
+test-chaos-slow:
+    @cd go/mark1d && n=$(go test -tags chaos -list '^TestChaos(NetworkPartitionUplink|ClockSkewAndSleepWake)$' ./internal/uplink/ | grep -c '^TestChaos' || true); [ "$n" = "2" ] || { echo "test-chaos-slow: internal/uplink matched $n chaos tests, want 2 — the build tag stopped selecting a chaos file or a test was renamed." >&2; exit 1; }
+    @cd go/mark1d && n=$(go test -tags chaos -list '^TestChaos(SpoolCapUnderLoad|DiskHardStopUnderLoad|DiskHardStopTmpfs)$' ./internal/spool/ | grep -c '^TestChaos' || true); [ "$n" = "3" ] || { echo "test-chaos-slow: internal/spool matched $n chaos tests, want 3 — the build tag stopped selecting a chaos file or a test was renamed." >&2; exit 1; }
+    @cd go/mark1d && n=$(go test -tags chaos -list '^TestChaosNetworkPartitionDaemon$' ./cmd/ | grep -c '^TestChaos' || true); [ "$n" = "1" ] || { echo "test-chaos-slow: cmd matched $n chaos tests, want 1 — the build tag stopped selecting chaos_network_partition_test.go or the test was renamed." >&2; exit 1; }
+    @cd go/controld && n=$(go test -tags integration,chaos -list '^TestChaos(S3OutageNoFalseAck|CHOutageIngestUnaffected)$' ./internal/ingest/ | grep -c '^TestChaos' || true); [ "$n" = "2" ] || { echo "test-chaos-slow: controld/internal/ingest matched $n chaos tests, want 2." >&2; exit 1; }
+    @cd go/controld && n=$(go test -tags integration,chaos -list '^TestChaosTlogOutagePublicationHalts$' ./internal/policydist/ | grep -c '^TestChaos' || true); [ "$n" = "1" ] || { echo "test-chaos-slow: controld/internal/policydist matched $n chaos tests, want 1." >&2; exit 1; }
+    cd go/mark1d && go test -tags chaos -count=1 -v -run '^TestChaos(NetworkPartitionUplink|ClockSkewAndSleepWake)$' ./internal/uplink/
+    cd go/mark1d && go test -tags chaos -count=1 -v -run '^TestChaos(SpoolCapUnderLoad|DiskHardStopUnderLoad|DiskHardStopTmpfs)$' ./internal/spool/
+    cd go/mark1d && go test -tags chaos -count=1 -v -run '^TestChaosNetworkPartitionDaemon$' ./cmd/
+    cd go/controld && go test -tags integration,chaos -count=1 -v -run '^TestChaos(S3OutageNoFalseAck|CHOutageIngestUnaffected)$' ./internal/ingest/
+    cd go/controld && go test -tags integration,chaos -count=1 -v -run '^TestChaosTlogOutagePublicationHalts$' ./internal/policydist/
+
+# The 7-day fail-static soak (12 §6.3 `bundle_maxage_builtins` + NFR-AVAILABILITY-003 / CON-007 chaos
+# rows). One process, one injected clock, ~2.5M virtual timer events in ~15 s wall: the control plane
+# goes dark 12 min into day 0 and returns on day 7; capture, the 08 §2.5 uploader automaton, the spool
+# caps, the max_age edge and the drain are asserted tick by tick. Same `-list` guard and `-count=1`
+# reasoning as test-chaos: the files are invisible to an untagged build BY DESIGN.
+test-soak:
+    @cd go/mark1d && n=$(go test -tags soak -list '^TestSoakSevenDayBlackhole$' ./internal/soak/ | grep -c '^TestSoakSevenDayBlackhole$' || true); [ "$n" = "1" ] || { echo "test-soak: the soak harness did not select. 'go test -tags soak -list' matched $n tests, want 1 — either the build tag stopped selecting internal/soak or the test was renamed. Running -run against that would print 'no tests to run' and exit 0." >&2; exit 1; }
+    cd go/mark1d && go test -tags soak -count=1 -v -run '^TestSoakSevenDayBlackhole$' ./internal/soak/
 
 # Store-backed suites, incl. the tag-gated Go integration suite. Real stores on EVERY PR
 # (12 §11.4) — no Docker, no testcontainers, no skip-if-absent. Run `just stores-up` first.
@@ -299,6 +345,9 @@ gates:
     tools/ci/verifier_offline_gate.sh
     tools/ci/buf_breaking_gate.sh
     tools/ci/tokenpath_deps_gate.sh
+    tools/ci/raw_credential_gate.sh
+    tools/ci/posture_gate.sh
+    tools/ci/crush_reserved_gate.sh
 
 # The requirement→test gate (12 §10.3). Deliberately NOT folded into `gates`: this one is built
 # to go red the moment a requirement loses its test, and a red `gates` that could mean any of five

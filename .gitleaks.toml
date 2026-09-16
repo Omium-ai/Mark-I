@@ -163,6 +163,9 @@ paths = [
   # Plants one synthetic AWS key in a ServiceTier field to prove the pre-egress
   # scanner quarantines the batch rather than shipping it.
   '''(^|/)go/controld/internal/ingest/pipeline_test\.go$''',
+  # Plants the same synthetic ghp_ token the scanner tests use, to prove a rescan under a
+  # newer ruleset quarantines a batch that landed clean (FR-SPINE-012). Not a credential.
+  '''(^|/)go/controld/internal/ingest/chproj/ledger_integration_test\.go$''',
   # goldenUsageIdemKey: a 64-hex HKDF-SHA256 output pinned as the FR-SPINE-003 wire vector. It is
   # derived from a string literal declared four lines above it, so anyone can recompute it — a
   # digest, not a credential. Named *IdemKey because idem_key is the protocol's word for it.
