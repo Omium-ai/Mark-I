@@ -163,7 +163,7 @@ func TestLinuxInstallStatusUninstallRoundTrip(t *testing.T) {
 		"systemctl --user daemon-reload",
 		"systemctl --user enable --now mark1d.service")
 	got, err := os.ReadFile(unit)
-	if err != nil || !bytes.Equal(got, Render("systemd", daemon, env.StateDir, "")) {
+	if err != nil || !bytes.Equal(got, Render("systemd", absDaemon(t), env.StateDir, "")) {
 		t.Fatalf("unit file: %v\n%s", err, got)
 	}
 	res := decode[Result](t, out)
@@ -269,9 +269,9 @@ func TestLinuxFallsBackToAutostartWithoutSystemdUser(t *testing.T) {
 	f.want(t,
 		"systemctl --user daemon-reload",
 		"pgrep -x -u "+me+" mark1d",
-		"setsid -f "+daemon+" --state-dir "+env.StateDir)
+		"setsid -f "+absDaemon(t)+" --state-dir "+env.StateDir)
 	got, err := os.ReadFile(desktop)
-	if err != nil || !bytes.Equal(got, Render("autostart", daemon, env.StateDir, "")) {
+	if err != nil || !bytes.Equal(got, Render("autostart", absDaemon(t), env.StateDir, "")) {
 		t.Fatalf("desktop entry: %v\n%s", err, got)
 	}
 	if res := decode[Result](t, out); res.Supervisor != "autostart" || res.Artifact != desktop {
@@ -291,7 +291,7 @@ func TestLinuxFallsBackToAutostartWithoutSystemdUser(t *testing.T) {
 		"pgrep -x -u "+me+" mark1d",
 		"pkill -x -u "+me+" mark1d",
 		"pgrep -x -u "+me+" mark1d",
-		"setsid -f "+daemon+" --state-dir "+env.StateDir)
+		"setsid -f "+absDaemon(t)+" --state-dir "+env.StateDir)
 
 	f.reset()
 	if err := Uninstall(env, opts); err != nil {
@@ -330,7 +330,7 @@ func TestDarwinLaunchdArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.want(t, "launchctl print "+dom+"/"+Label, "launchctl print "+dom+"/"+Label, "launchctl bootstrap "+dom+" "+plist)
-	if got, err := os.ReadFile(plist); err != nil || !bytes.Equal(got, Render("launchd", daemon, env.StateDir, "")) {
+	if got, err := os.ReadFile(plist); err != nil || !bytes.Equal(got, Render("launchd", absDaemon(t), env.StateDir, "")) {
 		t.Fatalf("plist: %v\n%s", err, got)
 	}
 	if fi, err := os.Stat(filepath.Join(env.StateDir, "logs")); err != nil || !fi.IsDir() {
@@ -486,4 +486,14 @@ func TestWaitStoppedPollsTheSupervisor(t *testing.T) {
 	if WaitStopped(env, "/nonexistent.sock", 0) {
 		t.Fatal("a daemon that never exits reported stopped")
 	}
+}
+
+// absDaemon is what daemonPath makes of the POSIX test constant on THIS host (filepath.Abs adds a drive on Windows).
+func absDaemon(t *testing.T) string {
+	t.Helper()
+	p, err := filepath.Abs(daemon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
