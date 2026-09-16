@@ -270,7 +270,7 @@ func TestProjectsLifecycle(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("re-enable must be idempotent: %s", body)
 	}
-	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 1 || !strings.Contains(lines[0], `"workspace":"`+root+`"`) {
+	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 1 || !strings.Contains(lines[0], `"workspace":`+jsonString(root)) {
 		t.Fatalf("consent.jsonl %v", lines)
 	}
 
@@ -397,7 +397,7 @@ func mustConsent(t *testing.T, dir string) []anchors.ConsentRecord {
 func TestOptInsDriveTheGateReaders(t *testing.T) {
 	s, dir := newServer(t)
 	repo, _ := canonical(t.TempDir())
-	if err := writeAtomic(filepath.Join(dir, "workspaces.json"), []byte(`{"version":1,"workspaces":[{"path":"`+repo+`","enabled_at":"2026-09-16T00:00:00Z"}]}`)); err != nil {
+	if err := writeAtomic(filepath.Join(dir, "workspaces.json"), []byte(`{"version":1,"workspaces":[{"path":`+jsonString(repo)+`,"enabled_at":"2026-09-16T00:00:00Z"}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	var o struct {
@@ -778,4 +778,9 @@ func TestReceiptsAndVerifier(t *testing.T) {
 	}
 	resp, body = call(t, s, http.MethodPost, "/v1/receipts/verify", map[string]string{"chain": "/bad", "keys": "/k"})
 	want(t, resp, body, http.StatusBadRequest, "M1E-2001")
+}
+
+func jsonString(v string) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }

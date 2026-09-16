@@ -89,7 +89,7 @@ type Runner struct {
 	mu       sync.Mutex
 	seen     map[string]bool
 	inflight map[string]bool
-	seenFile *os.File
+	seenPath string
 	calls    chan struct{}
 }
 
@@ -124,10 +124,12 @@ func New(cfg Config) (*Runner, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "seen"), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
+	r.seenPath = filepath.Join(dir, "seen")
+	f, err := os.OpenFile(r.seenPath, os.O_CREATE|os.O_RDONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		if id := strings.TrimSpace(sc.Text()); id != "" {
@@ -135,11 +137,18 @@ func New(cfg Config) (*Runner, error) {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		_ = f.Close()
 		return nil, err
 	}
-	r.seenFile = f
 	return r, nil
+}
+
+func (r *Runner) appendSeen(id string) error {
+	f, err := os.OpenFile(r.seenPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(f, id)
+	return errors.Join(err, f.Close())
 }
 
 // Handle is bundle.Client.OnJudgeRequest: decode, own-check, dedupe, then answer off the stream goroutine.
@@ -219,7 +228,7 @@ func (r *Runner) serve(req *m1pv1.JudgeRequest) {
 	r.mu.Lock()
 	if err == nil {
 		r.seen[req.GetRequestId()] = true
-		_, err = fmt.Fprintln(r.seenFile, req.GetRequestId())
+		err = r.appendSeen(req.GetRequestId())
 	}
 	r.mu.Unlock()
 	if err != nil {

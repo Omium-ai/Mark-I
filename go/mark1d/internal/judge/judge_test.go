@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -342,7 +343,7 @@ func TestJudgeVotesOncePerRequestIDAcrossRestarts(t *testing.T) {
 	r.Handle(request(nil))
 	h.noVote()
 	fi, err := os.Stat(filepath.Join(h.dir, "judge", "seen"))
-	if err != nil || fi.Mode().Perm() != 0o600 {
+	if err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Fatalf("seen file mode = %v, err %v; want 0600", fi.Mode(), err)
 	}
 	if got := seenLines(t, h.dir); len(got) != 1 || got[0] != requestID {

@@ -43,7 +43,7 @@ func startFakeGuard(t *testing.T, state string, writePort bool) *httptest.Server
 func byokAdapter(t *testing.T, state string) *Adapter {
 	t.Helper()
 	return &Adapter{
-		Home: t.TempDir(), CopilotHome: t.TempDir(), StateDir: state,
+		Home: t.TempDir(), CopilotHome: t.TempDir(), StateDir: state, GOOS: "linux",
 		Env: envOf(map[string]string{"COPILOT_PROVIDER_BASE_URL": "https://api.openai.com/v1", "COPILOT_PROVIDER_API_KEY": "sk-synth"}),
 	}
 }
