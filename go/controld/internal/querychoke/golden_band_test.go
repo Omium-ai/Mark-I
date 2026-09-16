@@ -25,6 +25,7 @@ type bandGoldenCase struct {
 	Verified              uint64 `json:"verified"`
 	CostBasis             string `json:"cost_basis"`
 	PricePinned           bool   `json:"price_pinned"`
+	ShadowPriceConfirmed  bool   `json:"shadow_price_confirmed"`
 	Expect                struct {
 		Coverage       float64  `json:"coverage"`
 		CoverageLower  float64  `json:"coverage_lower"`
@@ -61,7 +62,7 @@ func TestConfVectorsTVOBandGolden(t *testing.T) {
 			if math.Abs(lower-c.Expect.CoverageLower) > 1e-12 {
 				t.Fatalf("coverage_lower %v, want %v", lower, c.Expect.CoverageLower)
 			}
-			refusals := guaranteeRefusals(lower, c.Verified, c.CostBasis, c.PricePinned)
+			refusals := guaranteeRefusals(lower, c.Verified, c.CostBasis, c.PricePinned, c.ShadowPriceConfirmed)
 			if (len(refusals) == 0) != c.Expect.GuaranteeGrade {
 				t.Fatalf("guarantee_grade %v, want %v (refusals %q)",
 					len(refusals) == 0, c.Expect.GuaranteeGrade, refusals)

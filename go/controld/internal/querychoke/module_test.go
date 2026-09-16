@@ -42,9 +42,19 @@ func (f *fakeRunner) Run(_ context.Context, q Query) (*Rows, error) {
 	return f.rows, nil
 }
 
+// fakeRegimes serves canned m1_075 rows per tenant (nil = no row), or fails.
+type fakeRegimes struct {
+	rows map[uuid.UUID]*Regime
+	err  error
+}
+
+func (f *fakeRegimes) Regime(_ context.Context, t TenantID) (*Regime, error) {
+	return f.rows[t.UUID()], f.err
+}
+
 const testHMACKey = "module-test-key"
 
-func newTestModule(t *testing.T, run *fakeRunner, rollupEnabled bool) (*Module, *http.ServeMux, uuid.UUID, string) {
+func newTestModule(t *testing.T, run *fakeRunner, rollupEnabled bool, regimes ...RegimeSource) (*Module, *http.ServeMux, uuid.UUID, string) {
 	t.Helper()
 	reg, err := LoadTemplates()
 	if err != nil {
@@ -52,14 +62,18 @@ func newTestModule(t *testing.T, run *fakeRunner, rollupEnabled bool) (*Module, 
 	}
 	tenant, device := uuid.New(), uuid.New()
 	verifier := auth.NewHMACVerifier([]byte(testHMACKey), auth.StaticRevocations{})
-	m := New(Deps{
+	deps := Deps{
 		Registry:           reg,
 		Runner:             run,
 		Verifier:           verifier,
 		ObsCfg:             obs.Config{ServiceName: "test"},
 		RollupWriteEnabled: rollupEnabled,
 		IntelServiceToken:  "intel-secret",
-	})
+	}
+	if len(regimes) > 0 {
+		deps.Regimes = regimes[0]
+	}
+	m := New(deps)
 	mux := http.NewServeMux()
 	m.RegisterRoutes(mux)
 	bearer := auth.Mint([]byte(testHMACKey), tenant, device, time.Hour)
@@ -162,22 +176,32 @@ func TestTVOReportContract(t *testing.T) {
 		t.Fatalf("bad window: got %d %s", w.Code, w.Body.String())
 	}
 
-	// cost_basis=quota is REFUSED, never mislabeled: quota arithmetic needs
-	// the D22 shadow price, which has no source yet (06 §8.4 — a report must
-	// never carry a basis its arithmetic didn't use).
+	// cost_basis=quota with no regime row: stamped as asked, and the guarantee
+	// is refused for want of the tenant-confirmed S (06 §8.4 D22) — the number
+	// still renders (08 §3.3), never a 400.
 	w := do(mux, "GET", "/api/v1/reports/tvo?window=1d&cost_basis=quota", bearer, "")
-	if w.Code != http.StatusBadRequest || errCode(t, w) != "M1E-2001" ||
-		!strings.Contains(w.Body.String(), "D22") {
-		t.Fatalf("quota basis must refuse naming the D22 seam: got %d %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("quota basis: got %d %s", w.Code, w.Body.String())
 	}
-	if strings.Contains(w.Body.String(), `"cost_basis"`) {
-		t.Fatalf("refused quota request must not emit a basis label: %s", w.Body.String())
+	var quota map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &quota); err != nil {
+		t.Fatal(err)
+	}
+	if quota["cost_basis"] != "quota" || quota["guarantee_grade"] != false ||
+		!strings.Contains(quota["refusal"].(string), "shadow price S unconfirmed by tenant (D22)") {
+		t.Fatalf("quota without a regime must issue indicative naming D22: %s", w.Body.String())
+	}
+	if _, ok := quota["price_table_version"]; ok {
+		t.Fatalf("a quota report never claims a price pin: %s", w.Body.String())
+	}
+	if w := do(mux, "GET", "/api/v1/reports/tvo?window=1d&cost_basis=eur", bearer, ""); w.Code != http.StatusBadRequest || errCode(t, w) != "M1E-2001" {
+		t.Fatalf("unknown basis: got %d %s", w.Code, w.Body.String())
 	}
 
 	// A 1-day window fully covered and shed-free: the band clears D23, but
-	// usd has no pinned model_prices row on this surface (the routes.py
-	// get_price_row seam), so the report is INDICATIVE with the basis
-	// refusal stated — never a silent guarantee (06 §8.5). TVO = 300/3.
+	// with no m1_075 regime row usd has no pinned model_prices row, so the
+	// report is INDICATIVE with the basis refusal stated — never a silent
+	// guarantee (06 §8.5). TVO = 300/3.
 	w = do(mux, "GET", "/api/v1/reports/tvo?window=1d&cohort=all&cost_basis=auto", bearer, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("tvo: got %d %s", w.Code, w.Body.String())
@@ -203,6 +227,9 @@ func TestTVOReportContract(t *testing.T) {
 	}
 	if resp["cost_basis"] != "usd" || resp["task_seg_version"] != "task_seg.v1" {
 		t.Fatalf("body shape: %s", w.Body.String())
+	}
+	if _, ok := resp["price_table_version"]; ok {
+		t.Fatalf("an unpinned usd report must not stamp a price table: %s", w.Body.String())
 	}
 	waste := resp["waste"].(map[string]any)
 	if waste["re_exploration_tokens"].(float64) != 20 {

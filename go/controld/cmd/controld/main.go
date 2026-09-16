@@ -31,6 +31,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/registry"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/s3land"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/memory"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/pg"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/policydist"
@@ -165,6 +166,17 @@ func main() {
 		log.Fatalf("auth: boot refusal (05 §1.2 R1): %v", err) // bad seed = no verifier at all
 	}
 	var verifier auth.Verifier = auth.NewEd25519Verifier(signer.Public(), revocations)
+	// The tenant HMAC pepper (04 §2.9 root, delivered at enrollment). Same
+	// dev-mode-only ephemeral escape hatch as the seeds above: an ephemeral
+	// pepper means every enrolled edge's root goes stale at restart.
+	tenantPepper := cfg.TenantHMACPepper
+	if tenantPepper == nil {
+		tenantPepper = make([]byte, 32)
+		if _, err := rand.Read(tenantPepper); err != nil {
+			log.Fatalf("cannot generate ephemeral tenant pepper: %v", err)
+		}
+		log.Printf("WARNING: TENANT_HMAC_PEPPER unset — EPHEMERAL tenant HMAC pepper; every enrolled device's tenant root goes stale at restart (dev mode only)")
+	}
 	if cfg.AuthDevMode {
 		log.Printf("WARNING: AUTH_DEV_MODE=1 — dev HMAC token verifier ACTIVE alongside the production verifier; NEVER run production traffic with this flag")
 		// The dev leg shares the SAME revocation cache as the production leg:
@@ -200,6 +212,27 @@ func main() {
 		ObsCfg:   obsCfg,
 	})
 
+	tenants := make([]uuid.UUID, 0, len(cfg.WitnessTenants))
+	for _, s := range cfg.WitnessTenants {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			log.Fatalf("config: WITNESS_TENANTS entry %q is not a uuid (boot refusal R1): %v", s, err)
+		}
+		tenants = append(tenants, id)
+	}
+	enrollMod := enroll.New(enroll.Deps{
+		DB:            tenantDB,
+		PG:            tenantDB,
+		Signer:        signer,
+		Verifier:      verifier,
+		ObsCfg:        obsCfg,
+		Cache:         revocations,
+		PublicBaseURL: cfg.PublicBaseURL,
+		ServerMinEdge: cfg.ServerMinEdge,
+		TenantPepper:  tenantPepper,
+	})
+	chRunner := querychoke.NewRunner(chQuery, ch, chOffboard)
+
 	srv := server.New(cfg.Port, cfg.DrainTimeout)
 	srv.Register(ingest.New(ingest.Deps{ // 8. each module contributes routes + readiness
 		Verifier: verifier,
@@ -209,27 +242,26 @@ func main() {
 		Proj:     proj,
 		Sidefx:   sfx,
 		Registry: registry.NewPG(tenantDB), // m1_063 schema windows (FR-SPINE-023)
-	}), enroll.New(enroll.Deps{
-		DB:            tenantDB,
-		PG:            tenantDB,
-		Signer:        signer,
-		Verifier:      verifier,
-		ObsCfg:        obsCfg,
-		Cache:         revocations,
-		PublicBaseURL: cfg.PublicBaseURL,
-		ServerMinEdge: cfg.ServerMinEdge,
-	}), receipts.NewModule(receipts.ModuleDeps{ // 08 §3.4 retrieval + verifier food
-		DB:       tenantDB,
-		PG:       tenantDB,
-		Verifier: verifier,
-		ObsCfg:   obsCfg,
+	}), enrollMod, receipts.NewModule(receipts.ModuleDeps{ // 08 §3.4 retrieval + verifier food
+		DB:                tenantDB,
+		PG:                tenantDB,
+		Verifier:          verifier,
+		ObsCfg:            obsCfg,
+		Store:             chainStore,
+		IntelServiceToken: cfg.IntelServiceToken,
 	}), policy, querychoke.New(querychoke.Deps{ // 08 §3.3 report/query chokepoint
 		Registry:           tmpl,
-		Runner:             querychoke.NewRunner(chQuery, ch, chOffboard),
+		Runner:             chRunner,
 		Verifier:           verifier,
 		ObsCfg:             obsCfg,
 		RollupWriteEnabled: cfg.RollupWriteEnabled,
 		IntelServiceToken:  cfg.IntelServiceToken,
+		Regimes:            querychoke.PGRegimes{DB: tenantDB},
+	}), memory.New(memory.Deps{ // 08 §3.7 memory delivery: device-token verified, tenant from claims, proxied to intel
+		Verifier:          verifier,
+		ObsCfg:            obsCfg,
+		IntelBaseURL:      cfg.IntelBaseURL,
+		IntelServiceToken: cfg.IntelServiceToken,
 	}))
 
 	// The hourly witness-head job (m1_003; 05 §4.4). Runs only when a
@@ -246,18 +278,17 @@ func main() {
 		if err != nil {
 			log.Fatalf("receipts: witness publisher boot refusal (05 §1.2): %v", err)
 		}
-		tenants := make([]uuid.UUID, 0, len(cfg.WitnessTenants))
-		for _, s := range cfg.WitnessTenants {
-			id, err := uuid.Parse(s)
-			if err != nil {
-				log.Fatalf("config: WITNESS_TENANTS entry %q is not a uuid (boot refusal R1): %v", s, err)
-			}
-			tenants = append(tenants, id)
-		}
 		job := receipts.NewWitnessJob(tenantDB, chainSigner, pub, receipts.StaticTenants(tenants), time.Hour)
 		go job.Run(witnessCtx)
 	} else {
 		log.Printf("receipts: WITNESS_BUCKET unset — hourly witness job NOT running; chain heads have no external anchor (m1_003)")
+	}
+	if len(tenants) > 0 {
+		rollout := policydist.NewController(policy, chRunner, tmpl, enrollMod.TenantRoot, receipts.StaticTenants(tenants))
+		go rollout.Run(witnessCtx)
+		go policydist.NewDraftPublisher(rollout).Run(witnessCtx)
+	} else {
+		log.Printf("policydist: WITNESS_TENANTS unset — canary rollout controller and draft publisher NOT running (05 §4.1, §4.3)")
 	}
 
 	// 9. /metrics /healthz on MetricsPort (pod-annotation scrape, 05 §1.7);

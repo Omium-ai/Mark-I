@@ -57,6 +57,7 @@ type Config struct {
 	// must be absent, never open).
 	RollupWriteEnabled bool
 	IntelServiceToken  string // INTEL_SERVICE_TOKEN — the ADR-0010 §2.2 service credential seam
+	IntelBaseURL       string // INTEL_BASE_URL — mark1-intel base URL for the memory proxy; unset ⇒ /api/v1/memory/* answer 503
 
 	IngestBucket string // S3_INGEST_BUCKET required
 	// S3_ENDPOINT is set only for the dev/compose MinIO stack (13 §11 C4:
@@ -115,6 +116,13 @@ type Config struct {
 	// publish as a chain key. Domain prefixes keep the two uses
 	// non-interchangeable.
 	BundleSectionSeed []byte
+	// TENANT_HMAC_PEPPER — the 32-byte root (hex or base64) every tenant's
+	// HMAC root is HKDF-derived from (m1_001 hmac_salt_secret_ref: "derived
+	// from the mark1-hmac-pepper root (09)"). The per-tenant root is what
+	// enrollment delivers to the edge (04 §2.9) and what keys Usage idem_key,
+	// task digests and anchor output HMACs there. Required outside dev mode:
+	// a control plane without it enrolls devices that can never tail.
+	TenantHMACPepper []byte
 
 	// WITNESS_BUCKET — the object-lock bucket the hourly witness job (m1_003)
 	// publishes chain heads to. Empty ⇒ the job does not run (a dev stack
@@ -206,6 +214,15 @@ func Load() (Config, error) {
 	} else if !c.AuthDevMode {
 		return Config{}, fmt.Errorf("config: required env SERVER_CHAIN_ED25519_SEED is unset (boot refusal R1, 05 §1.2; m1_002 server chain key)")
 	}
+	if raw := os.Getenv("TENANT_HMAC_PEPPER"); raw != "" {
+		pepper, err := decodeSeed(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: TENANT_HMAC_PEPPER: %w", err)
+		}
+		c.TenantHMACPepper = pepper
+	} else if !c.AuthDevMode {
+		return Config{}, fmt.Errorf("config: required env TENANT_HMAC_PEPPER is unset (boot refusal R1, 05 §1.2; 04 §2.9 per-tenant HMAC root delivered at enrollment)")
+	}
 	if rawSeed := os.Getenv("BUNDLE_SECTION_ED25519_SEED"); rawSeed != "" {
 		seed, err := decodeSeed(rawSeed)
 		if err != nil {
@@ -230,10 +247,14 @@ func Load() (Config, error) {
 	// The rollup-write arm switch: "" off, "1" on, anything else a refusal
 	// (same posture as S3_DISABLE_SSEKMS — a typo'd truthy value must not
 	// read as intent to arm a write path ADR-0010 has not licensed).
+	c.IntelServiceToken = os.Getenv("INTEL_SERVICE_TOKEN")
+	c.IntelBaseURL = os.Getenv("INTEL_BASE_URL")
+	if c.IntelBaseURL != "" && c.IntelServiceToken == "" {
+		return Config{}, fmt.Errorf("config: INTEL_BASE_URL set without INTEL_SERVICE_TOKEN — the memory proxy would present nothing and every edge sync would 502 (boot refusal R1, 05 §1.2)")
+	}
 	switch v := os.Getenv("QUERYCHOKE_ROLLUP_WRITE"); v {
 	case "":
 	case "1":
-		c.IntelServiceToken = os.Getenv("INTEL_SERVICE_TOKEN")
 		if c.IntelServiceToken == "" {
 			return Config{}, fmt.Errorf("config: QUERYCHOKE_ROLLUP_WRITE=1 without INTEL_SERVICE_TOKEN — a write surface that verifies nothing must be absent, never open (boot refusal R1, 05 §1.2)")
 		}

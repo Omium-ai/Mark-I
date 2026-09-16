@@ -22,6 +22,7 @@ package querychoke
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -251,9 +252,18 @@ func mustTenant(t *testing.T, id uuid.UUID) TenantID {
 // template filters on is seeded, and the sweep test refuses zero-row
 // results for the seeded tenant before trusting the leak grep. seedEventRows
 // counts the m1p_events rows this writes (the offboard test's ledger math).
-const seedEventRows = 4
+// Returns the task every task-grain template keys on.
+const seedEventRows = 12
 
-func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID, tokens, droppedQty uint64) {
+// seedArtifactID is the artifact `task` receives (MemoryInjection) and closes
+// on (ArtifactOutcome) — the same id for every tenant, so artifact_outcomes'
+// tenancy negative is a real join and not a disjoint key.
+var seedArtifactID = uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
+// seedNoiseCertID rides the certified verdict (gold_vs_verdict / corpus read it back).
+var seedNoiseCertID = uuid.MustParse("55555555-5555-4555-8555-555555555555")
+
+func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID, tokens, droppedQty uint64) uuid.UUID {
 	t.Helper()
 	ctx := context.Background()
 	at := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
@@ -289,13 +299,74 @@ func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID
 	}
 	// The stage-final verdict `interventions` and `canary_fused_violated_rate`
 	// key on.
-	verdictCols := append(usageCols, "task_id", "verdict", "verdict_stage")
+	verdictCols := append(usageCols, "task_id", "verdict", "verdict_stage",
+		"p_satisfied", "p_violated", "p_refused", "p_error", "noise_cert_id")
 	if err := conn.InsertRows(ctx, "m1p_events", verdictCols, [][]any{
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(4), uint32(1),
 			device, "VerdictEvent", "verdict", "claudecode", uint64(0), uint64(0),
-			task, "satisfied", "certified"},
+			task, "satisfied", "certified",
+			float32(0.9), float32(0.05), float32(0.03), float32(0.02), seedNoiseCertID},
 	}); err != nil {
 		t.Fatalf("seed verdict: %v", err)
+	}
+	// The intelligence consumers' rows (templates_test.go
+	// TestIntelReadTemplatesServeTheirConsumers): TaskOpen carrying the
+	// digests, a RouteDecision followed by the Usage that served it (the C9
+	// confirmation join), and the AnchorVote/JudgeVote pair per task.
+	taskCols := append(usageCols, "task_id", "payload")
+	if err := conn.InsertRows(ctx, "m1p_events", taskCols, [][]any{
+		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(5), uint32(1),
+			device, "TaskOpen", "diagnostic", "claudecode", uint64(0), uint64(0),
+			task, `{"task_seg_version":"task_seg.v1","prompt_digest":"` + seedPromptDigestB64 + `"}`},
+		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(8), uint32(1),
+			device, "AnchorVote", "diagnostic", "claudecode", uint64(0), uint64(0),
+			task, `{"anchor_id":"ruff@1","vote":"VERDICT_SATISFIED","integrity":{"tamper":false}}`},
+		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(9), uint32(1),
+			device, "JudgeVote", "diagnostic", "claudecode", uint64(0), uint64(0),
+			task, `{"judge_id":"judge:rubric@2","vote":"VERDICT_VIOLATED"}`},
+	}); err != nil {
+		t.Fatalf("seed task rows: %v", err)
+	}
+	routeCols := append(taskCols, "propensity", "fidelity", "bundle_seq")
+	if err := conn.InsertRows(ctx, "m1p_events", routeCols, [][]any{
+		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(6), uint32(1),
+			device, "RouteDecision", "route", "claudecode", uint64(0), uint64(0),
+			task, `{"action":"mid","candidates":["small","mid"]}`, float64(1), "wire_enforced", uint64(483)},
+	}); err != nil {
+		t.Fatalf("seed route decision: %v", err)
+	}
+	servedCols := append(usageCols, "task_id", "model", "cache_read_input_tokens")
+	if err := conn.InsertRows(ctx, "m1p_events", servedCols, [][]any{
+		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(7), uint32(1),
+			device, "Usage", "billing", "claudecode", uint64(0), uint64(0),
+			task, "mid", uint64(300)},
+	}); err != nil {
+		t.Fatalf("seed served usage: %v", err)
+	}
+	// The memory join (artifact_outcomes): `task` is delivered seedArtifactID
+	// and closes on it — payloads exactly as chproj lands protojson (bytes →
+	// base64, enum names) — and a second, un-injected certified task is the
+	// control cohort the utility is measured against (zero cost: no Usage row,
+	// so dropped_by_tenant_day's billing count and tokens_in stay as asserted).
+	artifactB64 := base64.StdEncoding.EncodeToString(seedArtifactID[:])
+	control := uuid.New()
+	if err := conn.InsertRows(ctx, "m1p_events", taskCols, [][]any{
+		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(10), uint32(1),
+			device, "MemoryInjection", "diagnostic", "claudecode", uint64(0), uint64(0),
+			task, `{"artifact_ids":["` + artifactB64 + `"],"channel":"INJECTION_CHANNEL_HOOK_CONTEXT","tokens_used":12}`},
+		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(11), uint32(1),
+			device, "ArtifactOutcome", "diagnostic", "claudecode", uint64(0), uint64(0),
+			task, `{"artifact_id":"` + artifactB64 + `","task_verdict":"VERDICT_SATISFIED"}`},
+	}); err != nil {
+		t.Fatalf("seed memory rows: %v", err)
+	}
+	if err := conn.InsertRows(ctx, "m1p_events", verdictCols, [][]any{
+		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(12), uint32(1),
+			device, "VerdictEvent", "verdict", "claudecode", uint64(0), uint64(0),
+			control, "satisfied", "certified",
+			float32(0.8), float32(0.1), float32(0.05), float32(0.05), seedNoiseCertID},
+	}); err != nil {
+		t.Fatalf("seed control verdict: %v", err)
 	}
 	// The tenant-day rollup row `tvo_report` and `coverage_band` read —
 	// written through the real write carve-out, tenant-bound by BuildWrite.
@@ -328,6 +399,7 @@ func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID
 	if _, err := rig.runner.Run(ctx, q); err != nil {
 		t.Fatalf("seed rollup row: %v", err)
 	}
+	return task
 }
 
 // Claim 1 — the live tenancy negative, over EVERY read template.
@@ -370,7 +442,7 @@ func TestIntegrationReadTemplatesReturnOnlyCallingTenant(t *testing.T) {
 	}
 
 	// The shed-accounting read (reader.py coverage_inputs' contract): A's
-	// dropped 5 (billing_grade) against A's 1 ingested billing row — never
+	// dropped 5 (billing_grade) against A's 2 ingested billing rows — never
 	// B's 7.
 	dropped, _ := reg.Lookup("dropped_by_tenant_day")
 	q, err = Build(tidA, dropped, Params{"from": "2026-08-28", "to": "2026-08-28"})
@@ -382,7 +454,7 @@ func TestIntegrationReadTemplatesReturnOnlyCallingTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(rows.Rows) != 1 || asU64(rows.Rows[0]["dropped_billing"]) != 5 ||
-		asU64(rows.Rows[0]["events_billing_ingested"]) != 1 {
+		asU64(rows.Rows[0]["events_billing_ingested"]) != 2 {
 		t.Fatalf("tenant A shed accounting: %v", rows.Rows)
 	}
 
@@ -442,13 +514,18 @@ func TestIntegrationReadTemplatesReturnOnlyCallingTenant(t *testing.T) {
 }
 
 // dummyParamsForDay is dummyParams pinned to the seeded day so the live
-// sweep actually scans the populated range.
+// sweep actually scans the populated range — `to` is the day after, so a
+// half-open [from, to) template (tvo_task_window) scans it as well.
 func dummyParamsForDay(tpl *template) Params {
 	p := Params{}
 	for name, spec := range tpl.params {
 		switch spec.kind {
 		case pDate:
-			p[name] = "2026-08-28"
+			if name == "to" {
+				p[name] = "2026-08-29"
+			} else {
+				p[name] = "2026-08-28"
+			}
 		case pDateTime:
 			if name == "from" {
 				p[name] = "2026-08-28 00:00:00"
@@ -459,6 +536,9 @@ func dummyParamsForDay(tpl *template) Params {
 			p[name] = []uuid.UUID{uuid.New()}
 		case pUUID:
 			p[name] = uuid.New()
+			if name == "artifact_id" {
+				p[name] = seedArtifactID
+			}
 		case pUInt64:
 			p[name] = uint64(1)
 		case pDecimal:
@@ -468,6 +548,161 @@ func dummyParamsForDay(tpl *template) Params {
 		}
 	}
 	return p
+}
+
+// seedPromptDigestB64 is TaskOpen.prompt_digest as protojson lands it (bytes
+// → base64); corpus_candidates must hand it back as the hex intel's
+// bytes.fromhex reads.
+const seedPromptDigestB64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+
+// The three intelligence-consumer templates, live: the semantics their
+// readers assume (C9 served-model join, certified-only candidates with the
+// hex digest, the vote rows' anchor flag and wire verdicts) hold on real
+// ClickHouse, and every row is the calling tenant's.
+func TestIntegrationIntelTemplatesServeConsumersLive(t *testing.T) {
+	rig := setupQC(t)
+	ctx := context.Background()
+	tenantA, tenantB := uuid.New(), uuid.New()
+	sessionA := uuid.Must(uuid.NewV7())
+	taskA := seed(t, rig, rig.ingest, tenantA, sessionA, 100, 5)
+	seed(t, rig, rig.ingest, tenantB, uuid.Must(uuid.NewV7()), 987_654, 7)
+	reg, err := LoadTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(name string, extra ...Params) []map[string]any {
+		t.Helper()
+		tpl, err := reg.Lookup(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		params := Params{"from": "2026-08-28", "to": "2026-08-28"}
+		for _, e := range extra {
+			for k, v := range e {
+				params[k] = v
+			}
+		}
+		q, err := Build(mustTenant(t, tenantA), tpl, params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := rig.runner.Run(ctx, q)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(rows.Rows) == 0 || strings.Contains(fmt.Sprint(rows.Rows), tenantB.String()) {
+			t.Fatalf("%s: %v", name, rows.Rows)
+		}
+		return rows.Rows
+	}
+	ope := run("ope_route_decisions")
+	if len(ope) != 1 || fmt.Sprint(ope[0]["served_model"]) != "mid" || fmt.Sprint(ope[0]["action"]) != "mid" ||
+		fmt.Sprint(ope[0]["verdict"]) != "satisfied" || fmt.Sprint(ope[0]["verdict_stage"]) != "certified" ||
+		fmt.Sprint(ope[0]["session_id"]) != sessionA.String() {
+		t.Fatalf("ope_route_decisions: %v", ope)
+	}
+	if conf, ok := ope[0]["label_confidence"].(*float32); !ok || conf == nil {
+		t.Fatalf("ope_route_decisions: certified decision must carry a non-NULL label_confidence: %#v", ope[0]["label_confidence"])
+	}
+	// Two certified tasks (taskA + the un-injected control) are candidates; the
+	// digest/route/model semantics are asserted on taskA's row.
+	corpus := byTask(run("corpus_candidates"), taskA)
+	if corpus == nil || fmt.Sprint(corpus["prompt_digest"]) != "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F" ||
+		fmt.Sprint(corpus["task_seg_version"]) != "task_seg.v1" || asU64(corpus["attempts"]) != 1 ||
+		fmt.Sprint(corpus["model"]) != "mid" || fmt.Sprint(corpus["tamper"]) != "0" ||
+		fmt.Sprint(corpus["fidelity"]) == "<nil>" {
+		t.Fatalf("corpus_candidates: %v", corpus)
+	}
+	votes := run("adjudication_votes")
+	got := map[string]string{}
+	for _, r := range votes {
+		got[fmt.Sprint(r["verifier_id"])] = fmt.Sprint(r["vote"], "/", r["is_anchor"], "/", r["stage"])
+	}
+	if len(votes) != 2 || got["ruff@1"] != "satisfied/1/certified" || got["judge:rubric@2"] != "violated/0/certified" {
+		t.Fatalf("adjudication_votes: %v", votes)
+	}
+
+	// Batch 2. policy_compiler_attempts over the half-open day: taskA's one
+	// attempt (its certified verdict at seq 4, the tail folded in) carries the
+	// served model, the split token classes and the still-unstamped basis.
+	attempt := byTask(run("policy_compiler_attempts", Params{"to": "2026-08-29"}), taskA)
+	if attempt == nil || asU64(attempt["attempt_n"]) != 1 || fmt.Sprint(attempt["model_id"]) != "mid" ||
+		fmt.Sprint(attempt["fused_verdict"]) != "satisfied" || fmt.Sprint(attempt["verdict_stage"]) != "certified" ||
+		asU64(attempt["cache_read_tokens"]) != 300 || asU64(attempt["input_tokens"]) != 0 ||
+		fmt.Sprint(attempt["cost_basis"]) != "" || fmt.Sprint(attempt["task_class"]) != "" {
+		t.Fatalf("policy_compiler_attempts: %v", attempt)
+	}
+	// artifact_outcomes: exactly taskA for the seeded artifact — delivered AND
+	// closed — costed at its 300 cache-read tokens against a zero-cost control
+	// (TVO_control 0 ⇒ utility −300); a different artifact has no sample.
+	outcomes := run("artifact_outcomes", Params{"to": "2026-08-29", "artifact_id": seedArtifactID})
+	if len(outcomes) != 1 || fmt.Sprint(outcomes[0]["task_id"]) != taskA.String() ||
+		fmt.Sprint(outcomes[0]["verdict"]) != "satisfied" || fmt.Sprint(outcomes[0]["verdict_stage"]) != "certified" ||
+		fmt.Sprint(outcomes[0]["noise_cert_id"]) != seedNoiseCertID.String() ||
+		fmt.Sprint(outcomes[0]["task_cost"]) != "300" || fmt.Sprint(outcomes[0]["utility"]) != "-300" {
+		t.Fatalf("artifact_outcomes: %v", outcomes)
+	}
+	other, err := Build(mustTenant(t, tenantA), must(reg.Lookup("artifact_outcomes")),
+		Params{"from": "2026-08-28", "to": "2026-08-29", "artifact_id": uuid.New()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := rig.runner.Run(ctx, other); err != nil || len(rows.Rows) != 0 {
+		t.Fatalf("artifact_outcomes for an undelivered artifact: %v %v", rows, err)
+	}
+	// gold_vs_verdict: both certified tasks, taskA's row carrying the posterior,
+	// cert and session the adjudicator's digest join needs.
+	gold := byTask(run("gold_vs_verdict"), taskA)
+	if gold == nil || fmt.Sprint(gold["fused_verdict"]) != "satisfied" || fmt.Sprint(gold["verdict_stage"]) != "certified" ||
+		fmt.Sprint(gold["session_id"]) != sessionA.String() || fmt.Sprint(gold["noise_cert_id"]) != seedNoiseCertID.String() ||
+		fmt.Sprint(gold["p_satisfied"]) != "0.9" {
+		t.Fatalf("gold_vs_verdict: %v", gold)
+	}
+
+	// Batch 3. memory_certified_sessions over the half-open day: taskA with its
+	// certified verdict, cert and untampered anchor, and its nine ledger rows
+	// as (digest, kind, payload) in (session_epoch, seq) order — digest is the
+	// event_id the receipt chain leafs on, never a transcript.
+	sessions := run("memory_certified_sessions", Params{"to": "2026-08-29"})
+	mem := byTask(sessions, taskA)
+	if mem == nil || fmt.Sprint(mem["verdict"]) != "satisfied" || fmt.Sprint(mem["verdict_stage"]) != "certified" ||
+		fmt.Sprint(mem["noise_cert_id"]) != seedNoiseCertID.String() || fmt.Sprint(mem["session_id"]) != sessionA.String() ||
+		fmt.Sprint(mem["tamper"]) != "0" {
+		t.Fatalf("memory_certified_sessions: %v", mem)
+	}
+	events, ok := mem["events"].([]map[string]any)
+	if !ok || len(events) != 9 {
+		t.Fatalf("memory_certified_sessions events: %T %v", mem["events"], mem["events"])
+	}
+	var kinds []string
+	for _, ev := range events {
+		if _, err := uuid.Parse(fmt.Sprint(ev["digest"])); err != nil {
+			t.Fatalf("event digest is not the event_id: %v", ev)
+		}
+		kinds = append(kinds, fmt.Sprint(ev["kind"]))
+	}
+	if strings.Join(kinds, ",") != "GuardDecision,VerdictEvent,TaskOpen,RouteDecision,Usage,AnchorVote,JudgeVote,MemoryInjection,ArtifactOutcome" {
+		t.Fatalf("events out of (session_epoch, seq) order: %v", kinds)
+	}
+	if !strings.Contains(fmt.Sprint(events[2]["payload"]), `"task_seg_version":"task_seg.v1"`) {
+		t.Fatalf("event payload is not the typed remainder: %v", events[2])
+	}
+}
+
+func byTask(rows []map[string]any, task uuid.UUID) map[string]any {
+	for _, r := range rows {
+		if fmt.Sprint(r["task_id"]) == task.String() {
+			return r
+		}
+	}
+	return nil
+}
+
+func must(tpl Template, err error) Template {
+	if err != nil {
+		panic(err)
+	}
+	return tpl
 }
 
 // Claim 2 — ADR-0010 §2.3 idempotency on the live table.

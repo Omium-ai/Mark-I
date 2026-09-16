@@ -51,6 +51,8 @@ type Deps struct {
 	// (the ADR-0010 §2.2 seam). Empty ⇒ the write surface verifies nothing
 	// and is therefore absent, never open.
 	IntelServiceToken string
+	// Regimes resolves the tenant's m1_075 row (06 §8.4); nil ⇒ every basis stays unresolved and reports issue indicative.
+	Regimes RegimeSource
 }
 
 type Module struct {
@@ -182,28 +184,28 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "M1E-2001", "cohort: only \"all\" is supported")
 		return
 	}
-	// cost_basis is HONORED, never accepted-then-ignored (08 §3.3: usd |
-	// quota | auto, never mixed; 06 §8.4). A report must never carry a basis
-	// label its arithmetic didn't use — so:
-	//   ""/auto/usd ⇒ usd (auto resolves per cohort, and v1's one cohort is
-	//   API-key/usd; the ledger's cost_usd column IS usd-priced);
-	//   quota ⇒ REFUSED with the 08 §9 error shape: quota arithmetic needs
-	//   the wall-clock shadow price S and the fitted window limit.
-	// ponytail: S has no source yet — the D22 seam, the same one intel's
-	// report.py leaves open (get_shadow_price returns unconfirmed) — so the
-	// honest answer is refusal, not a report stamped "usd" for a quota ask;
-	// this branch flips to real quota arithmetic when the tenant-settings
-	// row lands.
-	switch cb := r.URL.Query().Get("cost_basis"); cb {
-	case "", "auto", "usd":
-	case "quota":
-		writeErr(w, http.StatusBadRequest, "M1E-2001",
-			"cost_basis \"quota\" unavailable: shadow price S has no source yet (D22, 06 §8.4) — refusing beats mislabeling the report \"usd\"")
-		return
+	// 08 §3.3 / 06 §8.4: `auto` is the tenant's m1_075 basis (v1 has one cohort per tenant); an explicit basis the regime does not carry is stamped as asked and issues indicative, as routes.py does.
+	requestedBasis := r.URL.Query().Get("cost_basis")
+	switch requestedBasis {
+	case "", "auto", costBasisUSD, costBasisQuota:
 	default:
 		writeErr(w, http.StatusBadRequest, "M1E-2001", "cost_basis: want auto|usd|quota")
 		return
 	}
+	reg, err := loadRegime(r.Context(), m.deps.Regimes, tid)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "M1E-9500", "tenant regime lookup failed")
+		return
+	}
+	costBasis := requestedBasis
+	if costBasis == "" || costBasis == "auto" {
+		costBasis = costBasisUSD
+		if reg != nil {
+			costBasis = reg.CostBasis
+		}
+	}
+	pricePinned := reg != nil && reg.CostBasis == costBasisUSD && modelPrices.pinned[reg.PriceModelID]
+	shadowConfirmed := reg != nil && reg.CostBasis == costBasisQuota
 
 	tpl, err := m.reg.Lookup("tvo_report")
 	if err != nil {
@@ -316,11 +318,7 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	if len(missingDays) > 0 {
 		refusals = append(refusals, fmt.Sprintf("M1E-5004 rollup missing for %d day(s) in window", len(missingDays)))
 	}
-	// ponytail: no model_prices source exists in controld yet (the same seam
-	// routes.py's get_price_row leaves open), so pricePinned is a constant
-	// false and every usd report issues `indicative`; upgrade path is a
-	// Postgres lookup when the billing row ships.
-	refusals = append(refusals, guaranteeRefusals(covLower, verified, "usd", false)...)
+	refusals = append(refusals, guaranteeRefusals(covLower, verified, costBasis, pricePinned, shadowConfirmed)...)
 
 	resp := map[string]any{
 		"tvo":   ratio(float64(tokensTotal), float64(verified)),
@@ -330,7 +328,7 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 			"coverage_lower":    covLower, // the edge D23 floors (06 §8.5)
 			"floor":             coverageFloor,
 		},
-		"cost_basis":       "usd", // the only basis this arithmetic used; quota was refused above
+		"cost_basis":       costBasis,
 		"task_seg_version": segVersion,
 		"waste": map[string]any{
 			"retry_loop_tokens":     retryLoop,
@@ -338,6 +336,9 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 			"over_model_tokens":     overModel,
 		},
 		"guarantee_grade": len(refusals) == 0,
+	}
+	if costBasis == costBasisUSD && pricePinned {
+		resp["price_table_version"] = modelPrices.version // 08 §3.3: usd only, the table the figures were priced under
 	}
 	if len(missingDays) > 0 {
 		resp["missing_days"] = missingDays
@@ -364,19 +365,23 @@ func coverageBand(observedMS, bypassMS, disabledMS, droppedBilling, eventsBillin
 
 // guaranteeRefusals is report.py assemble_report's refusal set, restricted to
 // the conditions this rollup-read surface can evaluate (06 §8.5, normative):
-// the D23 floor on the shed-narrowed lower edge, the unresolved-usd-basis
-// rule (06 §8.4: a report pins the price-table version it used — no pin, no
-// guarantee), and zero verified outcomes (intel's engine refuses the whole
-// window for this — routes.py maps it to M1E-2001; here the rollup rows still
-// render, so only the guarantee is refused). Strings and order match
-// report.py exactly — the golden fixture asserts them byte-for-byte.
-func guaranteeRefusals(coverageLower float64, verified uint64, costBasis string, pricePinned bool) []string {
+// the D23 floor on the shed-narrowed lower edge, the symmetric basis rule
+// (06 §8.4: quota needs the tenant-confirmed S, D22; usd pins the price-table
+// version it used — no pin, no guarantee), and zero verified outcomes
+// (intel's engine refuses the whole window for this — routes.py maps it to
+// M1E-2001; here the rollup rows still render, so only the guarantee is
+// refused). Strings and order match report.py exactly — the golden fixture
+// asserts them byte-for-byte.
+func guaranteeRefusals(coverageLower float64, verified uint64, costBasis string, pricePinned, shadowConfirmed bool) []string {
 	var out []string
 	if coverageLower < coverageFloor {
 		out = append(out, fmt.Sprintf(
 			"M1E-5004 coverage below floor: coverage_lower=%.4f < %v", coverageLower, coverageFloor))
 	}
-	if costBasis == "usd" && !pricePinned {
+	if costBasis == costBasisQuota && !shadowConfirmed {
+		out = append(out, "cost basis unresolved: shadow price S unconfirmed by tenant (D22)")
+	}
+	if costBasis == costBasisUSD && !pricePinned {
 		out = append(out, "cost basis unresolved: no pinned model_prices row for usd (06 §8.4)")
 	}
 	if verified == 0 {

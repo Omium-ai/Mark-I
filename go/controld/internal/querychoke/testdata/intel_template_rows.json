@@ -1,0 +1,217 @@
+{
+  "_why": "One wire row per intelligence-consumer template, as POST /api/v1/query serialises it (module.go: Rows verbatim through encoding/json — UUIDs and DateTime64 as strings, Nullable as null, UInt8 flags as 0/1). Locked BOTH ways (RECONCILIATION.md wave-5 lesson): Go templates_test.go TestIntelReadTemplatesServeTheirConsumers asserts each template's outer SELECT aliases equal these keys exactly; the Python consumers (intel app/ope/inputs.py decision_row, intel app/corpus/jobs.py _candidate, adjudicator app/jobs/nightly.py spectral_estimate; batch 2: intel app/policy_compiler/jobs.py read_attempts, intel app/memory/admit.py certified_outcomes, adjudicator app/jobs/nightly.py _ledger_pairs; batch 3: intel app/memory/extract.py certified_sessions -- events are (digest = event_id, kind = event_type, payload = the typed remainder), never transcript text) feed these rows to their readers. Rename a column on either side alone and one suite goes red.",
+  "ope_route_decisions": [
+    {
+      "decision_id": "00000000-0000-7000-8000-000000000002",
+      "task_id": "44444444-4444-4444-4444-444444444444",
+      "session_id": "22222222-2222-2222-2222-222222222222",
+      "session_epoch": 1,
+      "seq": 2,
+      "agent": "claudecode",
+      "action": "mid",
+      "candidates": ["small", "mid"],
+      "propensity": 0.8,
+      "fidelity": "config_steered",
+      "bundle_seq": 7,
+      "served_model": "mid",
+      "verdict": "satisfied",
+      "verdict_stage": "certified",
+      "label_confidence": 0.9
+    },
+    {
+      "decision_id": "00000000-0000-7000-8000-000000000009",
+      "task_id": "66666666-6666-6666-6666-666666666666",
+      "session_id": "22222222-2222-2222-2222-222222222222",
+      "session_epoch": 1,
+      "seq": 9,
+      "agent": "claudecode",
+      "action": "small",
+      "candidates": ["small", "mid"],
+      "propensity": 1,
+      "fidelity": "wire_enforced",
+      "bundle_seq": 7,
+      "served_model": "",
+      "verdict": "",
+      "verdict_stage": "",
+      "label_confidence": null
+    }
+  ],
+  "corpus_candidates": [
+    {
+      "task_id": "44444444-4444-4444-4444-444444444444",
+      "session_id": "22222222-2222-2222-2222-222222222222",
+      "task_seg_version": "task_seg.v1",
+      "agent": "claudecode",
+      "model": "mid",
+      "prompt_digest": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F",
+      "verdict": "satisfied",
+      "verdict_stage": "certified",
+      "p_satisfied": 0.9,
+      "p_violated": 0.05,
+      "p_refused": 0.03,
+      "p_error": 0.02,
+      "noise_cert_id": "55555555-5555-5555-5555-555555555555",
+      "input_tokens": 10,
+      "output_tokens": 5,
+      "cache_read_input_tokens": 0,
+      "attempts": 1,
+      "propensity": 1,
+      "fidelity": "wire_enforced",
+      "checkpoint_seq": 0,
+      "occurred_at": "2026-08-28T10:00:07Z",
+      "tamper": 0
+    }
+  ],
+  "adjudication_votes": [
+    {
+      "task_id": "44444444-4444-4444-4444-444444444444",
+      "vote_id": "00000000-0000-7000-8000-000000000004",
+      "session_epoch": 1,
+      "seq": 4,
+      "family": "AnchorVote",
+      "verifier_id": "ruff@1",
+      "is_anchor": 1,
+      "vote": "satisfied",
+      "abstained": 0,
+      "score": 0,
+      "tamper": 0,
+      "stage": "certified"
+    },
+    {
+      "task_id": "44444444-4444-4444-4444-444444444444",
+      "vote_id": "00000000-0000-7000-8000-000000000005",
+      "session_epoch": 1,
+      "seq": 5,
+      "family": "JudgeVote",
+      "verifier_id": "judge:rubric@2",
+      "is_anchor": 0,
+      "vote": "violated",
+      "abstained": 0,
+      "score": 0,
+      "tamper": 0,
+      "stage": "certified"
+    },
+    {
+      "task_id": "44444444-4444-4444-4444-444444444444",
+      "vote_id": "00000000-0000-7000-8000-000000000006",
+      "session_epoch": 1,
+      "seq": 6,
+      "family": "RmScore",
+      "verifier_id": "rm:x@1",
+      "is_anchor": 0,
+      "vote": "",
+      "abstained": 0,
+      "score": 0.7,
+      "tamper": 0,
+      "stage": "certified"
+    },
+    {
+      "task_id": "44444444-4444-4444-4444-444444444444",
+      "vote_id": "00000000-0000-7000-8000-00000000000a",
+      "session_epoch": 1,
+      "seq": 10,
+      "family": "ConsistencyVote",
+      "verifier_id": "consistency",
+      "is_anchor": 0,
+      "vote": "refused",
+      "abstained": 1,
+      "score": 0,
+      "tamper": 0,
+      "stage": "certified"
+    }
+  ],
+  "policy_compiler_attempts": [
+    {
+      "task_id": "44444444-4444-4444-4444-444444444444",
+      "task_class": "fn",
+      "model_id": "mid",
+      "attempt_n": 1,
+      "fused_verdict": "satisfied",
+      "verdict_stage": "certified",
+      "input_tokens": 10,
+      "output_tokens": 5,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 300,
+      "verifier_spend_usd": 0,
+      "cost_basis": "quota"
+    },
+    {
+      "task_id": "66666666-6666-6666-6666-666666666666",
+      "task_class": "fn",
+      "model_id": "small",
+      "attempt_n": 2,
+      "fused_verdict": "violated",
+      "verdict_stage": "provisional",
+      "input_tokens": 9,
+      "output_tokens": 9,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "verifier_spend_usd": 0,
+      "cost_basis": "quota"
+    }
+  ],
+  "artifact_outcomes": [
+    {
+      "task_id": "44444444-4444-4444-4444-444444444444",
+      "device_id": "33333333-3333-3333-3333-333333333333",
+      "verdict": "satisfied",
+      "verdict_stage": "certified",
+      "noise_cert_id": "55555555-5555-5555-5555-555555555555",
+      "cost_basis": "quota",
+      "task_cost": 315,
+      "utility": -315
+    },
+    {
+      "task_id": "77777777-7777-7777-7777-777777777777",
+      "device_id": "33333333-3333-3333-3333-333333333333",
+      "verdict": "",
+      "verdict_stage": "",
+      "noise_cert_id": "00000000-0000-0000-0000-000000000000",
+      "cost_basis": "",
+      "task_cost": 40,
+      "utility": -40
+    }
+  ],
+  "gold_vs_verdict": [
+    {
+      "task_id": "44444444-4444-4444-4444-444444444444",
+      "session_id": "22222222-2222-2222-2222-222222222222",
+      "fused_verdict": "satisfied",
+      "verdict_stage": "certified",
+      "p_satisfied": 0.9,
+      "p_violated": 0.05,
+      "p_refused": 0.03,
+      "p_error": 0.02,
+      "noise_cert_id": "55555555-5555-5555-5555-555555555555",
+      "verdict_at": "2026-08-28T10:00:04Z"
+    }
+  ],
+  "memory_certified_sessions": [
+    {
+      "task_id": "44444444-4444-4444-4444-444444444444",
+      "session_id": "22222222-2222-2222-2222-222222222222",
+      "device_id": "33333333-3333-3333-3333-333333333333",
+      "verdict": "satisfied",
+      "verdict_stage": "certified",
+      "noise_cert_id": "55555555-5555-5555-5555-555555555555",
+      "tamper": 0,
+      "events": [
+        {"digest": "00000000-0000-7000-8000-000000000001", "kind": "TaskOpen", "payload": "{\"task_seg_version\":\"task_seg.v1\"}"},
+        {"digest": "00000000-0000-7000-8000-000000000003", "kind": "ToolUse", "payload": "{\"tool_name\":\"Bash\",\"status\":\"TOOL_STATUS_ERROR\"}"},
+        {"digest": "00000000-0000-7000-8000-000000000004", "kind": "VerdictEvent", "payload": ""}
+      ]
+    },
+    {
+      "task_id": "66666666-6666-6666-6666-666666666666",
+      "session_id": "22222222-2222-2222-2222-222222222222",
+      "device_id": "33333333-3333-3333-3333-333333333333",
+      "verdict": "violated",
+      "verdict_stage": "provisional",
+      "noise_cert_id": "00000000-0000-0000-0000-000000000000",
+      "tamper": 0,
+      "events": [
+        {"digest": "00000000-0000-7000-8000-000000000008", "kind": "VerdictEvent", "payload": ""}
+      ]
+    }
+  ]
+}

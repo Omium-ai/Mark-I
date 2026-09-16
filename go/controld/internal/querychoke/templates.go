@@ -214,6 +214,311 @@ ORDER BY day, session_id`,
 		widenDates: true,
 	},
 	{
+		// reader.py attempt_window over [from, to): 07's attempt = span between stage-final verdicts in (session_epoch, seq) order, tail folded into the last verdicted attempt; verifier_tokens 0 (no witness row exists); task_seg_version lifted from the TaskOpen payload.
+		name:    "tvo_task_window",
+		version: "tvo_task_window.v1",
+		body: `SELECT e.task_id AS task_id,
+       e.attempt_n AS attempt_n,
+       sum(e.input_tokens + e.output_tokens + e.cache_creation_input_tokens + e.cache_read_input_tokens) AS gen_tokens,
+       toUInt64(0) AS verifier_tokens,
+       argMaxIf(e.verdict, (e.session_epoch, e.seq), e.verdict != '')       AS fused_verdict,
+       argMaxIf(e.verdict_stage, (e.session_epoch, e.seq), e.verdict != '') AS verdict_stage,
+       any(e.task_seg_version) AS task_seg_version,
+       toFloat64(sum(e.cost_usd)) AS cost_usd
+FROM (SELECT task_id, session_epoch, seq, verdict, verdict_stage, cost_usd,
+             input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+             least(1 + countIf(verdict != '' AND verdict_stage IN ('certified', 'revised'))
+                       OVER (PARTITION BY task_id ORDER BY session_epoch, seq
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                   greatest(1, countIf(verdict != '' AND verdict_stage IN ('certified', 'revised'))
+                       OVER (PARTITION BY task_id))) AS attempt_n,
+             max(JSONExtractString(payload, 'task_seg_version')) OVER (PARTITION BY task_id) AS task_seg_version
+      FROM (SELECT event_id, task_id, session_epoch, seq, verdict, verdict_stage, cost_usd, payload,
+                   input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+            FROM m1p_events
+            WHERE {{tenant_pred}}
+              AND toDate(occurred_at) >= {from:Date} AND toDate(occurred_at) < {to:Date}
+              AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+              AND event_type IN ('Usage', 'VerdictEvent', 'TaskOpen')
+            LIMIT 1 BY event_id) AS d) AS e
+GROUP BY e.task_id, e.attempt_n
+ORDER BY e.task_id, e.attempt_n`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: maxRowLimit,
+		timeout:  timeoutReport,
+	},
+	{
+		// inputs.py decision_row over [from, to]: served_model = the FIRST later Usage in the task ('' = none observed), verdict/label_confidence from the latest stage-final verdict (NULL confidence = uncertified); one scan, (session_epoch, seq) order, never occurred_at.
+		name:    "ope_route_decisions",
+		version: "ope_route_decisions.v1",
+		body: `SELECT e.event_id AS decision_id,
+       e.task_id AS task_id,
+       e.session_id AS session_id,
+       e.session_epoch AS session_epoch,
+       e.seq AS seq,
+       e.agent AS agent,
+       JSONExtractString(e.payload, 'action') AS action,
+       JSONExtract(e.payload, 'candidates', 'Array(String)') AS candidates,
+       e.propensity AS propensity,
+       e.fidelity AS fidelity,
+       e.bundle_seq AS bundle_seq,
+       e.next_model AS served_model,
+       e.cert_verdict AS verdict,
+       e.cert_stage AS verdict_stage,
+       if(e.cert_stage = '', NULL, e.cert_conf) AS label_confidence
+FROM (SELECT event_id, task_id, session_id, session_epoch, seq, agent, payload, propensity, fidelity, bundle_seq, event_type,
+             argMinIf(model, (session_epoch, seq), event_type = 'Usage' AND model != '')
+                 OVER (PARTITION BY task_id ORDER BY session_epoch, seq ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS next_model,
+             argMaxIf(verdict, (session_epoch, seq), verdict_stage IN ('certified', 'revised'))
+                 OVER (PARTITION BY task_id) AS cert_verdict,
+             argMaxIf(verdict_stage, (session_epoch, seq), verdict_stage IN ('certified', 'revised'))
+                 OVER (PARTITION BY task_id) AS cert_stage,
+             argMaxIf(multiIf(verdict = 'satisfied', p_satisfied, verdict = 'violated', p_violated, verdict = 'refused', p_refused, p_error),
+                      (session_epoch, seq), verdict_stage IN ('certified', 'revised'))
+                 OVER (PARTITION BY task_id) AS cert_conf
+      FROM (SELECT event_id, task_id, session_id, session_epoch, seq, agent, payload, propensity, fidelity, bundle_seq, event_type,
+                   model, verdict, verdict_stage, p_satisfied, p_violated, p_refused, p_error
+            FROM m1p_events
+            WHERE {{tenant_pred}}
+              AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
+              AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+              AND event_type IN ('RouteDecision', 'Usage', 'VerdictEvent')
+            LIMIT 1 BY event_id) AS d) AS e
+WHERE e.event_type = 'RouteDecision'
+ORDER BY e.session_epoch, e.seq, e.event_id`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: maxRowLimit,
+		timeout:  timeoutReport,
+	},
+	{
+		// corpus/export.py candidates over [from, to]: one row per task with a stage-final verdict; digests ride TaskOpen's payload (protojson base64 -> hex), tamper is any AnchorVote integrity.tamper, propensity/fidelity NULL on unrouted tasks.
+		name:    "corpus_candidates",
+		version: "corpus_candidates.v1",
+		body: `SELECT e.task_id AS task_id,
+       any(e.session_id) AS session_id,
+       maxIf(JSONExtractString(e.payload, 'task_seg_version'), e.event_type = 'TaskOpen') AS task_seg_version,
+       any(e.agent) AS agent,
+       argMaxIf(e.model, (e.session_epoch, e.seq), e.event_type = 'Usage' AND e.model != '') AS model,
+       hex(base64Decode(maxIf(JSONExtractString(e.payload, 'prompt_digest'), e.event_type = 'TaskOpen'))) AS prompt_digest,
+       argMaxIf(e.verdict, (e.session_epoch, e.seq), e.stage_final)       AS verdict,
+       argMaxIf(e.verdict_stage, (e.session_epoch, e.seq), e.stage_final) AS verdict_stage,
+       argMaxIf(e.p_satisfied, (e.session_epoch, e.seq), e.stage_final)   AS p_satisfied,
+       argMaxIf(e.p_violated, (e.session_epoch, e.seq), e.stage_final)    AS p_violated,
+       argMaxIf(e.p_refused, (e.session_epoch, e.seq), e.stage_final)     AS p_refused,
+       argMaxIf(e.p_error, (e.session_epoch, e.seq), e.stage_final)       AS p_error,
+       argMaxIf(e.noise_cert_id, (e.session_epoch, e.seq), e.stage_final) AS noise_cert_id,
+       sum(e.input_tokens)            AS input_tokens,
+       sum(e.output_tokens)           AS output_tokens,
+       sum(e.cache_read_input_tokens) AS cache_read_input_tokens,
+       countIf(e.stage_final)         AS attempts,
+       if(countIf(e.event_type = 'RouteDecision') = 0, NULL,
+          argMaxIf(e.propensity, (e.session_epoch, e.seq), e.event_type = 'RouteDecision')) AS propensity,
+       if(countIf(e.event_type = 'RouteDecision') = 0, NULL,
+          argMaxIf(e.fidelity, (e.session_epoch, e.seq), e.event_type = 'RouteDecision')) AS fidelity,
+       max(e.checkpoint_seq) AS checkpoint_seq,
+       argMaxIf(e.occurred_at, (e.session_epoch, e.seq), e.stage_final) AS occurred_at,
+       maxIf(JSONExtractBool(e.payload, 'integrity', 'tamper'), e.event_type = 'AnchorVote') AS tamper
+FROM (SELECT event_id, task_id, session_id, session_epoch, seq, occurred_at, agent, model, payload, event_type,
+             verdict, verdict_stage, p_satisfied, p_violated, p_refused, p_error, noise_cert_id,
+             input_tokens, output_tokens, cache_read_input_tokens, propensity, fidelity, checkpoint_seq,
+             verdict_stage IN ('certified', 'revised') AS stage_final
+      FROM m1p_events
+      WHERE {{tenant_pred}}
+        AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
+        AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+        AND event_type IN ('TaskOpen', 'Usage', 'VerdictEvent', 'RouteDecision', 'AnchorVote')
+      LIMIT 1 BY event_id) AS e
+GROUP BY e.task_id
+HAVING attempts > 0
+ORDER BY occurred_at, task_id`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: maxRowLimit,
+		timeout:  timeoutReport,
+	},
+	{
+		// adjudicator spectral_estimate over [from, to]: one row per verifier vote; vote is the wire Verdict name lowercased ('' on RmScore, which carries score), stage is the task's latest verdict stage, tamper the AnchorVote envelope flag (06 §2.4: quarantined from estimation by the reader).
+		name:    "adjudication_votes",
+		version: "adjudication_votes.v1",
+		body: `SELECT e.task_id AS task_id,
+       e.event_id AS vote_id,
+       e.session_epoch AS session_epoch,
+       e.seq AS seq,
+       e.event_type AS family,
+       multiIf(e.event_type = 'AnchorVote', JSONExtractString(e.payload, 'anchor_id'),
+               e.event_type = 'JudgeVote',  JSONExtractString(e.payload, 'judge_id'),
+               e.event_type = 'RmScore',    JSONExtractString(e.payload, 'model_id'),
+               'consistency') AS verifier_id,
+       e.event_type = 'AnchorVote' AS is_anchor,
+       lower(replaceOne(JSONExtractString(e.payload, 'vote'), 'VERDICT_', '')) AS vote,
+       lower(replaceOne(JSONExtractString(e.payload, 'vote'), 'VERDICT_', '')) IN ('refused', 'error') AS abstained,
+       JSONExtractFloat(e.payload, 'score') AS score,
+       JSONExtractBool(e.payload, 'integrity', 'tamper') AS tamper,
+       e.task_stage AS stage
+FROM (SELECT event_id, task_id, session_epoch, seq, event_type, payload,
+             argMaxIf(verdict_stage, (session_epoch, seq), verdict != '') OVER (PARTITION BY task_id) AS task_stage
+      FROM (SELECT event_id, task_id, session_epoch, seq, event_type, payload, verdict, verdict_stage
+            FROM m1p_events
+            WHERE {{tenant_pred}}
+              AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
+              AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+              AND event_type IN ('AnchorVote', 'JudgeVote', 'RmScore', 'ConsistencyVote', 'VerdictEvent')
+            LIMIT 1 BY event_id) AS d) AS e
+WHERE e.event_type != 'VerdictEvent'
+ORDER BY e.task_id, e.session_epoch, e.seq, e.event_id`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: maxRowLimit,
+		timeout:  timeoutReport,
+	},
+	{
+		// policy_compiler/jobs.py read_attempts over [from, to): tvo_task_window's attempt arithmetic plus the two CPVS keys (06 §10.1) — task_class lifted from the TaskOpen payload (no wire field stamps it yet: '' until the edge does), model_id the attempt's latest Usage model; token classes split as knee.py's AttemptCost names them; verifier_spend_usd 0 (no witness row); cost_basis the C1.9 stamp ('' until stamped, which CertifiedAttempt refuses loudly).
+		name:    "policy_compiler_attempts",
+		version: "policy_compiler_attempts.v1",
+		body: `SELECT e.task_id AS task_id,
+       any(e.task_class) AS task_class,
+       argMaxIf(e.model, (e.session_epoch, e.seq), e.event_type = 'Usage' AND e.model != '') AS model_id,
+       e.attempt_n AS attempt_n,
+       argMaxIf(e.verdict, (e.session_epoch, e.seq), e.verdict != '')       AS fused_verdict,
+       argMaxIf(e.verdict_stage, (e.session_epoch, e.seq), e.verdict != '') AS verdict_stage,
+       sum(e.input_tokens)                AS input_tokens,
+       sum(e.output_tokens)               AS output_tokens,
+       sum(e.cache_creation_input_tokens) AS cache_creation_tokens,
+       sum(e.cache_read_input_tokens)     AS cache_read_tokens,
+       toFloat64(0) AS verifier_spend_usd,
+       anyIf(e.cost_basis, e.cost_basis != '') AS cost_basis
+FROM (SELECT task_id, session_epoch, seq, event_type, model, verdict, verdict_stage, cost_basis,
+             input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+             least(1 + countIf(verdict != '' AND verdict_stage IN ('certified', 'revised'))
+                       OVER (PARTITION BY task_id ORDER BY session_epoch, seq
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                   greatest(1, countIf(verdict != '' AND verdict_stage IN ('certified', 'revised'))
+                       OVER (PARTITION BY task_id))) AS attempt_n,
+             max(JSONExtractString(payload, 'task_class')) OVER (PARTITION BY task_id) AS task_class
+      FROM (SELECT event_id, task_id, session_epoch, seq, event_type, model, verdict, verdict_stage, cost_basis, payload,
+                   input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+            FROM m1p_events
+            WHERE {{tenant_pred}}
+              AND toDate(occurred_at) >= {from:Date} AND toDate(occurred_at) < {to:Date}
+              AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+              AND event_type IN ('Usage', 'VerdictEvent', 'TaskOpen')
+            LIMIT 1 BY event_id) AS d) AS e
+GROUP BY e.task_id, e.attempt_n
+HAVING fused_verdict != ''
+ORDER BY e.task_id, e.attempt_n`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: maxRowLimit,
+		timeout:  timeoutReport,
+	},
+	{
+		// memory/admit.py certified_outcomes over [from, to): one row per task the artifact was delivered to (MemoryInjection.artifact_ids) AND closed on (ArtifactOutcome.artifact_id) — protojson lands both as base64 of the 16 bytes; the task's stage-final verdict; task_cost under the row's basis (usd → cost_usd, else tokens).
+		// ponytail: utility = TVO_control − task_cost on a satisfied task, −task_cost otherwise (06 §9.3's TVO_with_injection is unbounded on a failed task; the consumer clips at φ); TVO_control is the window's un-injected certified cohort, not class-matched — no task_class exists yet. No control ⇒ no sample.
+		name:    "artifact_outcomes",
+		version: "artifact_outcomes.v1",
+		body: `SELECT t.task_id AS task_id,
+       t.device_id AS device_id,
+       t.verdict AS verdict,
+       t.verdict_stage AS verdict_stage,
+       t.noise_cert_id AS noise_cert_id,
+       t.cost_basis AS cost_basis,
+       t.task_cost AS task_cost,
+       if(t.verdict = 'satisfied', t.control_tvo - t.task_cost, -t.task_cost) AS utility
+FROM (SELECT task_id, device_id, verdict, verdict_stage, noise_cert_id, cost_basis, task_cost, delivered, closed,
+             sumIf(task_cost, NOT injected AND verdict_stage != '') OVER ()
+               / countIf(NOT injected AND verdict = 'satisfied') OVER () AS control_tvo
+      FROM (SELECT e.task_id AS task_id,
+                   any(e.device_id) AS device_id,
+                   argMaxIf(e.verdict, (e.session_epoch, e.seq), e.stage_final)       AS verdict,
+                   argMaxIf(e.verdict_stage, (e.session_epoch, e.seq), e.stage_final) AS verdict_stage,
+                   argMaxIf(e.noise_cert_id, (e.session_epoch, e.seq), e.stage_final) AS noise_cert_id,
+                   anyIf(e.cost_basis, e.cost_basis != '') AS cost_basis,
+                   if(anyIf(e.cost_basis, e.cost_basis != '') = 'usd', toFloat64(sum(e.cost_usd)),
+                      toFloat64(sum(e.input_tokens + e.output_tokens + e.cache_creation_input_tokens + e.cache_read_input_tokens))) AS task_cost,
+                   countIf(e.event_type = 'MemoryInjection') > 0 AS injected,
+                   countIf(e.event_type = 'MemoryInjection' AND has(JSONExtract(e.payload, 'artifact_ids', 'Array(String)'), e.wanted)) > 0 AS delivered,
+                   countIf(e.event_type = 'ArtifactOutcome' AND JSONExtractString(e.payload, 'artifact_id') = e.wanted) > 0 AS closed
+            FROM (SELECT event_id, task_id, device_id, session_epoch, seq, event_type, payload,
+                         verdict, verdict_stage, noise_cert_id, cost_basis, cost_usd,
+                         input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+                         verdict_stage IN ('certified', 'revised') AS stage_final,
+                         base64Encode(UUIDStringToNum(toString({artifact_id:UUID}))) AS wanted
+                  FROM m1p_events
+                  WHERE {{tenant_pred}}
+                    AND toDate(occurred_at) >= {from:Date} AND toDate(occurred_at) < {to:Date}
+                    AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+                    AND event_type IN ('Usage', 'VerdictEvent', 'MemoryInjection', 'ArtifactOutcome')
+                  LIMIT 1 BY event_id) AS e
+            GROUP BY e.task_id) AS a) AS t
+WHERE t.delivered AND t.closed AND isFinite(t.control_tvo)
+ORDER BY t.task_id`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}, "artifact_id": {kind: pUUID}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: maxRowLimit,
+		timeout:  timeoutReport,
+	},
+	{
+		// adjudicator nightly.py _ledger_pairs over [from, to]: the ledger side of the gold-vs-verdict join (06 §5.2) — one row per task with a stage-final verdict, its posterior[4] and cert; session_id rides along because m1_021's task_digest is HMAC(root, session_id ‖ task_id) and the join happens in Postgres.
+		name:    "gold_vs_verdict",
+		version: "gold_vs_verdict.v1",
+		body: `SELECT e.task_id AS task_id,
+       any(e.session_id) AS session_id,
+       argMaxIf(e.verdict, (e.session_epoch, e.seq), e.stage_final)       AS fused_verdict,
+       argMaxIf(e.verdict_stage, (e.session_epoch, e.seq), e.stage_final) AS verdict_stage,
+       argMaxIf(e.p_satisfied, (e.session_epoch, e.seq), e.stage_final)   AS p_satisfied,
+       argMaxIf(e.p_violated, (e.session_epoch, e.seq), e.stage_final)    AS p_violated,
+       argMaxIf(e.p_refused, (e.session_epoch, e.seq), e.stage_final)     AS p_refused,
+       argMaxIf(e.p_error, (e.session_epoch, e.seq), e.stage_final)       AS p_error,
+       argMaxIf(e.noise_cert_id, (e.session_epoch, e.seq), e.stage_final) AS noise_cert_id,
+       argMaxIf(e.occurred_at, (e.session_epoch, e.seq), e.stage_final)   AS verdict_at
+FROM (SELECT event_id, task_id, session_id, session_epoch, seq, occurred_at,
+             verdict, verdict_stage, p_satisfied, p_violated, p_refused, p_error, noise_cert_id,
+             verdict_stage IN ('certified', 'revised') AS stage_final
+      FROM m1p_events
+      WHERE {{tenant_pred}}
+        AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
+        AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+        AND event_type = 'VerdictEvent'
+      LIMIT 1 BY event_id) AS e
+GROUP BY e.task_id
+HAVING countIf(e.stage_final) > 0
+ORDER BY verdict_at, task_id`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: maxRowLimit,
+		timeout:  timeoutReport,
+	},
+	{
+		// memory/extract.py certified_sessions over [from, to) (06 §9.1, FR-REMEMBER-002): one row per task with a verdict — verdict/stage/cert from its terminal verdict row in (session_epoch, seq) order (a provisional-only task surfaces so the consumer refuses it by stage), tamper any AnchorVote integrity.tamper, events the task's ledger rows in causal order: digest = event_id (the receipt-chain leaf, 07), kind = event_type, payload the typed P0/P1 remainder — transcript text never reaches the ledger.
+		// ponytail: events uncapped per task; wrap groupArray in groupArray(N) if a task's row count outgrows the Batch API request ceiling.
+		name:    "memory_certified_sessions",
+		version: "memory_certified_sessions.v1",
+		body: `SELECT e.task_id AS task_id,
+       any(e.session_id) AS session_id,
+       any(e.device_id) AS device_id,
+       argMaxIf(e.verdict, (e.session_epoch, e.seq), e.verdict != '')       AS verdict,
+       argMaxIf(e.verdict_stage, (e.session_epoch, e.seq), e.verdict != '') AS verdict_stage,
+       argMaxIf(e.noise_cert_id, (e.session_epoch, e.seq), e.verdict != '') AS noise_cert_id,
+       maxIf(JSONExtractBool(e.payload, 'integrity', 'tamper'), e.event_type = 'AnchorVote') AS tamper,
+       arrayMap(x -> (x.3, x.4, x.5)::Tuple(digest String, kind String, payload String),
+                arraySort(x -> (x.1, x.2), groupArray((e.session_epoch, e.seq, toString(e.event_id), e.event_type, e.payload)))) AS events
+FROM (SELECT event_id, task_id, session_id, device_id, session_epoch, seq, event_type, payload, verdict, verdict_stage, noise_cert_id
+      FROM m1p_events
+      WHERE {{tenant_pred}}
+        AND toDate(occurred_at) >= {from:Date} AND toDate(occurred_at) < {to:Date}
+        AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+      LIMIT 1 BY event_id) AS e
+GROUP BY e.task_id
+HAVING verdict != ''
+ORDER BY e.task_id`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: maxRowLimit,
+		timeout:  timeoutReport,
+	},
+	{
 		// Coverage-band inputs per day (07: observed/bypass/disabled are
 		// columns of the tenant-day row — a missing day is 0/0, which the
 		// report layer refuses rather than stretches, ADR-0010 §2.7).

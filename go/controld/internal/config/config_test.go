@@ -16,6 +16,7 @@ func setRequired(t *testing.T) {
 		"S3_INGEST_BUCKET":          "mark1-ingest",
 		"AUTH_TOKEN_ED25519_SEED":   strings.Repeat("ab", 32), // 32 bytes of hex
 		"SERVER_CHAIN_ED25519_SEED": strings.Repeat("cd", 32), // 32 bytes of hex
+		"TENANT_HMAC_PEPPER":        strings.Repeat("ef", 32), // 32 bytes of hex
 	} {
 		t.Setenv(k, v)
 	}

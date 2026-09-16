@@ -1,5 +1,5 @@
 {
-  "_why": "ONE fixture, TWO asserters (the wave-5 lesson: stub-tested halves drift). Go: querychoke golden_band_test.go (coverageBand + guaranteeRefusals, the /api/v1/reports/tvo arithmetic). Python: python/intel/tests/test_conf_vectors_tvo_band.py (app/tvo/coverage.py coverage_band + report.py assemble_report). The arithmetic is normative in 07 (coverage = observed/(observed+bypass+disabled); lower edge = coverage x (1 - dropped/(dropped+ingested))) and the refusal rule in 06 SS8.5 (D23 floor 0.95 on the SHED-NARROWED lower edge; unresolved usd basis without a pinned model_prices row). Refusal strings are asserted byte-for-byte: if either implementation reformats or reorders them, this fixture goes red in that language.",
+  "_why": "ONE fixture, TWO asserters (the wave-5 lesson: stub-tested halves drift). Go: querychoke golden_band_test.go (coverageBand + guaranteeRefusals, the /api/v1/reports/tvo arithmetic). Python: python/intel/tests/test_conf_vectors_tvo_band.py (app/tvo/coverage.py coverage_band + report.py assemble_report). The arithmetic is normative in 07 (coverage = observed/(observed+bypass+disabled); lower edge = coverage x (1 - dropped/(dropped+ingested))) and the refusal rule in 06 SS8.5 (D23 floor 0.95 on the SHED-NARROWED lower edge; unresolved basis: usd without a pinned model_prices row, quota without a tenant-confirmed S). Refusal strings are asserted byte-for-byte: if either implementation reformats or reorders them, this fixture goes red in that language.",
   "floor": 0.95,
   "cases": [
     {
@@ -116,6 +116,46 @@
           "M1E-5004 coverage below floor: coverage_lower=0.5000 < 0.95",
           "cost basis unresolved: no pinned model_prices row for usd (06 §8.4)"
         ]
+      }
+    },
+    {
+      "name": "quota_without_a_confirmed_shadow_price_is_indicative",
+      "_why": "The quota half of the symmetric basis rule (06 SS8.4, D22): a quota report needs the tenant-CONFIRMED S from its m1_075 row; Python's asserter passes no confirmation (assemble_report's default), Go's passes shadow_price_confirmed. price_pinned is irrelevant to quota and must not rescue it.",
+      "observed_ms": 990,
+      "bypass_ms": 10,
+      "disabled_ms": 0,
+      "dropped_billing": 0,
+      "events_billing_ingested": 100,
+      "verified": 7,
+      "cost_basis": "quota",
+      "price_pinned": true,
+      "shadow_price_confirmed": false,
+      "expect": {
+        "coverage": 0.99,
+        "coverage_lower": 0.99,
+        "guarantee_grade": false,
+        "refusals": [
+          "cost basis unresolved: shadow price S unconfirmed by tenant (D22)"
+        ]
+      }
+    },
+    {
+      "name": "exactly_at_the_floor_is_guarantee_grade",
+      "_why": "D23 is a floor, not a ceiling: coverage_lower == 0.95 issues. Pins the strict < in both languages (a <= drift refuses here).",
+      "observed_ms": 950,
+      "bypass_ms": 50,
+      "disabled_ms": 0,
+      "dropped_billing": 0,
+      "events_billing_ingested": 0,
+      "verified": 4,
+      "cost_basis": "usd",
+      "price_pinned": true,
+      "shadow_price_confirmed": false,
+      "expect": {
+        "coverage": 0.95,
+        "coverage_lower": 0.95,
+        "guarantee_grade": true,
+        "refusals": []
       }
     }
   ]
