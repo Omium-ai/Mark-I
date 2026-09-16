@@ -299,6 +299,111 @@ pub fn ppr(
     Ok(rank)
 }
 
+/// Number of per-file features the ranker seam scores (`Index::file_features`).
+pub const FEATURES: usize = 4;
+
+/// 06 §12.4 stages at the edge: probation/shadow are diagnostic-only, `Active` blends.
+/// Serde spelling is the bundle's closed enum, as mark1d writes it to `--ranker-file`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RankerStage {
+    Probation,
+    Shadow,
+    Active,
+}
+
+/// Phase 6 learned re-ranker; weights arrive ONLY via the signed bundle's cortex
+/// `learned_ranker`, relayed by mark1d as `--ranker-file` (session::Shared::set_ranker).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RankerWeights {
+    stage: RankerStage,
+    weight: f64,
+    bias: f64,
+    coefficients: [f64; FEATURES],
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum RankerRefusal {
+    #[error("blend weight {0} outside [0,1]")]
+    Weight(f64),
+    #[error("non-finite bias or coefficient")]
+    Coefficient,
+}
+
+impl RankerWeights {
+    /// Refuses at load what the blend could not bound (NaN fails the range check).
+    pub fn new(
+        stage: RankerStage,
+        weight: f64,
+        bias: f64,
+        coefficients: [f64; FEATURES],
+    ) -> Result<Self, RankerRefusal> {
+        if !(0.0..=1.0).contains(&weight) {
+            return Err(RankerRefusal::Weight(weight));
+        }
+        if !bias.is_finite() || coefficients.iter().any(|c| !c.is_finite()) {
+            return Err(RankerRefusal::Coefficient);
+        }
+        Ok(RankerWeights {
+            stage,
+            weight,
+            bias,
+            coefficients,
+        })
+    }
+
+    pub fn stage(&self) -> RankerStage {
+        self.stage
+    }
+
+    /// ponytail: linear model over the 4 PPR-side features clamped to [0,1]; a trained
+    /// ranker (bundle-delivered weights of anything richer) replaces this fn behind the seam.
+    pub fn learned(&self, features: &[f64; FEATURES]) -> f64 {
+        let dot: f64 = self
+            .coefficients
+            .iter()
+            .zip(features)
+            .map(|(c, x)| c * x)
+            .sum();
+        (self.bias + dot).clamp(0.0, 1.0)
+    }
+}
+
+/// The served SET is always PPR's top-k; a learned member may reorder inside it, never
+/// remove from it (10 §11.3). Active blends `(ppr + w·learned) / (1 + w)`, staying in [0,1].
+pub fn rerank(
+    ppr_order: Vec<(String, f64)>,
+    features: impl Fn(&str) -> [f64; FEATURES],
+    weights: &RankerWeights,
+    k: usize,
+) -> Vec<(String, f64)> {
+    let top: Vec<(String, f64, f64)> = ppr_order
+        .into_iter()
+        .take(k)
+        .map(|(path, ppr)| {
+            let learned = weights.learned(&features(&path));
+            (path, ppr, learned)
+        })
+        .collect();
+    if weights.stage != RankerStage::Active {
+        for (path, ppr, learned) in &top {
+            tracing::debug!(path, ppr, learned, stage = ?weights.stage, "learned ranker diagnostic");
+        }
+        return top.into_iter().map(|(p, s, _)| (p, s)).collect();
+    }
+    let w = weights.weight;
+    let mut out: Vec<(String, f64)> = top
+        .into_iter()
+        .map(|(p, ppr, learned)| (p, (ppr + w * learned) / (1.0 + w)))
+        .collect();
+    out.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    out
+}
+
 /// Import-string → file resolution, one heuristic across all 5 languages:
 /// normalize separators to `/`, strip relative markers and quotes, then match
 /// the longest trailing-segment suffix against indexed paths (extension
@@ -426,6 +531,68 @@ mod tests {
             .ranks_for(&[seed], Duration::ZERO, 1)
             .expect_err("must refuse");
         assert!(err.retry_after_ms > 0);
+    }
+
+    #[test]
+    fn ranker_weights_refuse_what_the_blend_cannot_bound() {
+        for w in [-0.1, 1.000_001, f64::NAN, f64::INFINITY] {
+            assert!(
+                RankerWeights::new(RankerStage::Active, w, 0.0, [0.0; FEATURES]).is_err(),
+                "weight {w} must refuse"
+            );
+        }
+        assert_eq!(
+            RankerWeights::new(RankerStage::Active, 0.5, f64::NAN, [0.0; FEATURES]),
+            Err(RankerRefusal::Coefficient)
+        );
+        assert_eq!(
+            RankerWeights::new(
+                RankerStage::Shadow,
+                0.5,
+                0.0,
+                [0.0, f64::INFINITY, 0.0, 0.0]
+            ),
+            Err(RankerRefusal::Coefficient)
+        );
+        let ok = RankerWeights::new(RankerStage::Active, 1.0, 0.0, [1.0, 0.0, 0.0, 0.0]).unwrap();
+        assert_eq!(ok.learned(&[50.0, 0.0, 0.0, 0.0]), 1.0, "clamped to [0,1]");
+        assert_eq!(ok.learned(&[0.0, 0.0, 0.0, 0.0]), 0.0);
+        let neg = RankerWeights::new(RankerStage::Active, 1.0, -3.0, [0.0; FEATURES]).unwrap();
+        assert_eq!(neg.learned(&[9.0; FEATURES]), 0.0);
+    }
+
+    #[test]
+    fn rerank_is_bounded_and_keeps_pprs_top_k() {
+        let order = vec![
+            ("a.rs".to_string(), 1.0),
+            ("b.rs".to_string(), 0.5),
+            ("c.rs".to_string(), 0.0),
+        ];
+        // Learned score = fan_in feature; c.rs is the outsider the learned model loves.
+        let feats = |p: &str| match p {
+            "a.rs" => [1.0, 0.0, 0.0, 0.0],
+            "b.rs" => [0.0, 0.0, 0.0, 0.0],
+            _ => [1.0, 0.0, 0.0, 0.0],
+        };
+        let active =
+            RankerWeights::new(RankerStage::Active, 1.0, 0.0, [1.0, 0.0, 0.0, 0.0]).unwrap();
+        let out = rerank(order.clone(), feats, &active, 2);
+        assert_eq!(
+            out.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+            ["a.rs", "b.rs"],
+            "the served set is PPR's top-2; c.rs cannot enter"
+        );
+        assert!(out.iter().all(|(_, s)| (0.0..=1.0).contains(s)), "{out:?}");
+        assert_eq!(out[0].1, 1.0, "(1 + 1·1)/(1 + 1)");
+        assert_eq!(out[1].1, 0.25, "(0.5 + 1·0)/(1 + 1)");
+        for stage in [RankerStage::Probation, RankerStage::Shadow] {
+            let w = RankerWeights::new(stage, 1.0, 0.0, [1.0, 0.0, 0.0, 0.0]).unwrap();
+            assert_eq!(
+                rerank(order.clone(), feats, &w, 3),
+                order,
+                "{stage:?} serves PPR order"
+            );
+        }
     }
 
     #[test]

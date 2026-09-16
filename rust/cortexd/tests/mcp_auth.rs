@@ -230,8 +230,8 @@ fn unreadable_ignore_file_fails_closed_m1e6402() {
 
 /// memory_recall obeys the common contract like its siblings (08 §6): every
 /// non-refused result carries the preamble (refused/root_hash/index_clock/
-/// budget), so call_tool books real token usage — latent only while the
-/// artifact cache is the Phase-2 honest-empty stub.
+/// budget), so call_tool books real token usage; with no cache designated
+/// (`--memory-file` unset) the answer is the honest empty.
 #[test]
 fn memory_recall_carries_preamble_and_budget() {
     let (shared, _work, _store) = scratch();
@@ -303,4 +303,331 @@ fn every_tool_call_emits_one_cortex_injection() {
     assert_eq!(ci.index_clock, shared.index_clock.load(Ordering::SeqCst));
     assert_eq!(ci.channel, InjectionChannel::McpPull as i32);
     assert_eq!((ci.token_budget, ci.tokens_used), (2000, 10));
+}
+
+/// RFC 3339 UTC for "now", the shape Go's `time.Time` marshals — the planted
+/// cache must be fresh against the real clock `call_tool` reads.
+fn rfc3339_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil from days (Hinnant), the inverse of the reader's days-from-civil.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.5Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
+}
+
+fn artifact(id: &str, kind: &str, trigger: &str, lcb: f64) -> serde_json::Value {
+    serde_json::json!({
+        "artifact_id": id, "kind": kind, "trigger": trigger,
+        "guidance": format!("guidance for {id}"), "utility_lcb": lcb
+    })
+}
+
+const ID_PIT: &str = "0190a1b2-c3d4-7000-8000-000000000001";
+const ID_FIX: &str = "0190a1b2-c3d4-7000-8000-000000000002";
+const ID_INV: &str = "0190a1b2-c3d4-7000-8000-000000000003";
+const ID_PREF: &str = "0190a1b2-c3d4-7000-8000-000000000004";
+
+/// A cache with every kind the DB enum has plus the two ways a row can be
+/// unservable (unknown kind, non-UUID id) and one that does not match.
+fn planted(synced_at: &str) -> String {
+    serde_json::json!({
+        "synced_at": synced_at,
+        "artifacts": [
+            artifact(ID_PIT, "pitfall", "TypeError: cannot read property of undefined", 0.2),
+            artifact(ID_PREF, "preference", "typeerror", 0.9),
+            artifact(ID_FIX, "fix_pattern", "  TypeError   in render ", 0.6),
+            artifact("0190a1b2-c3d4-7000-8000-000000000005", "routing_hint", "typeerror", 0.9),
+            artifact("not-a-uuid", "pitfall", "typeerror", 0.9),
+            artifact(ID_INV, "invariant", "typeerror", 0.4),
+            artifact("0190a1b2-c3d4-7000-8000-000000000006", "fix_pattern", "unrelated trigger", 0.9),
+            artifact("0190a1b2-c3d4-7000-8000-000000000007", "invariant", "", 0.9),
+        ]
+    })
+    .to_string()
+}
+
+fn plant(shared: &cortexd::session::Shared, dir: &Path, body: &str) {
+    let file = dir.join("memory/artifacts.json");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, body).unwrap();
+    let _ = shared.memory_file.set(file);
+}
+
+fn recall(shared: &Arc<cortexd::session::Shared>, args: serde_json::Value) -> serde_json::Value {
+    cortexd::mcp::call_tool(shared, "memory_recall", &args).unwrap()
+}
+
+fn ids(out: &serde_json::Value) -> Vec<&str> {
+    out["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["artifact_id"].as_str().unwrap())
+        .collect()
+}
+
+/// FR-REMEMBER-004 at the pull surface (08 §6.6): only the edge allowlist
+/// (pitfall, fix_pattern, invariant) is served — never `preference` (the
+/// routing-hint class), unknown kinds, non-UUID ids or empty triggers — in
+/// LCB order, matched by normalized substring on the trigger, and the 08
+/// spelling of a kind filters as its m1_040 twin (06 §9.2).
+#[test]
+fn memory_recall_serves_the_allowlist_in_lcb_order() {
+    let (shared, _work, store) = scratch();
+    plant(&shared, store.path(), &planted(&rfc3339_now()));
+    let out = recall(&shared, serde_json::json!({ "query": "TypeError" }));
+    assert_eq!(out["refused"], serde_json::json!(false));
+    assert_eq!(
+        ids(&out),
+        [ID_FIX, ID_INV, ID_PIT],
+        "LCB desc, default limit 3"
+    );
+    let first = &out["artifacts"][0];
+    assert_eq!(first["kind"], "fix_pattern");
+    assert_eq!(first["body"], format!("guidance for {ID_FIX}"));
+    assert_eq!(first["scope"], "tenant");
+    assert_eq!(first["utility_lcb"], 0.6);
+    // The query may carry the whole error: triggers inside it match, a
+    // trigger that merely shares a word ("typeerror in render") does not.
+    let out = recall(
+        &shared,
+        serde_json::json!({ "query": "Uncaught TypeError: cannot read property of undefined at x.js:1", "limit": 10 }),
+    );
+    assert_eq!(ids(&out), [ID_INV, ID_PIT]);
+    assert_eq!(
+        ids(&recall(
+            &shared,
+            serde_json::json!({ "query": "TypeError", "limit": 1 })
+        )),
+        [ID_FIX]
+    );
+    assert_eq!(
+        ids(&recall(
+            &shared,
+            serde_json::json!({ "query": "typeerror", "kinds": ["pitfall_remedy"] })
+        )),
+        [ID_PIT]
+    );
+    assert_eq!(
+        ids(&recall(
+            &shared,
+            serde_json::json!({ "query": "typeerror", "kinds": ["invariant", "workflow_template"] })
+        )),
+        [ID_FIX, ID_INV]
+    );
+    assert!(ids(&recall(
+        &shared,
+        serde_json::json!({ "query": "typeerror", "kinds": ["preference"] })
+    ))
+    .is_empty());
+    assert!(ids(&recall(
+        &shared,
+        serde_json::json!({ "query": "no such trigger" })
+    ))
+    .is_empty());
+    assert_eq!(
+        shared
+            .memory_unreadable
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
+
+/// D-AF: a recall shares the session map budget under the 2 500-token
+/// injection ceiling, never the 8k per-call cap; the reply's own estimate is
+/// ceil(len/4) and shedding is from the LCB tail.
+#[test]
+fn memory_recall_is_budgeted_by_the_session_map_budget() {
+    let (shared, _work, store) = scratch();
+    let rows: Vec<serde_json::Value> = (0..10)
+        .map(|i| {
+            let mut a = artifact(
+                &format!("0190a1b2-c3d4-7000-8000-0000000000{i:02}"),
+                "invariant",
+                "budget probe",
+                1.0 - i as f64 / 100.0,
+            );
+            a["guidance"] = serde_json::json!("g".repeat(1_000));
+            a
+        })
+        .collect();
+    let body = serde_json::json!({ "synced_at": rfc3339_now(), "artifacts": rows }).to_string();
+    plant(&shared, store.path(), &body);
+    let out = recall(
+        &shared,
+        serde_json::json!({ "query": "budget probe", "limit": 10, "max_tokens": 8000 }),
+    );
+    let b = &out["budget"];
+    assert_eq!(
+        b["max_tokens"], 2000,
+        "min(8000 asked, 2000 session map, 2500 D-AF)"
+    );
+    let used = b["used_tokens"].as_u64().unwrap();
+    assert!(used <= 2000 && used > 1_000, "{used}");
+    let payload = serde_json::json!({ "artifacts": out["artifacts"] }).to_string();
+    assert_eq!(
+        used,
+        (payload.len() as u64).div_ceil(4),
+        "own estimate is ceil(len/4)"
+    );
+    assert_eq!(b["truncated"], true);
+    let served = ids(&out);
+    assert!(!served.is_empty() && served.len() < 10, "{served:?}");
+    assert!(
+        served[0].ends_with("00"),
+        "highest LCB survives, the tail is shed"
+    );
+    // The event attributes what was served, not what was shed.
+    let held = shared.pending.lock().unwrap();
+    let mi = held
+        .iter()
+        .find_map(|e| match &e.body {
+            Some(m1p_wire::pb::event::Body::MemoryInjection(mi)) => Some(mi.clone()),
+            _ => None,
+        })
+        .expect("a served recall emits a MemoryInjection");
+    assert_eq!(mi.artifact_ids.len(), served.len());
+}
+
+/// Fail-open, counted: stale (>7 d) is the honest empty; unreadable or
+/// malformed is the honest empty AND a count; absent is neither.
+#[test]
+fn memory_recall_stale_or_malformed_cache_is_empty_and_counted() {
+    use std::sync::atomic::Ordering;
+    let (shared, _work, store) = scratch();
+    let unreadable = || shared.memory_unreadable.load(Ordering::Relaxed);
+    let q = serde_json::json!({ "query": "typeerror" });
+    plant(&shared, store.path(), &planted("2020-01-01T00:00:00Z"));
+    assert!(
+        ids(&recall(&shared, q.clone())).is_empty(),
+        "stale sync serves nothing"
+    );
+    assert_eq!(unreadable(), 0, "stale is not malformed");
+    let file = shared.memory_file.get().unwrap().clone();
+    std::fs::write(&file, b"{not json").unwrap();
+    assert!(ids(&recall(&shared, q.clone())).is_empty());
+    assert_eq!(unreadable(), 1, "malformed is counted");
+    std::fs::write(&file, planted("yesterday")).unwrap();
+    assert!(ids(&recall(&shared, q.clone())).is_empty());
+    assert_eq!(unreadable(), 2, "unparseable synced_at is malformed");
+    std::fs::remove_file(&file).unwrap();
+    assert!(ids(&recall(&shared, q.clone())).is_empty());
+    assert_eq!(unreadable(), 2, "absent is the ordinary unsynced state");
+    std::fs::write(&file, planted(&rfc3339_now())).unwrap();
+    assert_eq!(
+        ids(&recall(&shared, q.clone())).len(),
+        3,
+        "a fresh sync serves again"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(ids(&recall(&shared, q)).is_empty());
+        assert_eq!(unreadable(), 3, "present but unreadable is counted");
+    }
+}
+
+/// FR-REMEMBER-005 / FR-CORTEX-005 at the pull surface: a served recall
+/// emits its CortexInjection like every call AND exactly one MemoryInjection
+/// carrying the ids actually served (post-shedding), McpPull, with the
+/// reply's token estimate; an empty recall emits no MemoryInjection. Held in
+/// `pending` for the session mark1d will publish, as the sibling test proves.
+/// A cortexd the daemon designated no cache for (another workspace) serves
+/// nothing from the same file on disk.
+#[test]
+fn memory_recall_emits_one_memory_injection_per_served_call() {
+    use m1p_wire::pb::{event::Body, InjectionChannel};
+    let (shared, _work, store) = scratch();
+    let pending = || shared.pending.lock().unwrap().clone();
+    let before = pending().len();
+    let out = recall(&shared, serde_json::json!({ "query": "typeerror" }));
+    assert!(ids(&out).is_empty());
+    assert_eq!(
+        pending().len(),
+        before + 1,
+        "empty recall: the CortexInjection only"
+    );
+
+    plant(&shared, store.path(), &planted(&rfc3339_now()));
+    let before = pending().len();
+    let out = recall(
+        &shared,
+        serde_json::json!({ "query": "typeerror", "limit": 2 }),
+    );
+    assert_eq!(ids(&out), [ID_FIX, ID_INV]);
+    let held = pending();
+    assert_eq!(
+        held.len(),
+        before + 2,
+        "one CortexInjection + one MemoryInjection"
+    );
+    let memory: Vec<_> = held[before..]
+        .iter()
+        .filter_map(|e| match &e.body {
+            Some(Body::MemoryInjection(mi)) => Some(mi.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(memory.len(), 1);
+    let want: Vec<Vec<u8>> = [ID_FIX, ID_INV]
+        .iter()
+        .map(|id| uuid::Uuid::parse_str(id).unwrap().into_bytes().to_vec())
+        .collect();
+    assert_eq!(
+        memory[0].artifact_ids, want,
+        "exactly the served ids, in served order"
+    );
+    assert_eq!(memory[0].channel, InjectionChannel::McpPull as i32);
+    assert_eq!(
+        u64::from(memory[0].tokens_used),
+        out["budget"]["used_tokens"].as_u64().unwrap()
+    );
+    assert_eq!(
+        held[before..]
+            .iter()
+            .filter(|e| matches!(e.body, Some(Body::CortexInjection(_))))
+            .count(),
+        1,
+        "the per-call CortexInjection still lands"
+    );
+
+    // A one-artifact recall is a served recall too.
+    let before = pending().len();
+    let out = recall(
+        &shared,
+        serde_json::json!({ "query": "typeerror", "limit": 1 }),
+    );
+    assert_eq!(ids(&out), [ID_FIX]);
+    let held = pending();
+    assert_eq!(held.len(), before + 2);
+    assert!(held[before..].iter().any(|e| matches!(&e.body,
+        Some(Body::MemoryInjection(mi)) if mi.artifact_ids == want[..1])));
+
+    // Another workspace's cortexd: same file on disk, no designation, nothing served.
+    let (other, _w2, _s2) = scratch();
+    let before = other.pending.lock().unwrap().len();
+    let out = recall(&other, serde_json::json!({ "query": "typeerror" }));
+    assert!(ids(&out).is_empty());
+    assert_eq!(
+        other.pending.lock().unwrap().len(),
+        before + 1,
+        "its CortexInjection only"
+    );
 }

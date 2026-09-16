@@ -74,6 +74,25 @@ pub fn cortex_injection_event(
     tokens_used: u32,
     channel: pb::InjectionChannel,
 ) -> pb::Event {
+    envelope(pb::event::Body::CortexInjection(pb::CortexInjection {
+        root_hash: root_hash.to_vec(),
+        index_clock,
+        token_budget,
+        tokens_used,
+        channel: channel as i32,
+    }))
+}
+
+/// 08 §6.6 / FR-REMEMBER-005: one per served `memory_recall`, exactly the ids served.
+pub fn memory_injection_event(artifact_ids: Vec<Vec<u8>>, tokens_used: u32) -> pb::Event {
+    envelope(pb::event::Body::MemoryInjection(pb::MemoryInjection {
+        artifact_ids,
+        channel: pb::InjectionChannel::McpPull as i32,
+        tokens_used,
+    }))
+}
+
+fn envelope(body: pb::event::Body) -> pb::Event {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -96,13 +115,7 @@ pub fn cortex_injection_event(
         device_id: Vec::new(),
         received_at: None,
         clock_skew_ms: 0,
-        body: Some(pb::event::Body::CortexInjection(pb::CortexInjection {
-            root_hash: root_hash.to_vec(),
-            index_clock,
-            token_budget,
-            tokens_used,
-            channel: channel as i32,
-        })),
+        body: Some(body),
     }
 }
 

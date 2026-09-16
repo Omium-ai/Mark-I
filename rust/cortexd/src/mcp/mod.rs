@@ -22,9 +22,11 @@ use axum::Router;
 use serde_json::{json, Value};
 
 use crate::l0_merkle::IgnoreSet;
-use crate::l2_graph::PPR_WALL_BUDGET;
+use crate::l2_graph::{self, PPR_WALL_BUDGET};
 use crate::map;
-use crate::session::{Shared, MAX_CALL_TOKENS, MIN_CALL_TOKENS, TURN_BUDGET_TOKENS};
+use crate::session::{
+    LockExt, Shared, DAF_INJECTION_TOKENS, MAX_CALL_TOKENS, MIN_CALL_TOKENS, TURN_BUDGET_TOKENS,
+};
 use crate::{fabric, l3_scip};
 
 /// ponytail: turn-boundary heuristic — 08 §6's "per session turn" cap needs a
@@ -725,9 +727,13 @@ fn ranked_files(shared: &Arc<Shared>, args: &Value, budget: u32) -> Result<Value
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.0.cmp(&b.0))
     });
-    let files: Vec<Value> = scored
+    // Phase 6 seam: a bundle-delivered re-ranker works inside PPR's top-`limit` only.
+    let served: Vec<(String, f64)> = match shared.ranker.read_recover().as_ref() {
+        Some(w) => l2_graph::rerank(scored, |p| idx.file_features(p), w, limit),
+        None => scored.into_iter().take(limit).collect(),
+    };
+    let files: Vec<Value> = served
         .into_iter()
-        .take(limit)
         .map(|(path, score)| {
             let evidence = why
                 .get(&path)
@@ -763,15 +769,38 @@ fn memory_recall(shared: &Arc<Shared>, args: &Value, budget: u32) -> Result<Valu
     let limit = args
         .get("limit")
         .and_then(Value::as_u64)
-        .map(|v| (v as u32).clamp(1, 10))
+        .map(|v| (v as usize).clamp(1, 10))
         .unwrap_or(3);
-    // Empty/unsynced cache is an honest empty, not a refusal (08 §6.6) — but
-    // still under the common contract: preamble + budget accounting on every
-    // non-refused result, hard-capped like the siblings, so call_tool books
-    // real usage the day real artifacts land.
-    let artifacts = crate::session::recall_artifacts(query, &kinds, limit);
+    // A recall is an injection: session map budget and the D-AF ceiling, not the 8k cap.
+    let budget = budget.min(shared.default_budget).min(DAF_INJECTION_TOKENS);
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Empty/unsynced/stale cache is an honest empty, not a refusal (08 §6.6).
+    let found = shared.recall_artifacts(query, &kinds, limit, now_secs);
+    let artifacts: Vec<Value> = found
+        .iter()
+        .map(|a| {
+            json!({
+                "artifact_id": a.artifact_id, "kind": a.kind, "trigger": a.trigger,
+                "body": a.guidance, "utility_lcb": a.utility_lcb, "scope": "tenant"
+            })
+        })
+        .collect();
     let mut payload = json!({ "artifacts": artifacts });
     let (used, truncated) = fit_arrays(&mut payload, &["artifacts"], budget);
+    let served = payload["artifacts"].as_array().map_or(0, Vec::len);
+    if served > 0 {
+        // FR-REMEMBER-005: the ids actually served (after shedding), once per call.
+        let ids = found
+            .iter()
+            .take(served)
+            .filter_map(|a| uuid::Uuid::parse_str(&a.artifact_id).ok())
+            .map(|u| u.into_bytes().to_vec())
+            .collect();
+        fabric::spawn_push(shared, fabric::memory_injection_event(ids, used));
+    }
     Ok(merge(preamble(shared, budget, used, truncated), payload))
 }
 

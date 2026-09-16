@@ -37,6 +37,7 @@ zstd = { workspace = true }            # CAS artifact bodies (07 §derived artif
 
 # --- workspace crates ---
 m1p-wire = { workspace = true }        # CortexInjection + L0 root pushes over M1PL
+mark1-harden = { workspace = true }    # RLIMIT_CORE=0 + PR_SET_DUMPABLE=0 before the runtime (04 §11.6)
 # mark1-policy (the bundle's `cortex` section) joins when bundle plumbing lands —
 # Phase 2 runs the 04 §6.4 defaults (2k default / 8k ceiling) as constants.
 

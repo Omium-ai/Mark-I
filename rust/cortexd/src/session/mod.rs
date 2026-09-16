@@ -5,8 +5,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
-use std::sync::{Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use m1p_wire::pb;
 use rand::RngCore;
@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::l0_merkle::MerkleTree;
 use crate::l1_tags::Tag;
-use crate::l2_graph::SymbolGraph;
+use crate::l2_graph::{RankerStage, RankerWeights, SymbolGraph, FEATURES};
 use crate::map::MapRender;
 
 /// 04 §6.4: session-start map token budget — default 2k, ceiling 8k,
@@ -24,6 +24,12 @@ pub const DEFAULT_BUDGET_TOKENS: u32 = 2_000;
 pub const MIN_CALL_TOKENS: u32 = 256;
 pub const MAX_CALL_TOKENS: u32 = 8_000;
 pub const TURN_BUDGET_TOKENS: u32 = 8_000;
+/// D-AF (04 §6.4): the effective injection ceiling on the hook surface.
+pub const DAF_INJECTION_TOKENS: u32 = 2_500;
+/// The edge cache's fail-static clock (cache.go defaultMaxAge): older syncs serve nothing.
+pub const MEMORY_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
+/// Twin of retrieve.INJECTABLE_KINDS / cache.go `injectable`: `preference` never renders.
+const INJECTABLE_KINDS: [&str; 3] = ["pitfall", "fix_pattern", "invariant"];
 
 /// How many recent-edit paths seed the session-map PPR (04 §6.4 "live
 /// recent-edit set"). ponytail: fixed cap; capture-fed recency lands with
@@ -73,6 +79,18 @@ pub struct Shared {
     /// "a key bump invalidates exactly the affected entries" a number.
     pub cas_hits: AtomicU64,
     pub cas_misses: AtomicU64,
+    /// `<state>/memory/artifacts.json` (`--memory-file`), the cache mark1d syncs
+    /// (go/mark1d/internal/memory/cache.go). Unset ⇒ `memory_recall` is empty.
+    pub memory_file: OnceLock<PathBuf>,
+    /// Recalls that found the cache present but unreadable or malformed (served empty).
+    pub memory_unreadable: AtomicU64,
+    /// Phase 6 learned re-ranker (06 §12.4): bundle-delivered only, via the file
+    /// mark1d writes at `--ranker-file` (go/mark1d/internal/cortex RankerFile).
+    /// `None` (PPR order) whenever that file is absent, malformed or out of range.
+    pub ranker: RwLock<Option<RankerWeights>>,
+    pub ranker_file: OnceLock<PathBuf>,
+    /// Ranker files refused by `RankerWeights::new` or the parser (served PPR order).
+    pub ranker_rejected: AtomicU64,
 }
 
 impl Shared {
@@ -94,7 +112,77 @@ impl Shared {
             pending: Mutex::new(Vec::new()),
             cas_hits: AtomicU64::new(0),
             cas_misses: AtomicU64::new(0),
+            memory_file: OnceLock::new(),
+            memory_unreadable: AtomicU64::new(0),
+            ranker: RwLock::new(None),
+            ranker_file: OnceLock::new(),
+            ranker_rejected: AtomicU64::new(0),
         }
+    }
+
+    /// Installs the ranker the file's bytes describe, through `RankerWeights::new`
+    /// only; `None` (absent file) or anything it refuses leaves PPR order in force.
+    pub fn set_ranker(&self, bytes: Option<&[u8]>) {
+        let next = bytes.and_then(|b| match parse_ranker(b) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                self.ranker_rejected.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(error = %e, "ranker file refused; serving PPR order");
+                None
+            }
+        });
+        *self.ranker.write_recover() = next;
+    }
+
+    /// `memory_recall` (08 §6.6): allowlisted kinds, normalized-substring trigger match
+    /// (the 0.15 fuzz stays server-side, FR-REMEMBER-008), LCB order, fail-open empty.
+    pub fn recall_artifacts(
+        &self,
+        query: &str,
+        kinds: &[String],
+        limit: usize,
+        now_secs: u64,
+    ) -> Vec<Artifact> {
+        let Some(path) = self.memory_file.get() else {
+            return Vec::new();
+        };
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(_) => {
+                self.memory_unreadable.fetch_add(1, Ordering::Relaxed);
+                return Vec::new();
+            }
+        };
+        let parsed = serde_json::from_slice::<MemoryCustody>(&bytes)
+            .ok()
+            .and_then(|c| Some((rfc3339_utc_secs(&c.synced_at)?, c.artifacts)));
+        let Some((synced, artifacts)) = parsed else {
+            self.memory_unreadable.fetch_add(1, Ordering::Relaxed);
+            return Vec::new();
+        };
+        if now_secs.saturating_sub(synced) > MEMORY_MAX_AGE_SECS {
+            return Vec::new();
+        }
+        let q = normalize(query);
+        let want: Vec<&str> = kinds.iter().map(|k| canonical_kind(k)).collect();
+        let mut out: Vec<Artifact> = artifacts
+            .into_iter()
+            .filter(|a| INJECTABLE_KINDS.contains(&a.kind.as_str()))
+            .filter(|a| uuid::Uuid::parse_str(&a.artifact_id).is_ok())
+            .filter(|a| want.is_empty() || want.contains(&a.kind.as_str()))
+            .filter(|a| {
+                let t = normalize(&a.trigger);
+                !t.is_empty() && (t.contains(&q) || q.contains(&t))
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.utility_lcb
+                .partial_cmp(&a.utility_lcb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out.truncate(limit);
+        out
     }
 
     /// The live agent session for this workspace, as mark1d last published it,
@@ -129,6 +217,108 @@ fn read_live_session(path: &Path) -> Option<[u8; 16]> {
     let ls: LiveSession = serde_json::from_slice(&bytes).ok()?;
     let id = *uuid::Uuid::parse_str(&ls.session_id_hex).ok()?.as_bytes();
     (id != [0u8; 16]).then_some(id)
+}
+
+/// The file mark1d writes at `<state>/run/ranker.json` (cortex.go rankerFile) —
+/// one contract, two decoders. JSON cannot spell NaN/∞, so `new` sees finite floats
+/// and its checks are the range check plus a wrong-arity `coefficients`.
+#[derive(Deserialize)]
+struct RankerFile {
+    stage: RankerStage,
+    weight: f64,
+    bias: f64,
+    coefficients: [f64; FEATURES],
+}
+
+fn parse_ranker(bytes: &[u8]) -> Result<RankerWeights, String> {
+    let f: RankerFile = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    RankerWeights::new(f.stage, f.weight, f.bias, f.coefficients).map_err(|e| e.to_string())
+}
+
+/// Boot load + change detection for `--ranker-file`. ponytail: a byte-compare poll
+/// of a ~100-byte file every `every` (5 s in main); notify lands if it ever matters.
+pub async fn ranker_watch(shared: Arc<Shared>, every: std::time::Duration) {
+    let mut seen: Option<Vec<u8>> = None;
+    loop {
+        let now = shared.ranker_file.get().and_then(|p| std::fs::read(p).ok());
+        if now != seen {
+            shared.set_ranker(now.as_deref());
+            seen = now;
+        }
+        tokio::time::sleep(every).await;
+    }
+}
+
+/// One row of the synced cache (cache.go `Artifact`) — one contract, two decoders.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Artifact {
+    pub artifact_id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default)]
+    pub guidance: String,
+    #[serde(default)]
+    pub utility_lcb: f64,
+}
+
+/// The file's envelope (cache.go `custody`); `synced_at` is Go's RFC 3339 UTC.
+#[derive(Deserialize)]
+struct MemoryCustody {
+    synced_at: String,
+    artifacts: Vec<Artifact>,
+}
+
+/// 06 §9.2 reconciliation: 08 §6.6 still uses the pre-DDL spellings.
+fn canonical_kind(kind: &str) -> &str {
+    match kind {
+        "pitfall_remedy" => "pitfall",
+        "workflow_template" => "fix_pattern",
+        other => other,
+    }
+}
+
+fn normalize(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// `YYYY-MM-DDTHH:MM:SS[.frac]Z` (Go's UTC shape) → epoch seconds; else None.
+fn rfc3339_utc_secs(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    if b.len() < 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return None;
+    }
+    match (b[19], b.last()?) {
+        (b'Z', _) if b.len() == 20 => {}
+        (b'.', b'Z') if b.len() > 21 && b[20..b.len() - 1].iter().all(u8::is_ascii_digit) => {}
+        _ => return None,
+    }
+    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    // Days from civil (Hinnant): the March-based year makes leap days trailing.
+    let (y, m) = if mo <= 2 {
+        (y - 1, mo + 9)
+    } else {
+        (y, mo - 3)
+    };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + (153 * m + 2) / 5 + d - 1;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + h * 3_600 + mi * 60 + sec).ok()
 }
 
 /// Lock helpers: a poisoned lock means a reader panicked mid-read; the index
@@ -174,6 +364,24 @@ impl Index {
         self.recent_edits.insert(0, path);
         self.recent_edits.truncate(RECENT_EDIT_CAP);
     }
+
+    /// Ranker-seam features `[fan_in, recency, path_depth, tag_count]`, all index-held.
+    pub fn file_features(&self, path: &str) -> [f64; FEATURES] {
+        let fan_in = self.graph.node_of.get(path).map_or(0, |n| {
+            self.graph
+                .graph
+                .neighbors_directed(*n, petgraph::Direction::Incoming)
+                .count()
+        });
+        let recency = self
+            .recent_edits
+            .iter()
+            .position(|p| p == path)
+            .map_or(0.0, |i| 1.0 / (1.0 + i as f64));
+        let depth = path.matches('/').count();
+        let tags = self.tags.get(path).map_or(0, Vec::len);
+        [fan_in as f64, recency, depth as f64, tags as f64]
+    }
 }
 
 /// 256 bits of OS randomness, hex-encoded. blake3's hex encoder is reused so
@@ -182,14 +390,6 @@ fn fresh_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     blake3::hash(&bytes).to_hex().to_string()
-}
-
-/// `memory_recall` (08 §6.6) serves from the locally-synced tenant artifact
-/// cache maintained by `mark1-intel.memory`. No sync path exists at Phase 2,
-/// so the cache is honestly empty: `{ "artifacts": [] }` is the specified
-/// honest-empty, never a refusal and never fabricated content.
-pub fn recall_artifacts(_query: &str, _kinds: &[String], _limit: u32) -> Vec<serde_json::Value> {
-    Vec::new()
 }
 
 // Index poisoning note: the `RwLock` import list above intentionally excludes
@@ -247,6 +447,34 @@ mod tests {
     }
 
     #[test]
+    fn synced_at_parses_gos_utc_shape_only() {
+        assert_eq!(rfc3339_utc_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            rfc3339_utc_secs("2026-08-29T12:00:00Z"),
+            Some(1_788_004_800)
+        );
+        assert_eq!(
+            rfc3339_utc_secs("2026-08-29T12:00:00.123456789Z"),
+            Some(1_788_004_800),
+            "Go's RFC3339Nano fraction"
+        );
+        assert_eq!(
+            rfc3339_utc_secs("2024-02-29T00:00:00Z"),
+            Some(1_709_164_800)
+        );
+        for bad in [
+            "2026-08-29T12:00:00",
+            "2026-08-29T12:00:00+05:00",
+            "2026-08-29T12:00:00.Z",
+            "2026-08-29 12:00:00Z",
+            "1969-12-31T23:59:59Z",
+            "",
+        ] {
+            assert_eq!(rfc3339_utc_secs(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn recent_edits_dedupe_and_cap() {
         let mut idx = Index::default();
         for i in 0..40 {
@@ -256,5 +484,124 @@ mod tests {
         assert_eq!(idx.recent_edits[0], "f5.rs");
         assert_eq!(idx.recent_edits.len(), RECENT_EDIT_CAP);
         assert_eq!(idx.recent_edits.iter().filter(|p| *p == "f5.rs").count(), 1);
+    }
+
+    const SHADOW: &str =
+        r#"{"stage":"shadow","weight":0.5,"bias":0.05,"coefficients":[0.6,0.25,-0.1,0.15]}"#;
+    const ACTIVE: &str =
+        r#"{"stage":"active","weight":0.25,"bias":0.05,"coefficients":[0.6,0.25,-0.1,0.15]}"#;
+
+    fn with_ranker_file(dir: &Path) -> Arc<Shared> {
+        let shared = Shared::new(PathBuf::from("."), PathBuf::from("."), 2_000);
+        shared.ranker_file.set(dir.join("ranker.json")).unwrap();
+        Arc::new(shared)
+    }
+
+    fn stage_of(shared: &Shared) -> Option<RankerStage> {
+        shared.ranker.read_recover().as_ref().map(|w| w.stage())
+    }
+
+    #[test]
+    fn ranker_file_installs_through_ranker_weights_new_only() {
+        let shared = Shared::new(PathBuf::from("."), PathBuf::from("."), 2_000);
+        shared.set_ranker(Some(SHADOW.as_bytes()));
+        assert_eq!(
+            shared.ranker.read_recover().clone(),
+            Some(
+                RankerWeights::new(RankerStage::Shadow, 0.5, 0.05, [0.6, 0.25, -0.1, 0.15])
+                    .unwrap()
+            )
+        );
+        shared.set_ranker(Some(ACTIVE.as_bytes()));
+        assert_eq!(stage_of(&shared), Some(RankerStage::Active));
+        shared.set_ranker(None);
+        assert_eq!(stage_of(&shared), None, "absent file is PPR order");
+        assert_eq!(shared.ranker_rejected.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn malformed_or_out_of_range_ranker_file_is_none_and_counted() {
+        let shared = Shared::new(PathBuf::from("."), PathBuf::from("."), 2_000);
+        let bad: [&[u8]; 8] = [
+            b"{not json",
+            br#"{"stage":"shadow","weight":1.5,"bias":0.0,"coefficients":[0,0,0,0]}"#,
+            br#"{"stage":"shadow","weight":-0.1,"bias":0.0,"coefficients":[0,0,0,0]}"#,
+            br#"{"stage":"canary","weight":0.5,"bias":0.0,"coefficients":[0,0,0,0]}"#,
+            br#"{"stage":"shadow","weight":0.5,"bias":0.0,"coefficients":[0,0,0]}"#,
+            br#"{"stage":"shadow","weight":0.5,"bias":0.0,"coefficients":[0,0,0,0,0]}"#,
+            br#"{"stage":"shadow","weight":0.5,"bias":0.0}"#,
+            br#"{"stage":"shadow","weight":"0.5","bias":0.0,"coefficients":[0,0,0,0]}"#,
+        ];
+        for (i, b) in bad.iter().enumerate() {
+            shared.set_ranker(Some(SHADOW.as_bytes()));
+            shared.set_ranker(Some(b));
+            assert_eq!(
+                stage_of(&shared),
+                None,
+                "bad file #{i} left a ranker installed"
+            );
+            assert_eq!(
+                shared.ranker_rejected.load(Ordering::Relaxed),
+                i as u64 + 1,
+                "bad file #{i} not counted"
+            );
+        }
+        // The boundary weights are inside the range, exactly as `new` bounds them.
+        for edge in [
+            br#"{"stage":"active","weight":0.0,"bias":0.0,"coefficients":[0,0,0,0]}"#.as_slice(),
+            br#"{"stage":"active","weight":1.0,"bias":0.0,"coefficients":[0,0,0,0]}"#.as_slice(),
+        ] {
+            shared.set_ranker(Some(edge));
+            assert_eq!(stage_of(&shared), Some(RankerStage::Active));
+        }
+        assert_eq!(
+            shared.ranker_rejected.load(Ordering::Relaxed),
+            bad.len() as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn ranker_watch_loads_at_boot_and_reloads_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ranker.json");
+        // mark1d's write is tmp + rename; mirror it so the poll never sees a torn file.
+        let publish = |body: &str| {
+            std::fs::write(path.with_extension("tmp"), body).unwrap();
+            std::fs::rename(path.with_extension("tmp"), &path).unwrap();
+        };
+        let settle = |shared: Arc<Shared>, want: Option<RankerStage>| async move {
+            for _ in 0..300 {
+                if stage_of(&shared) == want {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("ranker never became {want:?} (is {:?})", stage_of(&shared));
+        };
+        publish(SHADOW);
+        let shared = with_ranker_file(dir.path());
+        tokio::spawn(ranker_watch(
+            Arc::clone(&shared),
+            std::time::Duration::from_millis(10),
+        ));
+        settle(Arc::clone(&shared), Some(RankerStage::Shadow)).await;
+        publish(ACTIVE);
+        settle(Arc::clone(&shared), Some(RankerStage::Active)).await;
+        std::fs::remove_file(&path).unwrap();
+        settle(Arc::clone(&shared), None).await;
+        publish(SHADOW);
+        settle(Arc::clone(&shared), Some(RankerStage::Shadow)).await;
+        assert_eq!(shared.ranker_rejected.load(Ordering::Relaxed), 0);
+        publish("{broken");
+        settle(Arc::clone(&shared), None).await;
+        assert_eq!(shared.ranker_rejected.load(Ordering::Relaxed), 1);
+        // A watcher with no file configured (hand-run cortexd) installs nothing.
+        let bare = Arc::new(Shared::new(PathBuf::from("."), PathBuf::from("."), 2_000));
+        tokio::spawn(ranker_watch(
+            Arc::clone(&bare),
+            std::time::Duration::from_millis(10),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(stage_of(&bare), None);
     }
 }

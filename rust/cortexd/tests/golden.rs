@@ -321,3 +321,81 @@ fn watcher_delivers_changed_paths() {
         }
     }
 }
+
+/// Phase 6 learned-ranker seam (06 §12.4, 10 §11.3) on the real fixture
+/// graph: probation/shadow weights leave `ranked_files` bit-identical to no
+/// weights at all; `active` reorders only inside PPR's top-`limit`, never
+/// admits a file PPR left out, and every score stays in [0,1].
+#[test]
+fn learned_ranker_shadow_is_bit_identical_and_active_keeps_pprs_top_k() {
+    use cortexd::l2_graph::{RankerStage, RankerWeights, FEATURES};
+    use cortexd::session::LockExt;
+    let store = tempfile::tempdir().unwrap();
+    let (shared, cas) = cortexd::bootstrap(fixture(), store.path().join("store"), 2000).unwrap();
+    cortexd::full_index(&shared, &cas).unwrap();
+    let ranked = |limit: u64| {
+        cortexd::mcp::call_tool(
+            &shared,
+            "ranked_files",
+            &serde_json::json!({ "query": "render", "limit": limit }),
+        )
+        .unwrap()
+    };
+    let paths = |out: &serde_json::Value| -> Vec<String> {
+        out["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let baseline3 = ranked(3);
+    let baseline2 = ranked(2);
+    assert_eq!(
+        paths(&baseline3),
+        ["core/util.py", "rustlib/parse.rs", "web/render.ts"],
+        "PPR: the three definition files tie at 1.0, path order breaks it"
+    );
+    assert_eq!(paths(&baseline2), paths(&baseline3)[..2]);
+
+    // Recency is the feature that separates the tied top-3 (render.ts was
+    // the last settle's freshest edit) and that prefers a file outside top-2.
+    let recency = [0.0, 1.0, 0.0, 0.0];
+    for stage in [RankerStage::Probation, RankerStage::Shadow] {
+        *shared.ranker.write_recover() =
+            Some(RankerWeights::new(stage, 1.0, 0.0, recency).unwrap());
+        assert_eq!(
+            ranked(3),
+            baseline3,
+            "{stage:?} must not change the served answer"
+        );
+        assert_eq!(ranked(2), baseline2);
+    }
+
+    *shared.ranker.write_recover() =
+        Some(RankerWeights::new(RankerStage::Active, 1.0, 0.0, recency).unwrap());
+    let active3 = ranked(3);
+    assert_eq!(
+        paths(&active3),
+        ["web/render.ts", "rustlib/parse.rs", "core/util.py"],
+        "active reorders inside PPR's top-3 by (ppr + learned) / 2"
+    );
+    for f in active3["files"].as_array().unwrap() {
+        let s = f["score"].as_f64().unwrap();
+        assert!((0.0..=1.0).contains(&s), "{f}");
+    }
+    assert_eq!(active3["files"][0]["score"], 1.0, "(1 + 1·1) / (1 + 1)");
+    // Top-k protection: with limit 2 the file the learned model prefers most
+    // (web/render.ts) sits outside PPR's top-2 and must stay out.
+    let active2 = ranked(2);
+    assert_eq!(
+        paths(&active2),
+        ["rustlib/parse.rs", "core/util.py"],
+        "same set as PPR's top-2, reordered; render.ts cannot enter: {active2}"
+    );
+
+    *shared.ranker.write_recover() =
+        Some(RankerWeights::new(RankerStage::Active, 0.0, 0.0, recency).unwrap());
+    assert_eq!(paths(&ranked(3)), paths(&baseline3), "w = 0 is PPR order");
+    assert_eq!(FEATURES, recency.len());
+}
