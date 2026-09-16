@@ -55,6 +55,15 @@ type CHRunner struct {
 // delete template in this wave, and a nil handle refuses LOUDLY at run time
 // ("no offboard principal wired") rather than borrowing a principal whose
 // grants cannot execute the statement.
+// OpenRunner opens the read principal HERE so a caller outside this package never holds the raw query surface (05 §6.1); the returned closer releases it.
+func OpenRunner(ctx context.Context, opts chconn.Options, write *chconn.Conn) (*CHRunner, func() error, error) {
+	read, err := chconn.OpenQuery(ctx, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	return NewRunner(read, write, nil), read.Close, nil
+}
+
 func NewRunner(read *chconn.QueryConn, write, offboard *chconn.Conn) *CHRunner {
 	return &CHRunner{read: read, write: write, offboard: offboard, sem: make(chan struct{}, maxConcurrent)}
 }

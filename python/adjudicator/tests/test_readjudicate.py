@@ -14,10 +14,13 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+import zstandard
+from app import ledger
 from app.adjudicate.algorithm import adjudicate
 from app.adjudicate.chow import Costs
 from app.adjudicate.likelihoods import CALIBRATED_CONFUSION, Bundle
 from app.certified.runner import CONSISTENCY_ID, execution_hash
+from app.choke import QuerychokeError
 from app.jobs import nightly, readjudicate
 from app.jobs.readjudicate import (
     MARGIN,
@@ -32,6 +35,7 @@ from app.jobs.readjudicate import (
 from app.registry.catalog import RegistryEntry
 from app.registry.handlers import KIND_CONSISTENCY, KIND_TEST
 from app.registry.promotion import Measurement, ShadowPair, youden
+from m1p.v1 import Batch, CertificationStatus, VerdictStage
 from pydantic import SecretStr
 from tests.test_certified import ANCHOR, T3_ID, TEMPLATE, FakeE2B
 from tests.test_jobs import VOTE_ROW, FakeChoke
@@ -42,9 +46,12 @@ CERT = uuid4()
 COSTS = Costs()
 WINDOW = datetime(2026, 9, 15, tzinfo=UTC)
 E2B_KEY = "sk-e2b-readjudicate-secret"
+SESSION = uuid4()
 
 
-def row(task: UUID, vid: str, family: str, vote: str, tamper: int = 0, seq: int = 1) -> dict:
+def row(
+    task: UUID, vid: str, family: str, vote: str, tamper: int = 0, seq: int = 1, session=SESSION
+) -> dict:
     r = {
         **VOTE_ROW,
         "task_id": str(task),
@@ -58,6 +65,12 @@ def row(task: UUID, vid: str, family: str, vote: str, tamper: int = 0, seq: int 
         "tamper": tamper,
     }
     assert r.keys() == VOTE_ROW.keys()
+    # adjudication_votes.v2 serves session_id; None models a pre-v2 row, which the run counts
+    # and never posts.
+    if session is None:
+        r.pop("session_id", None)
+    else:
+        r["session_id"] = str(session)
     return r
 
 
@@ -166,15 +179,24 @@ def _cert_row(status: str) -> dict:
 
 
 class FakeCloud:
-    """One MockTransport for the choke, vLLM and both E2B hosts."""
+    """One MockTransport for the choke, controld's service ingest, vLLM and both E2B hosts."""
 
-    def __init__(self, choke_rows, rm_reply=GOOD, e2b: FakeE2B | None = None):
+    def __init__(self, choke_rows, rm_reply=GOOD, e2b: FakeE2B | None = None, ingest=200):
         self.choke = FakeChoke(choke_rows)
         self.rm_reply, self.e2b = rm_reply, e2b or FakeE2B(stdout=b"FAILED t.py::t\n", exit_code=1)
         self.rm_calls: list[httpx.Request] = []
+        self.ingested: list[httpx.Request] = []
+        self.ingest = ingest
 
     async def handler(self, req: httpx.Request) -> httpx.Response:
         host = req.url.host
+        if host == "choke" and req.url.path == ledger.INGEST_PATH:
+            self.ingested.append(req)
+            if self.ingest != 200:
+                return httpx.Response(self.ingest, json={"error": {"code": "M1E-9500"}})
+            return httpx.Response(
+                200, json={"batch_id": req.headers["M1P-Batch-Id"], "accepted": 1}
+            )
         if host == "choke":
             return await self.choke.client().send(
                 httpx.Request(req.method, req.url, headers=req.headers, content=req.content)
@@ -531,3 +553,85 @@ async def test_no_key_appears_in_logs(env, caplog):
     assert KEY not in caplog.text and E2B_KEY not in caplog.text
     for r in caplog.records:
         assert KEY not in repr(r.args) and E2B_KEY not in repr(r.args)
+
+
+def _posted(cloud: FakeCloud) -> dict[UUID, tuple[Batch, object]]:
+    """(batch, event) per task across every service-ingest POST, wire-decoded like controld."""
+    out = {}
+    for req in cloud.ingested:
+        assert req.headers[ledger.TENANT_HEADER] == TENANT
+        assert req.headers["authorization"] == "Bearer svc"
+        batch = Batch().parse(zstandard.decompress(req.content))
+        assert UUID(bytes=batch.batch_id) == UUID(req.headers["M1P-Batch-Id"])
+        for ev in batch.events:
+            out[UUID(bytes=ev.task_id)] = (batch, ev)
+    return out
+
+
+async def test_escalated_verdicts_reenter_the_ledger_as_verify_proto_spells_them(env):
+    # A passing T3 run moves AMBIGUOUS from the provisional `violated` into the band: REVISED.
+    pool, cloud = FakePool(), FakeCloud(rows(), e2b=FakeE2B(stdout=b"3 passed\n", exit_code=0))
+    esc = await _run(pool, cloud)
+    posted = _posted(cloud)
+    assert len(cloud.ingested) == 1 and set(posted) == set(esc) == {AMBIGUOUS, NO_TEST}
+    for task, rec in esc.items():
+        batch, ev = posted[task]
+        assert batch.advisory_tenant_id == UUID(TENANT).bytes
+        assert ev.event_id == ledger.event_id(UUID(TENANT), task, WINDOW)
+        assert ev.session_id == SESSION.bytes and ev.task_id == task.bytes
+        assert ev.session_epoch == 0xFFFFFFFF and ev.occurred_at == ledger.window_close(WINDOW)
+        v = ev.verdict_event
+        want_stage = (
+            VerdictStage.CERTIFIED if rec["verdict"] == rec["provisional"] else VerdictStage.REVISED
+        )
+        assert v.stage == want_stage
+        assert v.verdict.name.lower() == rec["verdict"]
+        assert v.posterior == rec["posterior"] and len(v.posterior) == 4
+        assert v.certification == CertificationStatus[rec["stage"].upper()]
+        assert v.noise_cert_id == str(rec["noise_cert_id"]) and v.vote_count == rec["vote_count"]
+        assert v.bundle_seq == 0  # no spectral run this window: calibrated defaults
+    assert (esc[AMBIGUOUS]["provisional"], esc[AMBIGUOUS]["verdict"]) == ("violated", "refused")
+    assert posted[AMBIGUOUS][1].verdict_event.stage == VerdictStage.REVISED
+    assert esc[NO_TEST]["provisional"] == esc[NO_TEST]["verdict"] == "violated"
+    assert posted[NO_TEST][1].verdict_event.stage == VerdictStage.CERTIFIED
+
+
+async def test_bundle_seq_names_the_windows_spectral_run(env):
+    laws = {ANCHOR: [[0.95, 0.02, 0.03], [0.5, 0.45, 0.05]]}
+    spectral = {"passed": True, "diagnostics": "{}", "confusion": json.dumps(laws)}
+    cloud = FakeCloud(rows())
+    await _run(FakePool(spectral=spectral), cloud, evidence=None, archive=None)
+    assert {ev.verdict_event.bundle_seq for _, ev in _posted(cloud).values()} == {
+        int(WINDOW.timestamp())
+    }
+
+
+async def test_ingest_refusal_fails_the_run_before_any_row_lands(env):
+    pool, cloud = FakePool(), FakeCloud(rows(), ingest=503)
+    with pytest.raises(QuerychokeError, match="M1E-9500"):
+        await _run(pool, cloud)
+    assert len(cloud.ingested) == 1 and pool.upserts == []
+
+
+async def test_rows_without_session_id_are_counted_never_posted(env):
+    before = readjudicate_skipped_total["ingest_no_session_id"]
+    no_session = [
+        row(AMBIGUOUS, ANCHOR, "AnchorVote", "satisfied", session=None),
+        row(AMBIGUOUS, "judge:g@1", "JudgeVote", "violated", seq=2, session=None),
+        row(NO_TEST, "ruff@cat-1", "AnchorVote", "violated", session=None),
+    ]
+    pool, cloud = FakePool(), FakeCloud(no_session)
+    esc = await _run(pool, cloud)
+    assert set(esc) == {AMBIGUOUS, NO_TEST} and cloud.ingested == []
+    assert readjudicate_skipped_total["ingest_no_session_id"] - before == 2
+
+
+async def test_rerun_reposts_the_same_event_ids_under_a_fresh_batch(env):
+    first, second = FakeCloud(rows()), FakeCloud(rows())
+    await _run(FakePool(), first)
+    await _run(FakePool(), second)
+    a, b = _posted(first), _posted(second)
+    assert {t: ev.event_id for t, (_, ev) in a.items()} == {
+        t: ev.event_id for t, (_, ev) in b.items()
+    }
+    assert a[AMBIGUOUS][0].batch_id != b[AMBIGUOUS][0].batch_id

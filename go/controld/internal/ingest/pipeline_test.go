@@ -7,6 +7,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -97,6 +98,13 @@ func (f *fakeStore) seed(key string, body []byte, device uuid.UUID) {
 }
 
 func (f *fakeStore) Ready(context.Context) error { return nil }
+
+func (f *fakeStore) Delete(_ context.Context, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objects, key)
+	return nil
+}
 
 func (f *fakeStore) List(_ context.Context, prefix string) ([]string, error) {
 	f.mu.Lock()
@@ -197,11 +205,14 @@ func (fakeReady) Ready(context.Context) error { return nil }
 
 var testKey = []byte("c4-test-hmac-key")
 
+const testServiceToken = "intel-service-token-test"
+
 type harness struct {
 	mux      *http.ServeMux
 	store    *fakeStore
 	ins      *fakeInserter
-	db       *fakeDB
+	db       *fakeDB // stage 11's seam (sidefx)
+	tomb     *fakeDB // the quarantine tombstone seam (Deps.DB); separate so `db.calls == 0` still means "no stage 11"
 	sec      *fakeSecurity
 	proj     *chproj.Projector
 	sfx      *sidefx.Sidefx
@@ -216,12 +227,19 @@ func newHarness(t *testing.T) *harness { return newHarnessWithRegistry(t, nil) }
 // newHarnessWithRegistry: reg nil ⇒ the compiled-in [m1p.v1] window (the
 // module's own default); the FR-SPINE-023 tests inject windows and outages.
 func newHarnessWithRegistry(t *testing.T, reg registry.Registry) *harness {
+	return newHarnessFull(t, reg, nil)
+}
+
+// newHarnessFull additionally takes the FR-VERIFY-004 device-key lookup;
+// nil ⇒ the module's own default (no lookup, non-empty signatures refuse).
+func newHarnessFull(t *testing.T, reg registry.Registry, dk DeviceKeys) *harness {
 	t.Helper()
 	h := &harness{
 		mux:    http.NewServeMux(),
 		store:  newFakeStore(),
 		ins:    &fakeInserter{},
 		db:     &fakeDB{},
+		tomb:   &fakeDB{},
 		sec:    &fakeSecurity{},
 		tenant: uuid.New(),
 		device: uuid.New(),
@@ -240,6 +258,10 @@ func newHarnessWithRegistry(t *testing.T, reg registry.Registry) *harness {
 		Security: h.sec,
 		Registry: reg,
 		PoolSize: 4,
+
+		IntelServiceToken: testServiceToken,
+		DeviceKeys:        dk,
+		DB:                h.tomb,
 	})
 	m.RegisterRoutes(h.mux)
 	t.Cleanup(func() { h.proj.Close(); h.sfx.Close() })
@@ -278,6 +300,66 @@ func usageEvent(t *testing.T, session uuid.UUID, seq uint64) *m1pv1.Event {
 			InputTokens:  100,
 			OutputTokens: 50,
 		}},
+	}
+}
+
+// fakeDeviceKeys is the harness's FR-VERIFY-004 lookup: exactly one device's
+// live key, mirroring what m1_device_keys would answer. A pointer so tests
+// can set .device to the harness's randomly-generated one AFTER construction
+// (New(Deps{DeviceKeys: dk}) only needs the interface value, not its fields
+// filled in yet -- PublicKey isn't called until a request lands).
+type fakeDeviceKeys struct {
+	device uuid.UUID
+	pub    ed25519.PublicKey
+}
+
+func (f *fakeDeviceKeys) PublicKey(_ context.Context, _ querychoke.TenantID, device uuid.UUID) (ed25519.PublicKey, bool, error) {
+	if device != f.device {
+		return nil, false, nil
+	}
+	return f.pub, true, nil
+}
+
+// signedAnchorVote builds a well-formed AnchorVote and signs verify.proto's
+// canonical(anchor_id, vote, evidence, integrity) with priv -- the exact
+// bytes Runner.signVote produces, reproduced independently so the test
+// exercises the wire contract rather than any production helper. tamper, when
+// non-nil, mutates the vote AFTER signing so the returned event's stale
+// signature fails to verify.
+func signedAnchorVote(t *testing.T, session uuid.UUID, seq uint64, priv ed25519.PrivateKey, tamper func(*m1pv1.AnchorVote)) *m1pv1.Event {
+	t.Helper()
+	eventID := mustV7(t)
+	av := &m1pv1.AnchorVote{
+		AnchorId: "ruff",
+		Vote:     m1pv1.Verdict_VERDICT_VIOLATED,
+		Evidence: &m1pv1.EvidenceRecord{
+			Tool:           "ruff",
+			DiagnosticCode: "E501",
+			Category:       m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_LINT,
+			Counts:         &m1pv1.EvidenceCounts{Errors: 1, FilesAffected: 1},
+		},
+		Integrity: &m1pv1.AnchorIntegrity{
+			ResolvedBinaryHashes: map[string][]byte{"ruff": bytes.Repeat([]byte{0xAA}, 32)},
+			EnvScrubAttestation:  bytes.Repeat([]byte{0xBB}, 32),
+			DiffClassification:   m1pv1.DiffClassification_DIFF_CLASSIFICATION_SRC_ONLY,
+		},
+	}
+	if priv != nil {
+		canon, err := proto.MarshalOptions{Deterministic: true}.Marshal(av)
+		if err != nil {
+			t.Fatal(err)
+		}
+		av.Signature = ed25519.Sign(priv, canon)
+	}
+	if tamper != nil {
+		tamper(av)
+	}
+	return &m1pv1.Event{
+		EventId:    eventID[:],
+		Seq:        seq,
+		SessionId:  session[:],
+		OccurredAt: timestamppb.New(time.Date(2026, 8, 29, 10, 0, 0, 0, time.UTC)),
+		Body:       &m1pv1.Event_AnchorVote{AnchorVote: av},
 	}
 }
 
@@ -677,6 +759,97 @@ func TestBatchIDMismatchIs422(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// FR-VERIFY-004: per-vote signature verification (08 §9 ingest range)
+// ---------------------------------------------------------------------------
+
+func TestAnchorVoteSignedGoodAccepted(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dk := &fakeDeviceKeys{pub: pub}
+	h := newHarnessFull(t, nil, dk)
+	dk.device = h.device // the harness's randomly-generated device
+
+	ev := signedAnchorVote(t, mustV7(t), 1, priv, nil)
+	b, id := testBatch(t, ev)
+	rec := h.post(t, id, encodeBatch(t, b), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200 for a correctly signed vote, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAnchorVoteTamperedSignatureRefusedM1E2010(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dk := &fakeDeviceKeys{pub: pub}
+	h := newHarnessFull(t, nil, dk)
+	dk.device = h.device
+
+	// Content mutated AFTER signing: the stale signature must fail.
+	ev := signedAnchorVote(t, mustV7(t), 1, priv, func(av *m1pv1.AnchorVote) {
+		av.Evidence.Counts.Errors = 2
+	})
+	b, id := testBatch(t, ev)
+	rec := h.post(t, id, encodeBatch(t, b), nil)
+	if rec.Code != http.StatusUnprocessableEntity || errCode(t, rec) != "M1E-2010" {
+		t.Fatalf("want 422 M1E-2010, got %d %s", rec.Code, rec.Body.String())
+	}
+	evID := uuid.Must(uuid.FromBytes(ev.EventId)).String()
+	if body := rec.Body.String(); !strings.Contains(body, evID) || !strings.Contains(body, `"anchor_vote_signature"`) {
+		t.Fatalf("422 must name event %s and kind anchor_vote_signature: %s", evID, body)
+	}
+	if len(h.store.keys()) != 0 {
+		t.Fatal("tampered-signature batch must not land (05 §2.2)")
+	}
+}
+
+func TestAnchorVoteUnknownKeyRefusedM1E2010(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// DeviceKeys knows a DIFFERENT device -- this device has no enrolled key.
+	h := newHarnessFull(t, nil, &fakeDeviceKeys{device: uuid.New()})
+	ev := signedAnchorVote(t, mustV7(t), 1, priv, nil)
+	b, id := testBatch(t, ev)
+	rec := h.post(t, id, encodeBatch(t, b), nil)
+	if rec.Code != http.StatusUnprocessableEntity || errCode(t, rec) != "M1E-2010" {
+		t.Fatalf("want 422 M1E-2010 for a signature with no resolvable key, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAnchorVoteNilSignerDepsRefusesSignedVote(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t) // DeviceKeys nil: the safe default
+	ev := signedAnchorVote(t, mustV7(t), 1, priv, nil)
+	b, id := testBatch(t, ev)
+	rec := h.post(t, id, encodeBatch(t, b), nil)
+	if rec.Code != http.StatusUnprocessableEntity || errCode(t, rec) != "M1E-2010" {
+		t.Fatalf("want 422 M1E-2010 with no DeviceKeys dependency wired, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAnchorVoteEmptySignatureAdmittedAndMarkedUnsigned(t *testing.T) {
+	h := newHarness(t)
+	ev := signedAnchorVote(t, mustV7(t), 1, nil, nil) // priv nil ⇒ Signature stays empty
+	b, id := testBatch(t, ev)
+	rec := h.post(t, id, encodeBatch(t, b), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("an empty signature must be ADMITTED, not refused: %d %s", rec.Code, rec.Body.String())
+	}
+	h.drain()
+	if h.ins.count() != 1 {
+		t.Fatalf("want 1 projected row, got %d", h.ins.count())
+	}
+}
+
 // verdictEvent is a well-formed VerdictEvent (verify.proto: 4-vector
 // posterior, stage inside the enum); tests break one field at a time.
 func verdictEvent(t *testing.T, session uuid.UUID, seq uint64) *m1pv1.Event {
@@ -860,6 +1033,9 @@ func TestScannerHitQuarantinesWholeBatchNeverStrips(t *testing.T) {
 	if h.ins.count() != 0 || h.db.calls != 0 {
 		t.Fatalf("quarantined batch was projected: proj=%d sidefx=%d", h.ins.count(), h.db.calls)
 	}
+	if h.tomb.calls != 1 {
+		t.Fatalf("the never-replay marker must be written in the landing request path (07 §S3 layout): tombstone writes=%d", h.tomb.calls)
+	}
 }
 
 // Re-POST of a quarantined batch (ack lost, same ruleset): the quarantine
@@ -978,7 +1154,7 @@ func realSecurityHarness(t *testing.T) *harness {
 	m := New(Deps{
 		Verifier: h.verifier,
 		ObsCfg:   obs.Config{ServiceName: "controld-test"},
-		PG:       fakeReady{}, Store: h.store, Proj: h.proj, Sidefx: h.sfx,
+		PG:       fakeReady{}, Store: h.store, Proj: h.proj, Sidefx: h.sfx, DB: h.tomb,
 		PoolSize: 4,
 	})
 	m.RegisterRoutes(mux)
@@ -1238,7 +1414,7 @@ func TestReplayReprojectsIdempotently(t *testing.T) {
 	// The fake store keys carry the batch_id's uuidv7 date (minted just
 	// above, so today); replay across a window that includes it.
 	now := time.Now().UTC()
-	n, err := Replay(context.Background(), h.store, h.ins, nil, tenant,
+	n, err := Replay(context.Background(), h.tomb, h.store, h.ins, nil, tenant,
 		now.AddDate(0, 0, -1), now.AddDate(0, 0, 1))
 	if err != nil {
 		t.Fatal(err)
@@ -1372,7 +1548,7 @@ func TestReplayFromS3AloneReconstructsAckedEvents(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	n, err := Replay(context.Background(), h.store, rebuiltIns, rebuiltSfx, tenant,
+	n, err := Replay(context.Background(), h.tomb, h.store, rebuiltIns, rebuiltSfx, tenant,
 		now.AddDate(0, 0, -3), now.AddDate(0, 0, 1))
 	if err != nil {
 		t.Fatal(err)

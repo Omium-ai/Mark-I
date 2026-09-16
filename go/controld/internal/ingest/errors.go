@@ -34,8 +34,27 @@ func errMediaType(msg string) apiErr {
 	return apiErr{http.StatusUnsupportedMediaType, "M1E-2005", msg, nil}
 }
 func errInvariant(eventIDs []string, kinds []string) apiErr {
-	return apiErr{http.StatusUnprocessableEntity, "M1E-2006", "invariant-violating events",
+	// FR-VERIFY-004: a batch whose ONLY named violation is a bad AnchorVote
+	// signature gets its own code (08 §9 ingest range, next free after
+	// M1E-2009) -- refused/quarantined identically to every other invariant
+	// row, distinguishable on the wire. A batch that mixes it with an
+	// unrelated violation (e.g. a bad idem_key) stays under the shared
+	// M1E-2006 umbrella the "kinds" list already carries.
+	code, msg := "M1E-2006", "invariant-violating events"
+	if len(kinds) > 0 && allKind(kinds, "anchor_vote_signature") {
+		code, msg = "M1E-2010", "anchor vote signature failed verification"
+	}
+	return apiErr{http.StatusUnprocessableEntity, code, msg,
 		map[string]any{"event_ids": eventIDs, "kinds": kinds}}
+}
+
+func allKind(kinds []string, want string) bool {
+	for _, k := range kinds {
+		if k != want {
+			return false
+		}
+	}
+	return true
 }
 func errIdentityDisagreement() apiErr {
 	return apiErr{http.StatusForbidden, "M1E-8003", "envelope identity disagrees with verified token claims", nil}

@@ -61,24 +61,37 @@ type Deps struct {
 	// Scanner is the stage-7 ruleset edition. nil ⇒ scanner.Default. Tests
 	// land batches under one edition and Rescan them under another.
 	Scanner *scanner.Ruleset
+	// DeviceKeys resolves the enrolled key for AnchorVote.signature
+	// verification (FR-VERIFY-004). nil ⇒ a non-empty signature can never be
+	// verified and is refused -- the safe default for the check that exists
+	// to catch forgery.
+	DeviceKeys DeviceKeys
+	// DB writes the m1_quarantined_batches tombstone in the request path that lands a quarantine twin (quarantine.go);
+	// nil refuses every flagged batch with 503 — the never-replay marker is not optional.
+	DB registry.DB
 	// PoolSize is the §8.1 ingest pipeline bound (64 at prod defaults).
 	PoolSize int
 	Now      func() time.Time
+	// IntelServiceToken verifies the internal service ingest route (service.go); empty ⇒ the surface is absent, never open.
+	IntelServiceToken string
 }
 
 type Module struct {
-	verifier auth.Verifier
-	obsCfg   obs.Config
-	pgReady  PGReady
-	store    s3land.Store
-	proj     *chproj.Projector
-	sfx      *sidefx.Sidefx
-	security SecurityRecorder
-	registry registry.Registry
-	scanner  *scanner.Ruleset
-	limiter  *Limiter
-	sem      chan struct{}
-	now      func() time.Time
+	verifier     auth.Verifier
+	obsCfg       obs.Config
+	pgReady      PGReady
+	store        s3land.Store
+	proj         *chproj.Projector
+	sfx          *sidefx.Sidefx
+	security     SecurityRecorder
+	registry     registry.Registry
+	scanner      *scanner.Ruleset
+	deviceKeys   DeviceKeys
+	db           registry.DB
+	limiter      *Limiter
+	sem          chan struct{}
+	now          func() time.Time
+	serviceToken string
 }
 
 func New(d Deps) *Module {
@@ -95,18 +108,21 @@ func New(d Deps) *Module {
 		d.Scanner = scanner.Default
 	}
 	m := &Module{
-		verifier: d.Verifier,
-		obsCfg:   d.ObsCfg,
-		pgReady:  d.PG,
-		store:    d.Store,
-		proj:     d.Proj,
-		sfx:      d.Sidefx,
-		security: d.Security,
-		registry: d.Registry,
-		scanner:  d.Scanner,
-		limiter:  NewLimiter(),
-		sem:      make(chan struct{}, d.PoolSize),
-		now:      d.Now,
+		verifier:     d.Verifier,
+		obsCfg:       d.ObsCfg,
+		pgReady:      d.PG,
+		store:        d.Store,
+		proj:         d.Proj,
+		sfx:          d.Sidefx,
+		security:     d.Security,
+		registry:     d.Registry,
+		scanner:      d.Scanner,
+		deviceKeys:   d.DeviceKeys,
+		db:           d.DB,
+		limiter:      NewLimiter(),
+		sem:          make(chan struct{}, d.PoolSize),
+		now:          d.Now,
+		serviceToken: d.IntelServiceToken,
 	}
 	if m.security == nil {
 		m.security = &projectorSecurity{proj: d.Proj}
@@ -124,6 +140,7 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 		authFailures.WithLabelValues(reason).Inc()
 	})
 	mux.Handle("POST /m1p/v1/ingest", chain(http.HandlerFunc(m.handleIngest)))
+	mux.Handle("POST /internal/v1/ingest/service", m.obsCfg.HTTPMiddleware(nil)(http.HandlerFunc(m.handleServiceIngest)))
 }
 
 // Ready is ingest's readiness contributor (05 §1.4): Postgres app-pool ping

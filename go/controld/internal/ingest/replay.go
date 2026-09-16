@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/chproj"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/registry"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/s3land"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
@@ -27,18 +28,26 @@ import (
 //
 // The quarantine prefix is NEVER replayed by this path (05 §2.3: the ingest
 // prefix is replayed mechanically; a secret there would resurface forever).
-func Replay(ctx context.Context, store s3land.Store, ins chproj.Inserter, sfx *sidefx.Sidefx,
+func Replay(ctx context.Context, db registry.DB, store s3land.Store, ins chproj.Inserter, sfx *sidefx.Sidefx,
 	tenant querychoke.TenantID, from, to time.Time) (int, error) {
 	tenantUUID := tenant.UUID()
 	replayed := 0
 	err := walkLanded(ctx, store, tenant, from, to, func(key string, compressed []byte, device uuid.UUID, batch *m1pv1.Batch, day time.Time) error {
-		// Quarantined AFTER landing (Rescan under a newer ruleset): the twin
-		// under the quarantine prefix is the marker. The ingest object is
-		// immutable and stays, but 05 §2.3's rule is that the quarantine
-		// prefix is never replayed — so neither is a batch that now lives
-		// there. Divergent counts too: anything quarantined under this
-		// batch_id disqualifies it, whatever bytes the twin holds.
+		// Quarantined AFTER landing (Rescan under a newer ruleset): the
+		// m1_quarantined_batches tombstone is the marker (07 §S3 layout) —
+		// the twin itself dies at 30 d. The ingest object is immutable and
+		// stays, but 05 §2.3's rule is that the quarantine prefix is never
+		// replayed — so neither is a batch that now lives there. The twin's
+		// existence is still honoured as a belt-and-braces OR for objects
+		// that predate m1_080; Divergent counts too: anything quarantined
+		// under this batch_id disqualifies it, whatever bytes the twin holds.
 		batchID, _ := uuid.FromBytes(batch.GetBatchId())
+		if marked, err := tombstoned(ctx, db, tenant, batchID); err != nil {
+			return err
+		} else if marked {
+			log.Printf("ingest: replay %s: skipped, tombstoned (05 §2.3)", key)
+			return nil
+		}
 		if q, err := store.Probe(ctx, s3land.QuarantineKey(tenantUUID, batchID), compressed); err != nil {
 			return err
 		} else if q != s3land.NotLanded {
@@ -54,7 +63,7 @@ func Replay(ctx context.Context, store s3land.Store, ins chproj.Inserter, sfx *s
 		if err := ins.InsertRows(ctx, chproj.Table, chproj.Columns, rows); err != nil {
 			return err
 		}
-		if sfx != nil && device != uuid.Nil {
+		if sfx != nil && device != uuid.Nil && device != ServiceDevice {
 			// The full stage-11 effect set replays too: pending leaves and
 			// checkpoint seals re-derive from the landing objects — the
 			// recovery story the in-memory pending-leaf set depends on.
@@ -101,7 +110,11 @@ func (m *Module) Rescan(ctx context.Context, tenant querychoke.TenantID, from, t
 			return nil
 		}
 		batchID, _ := uuid.FromBytes(batch.GetBatchId())
-		outcome, err := m.store.Land(ctx, s3land.QuarantineKey(tenantUUID, batchID), compressed, tenantUUID, device)
+		qkey := s3land.QuarantineKey(tenantUUID, batchID)
+		if err := m.tombstone(ctx, tenant, batchID, qkey, len(batch.GetEvents()), m.now()); err != nil {
+			return err
+		}
+		outcome, err := m.store.Land(ctx, qkey, compressed, tenantUUID, device)
 		if err != nil {
 			return err
 		}

@@ -341,9 +341,10 @@ ORDER BY occurred_at, task_id`,
 	{
 		// adjudicator spectral_estimate over [from, to]: one row per verifier vote; vote is the wire Verdict name lowercased ('' on RmScore, which carries score), stage is the task's latest verdict stage, tamper the AnchorVote envelope flag (06 §2.4: quarantined from estimation by the reader).
 		name:    "adjudication_votes",
-		version: "adjudication_votes.v1",
+		version: "adjudication_votes.v2",
 		body: `SELECT e.task_id AS task_id,
        e.event_id AS vote_id,
+       e.session_id AS session_id,
        e.session_epoch AS session_epoch,
        e.seq AS seq,
        e.event_type AS family,
@@ -357,9 +358,9 @@ ORDER BY occurred_at, task_id`,
        JSONExtractFloat(e.payload, 'score') AS score,
        JSONExtractBool(e.payload, 'integrity', 'tamper') AS tamper,
        e.task_stage AS stage
-FROM (SELECT event_id, task_id, session_epoch, seq, event_type, payload,
+FROM (SELECT event_id, task_id, session_id, session_epoch, seq, event_type, payload,
              argMaxIf(verdict_stage, (session_epoch, seq), verdict != '') OVER (PARTITION BY task_id) AS task_stage
-      FROM (SELECT event_id, task_id, session_epoch, seq, event_type, payload, verdict, verdict_stage
+      FROM (SELECT event_id, task_id, session_id, session_epoch, seq, event_type, payload, verdict, verdict_stage
             FROM m1p_events
             WHERE {{tenant_pred}}
               AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
@@ -374,7 +375,33 @@ ORDER BY e.task_id, e.session_epoch, e.seq, e.event_id`,
 		timeout:  timeoutReport,
 	},
 	{
-		// policy_compiler/jobs.py read_attempts over [from, to): tvo_task_window's attempt arithmetic plus the two CPVS keys (06 §10.1) — task_class lifted from the TaskOpen payload (no wire field stamps it yet: '' until the edge does), model_id the attempt's latest Usage model; token classes split as knee.py's AttemptCost names them; verifier_spend_usd 0 (no witness row); cost_basis the C1.9 stamp ('' until stamped, which CertifiedAttempt refuses loudly).
+		// adjudicator certified/archive.py + rm/evidence.py over [from, to]: one row per E1 EvidenceExcerpt of the task — the receipt id and evidence event it names (base64 of the raw bytes, as protojson lands them) and the 08 §2.1 attachment name. Content never rides here (artifacts.proto: the message names an attachment and a receipt); the reader fetches the part and admits it only against the bound m1_077 receipt. E2 is VPC/self-host only and has no receipt, so it is not served (FR-VERIFY-016).
+		name:    "evidence_excerpts",
+		version: "evidence_excerpts.v1",
+		body: `SELECT e.event_id AS event_id,
+       e.session_id AS session_id,
+       e.session_epoch AS session_epoch,
+       e.seq AS seq,
+       JSONExtractString(e.payload, 'evidence_event_id') AS evidence_event_id,
+       JSONExtractString(e.payload, 'attachment_name') AS attachment_name,
+       JSONExtractString(e.payload, 'redaction_receipt_id') AS redaction_receipt_id
+FROM (SELECT event_id, session_id, session_epoch, seq, payload
+      FROM m1p_events
+      WHERE {{tenant_pred}}
+        AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
+        AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+        AND task_id = {task_id:UUID}
+        AND event_type = 'EvidenceExcerpt'
+        AND JSONExtractString(payload, 'tier') = 'EVIDENCE_TIER_E1'
+      LIMIT 1 BY event_id) AS e
+ORDER BY e.session_epoch, e.seq, e.event_id`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}, "task_id": {kind: pUUID}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: 1_000,
+		timeout:  timeoutReport,
+	},
+	{
+		// policy_compiler/jobs.py read_attempts over [from, to): tvo_task_window's attempt arithmetic plus the two CPVS keys (06 §10.1) — task_class lifted from the TaskOpen payload (TaskOpen.task_class, "*" from the edge until a classifier exists) onto every attempt of the task, model_id the attempt's latest Usage model; token classes split as knee.py's AttemptCost names them; verifier_spend_usd 0 (no witness row); cost_basis chproj's per-tenant m1_075 stamp ('' for a tenant without a regime row, which CertifiedAttempt refuses loudly).
 		name:    "policy_compiler_attempts",
 		version: "policy_compiler_attempts.v1",
 		body: `SELECT e.task_id AS task_id,

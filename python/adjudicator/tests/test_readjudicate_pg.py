@@ -170,6 +170,7 @@ async def test_cascade_escalates_persists_and_accrues_the_shadow_pair(pool, env)
 
     results = await run_many(pool, SETTINGS, list(JOBS), _targets(http), tenant_id=tenant, now=NOW)
     assert results["readjudicate.run"] == "succeeded" and results["promotion.step"] == "succeeded"
+    assert len(cloud.ingested) == 1  # the three verdicts re-entered the ledger in one batch
     esc = {r["task_id"]: r for r in await _escalations(pool, tenant)}
     assert set(esc) == {AMBIGUOUS, NO_TEST, satisfied_task}
     assert esc[satisfied_task]["verdict"] == "satisfied"

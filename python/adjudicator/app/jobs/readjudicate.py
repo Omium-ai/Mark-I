@@ -2,8 +2,9 @@
 ledger votes are fused once at the provisional stage; tasks inside the D18 margin of a Chow
 band edge (06 §6.2 step 1) are escalated: the T2 reward model votes in shadow (06 §12.4 row
 2), the repo's declared test anchor re-runs as a T3 certified run under the t3:e2b@1 consent,
-and adjudicate(..., escalation=True) fuses everything (FR-VERIFY-017). Rows land in
-escalations (adj_002); promotion.step reads the shadow pairs back out."""
+and adjudicate(..., escalation=True) fuses everything (FR-VERIFY-017). The adjudicated
+VerdictEvents re-enter the ledger through controld's service ingest route (app/ledger.py)
+before the rows land in escalations (adj_002); promotion.step reads the shadow pairs back out."""
 
 import contextlib
 import json
@@ -20,6 +21,7 @@ import asyncpg
 import httpx
 from pydantic import ValidationError
 
+from app import ledger
 from app.adjudicate.algorithm import VerdictEvent, adjudicate
 from app.adjudicate.chow import Costs
 from app.adjudicate.likelihoods import CALIBRATED_CONFUSION, KIND_TO_GROUP, Bundle, VerifierParams
@@ -111,6 +113,16 @@ def votes_by_task(
     out: dict[UUID, list[NormalizedVote]] = {}
     for (task, _vid), v in latest.items():
         out.setdefault(task, []).append(v)
+    return out
+
+
+def sessions_by_task(rows: list[dict[str, Any]]) -> dict[UUID, UUID]:
+    """The session each task's votes rode on — the ledger identity a re-entered verdict must
+    carry (gold_vs_verdict joins on it). Absent until adjudication_votes serves session_id."""
+    out: dict[UUID, UUID] = {}
+    for r in rows:
+        if r.get("session_id"):
+            out[UUID(str(r["task_id"]))] = UUID(str(r["session_id"]))
     return out
 
 
@@ -353,36 +365,64 @@ async def run(
                     )
                 }
             tasks = votes_by_task(rows, registry)
+            sessions = sessions_by_task(rows)
             bundle = bundle_for((v for vs in tasks.values() for v in vs), spectral)
             costs = Costs()
             scorer = _scorer(client, ctx.pool, evidence_for)
             runner = _runner(client, ctx.pool, archive_for, registry)
-            escalated = 0
+            escalations: list[Escalation] = []
             for task_id, votes in tasks.items():
                 fused, _ = split_shadow(votes, shadow)
                 provisional = adjudicate(fused, bundle, costs, cert_id)
                 if task_id in done or not is_candidate(provisional.posterior[0], costs):
                     continue
-                e = await escalate(
-                    tenant,
-                    task_id,
-                    fused,
-                    provisional,
-                    bundle,
-                    costs,
-                    cert_id,
-                    scorer,
-                    runner,
-                    registry,
+                escalations.append(
+                    await escalate(
+                        tenant,
+                        task_id,
+                        fused,
+                        provisional,
+                        bundle,
+                        costs,
+                        cert_id,
+                        scorer,
+                        runner,
+                        registry,
+                    )
                 )
+            # The ledger write comes first: a failed POST fails the run before any row marks
+            # the task done, so the retry re-derives the same event_ids and re-POSTs them.
+            wire = [
+                ledger.verdict_wire(
+                    e.event,
+                    provisional=e.provisional,
+                    tenant_id=tenant,
+                    task_id=e.task_id,
+                    session_id=sessions[e.task_id],
+                    window_start=ctx.window_start,
+                    bundle_seq=int(ctx.window_start.timestamp()) if spectral else 0,
+                )
+                for e in escalations
+                if e.task_id in sessions
+            ]
+            readjudicate_skipped_total["ingest_no_session_id"] += len(escalations) - len(wire)
+            if wire:
+                await ledger.post_verdicts(
+                    client,
+                    settings.querychoke_base_url,
+                    settings.querychoke_token.get_secret_value(),
+                    tenant,
+                    wire,
+                )
+            for e in escalations:
                 await _upsert(conn, ctx.tenant_id, ctx.window_start, e)
-                escalated += 1
     log.info(
-        "readjudicate %s %s: %d tasks, %d escalated, skips=%s",
+        "readjudicate %s %s: %d tasks, %d escalated, %d re-entered, skips=%s",
         ctx.tenant_id,
         ctx.day,
         len(tasks),
-        escalated,
+        len(escalations),
+        len(wire),
         dict(readjudicate_skipped_total),
     )
     return None

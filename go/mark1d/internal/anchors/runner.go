@@ -17,10 +17,12 @@ import (
 	"sync"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"lukechampine.com/blake3"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/evidence"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
 )
 
 // ErrRefused means the runner declined to execute at all — unimplemented kind,
@@ -258,6 +260,10 @@ type Runner struct {
 
 	mu     sync.Mutex
 	l0root []byte // latest cortexd L0 root; nil ⇒ integrity incomplete
+	// signer mints AnchorVote.signature (verify.proto field 5, founder ruling
+	// 2026-09-16); nil ⇒ votes stay unsigned, the same fail-soft posture
+	// receipt sealing already has with no enrolled device key.
+	signer identity.DeviceKey
 }
 
 // NewRunner wires the sandbox and the capture emitter.
@@ -392,20 +398,19 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 	// Raw evidence stays on this device; a failed local write never fails the vote.
 	_, _ = r.Evidence.Put(task, e.ID, stdout, stderr, d.raw)
 
+	av := &m1pv1.AnchorVote{
+		AnchorId:  e.ID,
+		Vote:      verdict,
+		Evidence:  evidence,
+		Integrity: integrity,
+	}
+	r.signVote(av)
 	ev := &m1pv1.Event{
 		SessionId:  session[:],
 		TaskId:     task[:],
 		OccurredAt: timestamppb.Now(), // mark1d IS the origin of this event
-		Body: &m1pv1.Event_AnchorVote{AnchorVote: &m1pv1.AnchorVote{
-			AnchorId:  e.ID,
-			Vote:      verdict,
-			Evidence:  evidence,
-			Integrity: integrity,
-		}},
+		Body:       &m1pv1.Event_AnchorVote{AnchorVote: av},
 	}
-	// ponytail: device-signing of the vote rides the receipt-checkpoint chain
-	// (07 §3 — the batch merkle root is device-signed); AnchorVote itself has
-	// no signature field in verify.proto.
 	return r.emit.Admit(ctx, ev)
 }
 
@@ -413,6 +418,46 @@ func (r *Runner) currentL0Root() []byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]byte(nil), r.l0root...)
+}
+
+// SetSigner arms per-vote signing with the device origin key -- the same key
+// receipt.OpenKey opens for checkpoint sealing (reused, not re-derived). It is
+// late-bound like SetL0Root: the daemon wires it once enrollment identity is
+// known, which lands after the runner is constructed.
+func (r *Runner) SetSigner(key identity.DeviceKey) {
+	r.mu.Lock()
+	r.signer = key
+	r.mu.Unlock()
+}
+
+func (r *Runner) currentSigner() identity.DeviceKey {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.signer
+}
+
+// signVote mints AnchorVote.signature over the deterministic proto marshal of
+// av with signature cleared -- av.Signature must be unset at call time, so the
+// bytes signed and the bytes shipped agree on what "cleared" means. No domain
+// prefix: verify.proto's contract is exactly canonical(anchor_id, vote,
+// evidence, integrity), not the receipt-chain's JSON signing scheme. A
+// marshal or sign failure degrades to unsigned rather than dropping the vote
+// -- "empty on pre-ruling producers, never forged" licenses absent, never
+// fabricated.
+func (r *Runner) signVote(av *m1pv1.AnchorVote) {
+	signer := r.currentSigner()
+	if signer == nil {
+		return
+	}
+	canon, err := proto.MarshalOptions{Deterministic: true}.Marshal(av)
+	if err != nil {
+		return
+	}
+	sig, err := signer.Sign(canon)
+	if err != nil {
+		return
+	}
+	av.Signature = sig
 }
 
 // EmitExcerpt is the only door for opt-in tiers (FR-VERIFY-016, 07 §4): E1 needs redaction_receipt_id, E2 needs MARK1_PROFILE=vpc|selfhost (04 §3 gateway mode).

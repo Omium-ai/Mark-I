@@ -278,12 +278,23 @@ func TestIntelReadTemplatesServeTheirConsumers(t *testing.T) {
 			closedWindow,
 		}},
 		"adjudication_votes": {params: dayDay, terms: []string{
+			"e.session_id AS session_id", // the ledger re-entry (A3) binds the adjudicated verdict to the original session
 			"lower(replaceOne(JSONExtractString(e.payload, 'vote'), 'VERDICT_', '')) AS vote", // protojson enum name → wire verdict
 			"IN ('refused', 'error') AS abstained",
 			"e.event_type = 'AnchorVote' AS is_anchor",
 			"JSONExtractBool(e.payload, 'integrity', 'tamper') AS tamper",
 			"WHERE e.event_type != 'VerdictEvent'",
 			"event_type IN ('AnchorVote', 'JudgeVote', 'RmScore', 'ConsistencyVote', 'VerdictEvent')",
+			closedWindow,
+		}},
+		"evidence_excerpts": {params: Params{"from": "2026-08-10", "to": "2026-08-10", "task_id": uuid.New()}, terms: []string{
+			"AND event_type = 'EvidenceExcerpt'",
+			"JSONExtractString(payload, 'tier') = 'EVIDENCE_TIER_E1'", // E2 never served: VPC/self-host only, no receipt (FR-VERIFY-016)
+			"AND task_id = {task_id:UUID}",
+			"JSONExtractString(e.payload, 'redaction_receipt_id') AS redaction_receipt_id", // the m1_077 key the reader binds against
+			"JSONExtractString(e.payload, 'evidence_event_id') AS evidence_event_id",
+			"JSONExtractString(e.payload, 'attachment_name') AS attachment_name", // the 08 §2.1 part name; content never rides the choke
+			"ORDER BY e.session_epoch, e.seq, e.event_id",
 			closedWindow,
 		}},
 		"policy_compiler_attempts": {params: dayNext, terms: []string{

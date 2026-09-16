@@ -2,6 +2,8 @@ package ingest
 
 import (
 	"bytes"
+	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,6 +24,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/scanner"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/receipts"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
 
@@ -41,10 +44,33 @@ const (
 	maxDroppedEntries = 1_000    // stage 5
 )
 
+// principal is the stage-3 stamp: verified claims for a device, the service credential plus the named tenant for service.go.
+type principal struct {
+	tenant  querychoke.TenantID
+	device  uuid.UUID
+	service bool
+}
+
 // handleIngest runs the 05 §2.1 stages strictly in order. Stages 1–9 are
 // synchronous and stateless; stages 10–11 are post-ack and asynchronous —
 // the response is licensed by the S3 landing alone (05 §2.2).
 func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
+	// Stage 2 ran in the middleware (server.Chain); stage 3's stamp is the
+	// verified claims — the ONLY identity source from here on (08 §2.1).
+	claims, ok := auth.ClaimsFrom(r.Context())
+	if !ok {
+		writeErr(w, errServer("auth middleware did not run")) // a bug, not a request problem
+		return
+	}
+	tenant, err := querychoke.FromClaims(claims)
+	if err != nil {
+		writeErr(w, errServer("verified claims carry no tenant"))
+		return
+	}
+	m.ingest(w, r, principal{tenant: tenant, device: claims.DeviceID})
+}
+
+func (m *Module) ingest(w http.ResponseWriter, r *http.Request, p principal) {
 	// §2.4 in-process shed: when the bounded pool is saturated, refuse BEFORE
 	// stage 4's decompression spend — a fast honest 503 beats a slow timeout
 	// because the edge's backoff automaton handles it correctly.
@@ -59,19 +85,7 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 
 	start := m.now()
 	requestsTotal.WithLabelValues("admit").Inc()
-
-	// Stage 2 ran in the middleware (server.Chain); stage 3's stamp is the
-	// verified claims — the ONLY identity source from here on (08 §2.1).
-	claims, ok := auth.ClaimsFrom(r.Context())
-	if !ok {
-		writeErr(w, errServer("auth middleware did not run")) // a bug, not a request problem
-		return
-	}
-	tenant, err := querychoke.FromClaims(claims)
-	if err != nil {
-		writeErr(w, errServer("verified claims carry no tenant"))
-		return
-	}
+	tenant, tenantID, deviceID := p.tenant, p.tenant.UUID(), p.device
 
 	// ---- Stage 1: transport admission -----------------------------------
 	if r.ContentLength < 0 {
@@ -169,15 +183,15 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 	// fields and the server-stamped band (900–999) are checked against it.
 	// Any client-asserted identity ⇒ 403 M1E-8003 + security event — the
 	// client cannot assert its own identity (08 §2.1).
-	if detail, bad := identityDisagreement(&batch, claims); bad {
+	if detail, bad := identityDisagreement(&batch, tenantID, deviceID); bad {
 		identityDisagreements.Inc()
-		m.security.RecordIdentityDisagreement(claims.TenantID, claims.DeviceID, headerBatchID, detail, m.now())
+		m.security.RecordIdentityDisagreement(tenantID, deviceID, headerBatchID, detail, m.now())
 		writeErr(w, errIdentityDisagreement())
 		return
 	}
 
 	// ---- Stage 6: invariant checks ---------------------------------------
-	if e, violated := checkInvariants(&batch, headerBatchID); violated {
+	if e, violated := m.checkInvariants(r.Context(), &batch, headerBatchID, p.service, tenant, deviceID); violated {
 		writeErr(w, e)
 		return
 	}
@@ -187,7 +201,7 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 	for i, ev := range batch.GetEvents() {
 		types[i] = chproj.BodyTypeName(ev)
 	}
-	if wait, allowed := m.limiter.Debit(claims.TenantID, claims.DeviceID, categoryCounts(types)); !allowed {
+	if wait, allowed := m.limiter.Debit(tenantID, deviceID, categoryCounts(types)); !allowed {
 		w.Header().Set("Retry-After", retryAfterSeconds(wait))
 		w.Header().Set("M1P-Rate-Limits", RateLimitsHeader)
 		writeErr(w, errRateLimited())
@@ -211,9 +225,9 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 	// functions of (tenant, batch_id) so the 08 §2.5 retry automaton always
 	// re-PUTs the SAME key and the conditional write can detect it (08 §2.3).
 	receivedAt := m.now()
-	key := s3land.IngestKey(claims.TenantID, headerBatchID)
+	key := s3land.IngestKey(tenantID, headerBatchID)
 	if flagged {
-		key = s3land.QuarantineKey(claims.TenantID, headerBatchID)
+		key = s3land.QuarantineKey(tenantID, headerBatchID)
 		// A batch that first landed CLEAN under the ingest prefix (ack lost
 		// in transit, 08 §2.5) and is flagged on the re-POST — a scanner
 		// ruleset changed between attempts — is already in the replay log:
@@ -226,7 +240,7 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 		// clean is exactly 05 §2.3's fail-closed judgment applied at re-POST
 		// time — the stale quarantine object ages out under the 90-day
 		// lifecycle and is never auto-replayed.
-		switch prior, perr := m.store.Probe(r.Context(), s3land.IngestKey(claims.TenantID, headerBatchID), compressed); {
+		switch prior, perr := m.store.Probe(r.Context(), s3land.IngestKey(tenantID, headerBatchID), compressed); {
 		case perr != nil:
 			s3LandFailures.Inc()
 			writeErr(w, errServer("landing store unavailable"))
@@ -240,9 +254,16 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, errDivergentBatch())
 			return
 		}
+		// The never-replay marker lands before the twin (quarantine.go); without it the batch is not durably held.
+		if err := m.tombstone(r.Context(), tenant, headerBatchID, key, len(batch.GetEvents()), receivedAt); err != nil {
+			tombstoneFailures.Inc()
+			log.Printf("ingest: quarantine tombstone for batch %s not written: %v", headerBatchID, err)
+			writeErr(w, errServer("quarantine marker unavailable"))
+			return
+		}
 	}
 	landStart := m.now()
-	outcome, err := m.store.Land(r.Context(), key, compressed, claims.TenantID, claims.DeviceID)
+	outcome, err := m.store.Land(r.Context(), key, compressed, tenantID, deviceID)
 	s3LandSeconds.Observe(m.now().Sub(landStart).Seconds())
 	if err != nil {
 		// The batch has NOT landed; withholding the ack IS the durability
@@ -275,7 +296,7 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 		// LANDING path: a duplicate re-POST returned above, so one landed
 		// quarantine records exactly one event, and the event_id is derived
 		// from batch_id so even a replay collapses instead of multiplying.
-		m.security.RecordQuarantine(claims.TenantID, claims.DeviceID, headerBatchID, hitClasses(hits), receivedAt)
+		m.security.RecordQuarantine(tenantID, deviceID, headerBatchID, hitClasses(hits), receivedAt)
 		// 05 §2.3: nothing from a flagged batch is projected; the 202 is
 		// still a durability promise (the quarantine object holds it all).
 		m.writeAck(w, start, &batch, headerBatchID, hits, false)
@@ -286,11 +307,14 @@ func (m *Module) handleIngest(w http.ResponseWriter, r *http.Request) {
 	// Stage 10 (ClickHouse projection) + stage 11 (Postgres side-effects):
 	// post-ack, asynchronous, idempotent on event_id — failure here is
 	// replayed from the landing object, never surfaced to the edge.
-	rows := chproj.RowsFromBatch(&batch, claims.TenantID, claims.DeviceID, receivedAt)
+	rows := chproj.RowsFromBatch(&batch, tenantID, deviceID, receivedAt)
 	m.proj.Enqueue(rows, receivedAt)
+	if p.service {
+		return // no device row to touch, no chain to leaf into (service.go)
+	}
 	// X-Mark1-Edge-Version is recorded, never rejected on (08 §10.1): it
 	// stamps m1_devices.edge_version alongside last_seen_at (m1_061).
-	m.sfx.Enqueue(tenant, claims.DeviceID, receivedAt, r.Header.Get("X-Mark1-Edge-Version"),
+	m.sfx.Enqueue(tenant, deviceID, receivedAt, r.Header.Get("X-Mark1-Edge-Version"),
 		sidefx.EffectsFromBatch(&batch, receivedAt))
 }
 
@@ -314,11 +338,11 @@ func hitClasses(hits []scanner.Hit) []string {
 
 // identityDisagreement applies 08 §2.1's constraint + the envelope's
 // server-stamped-band rule (proto envelope.proto fields 900–903).
-func identityDisagreement(b *m1pv1.Batch, c auth.Claims) (string, bool) {
-	if t := b.GetAdvisoryTenantId(); len(t) > 0 && !bytes.Equal(t, c.TenantID[:]) {
+func identityDisagreement(b *m1pv1.Batch, tenant, device uuid.UUID) (string, bool) {
+	if t := b.GetAdvisoryTenantId(); len(t) > 0 && !bytes.Equal(t, tenant[:]) {
 		return "advisory_tenant_id disagrees with token", true
 	}
-	if d := b.GetAdvisoryDeviceId(); len(d) > 0 && !bytes.Equal(d, c.DeviceID[:]) {
+	if d := b.GetAdvisoryDeviceId(); len(d) > 0 && !bytes.Equal(d, device[:]) {
 		return "advisory_device_id disagrees with token", true
 	}
 	for _, ev := range b.GetEvents() {
@@ -337,13 +361,19 @@ func identityDisagreement(b *m1pv1.Batch, c auth.Claims) (string, bool) {
 
 // checkInvariants is stage 6: violations name the offending event_ids
 // (08 §2.4: named events quarantine at edge, remainder re-sent once).
-func checkInvariants(b *m1pv1.Batch, headerBatchID uuid.UUID) (apiErr, bool) {
+func (m *Module) checkInvariants(ctx context.Context, b *m1pv1.Batch, headerBatchID uuid.UUID, service bool, tenant querychoke.TenantID, device uuid.UUID) (apiErr, bool) {
 	batchID, err := uuid.FromBytes(b.GetBatchId())
 	if err != nil || batchID != headerBatchID {
 		invariantViolations.WithLabelValues("batch_id_mismatch").Inc()
 		return errInvariant(nil, []string{"batch_id_mismatch"}), true
 	}
 	var badIDs, kinds []string
+	// FR-VERIFY-004: the device's live origin key, resolved at most once per
+	// batch (constant for every vote in it) and only if a vote actually
+	// carries a signature to check -- an all-unsigned batch (or no votes)
+	// never touches m1_device_keys.
+	var pubLooked, pubOK bool
+	var pub ed25519.PublicKey
 	for _, ev := range b.GetEvents() {
 		id, err := uuid.FromBytes(ev.GetEventId())
 		if err != nil || id.Version() != 7 {
@@ -376,6 +406,9 @@ func checkInvariants(b *m1pv1.Batch, headerBatchID uuid.UUID) (apiErr, bool) {
 			if st := v.GetStage(); st.Number() == 0 || st.Descriptor().Values().ByNumber(st.Number()) == nil {
 				invariantViolations.WithLabelValues("verdict_stage").Inc()
 				badIDs, kinds = append(badIDs, id.String()), append(kinds, "verdict_stage")
+			} else if st == foreignStage[service] {
+				invariantViolations.WithLabelValues("verdict_stage_origin").Inc()
+				badIDs, kinds = append(badIDs, id.String()), append(kinds, "verdict_stage_origin")
 			}
 		}
 		// FR-ROUTE-001, same posture: a RouteDecision is the OPE logging row
@@ -397,11 +430,57 @@ func checkInvariants(b *m1pv1.Batch, headerBatchID uuid.UUID) (apiErr, bool) {
 				badIDs, kinds = append(badIDs, id.String()), append(kinds, "route_action")
 			}
 		}
+		// FR-VERIFY-004: an empty signature is admitted (pre-ruling producers,
+		// or a device with no enrolled key -- receipt sealing degrades the same
+		// way) and marked unsigned downstream (chproj.unsignedAnchorVotes); a
+		// NON-empty signature that fails to verify is refused here, never
+		// silently dropped to unsigned -- that would let a forged vote pass as
+		// merely uncertified.
+		if av := ev.GetAnchorVote(); av != nil {
+			if sig := av.GetSignature(); len(sig) > 0 {
+				if !pubLooked {
+					pubLooked = true
+					if m.deviceKeys != nil {
+						if p, ok, kerr := m.deviceKeys.PublicKey(ctx, tenant, device); kerr == nil {
+							pub, pubOK = p, ok
+						}
+					}
+				}
+				if !pubOK || !verifyAnchorVoteSignature(pub, av, sig) {
+					invariantViolations.WithLabelValues("anchor_vote_signature").Inc()
+					badIDs, kinds = append(badIDs, id.String()), append(kinds, "anchor_vote_signature")
+				}
+			}
+		}
 	}
 	if len(badIDs) > 0 || len(kinds) > 0 {
 		return errInvariant(badIDs, kinds), true
 	}
 	return apiErr{}, false
+}
+
+// verifyAnchorVoteSignature reproduces verify.proto's signing input --
+// deterministic proto marshal of av with signature cleared, no domain prefix
+// (that's the receipt chain's JSON scheme, not this one) -- and checks it
+// against the enrolled device key. av is cloned so the caller's copy (which
+// still needs its real signature for the wire/payload column) is untouched.
+func verifyAnchorVoteSignature(pub ed25519.PublicKey, av *m1pv1.AnchorVote, sig []byte) bool {
+	clone, ok := proto.Clone(av).(*m1pv1.AnchorVote)
+	if !ok {
+		return false
+	}
+	clone.Signature = nil
+	canon, err := proto.MarshalOptions{Deterministic: true}.Marshal(clone)
+	if err != nil {
+		return false
+	}
+	return receipts.Verify(pub, sig, canon)
+}
+
+// foreignStage[service] is the stage that principal never authors (verify.proto VerdictStage: PROVISIONAL is the edge fusion, CERTIFIED is adjudicator-emitted; REVISED is both, 04 §2 slow anchors).
+var foreignStage = map[bool]m1pv1.VerdictStage{
+	false: m1pv1.VerdictStage_VERDICT_STAGE_CERTIFIED,
+	true:  m1pv1.VerdictStage_VERDICT_STAGE_PROVISIONAL,
 }
 
 // ---------------------------------------------------------------------------

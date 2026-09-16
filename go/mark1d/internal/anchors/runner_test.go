@@ -5,6 +5,8 @@ package anchors
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"os"
 	"path/filepath"
@@ -200,6 +202,65 @@ func TestRunOneL0RootSeam(t *testing.T) {
 	}
 	if got := em.all()[1].GetAnchorVote().GetIntegrity().GetWorktreeMerkleRoot(); len(got) != 0 {
 		t.Errorf("cleared root must yield empty (incomplete) envelope, got %x", got)
+	}
+}
+
+// fakeDeviceKey satisfies identity.DeviceKey with a key the test retains the
+// public half of -- SetSigner takes the interface, so this drives the exact
+// same Runner.signVote/RunOne path a real identity.DeviceKey would.
+type fakeDeviceKey struct{ priv ed25519.PrivateKey }
+
+func (f fakeDeviceKey) Sign(msg []byte) ([]byte, error) { return ed25519.Sign(f.priv, msg), nil }
+func (f fakeDeviceKey) KeyID() string                   { return "test-device-key" }
+
+// canonicalAnchorVote reproduces verify.proto's signing input independently
+// of production code: deterministic marshal with signature cleared.
+func canonicalAnchorVote(t *testing.T, av *m1pv1.AnchorVote) []byte {
+	t.Helper()
+	clone, ok := proto.Clone(av).(*m1pv1.AnchorVote)
+	if !ok {
+		t.Fatal("clone is not *AnchorVote")
+	}
+	clone.Signature = nil
+	canon, err := proto.MarshalOptions{Deterministic: true}.Marshal(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canon
+}
+
+func TestRunOneSignsVoteWithDeviceKey(t *testing.T) {
+	e, wt := enabledRuff(t)
+	sb := &fakeSandbox{res: RunResult{ExitCode: 0}}
+	em := &fakeEmitter{}
+	r := NewRunner(sb, em, nil, false)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetSigner(fakeDeviceKey{priv: priv})
+	if err := r.RunOne(context.Background(), e, testSession, testTask, wt); err != nil {
+		t.Fatal(err)
+	}
+	vote := em.all()[0].GetAnchorVote()
+	if len(vote.GetSignature()) == 0 {
+		t.Fatal("armed signer produced an empty signature")
+	}
+	if !ed25519.Verify(pub, canonicalAnchorVote(t, vote), vote.GetSignature()) {
+		t.Fatal("signature does not verify over canonical(anchor_id, vote, evidence, integrity)")
+	}
+}
+
+func TestRunOneNoSignerLeavesVoteUnsigned(t *testing.T) {
+	e, wt := enabledRuff(t)
+	sb := &fakeSandbox{res: RunResult{ExitCode: 0}}
+	em := &fakeEmitter{}
+	r := NewRunner(sb, em, nil, false) // no SetSigner call: pre-enrollment / soft-fail posture
+	if err := r.RunOne(context.Background(), e, testSession, testTask, wt); err != nil {
+		t.Fatal(err)
+	}
+	if got := em.all()[0].GetAnchorVote().GetSignature(); len(got) != 0 {
+		t.Fatalf("unarmed runner emitted a signature (%x); empty is required, never forged", got)
 	}
 }
 
