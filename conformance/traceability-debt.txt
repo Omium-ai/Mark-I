@@ -26,6 +26,13 @@
 #
 # 2026-09-16: 44 -> 42. FR-AGENT-002 and FR-AGENT-004 paid off (D-EE structural version
 # admission; the pinned corpus now spans 2.1.251 and 2.1.273).
+#
+# 2026-09-16 (evening): 42 -> 41. FR-SPINE-021 paid: ADR-0002 signed (D-EI); the re-arm
+# of 2026-09-15 closes on signature as its note said it would.
+#
+# 2026-09-16 (product phase): 41 -> 43. Two NEW rows entered 02 for the desktop/dogfood phase and
+# start armed: FR-CLI-009 (daemon lifecycle + self-update) and FR-ENROLL-007 (personal tenants /
+# Omium-hosted sign-in). Not regressions -- requirements that did not exist this morning.
 CON-003
 CON-004
 CON-008
@@ -37,9 +44,11 @@ FR-CLI-001
 FR-CLI-002
 FR-CLI-003
 FR-CLI-006
+FR-CLI-009
 FR-ENROLL-003
 FR-ENROLL-004
 FR-ENROLL-005
+FR-ENROLL-007
 FR-SPINE-001
 FR-SPINE-002
 FR-SPINE-005
@@ -51,7 +60,6 @@ FR-SPINE-015
 FR-SPINE-016
 FR-SPINE-018
 FR-SPINE-019
-FR-SPINE-021
 FR-SPINE-022
 FR-SPINE-023
 FR-SPINE-026
