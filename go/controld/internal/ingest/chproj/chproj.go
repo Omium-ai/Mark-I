@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -34,9 +35,10 @@ const Table = "m1p_events"
 
 // Columns is the projected subset of m1p_events. Omitted on purpose:
 // ingested_at (DEFAULT now64 — the ReplacingMergeTree version column, latest
-// server ingest wins), payload_json_close_reason (MATERIALIZED), cost_usd /
-// cost_basis and task_seg_version (stamped by later pipeline rows, not C4),
-// inclusion_path (arrives with checkpoints).
+// server ingest wins), payload_json_close_reason (MATERIALIZED), cost_usd and
+// task_seg_version (stamped by later pipeline rows, not C4), inclusion_path
+// (arrives with checkpoints). cost_basis is "" from the row builders and
+// stamped per tenant by Stamper on the insert path.
 var Columns = []string{
 	"tenant_id", "occurred_at", "session_id", "event_id", "seq", "session_epoch",
 	"device_id", "task_id",
@@ -46,7 +48,7 @@ var Columns = []string{
 	"propensity", "fidelity", "bundle_seq",
 	"checkpoint_seq", "coverage_kind", "coverage_duration_ms",
 	"dropped_reason", "dropped_durability_class", "dropped_quantity",
-	"payload",
+	"payload", "cost_basis", "task_seg_version",
 }
 
 var (
@@ -69,6 +71,15 @@ var (
 	unknownEventTypes = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "controld_ingest_ch_project_unknown_event_types_total",
 		Help: "Events whose body is a type this binary does not know: skipped in projection, retained whole in the landing object, re-projected on upgrade (08 §10.2 skip-and-retain)",
+	})
+	// unsignedAnchorVotes: AnchorVote has no dedicated typed columns (it rides
+	// entirely in the generic `payload` JSON column, per-row, where an absent
+	// or empty `signature` key already marks it -- FR-VERIFY-004 admits an
+	// empty signature rather than refusing it, so this is the operational
+	// (Dropped-style) counter for that, not a schema change.
+	unsignedAnchorVotes = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "controld_ingest_ch_project_unsigned_anchor_votes_total",
+		Help: "AnchorVote rows projected with an empty signature (admitted, marked unsigned) -- per-row detail lives in payload.signature",
 	})
 )
 
@@ -141,7 +152,7 @@ func eventRow(ev *m1pv1.Event, tenant, device uuid.UUID, agent string, fallbackA
 		float64(0), "", uint64(0),
 		uint64(0), "", uint64(0),
 		"", "", uint64(0),
-		payloadJSON(ev),
+		payloadJSON(ev), "", "",
 	}
 
 	switch body := ev.GetBody().(type) {
@@ -170,6 +181,14 @@ func eventRow(ev *m1pv1.Event, tenant, device uuid.UUID, agent string, fallbackA
 		row[24] = r.GetPropensity()
 		row[25] = enumSuffix(r.GetFidelity().String(), "ROUTE_FIDELITY_")
 		row[26] = r.GetBundleSeq()
+	case *m1pv1.Event_AnchorVote:
+		// No typed columns: the full vote (signature included) already rides
+		// in `payload` (payloadJSON below). This counter is the aggregate view.
+		if len(body.AnchorVote.GetSignature()) == 0 {
+			unsignedAnchorVotes.Inc()
+		}
+	case *m1pv1.Event_TaskOpen:
+		row[35] = body.TaskOpen.GetTaskSegVersion() // m1_ch_002 mv_tvo_task reads the column, not the payload
 	case *m1pv1.Event_ReceiptCheckpoint:
 		row[27] = body.ReceiptCheckpoint.GetCheckpointSeq()
 	case *m1pv1.Event_CoverageTransition:
@@ -197,7 +216,7 @@ func droppedRow(d *m1pv1.Dropped, idx int, batchID, tenant, device, session uuid
 		float64(0), "", uint64(0),
 		uint64(0), "", uint64(0),
 		reason, enumSuffix(d.GetDurabilityClass().String(), "DURABILITY_CLASS_"), d.GetQuantity(),
-		"{}",
+		"{}", "", "",
 	}
 }
 
@@ -249,7 +268,7 @@ func securityRow(tenant, device, batchID uuid.UUID, reason, code, detail string,
 		float64(0), "", uint64(0),
 		uint64(0), "", uint64(0),
 		"", "", uint64(0),
-		string(payload),
+		string(payload), "", "",
 	}
 }
 
@@ -434,4 +453,59 @@ func (p *Projector) worker() {
 func (p *Projector) Close() {
 	p.closed.Do(func() { close(p.queue) })
 	p.wg.Wait()
+}
+
+// BasisFunc resolves a tenant's m1_075 cost basis (07 m1p_events; 06 §8.4); "" is a tenant with no regime row and is never read as usd.
+type BasisFunc func(ctx context.Context, tenant uuid.UUID) (string, error)
+
+// Stamper is the Inserter both the Projector and Replay write through: every row carries its tenant's basis, resolved once per tenant per basisTTL.
+type Stamper struct {
+	ins   Inserter
+	basis BasisFunc
+	mu    sync.Mutex
+	cache map[uuid.UUID]cachedBasis
+}
+
+type cachedBasis struct {
+	basis string
+	until time.Time
+}
+
+// ponytail: TTL cache, no invalidation; a regime change reaches the stamp within a minute
+const basisTTL = time.Minute
+
+func Stamped(ins Inserter, basis BasisFunc) *Stamper {
+	return &Stamper{ins: ins, basis: basis, cache: map[uuid.UUID]cachedBasis{}}
+}
+
+func (s *Stamper) InsertRows(ctx context.Context, table string, columns []string, rows [][]any) error {
+	ti, bi := slices.Index(columns, "tenant_id"), slices.Index(columns, "cost_basis")
+	if ti >= 0 && bi >= 0 {
+		for _, r := range rows {
+			tenant, _ := r[ti].(uuid.UUID)
+			basis, err := s.lookup(ctx, tenant)
+			if err != nil {
+				return err
+			}
+			r[bi] = basis
+		}
+	}
+	return s.ins.InsertRows(ctx, table, columns, rows)
+}
+
+func (s *Stamper) lookup(ctx context.Context, tenant uuid.UUID) (string, error) {
+	s.mu.Lock()
+	c, ok := s.cache[tenant]
+	s.mu.Unlock()
+	if ok && time.Now().Before(c.until) {
+		return c.basis, nil
+	}
+	basis, err := s.basis(ctx, tenant)
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	s.cache[tenant] = cachedBasis{basis: basis, until: time.Now().Add(basisTTL)}
+	s.mu.Unlock()
+	return basis, nil
 }

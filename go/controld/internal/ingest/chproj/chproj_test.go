@@ -1,10 +1,14 @@
 package chproj
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
@@ -72,6 +76,55 @@ func TestUsageRowMapping(t *testing.T) {
 		if got := r[col(t, name)]; got != want {
 			t.Errorf("%s: want %v, got %v", name, want, got)
 		}
+	}
+}
+
+// AnchorVote has no dedicated columns (FR-VERIFY-004): the whole vote,
+// signature included, rides in `payload`; an empty signature is admitted and
+// counted, never refused at this layer (ingest's stage 6 already refused a
+// non-empty one that failed to verify before projection is ever reached).
+func TestAnchorVoteRowCarriesSignatureInPayloadAndCountsUnsigned(t *testing.T) {
+	tenant, device := uuid.New(), uuid.New()
+	eventID, session, batchID := v7(t), v7(t), v7(t)
+	at := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	before := testutil.ToFloat64(unsignedAnchorVotes)
+
+	signed := &m1pv1.Batch{
+		BatchId: batchID[:], SessionId: session[:],
+		Events: []*m1pv1.Event{{
+			EventId: eventID[:], Seq: 1, SessionId: session[:], OccurredAt: timestamppb.New(at),
+			Body: &m1pv1.Event_AnchorVote{AnchorVote: &m1pv1.AnchorVote{
+				AnchorId: "ruff", Vote: m1pv1.Verdict_VERDICT_VIOLATED, Signature: []byte{0xCA, 0xFE},
+			}},
+		}},
+	}
+	rows := RowsFromBatch(signed, tenant, device, at)
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row, got %d", len(rows))
+	}
+	if payload, _ := rows[0][col(t, "payload")].(string); !strings.Contains(payload, `"signature"`) {
+		t.Errorf("signed vote's payload must carry the signature field: %s", payload)
+	}
+	if got := testutil.ToFloat64(unsignedAnchorVotes); got != before {
+		t.Errorf("a SIGNED vote must not bump the unsigned counter: before=%v after=%v", before, got)
+	}
+
+	eventID2 := v7(t)
+	unsignedBatch := &m1pv1.Batch{
+		BatchId: batchID[:], SessionId: session[:],
+		Events: []*m1pv1.Event{{
+			EventId: eventID2[:], Seq: 2, SessionId: session[:], OccurredAt: timestamppb.New(at),
+			Body: &m1pv1.Event_AnchorVote{AnchorVote: &m1pv1.AnchorVote{
+				AnchorId: "ruff", Vote: m1pv1.Verdict_VERDICT_SATISFIED,
+			}},
+		}},
+	}
+	rows = RowsFromBatch(unsignedBatch, tenant, device, at)
+	if payload, _ := rows[0][col(t, "payload")].(string); strings.Contains(payload, `"signature"`) {
+		t.Errorf("empty-signature vote's payload must NOT carry a signature key: %s", payload)
+	}
+	if got := testutil.ToFloat64(unsignedAnchorVotes); got != before+1 {
+		t.Errorf("an UNSIGNED vote must bump the unsigned counter by exactly 1: before=%v after=%v", before, got)
 	}
 }
 
@@ -194,5 +247,117 @@ func TestRowWidthMatchesColumns(t *testing.T) {
 	}
 	if len(SecurityEventRow(uuid.New(), uuid.New(), uuid.New(), "", time.Now())) != len(Columns) {
 		t.Fatal("security row width")
+	}
+}
+
+// TaskOpen.task_class lands under its proto name: policy_compiler_attempts reads JSONExtractString(payload, 'task_class').
+func TestTaskOpenPayloadCarriesTaskClass(t *testing.T) {
+	b := &m1pv1.Batch{
+		BatchId: v7b(t), SentAt: timestamppb.Now(),
+		Events: []*m1pv1.Event{{EventId: v7b(t), Seq: 1, Body: &m1pv1.Event_TaskOpen{TaskOpen: &m1pv1.TaskOpen{
+			TaskSegVersion: "task_seg.v1", TaskClass: "*",
+		}}}},
+	}
+	r := RowsFromBatch(b, uuid.New(), uuid.New(), time.Now())[0]
+	payload := r[col(t, "payload")].(string)
+	if !strings.Contains(payload, `"task_class":"*"`) || !strings.Contains(payload, `"task_seg_version":"task_seg.v1"`) {
+		t.Fatalf("payload: %s", payload)
+	}
+	if r[col(t, "cost_basis")] != "" {
+		t.Fatalf("row builders must leave cost_basis unset for the stamp: %v", r[col(t, "cost_basis")])
+	}
+	if r[col(t, "task_seg_version")] != "task_seg.v1" {
+		t.Fatalf("task_seg_version column (mv_tvo_task reads it, not the payload): %v", r[col(t, "task_seg_version")])
+	}
+}
+
+type recordingInserter struct {
+	rows [][]any
+	cols []string
+}
+
+func (r *recordingInserter) InsertRows(_ context.Context, _ string, columns []string, rows [][]any) error {
+	r.cols, r.rows = columns, rows
+	return nil
+}
+
+func TestStamperStampsTenantBasisOnEveryRow(t *testing.T) {
+	usd, none := uuid.New(), uuid.New()
+	calls := map[uuid.UUID]int{}
+	basis := func(_ context.Context, tenant uuid.UUID) (string, error) {
+		calls[tenant]++
+		if tenant == usd {
+			return "usd", nil
+		}
+		return "", nil
+	}
+	rec := &recordingInserter{}
+	st := Stamped(rec, basis)
+	batch := &m1pv1.Batch{
+		BatchId: v7b(t), SentAt: timestamppb.Now(),
+		Events: []*m1pv1.Event{
+			{EventId: v7b(t), Seq: 1, Body: &m1pv1.Event_Usage{Usage: &m1pv1.Usage{Model: "m"}}},
+			{EventId: v7b(t), Seq: 2, Body: &m1pv1.Event_TaskOpen{TaskOpen: &m1pv1.TaskOpen{}}},
+		},
+		Dropped: []*m1pv1.Dropped{{Quantity: 1}},
+	}
+	for i := 0; i < 2; i++ {
+		if err := st.InsertRows(context.Background(), Table, Columns, RowsFromBatch(batch, usd, uuid.New(), time.Now())); err != nil {
+			t.Fatal(err)
+		}
+		if len(rec.rows) != 3 {
+			t.Fatalf("rows: %d", len(rec.rows))
+		}
+		for _, r := range rec.rows {
+			if r[col(t, "cost_basis")] != "usd" {
+				t.Fatalf("row %v not stamped usd: %v", r[col(t, "event_type")], r[col(t, "cost_basis")])
+			}
+		}
+	}
+	if calls[usd] != 1 {
+		t.Fatalf("regime resolved %d times over two batches of three rows; want once (cached)", calls[usd])
+	}
+	// No regime row: '' (unset), never usd — the compiler refuses it by name.
+	if err := st.InsertRows(context.Background(), Table, Columns, [][]any{SecurityEventRow(none, uuid.New(), uuid.New(), "x", time.Now())}); err != nil {
+		t.Fatal(err)
+	}
+	if rec.rows[0][col(t, "cost_basis")] != "" {
+		t.Fatalf("tenant without a regime stamped %q", rec.rows[0][col(t, "cost_basis")])
+	}
+	// A table without the column passes through untouched and resolves nothing.
+	before := len(calls)
+	if err := st.InsertRows(context.Background(), "other", []string{"tenant_id", "x"}, [][]any{{uuid.New(), 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != before || len(rec.rows[0]) != 2 {
+		t.Fatalf("pass-through resolved a regime or reshaped the row: %v", rec.rows)
+	}
+}
+
+func TestStamperCacheExpiresAndErrorsFailClosed(t *testing.T) {
+	tenant := uuid.New()
+	var fail bool
+	calls := 0
+	rec := &recordingInserter{}
+	st := Stamped(rec, func(context.Context, uuid.UUID) (string, error) {
+		calls++
+		if fail {
+			return "", errors.New("pg down")
+		}
+		return "quota", nil
+	})
+	row := func() [][]any { return [][]any{SecurityEventRow(tenant, uuid.New(), uuid.New(), "x", time.Now())} }
+	if err := st.InsertRows(context.Background(), Table, Columns, row()); err != nil {
+		t.Fatal(err)
+	}
+	st.cache[tenant] = cachedBasis{basis: "quota", until: time.Now().Add(-time.Second)}
+	if err := st.InsertRows(context.Background(), Table, Columns, row()); err != nil || calls != 2 {
+		t.Fatalf("expired entry was served from cache: calls=%d err=%v", calls, err)
+	}
+	fail = true
+	st.cache[tenant] = cachedBasis{basis: "quota", until: time.Now().Add(-time.Second)}
+	rec.rows = nil
+	if err := st.InsertRows(context.Background(), Table, Columns, row()); err == nil || rec.rows != nil {
+		t.Fatalf("a failed regime read must fail the projection (retry, then park), not insert: err=%v rows=%v", err, rec.rows)
 	}
 }

@@ -7,6 +7,7 @@ package querychoke
 // copy locked byte-for-byte to intel's.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -168,5 +169,12 @@ func TestModelPricesTableMatchesIntel(t *testing.T) {
 		if _, err := loadPriceTable([]byte(bad)); err == nil {
 			t.Errorf("loadPriceTable accepted %s", bad)
 		}
+	}
+}
+
+// CostBasis (chproj's stamp source) refuses a nil tenant before any read, exactly as FromClaims does.
+func TestCostBasisRefusesNilTenantBeforeReading(t *testing.T) {
+	if _, err := (PGRegimes{}).CostBasis(context.Background(), uuid.Nil); !errors.Is(err, ErrNoTenant) {
+		t.Fatalf("nil tenant: %v", err)
 	}
 }

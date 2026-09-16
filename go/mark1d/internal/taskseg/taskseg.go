@@ -332,7 +332,8 @@ func (s *Segmenter) mint(sid [16]byte, ss *session, parent *task, seed []string)
 	ss.cur = t
 	ss.tasks = append(ss.tasks, t)
 
-	open := &m1pv1.TaskOpen{TaskSegVersion: Version, FileSetDigest: s.fileSetDigest(t)}
+	// ponytail: task_class "*" (one class) until a classifier exists; the compiler reads it off the ledger instead of assuming it
+	open := &m1pv1.TaskOpen{TaskSegVersion: Version, TaskClass: "*", FileSetDigest: s.fileSetDigest(t)}
 	if parent != nil {
 		open.ParentTaskId = parent.id[:]
 	}

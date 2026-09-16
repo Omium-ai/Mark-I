@@ -36,8 +36,11 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/pg"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke/chconn"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
@@ -563,4 +566,86 @@ func setupCHSchema(t *testing.T) (driver.Conn, string) {
 		}
 	}
 	return bootstrap, scratch
+}
+
+// Stamped(chconn, PGRegimes.CostBasis) end to end: a real m1_075 row under the tenant GUC lands its basis on every row of the batch, no row lands empty (never usd), and the TaskOpen payload carries task_class under the key policy_compiler_attempts extracts.
+func TestIntegrationStampsTenantRegimeBasis(t *testing.T) {
+	conn, query, _ := setupCH(t)
+	dsn := os.Getenv("M1_TEST_PG_DSN")
+	if dsn == "" {
+		if os.Getenv("M1_REQUIRE_STORES") == "1" {
+			t.Fatal("M1_TEST_PG_DSN required (M1_REQUIRE_STORES=1) but unset")
+		}
+		t.Skip("M1_TEST_PG_DSN unset; skipping Postgres-backed test")
+	}
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("cannot reach test Postgres: %v", err)
+	}
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	pool, err := pg.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pg.Open: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	mkTenant := func(basis string) uuid.UUID {
+		t.Helper()
+		tag := "chproj-it-" + uuid.NewString()[:8]
+		tenant := uuid.New()
+		err := pgx.BeginFunc(ctx, admin, func(tx pgx.Tx) error {
+			var org uuid.UUID
+			if err := tx.QueryRow(ctx, `INSERT INTO m1_organizations (name, primary_domain) VALUES ($1, $2) RETURNING id`, tag, tag+".example").Scan(&org); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenant.String()); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO m1_tenants (id, org_id, name) VALUES ($1, $2, $3)`, tenant, org, tag); err != nil {
+				return err
+			}
+			switch basis {
+			case "usd":
+				_, err = tx.Exec(ctx, `INSERT INTO m1_tenant_regimes (tenant_id, cost_basis, price_model_id, v_default, set_by)
+					VALUES ($1, 'usd', 'claude-sonnet-5', 25, 'chproj-it')`, tenant)
+			case "quota":
+				_, err = tx.Exec(ctx, `INSERT INTO m1_tenant_regimes (tenant_id, cost_basis, window_limit_tokens, shadow_price_usd, v_default, set_by)
+					VALUES ($1, 'quota', 100000, 150, 25, 'chproj-it')`, tenant)
+			}
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tenant
+	}
+	st := Stamped(conn, querychoke.PGRegimes{DB: pg.NewTenantDB(pool)}.CostBasis)
+	at := time.Date(2026, 8, 29, 10, 0, 0, 0, time.UTC)
+	session := uuid.Must(uuid.NewV7())
+	for tenant, want := range map[uuid.UUID]string{mkTenant("usd"): "usd", mkTenant("quota"): "quota", mkTenant(""): ""} {
+		batch := &m1pv1.Batch{
+			BatchId: v7b(t), SessionId: session[:], Sdk: &m1pv1.SdkInfo{Agent: "claudecode"}, SentAt: timestamppb.New(at),
+			Events: []*m1pv1.Event{
+				{EventId: v7b(t), Seq: 1, SessionId: session[:], OccurredAt: timestamppb.New(at),
+					Body: &m1pv1.Event_TaskOpen{TaskOpen: &m1pv1.TaskOpen{TaskSegVersion: "task_seg.v1", TaskClass: "*"}}},
+				{EventId: v7b(t), Seq: 2, SessionId: session[:], OccurredAt: timestamppb.New(at),
+					Body: &m1pv1.Event_Usage{Usage: &m1pv1.Usage{Model: "claude-test-1", InputTokens: 5}}},
+			},
+			Dropped: []*m1pv1.Dropped{{Reason: m1pv1.DropReason_DROP_REASON_SPOOL_SHED, Quantity: 1}},
+		}
+		if err := st.InsertRows(ctx, Table, Columns, RowsFromBatch(batch, tenant, uuid.New(), at)); err != nil {
+			t.Fatalf("stamped insert: %v", err)
+		}
+		var basis, taskClass string
+		var n uint64
+		if err := query.QueryRow(ctx, fmt.Sprintf(
+			`SELECT cost_basis, count(), maxIf(JSONExtractString(payload, 'task_class'), event_type = 'TaskOpen')
+			   FROM (SELECT * FROM %s WHERE tenant_id = $1 LIMIT 1 BY event_id) GROUP BY cost_basis`, Table),
+			tenant).Scan(&basis, &n, &taskClass); err != nil {
+			t.Fatal(err)
+		}
+		if basis != want || n != 3 || taskClass != "*" {
+			t.Fatalf("tenant %s: basis %q over %d rows (task_class %q), want %q over 3", tenant, basis, n, taskClass, want)
+		}
+	}
 }

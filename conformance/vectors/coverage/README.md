@@ -82,7 +82,7 @@ whole point.
 
 The test runs the assembled daemon with `--spool-cap 1 KiB` and sends 32 HUMAN `Turn`
 events on one session, then asserts `FlushAck.drained < 32` and `SPOOL_SHED/DIAGNOSTIC
-> 0`. The exact quantity follows from the record layout and the segmenter:
+> 0` (the Go leg pins the exact 54). The exact quantity follows from the record layout and the segmenter:
 
 - Spool accounting (`internal/spool`): a fresh segment starts at `writeOff = 64`
   (segment header); each record is `28 + len(payload)` (len + crc32c + 20-byte record id);
@@ -97,10 +97,10 @@ events on one session, then asserts `FlushAck.drained < 32` and `SPOOL_SHED/DIAG
   task into a fresh mint: **31 `TaskOpen` events across 32 prompts** (1 + 0 + 30). A
   `TaskOpen` carries event_id, seq, session_id, task_id, `occurred_at` (seconds 5-byte
   varint + nanos 1–5 bytes), epoch and `{task_seg_version:"task_seg.v1",
-  file_set_digest:32B}` → 115–121 payload bytes → **143–149-byte record**.
-- Admission order and running total (R = one `TaskOpen` record, 143 ≤ R ≤ 149):
+  task_class:"*", file_set_digest:32B}` → 118–124 payload bytes → **146–152-byte record**.
+- Admission order and running total (R = one `TaskOpen` record, 146 ≤ R ≤ 152; cap 1040):
   `64 + R + 72 (P1) + 72 (P2) + R + 72 (P3) + R + 72 (P4) + R + 72 (P5)` = 424 + 4R ∈
-  [996, 1020] ≤ 1024 — all admitted. Prompt 6's `TaskOpen` needs `+R > 28` bytes and its
+  [1008, 1032] ≤ 1040 — all admitted. Prompt 6's `TaskOpen` needs `+R > 8` bytes and its
   `Turn` `+72`: both shed, and so is everything after, because nothing is ever freed.
 - Result: 4 `TaskOpen` + 5 `Turn` admitted (`drained = 5`); **27 `TaskOpen` + 27 `Turn`
   shed = 54**, all `SPOOL_SHED / DIAGNOSTIC`, all raised inside the one synchronous send
@@ -108,7 +108,7 @@ events on one session, then asserts `FlushAck.drained < 32` and `SPOOL_SHED/DIAG
   records ride, the union across batches is 54 (the test's `tap.dropped` is that union).
   The `EdgeHealth` the uploader admits after the ack is shed against the still-full
   segment but never rides a batch inside the test — a rows-only batch does not exist.
-- The Go test asserts `> 0`, not `== 54`; the tight assertion is listed under the Go leg.
+- The Go test asserts `== 54` under the 1040-byte cap (`TestSpoolShedReachesTheWire`); the manifest's `> 0` is the cross-language floor.
 
 That daemon's day has no `CoverageTransition` (no workspace) and no billing-grade event
 (`Turn`/`TaskOpen` are diagnostic), so `events_billing_ingested = 0`. The surface terms

@@ -502,6 +502,41 @@ def test_compile_refuses_an_unconstrained_task_class_from_the_ledger():
         pc.compile_sections(bad, REGIME)
 
 
+def test_knee_label_is_the_ledgers_task_class_and_pools_a_mixed_window():
+    """The knee is fitted on whatever class the rows carry (no assumed class): one class in
+    the window labels the table with it; two classes pool under "*" because 07's route.knee
+    is a single table, and the note says which."""
+    fn_only = tuple(a for a in attempts() if a.task_class == "fn")
+    assert "attempts of task_class fn:" in pc.compile_sections(fn_only, REGIME).note
+    assert "attempts of task_class *:" in pc.compile_sections(attempts(), REGIME).note
+
+
+async def test_compile_refuses_a_mixed_basis_window_before_touching_postgres(monkeypatch):
+    """CON-014 over the rows the choke serves: two bases in one window park the job, with the
+    pool never acquired (None here) and no regime consulted."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from app.jobs.runner import JobContext
+    from app.policy_compiler import jobs
+    from choke_mock import MockChoke
+
+    monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "svc")
+    rows = [a.model_dump() for a in attempts()]
+    rows[0]["cost_basis"] = "usd"
+    choke = MockChoke()
+    choke.templates[jobs.ATTEMPTS_TEMPLATE] = rows
+    ctx = JobContext(
+        pool=None,
+        settings=SimpleNamespace(querychoke_base_url="http://choke", http_timeout_s=1.0),
+        tenant_id="t",
+        window_start=datetime(2026, 9, 15, tzinfo=UTC),
+    )
+    async with choke.client() as http:
+        with pytest.raises(RuntimeError, match="never mixed"):
+            await jobs.compile(ctx, http=http, regime=REGIME)
+
+
 CHOKE_FIXTURE = Path(__file__).resolve().parents[3] / (
     "go/controld/internal/querychoke/testdata/intel_template_rows.json"
 )

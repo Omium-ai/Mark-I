@@ -253,7 +253,16 @@ func mustTenant(t *testing.T, id uuid.UUID) TenantID {
 // results for the seeded tenant before trusting the leak grep. seedEventRows
 // counts the m1p_events rows this writes (the offboard test's ledger math).
 // Returns the task every task-grain template keys on.
-const seedEventRows = 12
+const seedEventRows = 14
+
+// seedExcerptTaskID is shared by every tenant so evidence_excerpts' tenancy negative is a real key match.
+var seedExcerptTaskID = uuid.MustParse("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+
+// The E1 row's redaction_receipt_id (32 bytes) and evidence_event_id (16 bytes) as protojson lands bytes.
+const (
+	seedExcerptReceiptB64 = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+	seedExcerptSubjectB64 = "AAECAwQFBgcICQoLDA0ODw=="
+)
 
 // seedArtifactID is the artifact `task` receives (MemoryInjection) and closes
 // on (ArtifactOutcome) — the same id for every tenant, so artifact_outcomes'
@@ -269,20 +278,21 @@ func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID
 	at := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
 	device := uuid.New()
 	task := uuid.New()
+	// cost_basis rides every row as chproj's Stamper lands it (quota, so artifact_outcomes below stays token-costed).
 	usageCols := []string{
 		"tenant_id", "occurred_at", "session_id", "event_id", "seq", "session_epoch",
-		"device_id", "event_type", "event_class", "agent", "input_tokens", "output_tokens",
+		"device_id", "event_type", "event_class", "agent", "input_tokens", "output_tokens", "cost_basis",
 	}
 	if err := conn.InsertRows(ctx, "m1p_events", usageCols, [][]any{
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(1), uint32(1),
-			device, "Usage", "billing", "claudecode", tokens, uint64(1)},
+			device, "Usage", "billing", "claudecode", tokens, uint64(1), "quota"},
 	}); err != nil {
 		t.Fatalf("seed usage: %v", err)
 	}
 	dropCols := append(usageCols, "dropped_reason", "dropped_durability_class", "dropped_quantity")
 	if err := conn.InsertRows(ctx, "m1p_events", dropCols, [][]any{
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(2), uint32(1),
-			device, "Dropped", "diagnostic", "claudecode", uint64(0), uint64(0),
+			device, "Dropped", "diagnostic", "claudecode", uint64(0), uint64(0), "quota",
 			"spool_shed", "billing_grade", droppedQty},
 	}); err != nil {
 		t.Fatalf("seed dropped: %v", err)
@@ -292,7 +302,7 @@ func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID
 	guardCols := append(usageCols, "task_id", "payload", "bundle_seq")
 	if err := conn.InsertRows(ctx, "m1p_events", guardCols, [][]any{
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(3), uint32(1),
-			device, "GuardDecision", "route", "claudecode", uint64(0), uint64(0),
+			device, "GuardDecision", "route", "claudecode", uint64(0), uint64(0), "quota",
 			task, `{"decision":"block","tokens_saved_estimate":1200}`, uint64(483)},
 	}); err != nil {
 		t.Fatalf("seed guard decision: %v", err)
@@ -303,7 +313,7 @@ func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID
 		"p_satisfied", "p_violated", "p_refused", "p_error", "noise_cert_id")
 	if err := conn.InsertRows(ctx, "m1p_events", verdictCols, [][]any{
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(4), uint32(1),
-			device, "VerdictEvent", "verdict", "claudecode", uint64(0), uint64(0),
+			device, "VerdictEvent", "verdict", "claudecode", uint64(0), uint64(0), "quota",
 			task, "satisfied", "certified",
 			float32(0.9), float32(0.05), float32(0.03), float32(0.02), seedNoiseCertID},
 	}); err != nil {
@@ -316,21 +326,32 @@ func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID
 	taskCols := append(usageCols, "task_id", "payload")
 	if err := conn.InsertRows(ctx, "m1p_events", taskCols, [][]any{
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(5), uint32(1),
-			device, "TaskOpen", "diagnostic", "claudecode", uint64(0), uint64(0),
-			task, `{"task_seg_version":"task_seg.v1","prompt_digest":"` + seedPromptDigestB64 + `"}`},
+			device, "TaskOpen", "diagnostic", "claudecode", uint64(0), uint64(0), "quota",
+			task, `{"task_seg_version":"task_seg.v1","task_class":"*","prompt_digest":"` + seedPromptDigestB64 + `"}`},
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(8), uint32(1),
-			device, "AnchorVote", "diagnostic", "claudecode", uint64(0), uint64(0),
+			device, "AnchorVote", "diagnostic", "claudecode", uint64(0), uint64(0), "quota",
 			task, `{"anchor_id":"ruff@1","vote":"VERDICT_SATISFIED","integrity":{"tamper":false}}`},
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(9), uint32(1),
-			device, "JudgeVote", "diagnostic", "claudecode", uint64(0), uint64(0),
+			device, "JudgeVote", "diagnostic", "claudecode", uint64(0), uint64(0), "quota",
 			task, `{"judge_id":"judge:rubric@2","vote":"VERDICT_VIOLATED"}`},
 	}); err != nil {
 		t.Fatalf("seed task rows: %v", err)
 	}
+	// The E1 excerpt evidence_excerpts serves and the E2 excerpt it must never serve (FR-VERIFY-016).
+	if err := conn.InsertRows(ctx, "m1p_events", taskCols, [][]any{
+		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(13), uint32(1),
+			device, "EvidenceExcerpt", "diagnostic", "claudecode", uint64(0), uint64(0), "quota",
+			seedExcerptTaskID, `{"tier":"EVIDENCE_TIER_E1","evidence_event_id":"` + seedExcerptSubjectB64 + `","attachment_name":"attach.` + tenant.String() + `.e1","redaction_receipt_id":"` + seedExcerptReceiptB64 + `"}`},
+		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(14), uint32(1),
+			device, "EvidenceExcerpt", "diagnostic", "claudecode", uint64(0), uint64(0), "quota",
+			seedExcerptTaskID, `{"tier":"EVIDENCE_TIER_E2","attachment_name":"attach.` + tenant.String() + `.e2"}`},
+	}); err != nil {
+		t.Fatalf("seed excerpt rows: %v", err)
+	}
 	routeCols := append(taskCols, "propensity", "fidelity", "bundle_seq")
 	if err := conn.InsertRows(ctx, "m1p_events", routeCols, [][]any{
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(6), uint32(1),
-			device, "RouteDecision", "route", "claudecode", uint64(0), uint64(0),
+			device, "RouteDecision", "route", "claudecode", uint64(0), uint64(0), "quota",
 			task, `{"action":"mid","candidates":["small","mid"]}`, float64(1), "wire_enforced", uint64(483)},
 	}); err != nil {
 		t.Fatalf("seed route decision: %v", err)
@@ -338,7 +359,7 @@ func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID
 	servedCols := append(usageCols, "task_id", "model", "cache_read_input_tokens")
 	if err := conn.InsertRows(ctx, "m1p_events", servedCols, [][]any{
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(7), uint32(1),
-			device, "Usage", "billing", "claudecode", uint64(0), uint64(0),
+			device, "Usage", "billing", "claudecode", uint64(0), uint64(0), "quota",
 			task, "mid", uint64(300)},
 	}); err != nil {
 		t.Fatalf("seed served usage: %v", err)
@@ -352,17 +373,17 @@ func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID
 	control := uuid.New()
 	if err := conn.InsertRows(ctx, "m1p_events", taskCols, [][]any{
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(10), uint32(1),
-			device, "MemoryInjection", "diagnostic", "claudecode", uint64(0), uint64(0),
+			device, "MemoryInjection", "diagnostic", "claudecode", uint64(0), uint64(0), "quota",
 			task, `{"artifact_ids":["` + artifactB64 + `"],"channel":"INJECTION_CHANNEL_HOOK_CONTEXT","tokens_used":12}`},
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(11), uint32(1),
-			device, "ArtifactOutcome", "diagnostic", "claudecode", uint64(0), uint64(0),
+			device, "ArtifactOutcome", "diagnostic", "claudecode", uint64(0), uint64(0), "quota",
 			task, `{"artifact_id":"` + artifactB64 + `","task_verdict":"VERDICT_SATISFIED"}`},
 	}); err != nil {
 		t.Fatalf("seed memory rows: %v", err)
 	}
 	if err := conn.InsertRows(ctx, "m1p_events", verdictCols, [][]any{
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(12), uint32(1),
-			device, "VerdictEvent", "verdict", "claudecode", uint64(0), uint64(0),
+			device, "VerdictEvent", "verdict", "claudecode", uint64(0), uint64(0), "quota",
 			control, "satisfied", "certified",
 			float32(0.8), float32(0.1), float32(0.05), float32(0.05), seedNoiseCertID},
 	}); err != nil {
@@ -539,6 +560,9 @@ func dummyParamsForDay(tpl *template) Params {
 			if name == "artifact_id" {
 				p[name] = seedArtifactID
 			}
+			if name == "task_id" {
+				p[name] = seedExcerptTaskID
+			}
 		case pUInt64:
 			p[name] = uint64(1)
 		case pDecimal:
@@ -613,6 +637,12 @@ func TestIntegrationIntelTemplatesServeConsumersLive(t *testing.T) {
 		fmt.Sprint(corpus["fidelity"]) == "<nil>" {
 		t.Fatalf("corpus_candidates: %v", corpus)
 	}
+	excerpts := run("evidence_excerpts", Params{"task_id": seedExcerptTaskID})
+	if len(excerpts) != 1 || fmt.Sprint(excerpts[0]["redaction_receipt_id"]) != seedExcerptReceiptB64 ||
+		fmt.Sprint(excerpts[0]["attachment_name"]) != "attach."+tenantA.String()+".e1" ||
+		fmt.Sprint(excerpts[0]["evidence_event_id"]) != seedExcerptSubjectB64 {
+		t.Fatalf("evidence_excerpts: want tenant A's one E1 row and never the E2 row: %v", excerpts)
+	}
 	votes := run("adjudication_votes")
 	got := map[string]string{}
 	for _, r := range votes {
@@ -624,12 +654,12 @@ func TestIntegrationIntelTemplatesServeConsumersLive(t *testing.T) {
 
 	// Batch 2. policy_compiler_attempts over the half-open day: taskA's one
 	// attempt (its certified verdict at seq 4, the tail folded in) carries the
-	// served model, the split token classes and the still-unstamped basis.
+	// served model, the split token classes, the stamped basis and the TaskOpen's task_class.
 	attempt := byTask(run("policy_compiler_attempts", Params{"to": "2026-08-29"}), taskA)
 	if attempt == nil || asU64(attempt["attempt_n"]) != 1 || fmt.Sprint(attempt["model_id"]) != "mid" ||
 		fmt.Sprint(attempt["fused_verdict"]) != "satisfied" || fmt.Sprint(attempt["verdict_stage"]) != "certified" ||
 		asU64(attempt["cache_read_tokens"]) != 300 || asU64(attempt["input_tokens"]) != 0 ||
-		fmt.Sprint(attempt["cost_basis"]) != "" || fmt.Sprint(attempt["task_class"]) != "" {
+		fmt.Sprint(attempt["cost_basis"]) != "quota" || fmt.Sprint(attempt["task_class"]) != "*" {
 		t.Fatalf("policy_compiler_attempts: %v", attempt)
 	}
 	// artifact_outcomes: exactly taskA for the seeded artifact — delivered AND

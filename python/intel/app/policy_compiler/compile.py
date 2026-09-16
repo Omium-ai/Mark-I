@@ -287,12 +287,14 @@ def compile_sections(
     previous: Mapping[str, bytes] | None = None,
 ) -> Compiled:
     attempts = tuple(attempts)
-    if not certified(attempts):
+    classes = sorted({a.task_class for a in certified(attempts)})
+    if not classes:
         raise NothingToCompile("no certified attempts in the window")
     cells = cpvs_table(attempts, regime)
+    # ponytail: 07 route.knee is one table: a mixed-class window pools under "*" (per-class = wire)
     knee = knee_table(
         KneeInputs(
-            task_class="*",
+            task_class=classes[0] if len(classes) == 1 else "*",
             attempts=attempts,
             v_task=regime.v_default,
             price=regime.price,
@@ -320,7 +322,7 @@ def compile_sections(
     note = (
         f"{len(cells)} cpvs cells ({inherited} inherited), {len(route.ladders)} ladders, "
         f"knee[{knee.cost_basis}] {len(knee.rows)} rows over {knee.certified_attempts} certified "
-        f"attempts: {knee.note}; "
+        f"attempts of task_class {knee.task_class}: {knee.note}; "
         + ("non-route sections carried forward" if carried else "non-route sections defaulted")
     )
     return Compiled(

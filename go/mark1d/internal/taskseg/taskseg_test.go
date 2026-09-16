@@ -73,6 +73,9 @@ func trace(t *testing.T, s *Segmenter, sid [16]byte, script ...step) []string {
 				if b.TaskOpen.GetTaskSegVersion() != Version {
 					t.Fatalf("TaskOpen carries version %q, want %q", b.TaskOpen.GetTaskSegVersion(), Version)
 				}
+				if b.TaskOpen.GetTaskClass() != "*" {
+					t.Fatalf("TaskOpen carries task_class %q, want %q (one class until a classifier exists)", b.TaskOpen.GetTaskClass(), "*")
+				}
 				out = append(out, line)
 			case *m1pv1.Event_TaskClose:
 				out = append(out, "close "+id+" "+shortRes(b.TaskClose.GetResolution()))

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -57,6 +58,18 @@ func (p PGRegimes) Regime(ctx context.Context, tid TenantID) (*Regime, error) {
 		return nil
 	})
 	return out, err
+}
+
+// CostBasis is chproj.BasisFunc over the same read: the tenant is ingest's stage-3 stamp (05 §2.1), "" when no row exists.
+func (p PGRegimes) CostBasis(ctx context.Context, tenant uuid.UUID) (string, error) {
+	if tenant == uuid.Nil {
+		return "", ErrNoTenant
+	}
+	r, err := p.Regime(ctx, TenantID{id: tenant})
+	if err != nil || r == nil {
+		return "", err
+	}
+	return r.CostBasis, nil
 }
 
 func loadRegime(ctx context.Context, src RegimeSource, tid TenantID) (*Regime, error) {

@@ -16,7 +16,7 @@ from app.policy_compiler.publish import KneeGateViolation, previous_sections, wr
 from app.regime import load_regime
 from app.tvo.reader import QuerychokeReader
 
-# Not yet in controld's closed registry: the choke answers M1E-2008 and the job parks (fail-closed).
+# controld's closed registry serves it with the ledger's own task_class and cost_basis per attempt.
 ATTEMPTS_TEMPLATE = "policy_compiler_attempts"
 CHANNEL = "canary"  # 05 §4.3 step 1: a publication targets the canary channel first
 # ponytail: trailing window so D33's 30-outcome cells can fill; per-tenant when volumes differ.

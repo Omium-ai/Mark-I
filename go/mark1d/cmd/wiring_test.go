@@ -293,7 +293,7 @@ func TestSpoolShedReachesTheWire(t *testing.T) {
 	stop := runDaemon(t, config{
 		stateDir:    stateDir,
 		spoolDir:    spoolDir,
-		spoolCap:    1 << 10, // ~a handful of Turn records; the rest shed
+		spoolCap:    1040, // 424 + 4R for R ∈ [146,152] (TaskOpen carries task_class "*" since A2) ≤ 1040; prompt 6 sheds
 		socket:      socket,
 		ingestURL:   tap.url,
 		deviceToken: "tok-test",
@@ -317,8 +317,8 @@ func TestSpoolShedReachesTheWire(t *testing.T) {
 		t.Fatal("all 32 prompts were admitted under a 1 KiB cap — nothing shed, the test cannot observe the seam")
 	}
 
-	// Exactly 54: 27 TaskOpen + 27 Turn shed under the 1 KiB cap (64-byte
-	// segment header, 72-byte Turn records, 143–149-byte TaskOpen records;
+	// Exactly 54: 27 TaskOpen + 27 Turn shed under the 1040-byte cap (64-byte
+	// segment header, 72-byte Turn records, 146–152-byte TaskOpen records;
 	// derived in conformance/vectors/coverage/README.md, which pins this
 	// quantity as case spool_shed_reaches_the_wire). A union across batches.
 	waitUpTo(t, 20*time.Second, "the spool shed (54 records) to reach the wire", func() bool {
