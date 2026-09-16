@@ -167,7 +167,7 @@ func TestGateConsecutiveCapClearsOnPublish(t *testing.T) {
 		t.Helper()
 		prev, _ := eng.Reader().Get(task)
 		eng.Recompute(task, votes, 0)
-		for range 200 {
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); { // a deadline, not an iteration count: Windows sleeps in quanta
 			if e, ok := eng.Reader().Get(task); ok && e.ComputedAt.After(prev.ComputedAt) {
 				if e.Verdict.GetVerdict() != m1pv1.Verdict_VERDICT_VIOLATED {
 					t.Fatalf("fused %v, want VIOLATED — the bundle no longer makes this task blockable", e.Verdict.GetVerdict())
