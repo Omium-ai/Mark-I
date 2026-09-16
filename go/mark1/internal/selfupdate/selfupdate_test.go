@@ -345,7 +345,7 @@ func TestApplySwapsAtomicallyAndRestartsThroughService(t *testing.T) {
 		t.Fatalf("install dir after apply: %v (no .old, no .update expected)", got)
 	}
 	for _, b := range []string{"mark1d", "cortexd"} {
-		if fi, _ := os.Stat(filepath.Join(f.install, b)); fi.Mode().Perm()&0o111 == 0 {
+		if fi, _ := os.Stat(filepath.Join(f.install, b)); runtime.GOOS != "windows" && fi.Mode().Perm()&0o111 == 0 {
 			t.Fatalf("%s is not executable: %v", b, fi.Mode())
 		}
 	}
@@ -464,6 +464,9 @@ func TestPackageManagerOwnedInstallIsRefused(t *testing.T) {
 	r := newRelease(t, "0.2.0", map[string]string{"mark1d": "new"})
 	opts := f.opts(r, false)
 	opts.InstallDir = "/usr/bin"
+	if runtime.GOOS == "windows" {
+		opts.InstallDir = `C:\Program Files\Omium`
+	}
 	err := Run(context.Background(), f.env, opts)
 	if code := exitCode(t, err); code != cli.ExitRefused || !strings.Contains(err.Error(), "package manager") || len(f.calls) != 0 {
 		t.Fatalf("got %v (service calls %q)", err, f.calls)

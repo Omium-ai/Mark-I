@@ -91,6 +91,7 @@ func testEnv(t *testing.T) (*cli.Env, *bytes.Buffer) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	t.Setenv("XDG_RUNTIME_DIR", "")
 	out := &bytes.Buffer{}
 	return &cli.Env{StateDir: filepath.Join(home, ".omium", "mark1"), JSON: true, Stdout: out, Stderr: os.Stderr}, out
