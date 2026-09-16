@@ -22,6 +22,10 @@ export const LOCAL_ROUTES = [
   ['GET', '/v1/receipts', 'local-receipts'],
   ['POST', '/v1/receipts/verify', 'local-receipts-verify'],
   ['GET', '/v1/verify/events', 'local-verify-events'],
+  ['POST', '/v1/enroll/keygen', 'local-enroll-keygen'],
+  ['POST', '/v1/enroll', 'local-enroll'],
+  ['GET', '/v1/enroll', 'local-enroll-state'],
+  ['DELETE', '/v1/enroll', 'local-enroll-signout'],
 ];
 
 export const CLOUD_ROUTES = [

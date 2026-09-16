@@ -61,12 +61,12 @@ func TestDaemonBootsFromEnrollmentDocument(t *testing.T) {
 	ingest := front.URL + "/m1p/v1/ingest"
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	t.Run("no_document_no_flags_is_refused_naming_enroll", func(t *testing.T) {
+	t.Run("no_document_no_flags_boots_local_only", func(t *testing.T) {
 		stateDir, _, _ := uplinkPaths(t)
 		cfg := config{stateDir: stateDir}
-		err := applyEnrollment(&cfg, log)
-		if err == nil || !strings.Contains(err.Error(), "mark1 enroll") || !strings.Contains(err.Error(), enrollmentPath(stateDir)) {
-			t.Fatalf("want a refusal naming `mark1 enroll` and the path, got %v", err)
+		// The desktop app spawns the daemon before sign-in (spec §3.2): no document is local-only capture, not a refusal.
+		if err := applyEnrollment(&cfg, log); err != nil || cfg.identity() != (identityFlags{}) {
+			t.Fatalf("want a local-only boot with an empty identity, got err=%v identity=%+v", err, cfg.identity())
 		}
 		// A DEV SEAM flag is an identity: the seam tests use still boots.
 		cfg = config{stateDir: stateDir, saltHex: "aa"}

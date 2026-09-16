@@ -103,6 +103,8 @@ const dropUnsupportedAgentVersion spool.DropReason = 3
 
 type config struct {
 	stateDir string
+	flags    identityFlags // the flag-set identity, kept so a re-read of the enrollment document overrides only what flags did not
+	flagsSet bool
 	spoolDir string
 	// spoolCap is 07 §6's spool byte cap (spool.DefaultCap, ~2 GiB); zero
 	// takes the spool's default. The only operator-visible spool limit: past
@@ -202,6 +204,7 @@ func main() {
 	// Identity comes from the enrollment document `mark1 enroll` wrote, with
 	// the flags above as overrides. Here and not in run(): tests drive run()
 	// with flag-shaped configs and must not be refused for lacking a document.
+	cfg.flags, cfg.flagsSet = cfg.identity(), true
 	if err := applyEnrollment(&cfg, log); err != nil {
 		log.Error("mark1d exiting", "err", err)
 		os.Exit(1)
@@ -265,6 +268,16 @@ func readEnrollment(stateDir string) (*enrollment, error) {
 // so a daemon with no identity is a mis-install, not a mode. A REVOKED
 // document (stamped by the CLI on M1E-1003) boots capture-local-only: egress
 // closed, identity kept, re-enrollment surfaced (04 §9.3 REVOKED_LOCAL).
+type identityFlags struct{ deviceToken, tenantID, deviceID, saltHex, ingestURL string }
+
+func (c *config) identity() identityFlags {
+	return identityFlags{c.deviceToken, c.tenantID, c.deviceID, c.saltHex, c.ingestURL}
+}
+
+func (c *config) setIdentity(f identityFlags) {
+	c.deviceToken, c.tenantID, c.deviceID, c.saltHex, c.ingestURL = f.deviceToken, f.tenantID, f.deviceID, f.saltHex, f.ingestURL
+}
+
 func applyEnrollment(cfg *config, log *slog.Logger) error {
 	if cfg.stateDir == "" {
 		return nil // run() refuses this with the message that names --state-dir
@@ -273,10 +286,10 @@ func applyEnrollment(cfg *config, log *slog.Logger) error {
 	doc, err := readEnrollment(cfg.stateDir)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		if flagged {
-			return nil
+		if !flagged {
+			log.Warn("mark1d: no enrollment yet — capture is local-only until `mark1 enroll` or the desktop app posts /v1/enroll (08 §7.1, 04 §9.3)", "path", enrollmentPath(cfg.stateDir))
 		}
-		return fmt.Errorf("mark1d: no enrollment at %s — run `mark1 enroll` first (08 §7.1, 04 §9.3), or pass the DEV SEAM identity flags", enrollmentPath(cfg.stateDir))
+		return nil
 	case err != nil:
 		return fmt.Errorf("mark1d: enrollment: %w", err)
 	}
@@ -367,6 +380,16 @@ func run(ctx context.Context, log *slog.Logger, cfg config) error {
 		}
 	}()
 	log.Info("mark1d control API up", "addr", ctl.Addr(), "discovery", control.Path(cfg.stateDir))
+	if !cfg.flagsSet { // tests drive run() with flag-shaped configs and never pass through main()
+		cfg.flags, cfg.flagsSet = cfg.identity(), true
+	}
+	rearm := make(chan struct{}, 1)
+	ctl.SetEnrolled(func() {
+		select {
+		case rearm <- struct{}{}:
+		default:
+		}
+	})
 
 	for {
 		if off.Off(cfg.stateDir) {
@@ -375,11 +398,29 @@ func run(ctx context.Context, log *slog.Logger, cfg config) error {
 		if err := off.Wait(ctx, cfg.stateDir, cfg.offPoll); err != nil {
 			return nil // signal while parked: clean exit
 		}
-		if err := session(ctx, log, cfg, ctl); err != nil {
+		sctx, cancel := context.WithCancel(ctx)
+		go func() {
+			select {
+			case <-rearm:
+				cancel() // an enrollment arrived or left over the control API: drain this session and rebuild on the new identity
+			case <-sctx.Done():
+			}
+		}()
+		err := session(sctx, log, cfg, ctl)
+		cancel()
+		if err != nil {
 			return err
 		}
 		if ctx.Err() != nil {
 			return nil
+		}
+		select {
+		case <-rearm:
+		default:
+		}
+		cfg.setIdentity(cfg.flags)
+		if err := applyEnrollment(&cfg, log); err != nil {
+			return err
 		}
 		// `mark1 off` mid-run: everything above drained and closed; park
 		// until `mark1 on` clears the marker (step 3 of 08 §7.6, kept true

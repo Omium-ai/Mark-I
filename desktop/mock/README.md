@@ -42,6 +42,16 @@ for the control API, `cloud-*` for the cloud API). Storybook/design can read
 these directly without running the server. `GET /v1/events` fixtures are
 arrays of `{delayMs, event, data}`, replayed as SSE on a timer, looping.
 
+The sign-in handoff (§3.2 step 1) is four local rows: `POST /v1/enroll/keygen`
+(the device public key the app sends to controld's `/enroll/device/approve`),
+`POST /v1/enroll` (the ACTIVE body handed back verbatim; the real daemon 409s
+one minted for another device key or another live tenant), `GET /v1/enroll`
+(`enrolled` is true only while the device token is live; `state` is
+`active|expired|revoked`; `key_id` is present once a key exists) and
+`DELETE /v1/enroll` (device sign-out — returns the GET shape). Every scenario
+here is post-onboarding, so `GET` is enrolled; the not-enrolled shape is the
+`DELETE` fixture. Static fixtures do not flip state.
+
 Numbers are internally consistent: `tokens_saved.total` = the sum of its
 `arrests`/`re_exploration_avoided`/`routing` parts, and `tvo` = tokens ÷
 verified outcomes.

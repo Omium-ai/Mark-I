@@ -40,6 +40,7 @@ type Server struct {
 	hardStop  atomic.Bool
 	mu        sync.Mutex
 	reconcile func()
+	enrolled  func()
 	compat    map[string]string
 	files     sync.Mutex // ponytail: serializes this process's read-modify-writes only; a concurrent `mark1 enable` races exactly as two CLIs do today
 }
@@ -89,6 +90,13 @@ func (s *Server) SetHardStop(entered bool) { s.hardStop.Store(entered) }
 func (s *Server) SetReconcile(fn func()) {
 	s.mu.Lock()
 	s.reconcile = fn
+	s.mu.Unlock()
+}
+
+// SetEnrolled: run after POST/DELETE /v1/enroll rewrites the enrollment document; nil (parked) leaves the next boot to adopt it.
+func (s *Server) SetEnrolled(fn func()) {
+	s.mu.Lock()
+	s.enrolled = fn
 	s.mu.Unlock()
 }
 

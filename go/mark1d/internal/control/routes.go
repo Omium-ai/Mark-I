@@ -49,6 +49,10 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /v1/receipts", s.receipts)
 	mux.HandleFunc("POST /v1/receipts/verify", s.verifyReceipts)
 	mux.HandleFunc("GET /v1/verify/events", s.verifyEvents)
+	mux.HandleFunc("POST /v1/enroll/keygen", s.keygen)
+	mux.HandleFunc("POST /v1/enroll", s.postEnroll)
+	mux.HandleFunc("GET /v1/enroll", s.getEnroll)
+	mux.HandleFunc("DELETE /v1/enroll", s.deleteEnroll)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		refuse(w, http.StatusNotFound, "M1E-2001", "no such control route")
 	})
