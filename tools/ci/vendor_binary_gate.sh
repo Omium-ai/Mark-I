@@ -59,6 +59,7 @@ bound_idents() {
       lhs = substr($0, 1, n - 1)
       gsub(/:/, " ", lhs)                       # go '\''s :=
       sub(/^[ \t]*/, "", lhs)
+      sub(/^(else[ \t]+)?if[ \t]+/, "", lhs)   # go'\''s `if p, err := exec.LookPath(...)`: the keyword is not a binding
       sub(/^let[ \t]+/, "", lhs); sub(/^mut[ \t]+/, "", lhs); sub(/^var[ \t]+/, "", lhs)
       split(lhs, p, /[ \t,]+/)
       for (i in p) if (p[i] ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && p[i] != "err") print p[i]

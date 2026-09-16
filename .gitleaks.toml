@@ -178,6 +178,16 @@ paths = [
   '''(^|/)go/mark1d/adapters/copilot/copilot_test\.go$''',
   '''(^|/)rust/mark1-proxy/tests/proxy\.rs$''',
   '''(^|/)go/mark1d/internal/anchors/wire_test\.go$''',
+  # Four more, each read before listing (2026-09-16, the product wave): the same alphabet-run
+  # `gho_` token in the copilot env-pointer tests (refused, never registered); a `0123…abcdef`
+  # repeat standing in for the daemon's per-boot control bearer in the status tests; the frozen
+  # Ed25519 PUBLIC key (seed 0x11×32, the receipt vectors' test-key convention) in the anchorvote
+  # conformance manifest; and a three-part `eyJ…c2lnbmF0dXJl` ("signature") JWT shape the judge must
+  # refuse before any call. None is a credential; every one exists to prove a refusal.
+  '''(^|/)go/mark1d/adapters/copilot/envpointer_test\.go$''',
+  '''(^|/)go/mark1/internal/status/status_test\.go$''',
+  '''(^|/)conformance/anchorvote/manifest\.json$''',
+  '''(^|/)go/mark1d/internal/judge/judge_test\.go$''',
 ]
 
 regexes = [
