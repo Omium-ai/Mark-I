@@ -136,6 +136,7 @@ func newFixture(t *testing.T, running bool) *fixture {
 		f.pid = "77"
 	}
 	t.Setenv("HOME", f.home)
+	t.Setenv("USERPROFILE", f.home) // os.UserHomeDir on Windows
 	t.Setenv("XDG_RUNTIME_DIR", "")
 	prevPlatform := service.Platform
 	service.Platform = "linux" // the fixture is a systemd-user rig whatever the host
@@ -218,7 +219,7 @@ func stubVerify(t *testing.T, err error) *int32 {
 	prev := verify
 	verify = func(env *cli.Env, opts verifyrelease.Options) error {
 		atomic.AddInt32(calls, 1)
-		if !strings.HasSuffix(opts.Artifact, "/.update/edge.tar.gz") || opts.Provenance != opts.Artifact+".sigstore.json" {
+		if !strings.HasSuffix(filepath.ToSlash(opts.Artifact), "/.update/edge.tar.gz") || opts.Provenance != opts.Artifact+".sigstore.json" {
 			t.Errorf("verifier handed %+v", opts)
 		}
 		return err
