@@ -185,6 +185,7 @@ fn frame_roundtrip_every_fabric_arm() {
             posterior: vec![0.02, 0.95, 0.02, 0.01],
             reason: "two anchors report the build is broken".into(),
             evidence_ref: "evidence/abc".into(),
+            system_message: String::new(),
         }),
         Kind::Flush(pb::Flush {}),
         Kind::FlushAck(pb::FlushAck { drained: 17 }),

@@ -63,6 +63,11 @@ enum InjectionChannel {
   INJECTION_CHANNEL_HOOK_CONTEXT = 2;
   INJECTION_CHANNEL_MCP_PULL = 3;
   INJECTION_CHANNEL_REACTIVE_PITFALL = 4;  // PostToolUseFailure-triggered
+  // PostToolUse-triggered next-turn correction (04 §4 fast/slow split, 08 §5.1
+  // PostToolUse row): a slow anchor's REVISED verdict superseding the
+  // provisional one the agent already acted on. Rides ContextQuery/ContextReply
+  // as its own channel rather than a new frame arm (founder ruling 2026-09-16).
+  INJECTION_CHANNEL_CORRECTION = 5;
 }
 
 // ---------------------------------------------------------------------------

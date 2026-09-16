@@ -73,6 +73,7 @@ type Admitter struct {
 	redact RedactFunc
 	now    func() time.Time
 	epoch  uint32
+	Tap    func(*m1pv1.Event) // observers of durably appended (already redacted) events; nil is no-op
 
 	mu    sync.Mutex
 	seq   map[[16]byte]uint64 // per-session high-water; next seq is +1
@@ -183,6 +184,9 @@ func (a *Admitter) Admit(ctx context.Context, ev *m1pv1.Event) error {
 	if errors.Is(err, spool.ErrDiagnosticShed) {
 		return ErrShed // accounted inside the spool's own drop ledger
 	}
+	if err == nil && a.Tap != nil {
+		a.Tap(ev)
+	}
 	return err
 }
 
@@ -284,7 +288,7 @@ func deviceScoped(ev *m1pv1.Event) bool {
 		return false
 	}
 	switch ev.GetBody().(type) {
-	case *m1pv1.Event_EdgeHealth, *m1pv1.Event_ReceiptCheckpoint, *m1pv1.Event_CoverageTransition:
+	case *m1pv1.Event_EdgeHealth, *m1pv1.Event_ReceiptCheckpoint, *m1pv1.Event_CoverageTransition, *m1pv1.Event_QuarantineDeletion:
 		return true
 	}
 	return false

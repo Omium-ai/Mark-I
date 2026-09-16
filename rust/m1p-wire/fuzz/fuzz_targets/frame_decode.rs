@@ -95,7 +95,8 @@ fuzz_target!(|data: &[u8]| {
             verdict: (data.len() % 5) as i32,
             posterior: data.iter().map(|b| f64::from(*b) / 255.0).collect(),
             reason: text.clone(),
-            evidence_ref: text,
+            evidence_ref: text.clone(),
+            system_message: text,
         }),
         pb::fabric_frame::Kind::Flush(pb::Flush {}),
         pb::fabric_frame::Kind::FlushAck(pb::FlushAck {

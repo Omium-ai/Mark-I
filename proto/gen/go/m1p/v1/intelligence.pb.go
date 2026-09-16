@@ -50,6 +50,11 @@ const (
 	InjectionChannel_INJECTION_CHANNEL_HOOK_CONTEXT     InjectionChannel = 2
 	InjectionChannel_INJECTION_CHANNEL_MCP_PULL         InjectionChannel = 3
 	InjectionChannel_INJECTION_CHANNEL_REACTIVE_PITFALL InjectionChannel = 4 // PostToolUseFailure-triggered
+	// PostToolUse-triggered next-turn correction (04 §4 fast/slow split, 08 §5.1
+	// PostToolUse row): a slow anchor's REVISED verdict superseding the
+	// provisional one the agent already acted on. Rides ContextQuery/ContextReply
+	// as its own channel rather than a new frame arm (founder ruling 2026-09-16).
+	InjectionChannel_INJECTION_CHANNEL_CORRECTION InjectionChannel = 5
 )
 
 // Enum value maps for InjectionChannel.
@@ -60,6 +65,7 @@ var (
 		2: "INJECTION_CHANNEL_HOOK_CONTEXT",
 		3: "INJECTION_CHANNEL_MCP_PULL",
 		4: "INJECTION_CHANNEL_REACTIVE_PITFALL",
+		5: "INJECTION_CHANNEL_CORRECTION",
 	}
 	InjectionChannel_value = map[string]int32{
 		"INJECTION_CHANNEL_UNSPECIFIED":      0,
@@ -67,6 +73,7 @@ var (
 		"INJECTION_CHANNEL_HOOK_CONTEXT":     2,
 		"INJECTION_CHANNEL_MCP_PULL":         3,
 		"INJECTION_CHANNEL_REACTIVE_PITFALL": 4,
+		"INJECTION_CHANNEL_CORRECTION":       5,
 	}
 )
 
@@ -579,13 +586,14 @@ const file_m1p_v1_intelligence_proto_rawDesc = "" +
 	"\vduration_ms\x18\x03 \x01(\x04R\n" +
 	"durationMs\x12\x1f\n" +
 	"\vreason_code\x18\x04 \x01(\tR\n" +
-	"reasonCode*\xc6\x01\n" +
+	"reasonCode*\xe8\x01\n" +
 	"\x10InjectionChannel\x12!\n" +
 	"\x1dINJECTION_CHANNEL_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fINJECTION_CHANNEL_SESSION_START\x10\x01\x12\"\n" +
 	"\x1eINJECTION_CHANNEL_HOOK_CONTEXT\x10\x02\x12\x1e\n" +
 	"\x1aINJECTION_CHANNEL_MCP_PULL\x10\x03\x12&\n" +
-	"\"INJECTION_CHANNEL_REACTIVE_PITFALL\x10\x04*\x91\x01\n" +
+	"\"INJECTION_CHANNEL_REACTIVE_PITFALL\x10\x04\x12 \n" +
+	"\x1cINJECTION_CHANNEL_CORRECTION\x10\x05*\x91\x01\n" +
 	"\rRouteFidelity\x12\x1e\n" +
 	"\x1aROUTE_FIDELITY_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cROUTE_FIDELITY_WIRE_ENFORCED\x10\x01\x12!\n" +

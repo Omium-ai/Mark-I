@@ -255,6 +255,7 @@ func TestClassCensusIsClosedOverEveryBodyType(t *testing.T) {
 		"CoverageTransition": spool.ClassDiagnostic, // per-event receipted AND diagnostic — 07 §6 names it
 		"GuardDecision":      spool.ClassDiagnostic,
 		"EdgeHealth":         spool.ClassDiagnostic,
+		"QuarantineDeletion": spool.ClassDiagnostic, // the on-disk device-signed receipt is the durable copy (NFR-OPERABILITY-003)
 		"AnchorVote":         spool.ClassDiagnostic,
 		"JudgeVote":          spool.ClassDiagnostic,
 		"RmScore":            spool.ClassDiagnostic,
@@ -313,7 +314,7 @@ func TestSessionExemptionIsClosedOverEveryBodyType(t *testing.T) {
 	// session field (proto/m1p/v1/intelligence.proto), and every one of 04 §2.7's
 	// seven reason codes names a condition that exists when no session does —
 	// `mark1 off`, a hard-stopped disk, a proxy that will not start.
-	exempt := map[string]bool{"EdgeHealth": true, "ReceiptCheckpoint": true, "CoverageTransition": true}
+	exempt := map[string]bool{"EdgeHealth": true, "ReceiptCheckpoint": true, "CoverageTransition": true, "QuarantineDeletion": true}
 
 	od := (&m1pv1.Event{}).ProtoReflect().Descriptor().Oneofs().ByName("body")
 	if od == nil || od.Fields().Len() == 0 {

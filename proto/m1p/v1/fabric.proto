@@ -146,6 +146,11 @@ message GateVerdict {
   // Reference into the local evidence store (~/.omium/mark1/evidence/…),
   // resolvable on THIS device only — never a URL, never uploaded content.
   string evidence_ref = 5;
+  // At the knee (08 §5.1 Stop row): the shim exits 0 with no decision and
+  // surfaces this as the hook's systemMessage — verdict plus evidence for the
+  // human, never for the model (founder ruling 2026-09-16). Empty below the
+  // knee and on ALLOW.
+  string system_message = 6;
 }
 
 enum GateDecision {

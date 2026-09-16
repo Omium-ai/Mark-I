@@ -52,6 +52,11 @@ message AnchorVote {
   EvidenceRecord evidence = 3;   // [P0/P1] E0 always rides with the vote
   AnchorIntegrity integrity = 4; // [P0/P1] anti-tamper envelope, device-signed
                                  //         at origin
+  bytes signature = 5;           // [P0] Ed25519 by the device origin key over
+                                 //      canonical(anchor_id, vote, evidence,
+                                 //      integrity) — the per-vote signature
+                                 //      (founder ruling 2026-09-16); empty on
+                                 //      pre-ruling producers, never forged
 }
 
 // The anti-tamper envelope, computed per anchor run and device-signed at
@@ -123,6 +128,25 @@ message JudgeVote {
   EvidenceTier tier_used = 3;  // [P0] what the judge actually saw
   bytes rubric_hash = 4;       // [P1] HMAC_tenant of the rubric prefix served
   JudgeLocus locus = 5;        // [P0]
+}
+
+// adjudicator-svc → mark1d, the client-side-first path (06 §6.2 step 2, ADR-0008):
+// what crosses to the edge so the daemon can run the judge with the CUSTOMER'S
+// OWN key. Rubric is prompt DATA; no command, no evidence, no key ever crosses.
+// Rides the policy-dist SSE stream as `event: judge_request` (protojson); the
+// daemon answers with a JudgeVote{locus: CLIENT_SIDE} in its next batch and
+// ignores a task it does not own. Founder ruling 2026-09-16.
+message JudgeRequest {
+  string request_id = 1;      // [P0] idempotency: one vote per request_id
+  string judge_id = 2;        // [P0] "judge:<name>@<version>", JudgeVote.judge_id
+  bytes task_id = 3;          // [P0] 16 bytes, Event.task_id
+  bytes session_id = 4;       // [P0] 16 bytes, the session that owns the task
+  uint32 attempt = 5;         // [P0] attempt index within the task
+  string rubric = 6;          // [P0] prompt data, ≤ 16 KiB
+  EvidenceTier tier = 7;      // [P0] what the edge may show the judge (never above consent)
+  string model = 8;           // [P0] pinned model id the customer key may call
+  uint32 token_budget = 9;    // [P0] hard cap on judge tokens
+  JudgeLocus locus = 10;      // [P0] CLIENT_SIDE here; CLOUD requests never reach the edge
 }
 
 enum JudgeLocus {

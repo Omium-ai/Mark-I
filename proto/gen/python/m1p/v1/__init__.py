@@ -155,6 +155,13 @@ class InjectionChannel(betterproto.Enum):
     HOOK_CONTEXT = 2
     MCP_PULL = 3
     REACTIVE_PITFALL = 4
+    CORRECTION = 5
+    """
+    PostToolUse-triggered next-turn correction (04 §4 fast/slow split, 08 §5.1
+     PostToolUse row): a slow anchor's REVISED verdict superseding the
+     provisional one the agent already acted on. Rides ContextQuery/ContextReply
+     as its own channel rather than a new frame arm (founder ruling 2026-09-16).
+    """
 
 
 class RouteFidelity(betterproto.Enum):
@@ -496,6 +503,13 @@ class TaskOpen(betterproto.Message):
      auditable without carrying paths.
     """
 
+    task_class: str = betterproto.string_field(5)
+    """
+    [P1] The CPVS/ladder key (07 "route" CDDL: bare-identifier production).
+     "*" until a classifier exists; stamped at the edge so the compiler reads
+     it from the ledger instead of assuming one class (06 §10.1).
+    """
+
 
 @dataclass(eq=False, repr=False)
 class TaskClose(betterproto.Message):
@@ -588,6 +602,28 @@ class Usage(betterproto.Message):
     cache_read_input_tokens: int = betterproto.uint64_field(8)
     service_tier: str = betterproto.string_field(9)
     source: "UsageSource" = betterproto.enum_field(10)
+
+
+@dataclass(eq=False, repr=False)
+class QuarantineDeletion(betterproto.Message):
+    """
+    The edge's record that a quarantined batch was deleted at the 30-day
+     retention boundary (founder ruling 2026-09-16; NFR-OPERABILITY-003). The
+     daemon writes a device-signed receipt file BESIDE the bytes before removing
+     them; this event carries that same payload to the ledger so controld can
+     persist a `quarantine_deletion` receipt row. Diagnostic class on the spool
+     (07 §6 closes the billing set at three families): if it is shed, the on-disk
+     receipt is still the durable evidence and `Dropped{}` says so.
+     Event.session_id MUST be empty: the fact is per-device, like EdgeHealth.
+    """
+
+    batch_id: bytes = betterproto.bytes_field(1)
+    event_count: int = betterproto.uint32_field(2)
+    quarantined_at_ms: int = betterproto.uint64_field(3)
+    deleted_at_ms: int = betterproto.uint64_field(4)
+    reason: str = betterproto.string_field(5)
+    device_key_id: str = betterproto.string_field(6)
+    device_signature: bytes = betterproto.bytes_field(7)
 
 
 @dataclass(eq=False, repr=False)
@@ -1039,6 +1075,8 @@ class AnchorVote(betterproto.Message):
 
     evidence: "EvidenceRecord" = betterproto.message_field(3)
     integrity: "AnchorIntegrity" = betterproto.message_field(4)
+    signature: bytes = betterproto.bytes_field(5)
+    """at origin"""
 
 
 @dataclass(eq=False, repr=False)
@@ -1125,6 +1163,29 @@ class JudgeVote(betterproto.Message):
     tier_used: "EvidenceTier" = betterproto.enum_field(3)
     rubric_hash: bytes = betterproto.bytes_field(4)
     locus: "JudgeLocus" = betterproto.enum_field(5)
+
+
+@dataclass(eq=False, repr=False)
+class JudgeRequest(betterproto.Message):
+    """
+    adjudicator-svc → mark1d, the client-side-first path (06 §6.2 step 2, ADR-0008):
+     what crosses to the edge so the daemon can run the judge with the CUSTOMER'S
+     OWN key. Rubric is prompt DATA; no command, no evidence, no key ever crosses.
+     Rides the policy-dist SSE stream as `event: judge_request` (protojson); the
+     daemon answers with a JudgeVote{locus: CLIENT_SIDE} in its next batch and
+     ignores a task it does not own. Founder ruling 2026-09-16.
+    """
+
+    request_id: str = betterproto.string_field(1)
+    judge_id: str = betterproto.string_field(2)
+    task_id: bytes = betterproto.bytes_field(3)
+    session_id: bytes = betterproto.bytes_field(4)
+    attempt: int = betterproto.uint32_field(5)
+    rubric: str = betterproto.string_field(6)
+    tier: "EvidenceTier" = betterproto.enum_field(7)
+    model: str = betterproto.string_field(8)
+    token_budget: int = betterproto.uint32_field(9)
+    locus: "JudgeLocus" = betterproto.enum_field(10)
 
 
 @dataclass(eq=False, repr=False)
@@ -1384,6 +1445,9 @@ class Event(betterproto.Message):
      EdgeHealth in events.proto.
     """
 
+    quarantine_deletion: "QuarantineDeletion" = betterproto.message_field(
+        23, group="body"
+    )
     anchor_vote: "AnchorVote" = betterproto.message_field(30, group="body")
     """intelligence.proto families (30–49)"""
 
@@ -1600,6 +1664,14 @@ class GateVerdict(betterproto.Message):
     """
     Reference into the local evidence store (~/.omium/mark1/evidence/…),
      resolvable on THIS device only — never a URL, never uploaded content.
+    """
+
+    system_message: str = betterproto.string_field(6)
+    """
+    At the knee (08 §5.1 Stop row): the shim exits 0 with no decision and
+     surfaces this as the hook's systemMessage — verdict plus evidence for the
+     human, never for the model (founder ruling 2026-09-16). Empty below the
+     knee and on ALLOW.
     """
 
 

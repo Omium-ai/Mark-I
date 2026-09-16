@@ -725,7 +725,12 @@ type GateVerdict struct {
 	Reason    string    `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
 	// Reference into the local evidence store (~/.omium/mark1/evidence/…),
 	// resolvable on THIS device only — never a URL, never uploaded content.
-	EvidenceRef   string `protobuf:"bytes,5,opt,name=evidence_ref,json=evidenceRef,proto3" json:"evidence_ref,omitempty"`
+	EvidenceRef string `protobuf:"bytes,5,opt,name=evidence_ref,json=evidenceRef,proto3" json:"evidence_ref,omitempty"`
+	// At the knee (08 §5.1 Stop row): the shim exits 0 with no decision and
+	// surfaces this as the hook's systemMessage — verdict plus evidence for the
+	// human, never for the model (founder ruling 2026-09-16). Empty below the
+	// knee and on ALLOW.
+	SystemMessage string `protobuf:"bytes,6,opt,name=system_message,json=systemMessage,proto3" json:"system_message,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -791,6 +796,13 @@ func (x *GateVerdict) GetReason() string {
 func (x *GateVerdict) GetEvidenceRef() string {
 	if x != nil {
 		return x.EvidenceRef
+	}
+	return ""
+}
+
+func (x *GateVerdict) GetSystemMessage() string {
+	if x != nil {
+		return x.SystemMessage
 	}
 	return ""
 }
@@ -1008,13 +1020,14 @@ const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"\atask_id\x18\x01 \x01(\fR\x06taskId\x12$\n" +
 	"\x04gate\x18\x02 \x01(\x0e2\x10.m1p.v1.GateKindR\x04gate\x12\x1f\n" +
 	"\vdeadline_ms\x18\x03 \x01(\rR\n" +
-	"deadlineMs\"\xc3\x01\n" +
+	"deadlineMs\"\xea\x01\n" +
 	"\vGateVerdict\x120\n" +
 	"\bdecision\x18\x01 \x01(\x0e2\x14.m1p.v1.GateDecisionR\bdecision\x12)\n" +
 	"\averdict\x18\x02 \x01(\x0e2\x0f.m1p.v1.VerdictR\averdict\x12\x1c\n" +
 	"\tposterior\x18\x03 \x03(\x01R\tposterior\x12\x16\n" +
 	"\x06reason\x18\x04 \x01(\tR\x06reason\x12!\n" +
-	"\fevidence_ref\x18\x05 \x01(\tR\vevidenceRef\"\a\n" +
+	"\fevidence_ref\x18\x05 \x01(\tR\vevidenceRef\x12%\n" +
+	"\x0esystem_message\x18\x06 \x01(\tR\rsystemMessage\"\a\n" +
 	"\x05Flush\"$\n" +
 	"\bFlushAck\x12\x18\n" +
 	"\adrained\x18\x01 \x01(\x04R\adrained\"o\n" +

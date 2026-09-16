@@ -578,6 +578,10 @@ type TaskOpen struct {
 	// "same files" input to the task_seg merge rule, carried so merges are
 	// auditable without carrying paths.
 	FileSetDigest []byte `protobuf:"bytes,4,opt,name=file_set_digest,json=fileSetDigest,proto3" json:"file_set_digest,omitempty"`
+	// [P1] The CPVS/ladder key (07 "route" CDDL: bare-identifier production).
+	// "*" until a classifier exists; stamped at the edge so the compiler reads
+	// it from the ledger instead of assuming one class (06 §10.1).
+	TaskClass     string `protobuf:"bytes,5,opt,name=task_class,json=taskClass,proto3" json:"task_class,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -638,6 +642,13 @@ func (x *TaskOpen) GetFileSetDigest() []byte {
 		return x.FileSetDigest
 	}
 	return nil
+}
+
+func (x *TaskOpen) GetTaskClass() string {
+	if x != nil {
+		return x.TaskClass
+	}
+	return ""
 }
 
 // Closes a task into exactly one denominator class. 07 §3.
@@ -1120,6 +1131,106 @@ func (x *Usage) GetSource() UsageSource {
 	return UsageSource_USAGE_SOURCE_UNSPECIFIED
 }
 
+// The edge's record that a quarantined batch was deleted at the 30-day
+// retention boundary (founder ruling 2026-09-16; NFR-OPERABILITY-003). The
+// daemon writes a device-signed receipt file BESIDE the bytes before removing
+// them; this event carries that same payload to the ledger so controld can
+// persist a `quarantine_deletion` receipt row. Diagnostic class on the spool
+// (07 §6 closes the billing set at three families): if it is shed, the on-disk
+// receipt is still the durable evidence and `Dropped{}` says so.
+// Event.session_id MUST be empty: the fact is per-device, like EdgeHealth.
+type QuarantineDeletion struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	BatchId         []byte                 `protobuf:"bytes,1,opt,name=batch_id,json=batchId,proto3" json:"batch_id,omitempty"`                            // [P0] 16-byte UUIDv7 of the quarantined batch
+	EventCount      uint32                 `protobuf:"varint,2,opt,name=event_count,json=eventCount,proto3" json:"event_count,omitempty"`                  // [P0] events the batch carried (0 when the manifest was torn)
+	QuarantinedAtMs uint64                 `protobuf:"varint,3,opt,name=quarantined_at_ms,json=quarantinedAtMs,proto3" json:"quarantined_at_ms,omitempty"` // [P0] unix ms; the manifest's time or the file mtime
+	DeletedAtMs     uint64                 `protobuf:"varint,4,opt,name=deleted_at_ms,json=deletedAtMs,proto3" json:"deleted_at_ms,omitempty"`             // [P0] unix ms
+	Reason          string                 `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`                                             // [P0] "retention_30d"; free text never rides here
+	DeviceKeyId     string                 `protobuf:"bytes,6,opt,name=device_key_id,json=deviceKeyId,proto3" json:"device_key_id,omitempty"`              // [P0] key that signed the on-disk receipt
+	DeviceSignature []byte                 `protobuf:"bytes,7,opt,name=device_signature,json=deviceSignature,proto3" json:"device_signature,omitempty"`    // [P0] Ed25519 over the canonical receipt payload
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *QuarantineDeletion) Reset() {
+	*x = QuarantineDeletion{}
+	mi := &file_m1p_v1_events_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QuarantineDeletion) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QuarantineDeletion) ProtoMessage() {}
+
+func (x *QuarantineDeletion) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_events_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QuarantineDeletion.ProtoReflect.Descriptor instead.
+func (*QuarantineDeletion) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *QuarantineDeletion) GetBatchId() []byte {
+	if x != nil {
+		return x.BatchId
+	}
+	return nil
+}
+
+func (x *QuarantineDeletion) GetEventCount() uint32 {
+	if x != nil {
+		return x.EventCount
+	}
+	return 0
+}
+
+func (x *QuarantineDeletion) GetQuarantinedAtMs() uint64 {
+	if x != nil {
+		return x.QuarantinedAtMs
+	}
+	return 0
+}
+
+func (x *QuarantineDeletion) GetDeletedAtMs() uint64 {
+	if x != nil {
+		return x.DeletedAtMs
+	}
+	return 0
+}
+
+func (x *QuarantineDeletion) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *QuarantineDeletion) GetDeviceKeyId() string {
+	if x != nil {
+		return x.DeviceKeyId
+	}
+	return ""
+}
+
+func (x *QuarantineDeletion) GetDeviceSignature() []byte {
+	if x != nil {
+		return x.DeviceSignature
+	}
+	return nil
+}
+
 // The edge's own counters and gauges. This is the ONLY channel by which fleet
 // health reaches Omium: a laptop daemon exposes no metrics endpoint and no
 // Prometheus can route to it (04 §2.11, 11 §0.4), so there is nothing to
@@ -1167,7 +1278,7 @@ type EdgeHealth struct {
 
 func (x *EdgeHealth) Reset() {
 	*x = EdgeHealth{}
-	mi := &file_m1p_v1_events_proto_msgTypes[9]
+	mi := &file_m1p_v1_events_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1179,7 +1290,7 @@ func (x *EdgeHealth) String() string {
 func (*EdgeHealth) ProtoMessage() {}
 
 func (x *EdgeHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_events_proto_msgTypes[9]
+	mi := &file_m1p_v1_events_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1192,7 +1303,7 @@ func (x *EdgeHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EdgeHealth.ProtoReflect.Descriptor instead.
 func (*EdgeHealth) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_events_proto_rawDescGZIP(), []int{9}
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *EdgeHealth) GetMark1D() *ProcessHealth {
@@ -1293,7 +1404,7 @@ type ProcessHealth struct {
 
 func (x *ProcessHealth) Reset() {
 	*x = ProcessHealth{}
-	mi := &file_m1p_v1_events_proto_msgTypes[10]
+	mi := &file_m1p_v1_events_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1305,7 +1416,7 @@ func (x *ProcessHealth) String() string {
 func (*ProcessHealth) ProtoMessage() {}
 
 func (x *ProcessHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_events_proto_msgTypes[10]
+	mi := &file_m1p_v1_events_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1318,7 +1429,7 @@ func (x *ProcessHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProcessHealth.ProtoReflect.Descriptor instead.
 func (*ProcessHealth) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_events_proto_rawDescGZIP(), []int{10}
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ProcessHealth) GetRssBytes() uint64 {
@@ -1362,7 +1473,7 @@ type SpoolHealth struct {
 
 func (x *SpoolHealth) Reset() {
 	*x = SpoolHealth{}
-	mi := &file_m1p_v1_events_proto_msgTypes[11]
+	mi := &file_m1p_v1_events_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1374,7 +1485,7 @@ func (x *SpoolHealth) String() string {
 func (*SpoolHealth) ProtoMessage() {}
 
 func (x *SpoolHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_events_proto_msgTypes[11]
+	mi := &file_m1p_v1_events_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1387,7 +1498,7 @@ func (x *SpoolHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpoolHealth.ProtoReflect.Descriptor instead.
 func (*SpoolHealth) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_events_proto_rawDescGZIP(), []int{11}
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SpoolHealth) GetSegments() uint32 {
@@ -1424,7 +1535,7 @@ type UplinkHealth struct {
 
 func (x *UplinkHealth) Reset() {
 	*x = UplinkHealth{}
-	mi := &file_m1p_v1_events_proto_msgTypes[12]
+	mi := &file_m1p_v1_events_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1436,7 +1547,7 @@ func (x *UplinkHealth) String() string {
 func (*UplinkHealth) ProtoMessage() {}
 
 func (x *UplinkHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_events_proto_msgTypes[12]
+	mi := &file_m1p_v1_events_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1449,7 +1560,7 @@ func (x *UplinkHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UplinkHealth.ProtoReflect.Descriptor instead.
 func (*UplinkHealth) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_events_proto_rawDescGZIP(), []int{12}
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UplinkHealth) GetParked() uint32 {
@@ -1486,7 +1597,7 @@ type BundleHealth struct {
 
 func (x *BundleHealth) Reset() {
 	*x = BundleHealth{}
-	mi := &file_m1p_v1_events_proto_msgTypes[13]
+	mi := &file_m1p_v1_events_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1498,7 +1609,7 @@ func (x *BundleHealth) String() string {
 func (*BundleHealth) ProtoMessage() {}
 
 func (x *BundleHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_events_proto_msgTypes[13]
+	mi := &file_m1p_v1_events_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1511,7 +1622,7 @@ func (x *BundleHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BundleHealth.ProtoReflect.Descriptor instead.
 func (*BundleHealth) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_events_proto_rawDescGZIP(), []int{13}
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *BundleHealth) GetSeq() uint64 {
@@ -1552,7 +1663,7 @@ type GateHealth struct {
 
 func (x *GateHealth) Reset() {
 	*x = GateHealth{}
-	mi := &file_m1p_v1_events_proto_msgTypes[14]
+	mi := &file_m1p_v1_events_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1564,7 +1675,7 @@ func (x *GateHealth) String() string {
 func (*GateHealth) ProtoMessage() {}
 
 func (x *GateHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_events_proto_msgTypes[14]
+	mi := &file_m1p_v1_events_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1577,7 +1688,7 @@ func (x *GateHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateHealth.ProtoReflect.Descriptor instead.
 func (*GateHealth) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_events_proto_rawDescGZIP(), []int{14}
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GateHealth) GetReads() uint64 {
@@ -1627,7 +1738,7 @@ type ProxyLatency struct {
 
 func (x *ProxyLatency) Reset() {
 	*x = ProxyLatency{}
-	mi := &file_m1p_v1_events_proto_msgTypes[15]
+	mi := &file_m1p_v1_events_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1639,7 +1750,7 @@ func (x *ProxyLatency) String() string {
 func (*ProxyLatency) ProtoMessage() {}
 
 func (x *ProxyLatency) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_events_proto_msgTypes[15]
+	mi := &file_m1p_v1_events_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1652,7 +1763,7 @@ func (x *ProxyLatency) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProxyLatency.ProtoReflect.Descriptor instead.
 func (*ProxyLatency) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_events_proto_rawDescGZIP(), []int{15}
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ProxyLatency) GetAddedLatencyP50Us() uint64 {
@@ -1682,7 +1793,7 @@ type ShimHealth struct {
 
 func (x *ShimHealth) Reset() {
 	*x = ShimHealth{}
-	mi := &file_m1p_v1_events_proto_msgTypes[16]
+	mi := &file_m1p_v1_events_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1694,7 +1805,7 @@ func (x *ShimHealth) String() string {
 func (*ShimHealth) ProtoMessage() {}
 
 func (x *ShimHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_events_proto_msgTypes[16]
+	mi := &file_m1p_v1_events_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1707,7 +1818,7 @@ func (x *ShimHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShimHealth.ProtoReflect.Descriptor instead.
 func (*ShimHealth) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_events_proto_rawDescGZIP(), []int{16}
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ShimHealth) GetDelivered() uint64 {
@@ -1736,7 +1847,7 @@ type CortexHealth struct {
 
 func (x *CortexHealth) Reset() {
 	*x = CortexHealth{}
-	mi := &file_m1p_v1_events_proto_msgTypes[17]
+	mi := &file_m1p_v1_events_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1748,7 +1859,7 @@ func (x *CortexHealth) String() string {
 func (*CortexHealth) ProtoMessage() {}
 
 func (x *CortexHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_events_proto_msgTypes[17]
+	mi := &file_m1p_v1_events_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1761,7 +1872,7 @@ func (x *CortexHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CortexHealth.ProtoReflect.Descriptor instead.
 func (*CortexHealth) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_events_proto_rawDescGZIP(), []int{17}
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CortexHealth) GetIndexClock() uint64 {
@@ -1791,7 +1902,7 @@ type DialectRev struct {
 
 func (x *DialectRev) Reset() {
 	*x = DialectRev{}
-	mi := &file_m1p_v1_events_proto_msgTypes[18]
+	mi := &file_m1p_v1_events_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1803,7 +1914,7 @@ func (x *DialectRev) String() string {
 func (*DialectRev) ProtoMessage() {}
 
 func (x *DialectRev) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_events_proto_msgTypes[18]
+	mi := &file_m1p_v1_events_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1816,7 +1927,7 @@ func (x *DialectRev) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DialectRev.ProtoReflect.Descriptor instead.
 func (*DialectRev) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_events_proto_rawDescGZIP(), []int{18}
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *DialectRev) GetDialect() Dialect {
@@ -1848,12 +1959,14 @@ const file_m1p_v1_events_proto_rawDesc = "" +
 	"\x06reason\x18\x01 \x01(\x0e2\x11.m1p.v1.EndReasonR\x06reason\x12\x1f\n" +
 	"\vduration_ms\x18\x02 \x01(\x04R\n" +
 	"durationMs\x12\x18\n" +
-	"\adrained\x18\x03 \x01(\bR\adrained\"\xa7\x01\n" +
+	"\adrained\x18\x03 \x01(\bR\adrained\"\xc6\x01\n" +
 	"\bTaskOpen\x12(\n" +
 	"\x10task_seg_version\x18\x01 \x01(\tR\x0etaskSegVersion\x12$\n" +
 	"\x0eparent_task_id\x18\x02 \x01(\fR\fparentTaskId\x12#\n" +
 	"\rprompt_digest\x18\x03 \x01(\fR\fpromptDigest\x12&\n" +
-	"\x0ffile_set_digest\x18\x04 \x01(\fR\rfileSetDigest\"\x88\x01\n" +
+	"\x0ffile_set_digest\x18\x04 \x01(\fR\rfileSetDigest\x12\x1d\n" +
+	"\n" +
+	"task_class\x18\x05 \x01(\tR\ttaskClass\"\x88\x01\n" +
 	"\tTaskClose\x122\n" +
 	"\n" +
 	"resolution\x18\x01 \x01(\x0e2\x12.m1p.v1.ResolutionR\n" +
@@ -1902,7 +2015,16 @@ const file_m1p_v1_events_proto_rawDesc = "" +
 	"\x17cache_read_input_tokens\x18\b \x01(\x04R\x14cacheReadInputTokens\x12!\n" +
 	"\fservice_tier\x18\t \x01(\tR\vserviceTier\x12+\n" +
 	"\x06source\x18\n" +
-	" \x01(\x0e2\x13.m1p.v1.UsageSourceR\x06source\"\xb3\x04\n" +
+	" \x01(\x0e2\x13.m1p.v1.UsageSourceR\x06source\"\x87\x02\n" +
+	"\x12QuarantineDeletion\x12\x19\n" +
+	"\bbatch_id\x18\x01 \x01(\fR\abatchId\x12\x1f\n" +
+	"\vevent_count\x18\x02 \x01(\rR\n" +
+	"eventCount\x12*\n" +
+	"\x11quarantined_at_ms\x18\x03 \x01(\x04R\x0fquarantinedAtMs\x12\"\n" +
+	"\rdeleted_at_ms\x18\x04 \x01(\x04R\vdeletedAtMs\x12\x16\n" +
+	"\x06reason\x18\x05 \x01(\tR\x06reason\x12\"\n" +
+	"\rdevice_key_id\x18\x06 \x01(\tR\vdeviceKeyId\x12)\n" +
+	"\x10device_signature\x18\a \x01(\fR\x0fdeviceSignature\"\xb3\x04\n" +
 	"\n" +
 	"EdgeHealth\x12-\n" +
 	"\x06mark1d\x18\x01 \x01(\v2\x15.m1p.v1.ProcessHealthR\x06mark1d\x12/\n" +
@@ -2012,34 +2134,35 @@ func file_m1p_v1_events_proto_rawDescGZIP() []byte {
 }
 
 var file_m1p_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
-var file_m1p_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_m1p_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_m1p_v1_events_proto_goTypes = []any{
-	(CapturePath)(0),      // 0: m1p.v1.CapturePath
-	(EndReason)(0),        // 1: m1p.v1.EndReason
-	(Resolution)(0),       // 2: m1p.v1.Resolution
-	(Initiator)(0),        // 3: m1p.v1.Initiator
-	(ToolStatus)(0),       // 4: m1p.v1.ToolStatus
-	(UsageSource)(0),      // 5: m1p.v1.UsageSource
-	(Dialect)(0),          // 6: m1p.v1.Dialect
-	(*SessionStart)(nil),  // 7: m1p.v1.SessionStart
-	(*SessionEnd)(nil),    // 8: m1p.v1.SessionEnd
-	(*TaskOpen)(nil),      // 9: m1p.v1.TaskOpen
-	(*TaskClose)(nil),     // 10: m1p.v1.TaskClose
-	(*Turn)(nil),          // 11: m1p.v1.Turn
-	(*ToolUse)(nil),       // 12: m1p.v1.ToolUse
-	(*ModelRequest)(nil),  // 13: m1p.v1.ModelRequest
-	(*ModelResponse)(nil), // 14: m1p.v1.ModelResponse
-	(*Usage)(nil),         // 15: m1p.v1.Usage
-	(*EdgeHealth)(nil),    // 16: m1p.v1.EdgeHealth
-	(*ProcessHealth)(nil), // 17: m1p.v1.ProcessHealth
-	(*SpoolHealth)(nil),   // 18: m1p.v1.SpoolHealth
-	(*UplinkHealth)(nil),  // 19: m1p.v1.UplinkHealth
-	(*BundleHealth)(nil),  // 20: m1p.v1.BundleHealth
-	(*GateHealth)(nil),    // 21: m1p.v1.GateHealth
-	(*ProxyLatency)(nil),  // 22: m1p.v1.ProxyLatency
-	(*ShimHealth)(nil),    // 23: m1p.v1.ShimHealth
-	(*CortexHealth)(nil),  // 24: m1p.v1.CortexHealth
-	(*DialectRev)(nil),    // 25: m1p.v1.DialectRev
+	(CapturePath)(0),           // 0: m1p.v1.CapturePath
+	(EndReason)(0),             // 1: m1p.v1.EndReason
+	(Resolution)(0),            // 2: m1p.v1.Resolution
+	(Initiator)(0),             // 3: m1p.v1.Initiator
+	(ToolStatus)(0),            // 4: m1p.v1.ToolStatus
+	(UsageSource)(0),           // 5: m1p.v1.UsageSource
+	(Dialect)(0),               // 6: m1p.v1.Dialect
+	(*SessionStart)(nil),       // 7: m1p.v1.SessionStart
+	(*SessionEnd)(nil),         // 8: m1p.v1.SessionEnd
+	(*TaskOpen)(nil),           // 9: m1p.v1.TaskOpen
+	(*TaskClose)(nil),          // 10: m1p.v1.TaskClose
+	(*Turn)(nil),               // 11: m1p.v1.Turn
+	(*ToolUse)(nil),            // 12: m1p.v1.ToolUse
+	(*ModelRequest)(nil),       // 13: m1p.v1.ModelRequest
+	(*ModelResponse)(nil),      // 14: m1p.v1.ModelResponse
+	(*Usage)(nil),              // 15: m1p.v1.Usage
+	(*QuarantineDeletion)(nil), // 16: m1p.v1.QuarantineDeletion
+	(*EdgeHealth)(nil),         // 17: m1p.v1.EdgeHealth
+	(*ProcessHealth)(nil),      // 18: m1p.v1.ProcessHealth
+	(*SpoolHealth)(nil),        // 19: m1p.v1.SpoolHealth
+	(*UplinkHealth)(nil),       // 20: m1p.v1.UplinkHealth
+	(*BundleHealth)(nil),       // 21: m1p.v1.BundleHealth
+	(*GateHealth)(nil),         // 22: m1p.v1.GateHealth
+	(*ProxyLatency)(nil),       // 23: m1p.v1.ProxyLatency
+	(*ShimHealth)(nil),         // 24: m1p.v1.ShimHealth
+	(*CortexHealth)(nil),       // 25: m1p.v1.CortexHealth
+	(*DialectRev)(nil),         // 26: m1p.v1.DialectRev
 }
 var file_m1p_v1_events_proto_depIdxs = []int32{
 	0,  // 0: m1p.v1.SessionStart.capture_paths:type_name -> m1p.v1.CapturePath
@@ -2048,17 +2171,17 @@ var file_m1p_v1_events_proto_depIdxs = []int32{
 	3,  // 3: m1p.v1.Turn.initiator:type_name -> m1p.v1.Initiator
 	4,  // 4: m1p.v1.ToolUse.status:type_name -> m1p.v1.ToolStatus
 	5,  // 5: m1p.v1.Usage.source:type_name -> m1p.v1.UsageSource
-	17, // 6: m1p.v1.EdgeHealth.mark1d:type_name -> m1p.v1.ProcessHealth
-	17, // 7: m1p.v1.EdgeHealth.cortexd:type_name -> m1p.v1.ProcessHealth
-	17, // 8: m1p.v1.EdgeHealth.proxy:type_name -> m1p.v1.ProcessHealth
-	18, // 9: m1p.v1.EdgeHealth.spool:type_name -> m1p.v1.SpoolHealth
-	19, // 10: m1p.v1.EdgeHealth.uplink:type_name -> m1p.v1.UplinkHealth
-	20, // 11: m1p.v1.EdgeHealth.bundle:type_name -> m1p.v1.BundleHealth
-	21, // 12: m1p.v1.EdgeHealth.gate:type_name -> m1p.v1.GateHealth
-	22, // 13: m1p.v1.EdgeHealth.proxy_latency:type_name -> m1p.v1.ProxyLatency
-	23, // 14: m1p.v1.EdgeHealth.shim:type_name -> m1p.v1.ShimHealth
-	24, // 15: m1p.v1.EdgeHealth.cortex:type_name -> m1p.v1.CortexHealth
-	25, // 16: m1p.v1.EdgeHealth.dialect_revs:type_name -> m1p.v1.DialectRev
+	18, // 6: m1p.v1.EdgeHealth.mark1d:type_name -> m1p.v1.ProcessHealth
+	18, // 7: m1p.v1.EdgeHealth.cortexd:type_name -> m1p.v1.ProcessHealth
+	18, // 8: m1p.v1.EdgeHealth.proxy:type_name -> m1p.v1.ProcessHealth
+	19, // 9: m1p.v1.EdgeHealth.spool:type_name -> m1p.v1.SpoolHealth
+	20, // 10: m1p.v1.EdgeHealth.uplink:type_name -> m1p.v1.UplinkHealth
+	21, // 11: m1p.v1.EdgeHealth.bundle:type_name -> m1p.v1.BundleHealth
+	22, // 12: m1p.v1.EdgeHealth.gate:type_name -> m1p.v1.GateHealth
+	23, // 13: m1p.v1.EdgeHealth.proxy_latency:type_name -> m1p.v1.ProxyLatency
+	24, // 14: m1p.v1.EdgeHealth.shim:type_name -> m1p.v1.ShimHealth
+	25, // 15: m1p.v1.EdgeHealth.cortex:type_name -> m1p.v1.CortexHealth
+	26, // 16: m1p.v1.EdgeHealth.dialect_revs:type_name -> m1p.v1.DialectRev
 	6,  // 17: m1p.v1.DialectRev.dialect:type_name -> m1p.v1.Dialect
 	18, // [18:18] is the sub-list for method output_type
 	18, // [18:18] is the sub-list for method input_type
@@ -2078,7 +2201,7 @@ func file_m1p_v1_events_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_m1p_v1_events_proto_rawDesc), len(file_m1p_v1_events_proto_rawDesc)),
 			NumEnums:      7,
-			NumMessages:   19,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

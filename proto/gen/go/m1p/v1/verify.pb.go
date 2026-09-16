@@ -270,9 +270,11 @@ type AnchorVote struct {
 	AnchorId string                 `protobuf:"bytes,1,opt,name=anchor_id,json=anchorId,proto3" json:"anchor_id,omitempty"` // [P0] local-catalog id, user-consented
 	// (04 §2.2 consent catalog; bundles can
 	// never name a command, only an id)
-	Vote          Verdict          `protobuf:"varint,2,opt,name=vote,proto3,enum=m1p.v1.Verdict" json:"vote,omitempty"` // [P0]
-	Evidence      *EvidenceRecord  `protobuf:"bytes,3,opt,name=evidence,proto3" json:"evidence,omitempty"`              // [P0/P1] E0 always rides with the vote
-	Integrity     *AnchorIntegrity `protobuf:"bytes,4,opt,name=integrity,proto3" json:"integrity,omitempty"`            // [P0/P1] anti-tamper envelope, device-signed
+	Vote      Verdict          `protobuf:"varint,2,opt,name=vote,proto3,enum=m1p.v1.Verdict" json:"vote,omitempty"` // [P0]
+	Evidence  *EvidenceRecord  `protobuf:"bytes,3,opt,name=evidence,proto3" json:"evidence,omitempty"`              // [P0/P1] E0 always rides with the vote
+	Integrity *AnchorIntegrity `protobuf:"bytes,4,opt,name=integrity,proto3" json:"integrity,omitempty"`            // [P0/P1] anti-tamper envelope, device-signed
+	// at origin
+	Signature     []byte `protobuf:"bytes,5,opt,name=signature,proto3" json:"signature,omitempty"` // [P0] Ed25519 by the device origin key over
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -331,6 +333,13 @@ func (x *AnchorVote) GetEvidence() *EvidenceRecord {
 func (x *AnchorVote) GetIntegrity() *AnchorIntegrity {
 	if x != nil {
 		return x.Integrity
+	}
+	return nil
+}
+
+func (x *AnchorVote) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
 	}
 	return nil
 }
@@ -537,6 +546,128 @@ func (x *JudgeVote) GetLocus() JudgeLocus {
 	return JudgeLocus_JUDGE_LOCUS_UNSPECIFIED
 }
 
+// adjudicator-svc → mark1d, the client-side-first path (06 §6.2 step 2, ADR-0008):
+// what crosses to the edge so the daemon can run the judge with the CUSTOMER'S
+// OWN key. Rubric is prompt DATA; no command, no evidence, no key ever crosses.
+// Rides the policy-dist SSE stream as `event: judge_request` (protojson); the
+// daemon answers with a JudgeVote{locus: CLIENT_SIDE} in its next batch and
+// ignores a task it does not own. Founder ruling 2026-09-16.
+type JudgeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`        // [P0] idempotency: one vote per request_id
+	JudgeId       string                 `protobuf:"bytes,2,opt,name=judge_id,json=judgeId,proto3" json:"judge_id,omitempty"`              // [P0] "judge:<name>@<version>", JudgeVote.judge_id
+	TaskId        []byte                 `protobuf:"bytes,3,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`                 // [P0] 16 bytes, Event.task_id
+	SessionId     []byte                 `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`        // [P0] 16 bytes, the session that owns the task
+	Attempt       uint32                 `protobuf:"varint,5,opt,name=attempt,proto3" json:"attempt,omitempty"`                            // [P0] attempt index within the task
+	Rubric        string                 `protobuf:"bytes,6,opt,name=rubric,proto3" json:"rubric,omitempty"`                               // [P0] prompt data, ≤ 16 KiB
+	Tier          EvidenceTier           `protobuf:"varint,7,opt,name=tier,proto3,enum=m1p.v1.EvidenceTier" json:"tier,omitempty"`         // [P0] what the edge may show the judge (never above consent)
+	Model         string                 `protobuf:"bytes,8,opt,name=model,proto3" json:"model,omitempty"`                                 // [P0] pinned model id the customer key may call
+	TokenBudget   uint32                 `protobuf:"varint,9,opt,name=token_budget,json=tokenBudget,proto3" json:"token_budget,omitempty"` // [P0] hard cap on judge tokens
+	Locus         JudgeLocus             `protobuf:"varint,10,opt,name=locus,proto3,enum=m1p.v1.JudgeLocus" json:"locus,omitempty"`        // [P0] CLIENT_SIDE here; CLOUD requests never reach the edge
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JudgeRequest) Reset() {
+	*x = JudgeRequest{}
+	mi := &file_m1p_v1_verify_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JudgeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JudgeRequest) ProtoMessage() {}
+
+func (x *JudgeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_verify_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JudgeRequest.ProtoReflect.Descriptor instead.
+func (*JudgeRequest) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *JudgeRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *JudgeRequest) GetJudgeId() string {
+	if x != nil {
+		return x.JudgeId
+	}
+	return ""
+}
+
+func (x *JudgeRequest) GetTaskId() []byte {
+	if x != nil {
+		return x.TaskId
+	}
+	return nil
+}
+
+func (x *JudgeRequest) GetSessionId() []byte {
+	if x != nil {
+		return x.SessionId
+	}
+	return nil
+}
+
+func (x *JudgeRequest) GetAttempt() uint32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *JudgeRequest) GetRubric() string {
+	if x != nil {
+		return x.Rubric
+	}
+	return ""
+}
+
+func (x *JudgeRequest) GetTier() EvidenceTier {
+	if x != nil {
+		return x.Tier
+	}
+	return EvidenceTier_EVIDENCE_TIER_UNSPECIFIED
+}
+
+func (x *JudgeRequest) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *JudgeRequest) GetTokenBudget() uint32 {
+	if x != nil {
+		return x.TokenBudget
+	}
+	return 0
+}
+
+func (x *JudgeRequest) GetLocus() JudgeLocus {
+	if x != nil {
+		return x.Locus
+	}
+	return JudgeLocus_JUDGE_LOCUS_UNSPECIFIED
+}
+
 // One T2 learned reward model's scalar score.
 type RmScore struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
@@ -549,7 +680,7 @@ type RmScore struct {
 
 func (x *RmScore) Reset() {
 	*x = RmScore{}
-	mi := &file_m1p_v1_verify_proto_msgTypes[3]
+	mi := &file_m1p_v1_verify_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -561,7 +692,7 @@ func (x *RmScore) String() string {
 func (*RmScore) ProtoMessage() {}
 
 func (x *RmScore) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_verify_proto_msgTypes[3]
+	mi := &file_m1p_v1_verify_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -574,7 +705,7 @@ func (x *RmScore) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RmScore.ProtoReflect.Descriptor instead.
 func (*RmScore) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{3}
+	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *RmScore) GetModelId() string {
@@ -611,7 +742,7 @@ type ConsistencyVote struct {
 
 func (x *ConsistencyVote) Reset() {
 	*x = ConsistencyVote{}
-	mi := &file_m1p_v1_verify_proto_msgTypes[4]
+	mi := &file_m1p_v1_verify_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -623,7 +754,7 @@ func (x *ConsistencyVote) String() string {
 func (*ConsistencyVote) ProtoMessage() {}
 
 func (x *ConsistencyVote) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_verify_proto_msgTypes[4]
+	mi := &file_m1p_v1_verify_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -636,7 +767,7 @@ func (x *ConsistencyVote) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConsistencyVote.ProtoReflect.Descriptor instead.
 func (*ConsistencyVote) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{4}
+	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ConsistencyVote) GetVote() Verdict {
@@ -712,7 +843,7 @@ type VerdictEvent struct {
 
 func (x *VerdictEvent) Reset() {
 	*x = VerdictEvent{}
-	mi := &file_m1p_v1_verify_proto_msgTypes[5]
+	mi := &file_m1p_v1_verify_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -724,7 +855,7 @@ func (x *VerdictEvent) String() string {
 func (*VerdictEvent) ProtoMessage() {}
 
 func (x *VerdictEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_verify_proto_msgTypes[5]
+	mi := &file_m1p_v1_verify_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -737,7 +868,7 @@ func (x *VerdictEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerdictEvent.ProtoReflect.Descriptor instead.
 func (*VerdictEvent) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{5}
+	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *VerdictEvent) GetStage() VerdictStage {
@@ -793,13 +924,14 @@ var File_m1p_v1_verify_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_verify_proto_rawDesc = "" +
 	"\n" +
-	"\x13m1p/v1/verify.proto\x12\x06m1p.v1\x1a\x16m1p/v1/artifacts.proto\"\xb9\x01\n" +
+	"\x13m1p/v1/verify.proto\x12\x06m1p.v1\x1a\x16m1p/v1/artifacts.proto\"\xd7\x01\n" +
 	"\n" +
 	"AnchorVote\x12\x1b\n" +
 	"\tanchor_id\x18\x01 \x01(\tR\banchorId\x12#\n" +
 	"\x04vote\x18\x02 \x01(\x0e2\x0f.m1p.v1.VerdictR\x04vote\x122\n" +
 	"\bevidence\x18\x03 \x01(\v2\x16.m1p.v1.EvidenceRecordR\bevidence\x125\n" +
-	"\tintegrity\x18\x04 \x01(\v2\x17.m1p.v1.AnchorIntegrityR\tintegrity\"\xce\x03\n" +
+	"\tintegrity\x18\x04 \x01(\v2\x17.m1p.v1.AnchorIntegrityR\tintegrity\x12\x1c\n" +
+	"\tsignature\x18\x05 \x01(\fR\tsignature\"\xce\x03\n" +
 	"\x0fAnchorIntegrity\x120\n" +
 	"\x14worktree_merkle_root\x18\x01 \x01(\fR\x12worktreeMerkleRoot\x12g\n" +
 	"\x16resolved_binary_hashes\x18\x02 \x03(\v21.m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntryR\x14resolvedBinaryHashes\x122\n" +
@@ -816,7 +948,21 @@ const file_m1p_v1_verify_proto_rawDesc = "" +
 	"\ttier_used\x18\x03 \x01(\x0e2\x14.m1p.v1.EvidenceTierR\btierUsed\x12\x1f\n" +
 	"\vrubric_hash\x18\x04 \x01(\fR\n" +
 	"rubricHash\x12(\n" +
-	"\x05locus\x18\x05 \x01(\x0e2\x12.m1p.v1.JudgeLocusR\x05locus\"k\n" +
+	"\x05locus\x18\x05 \x01(\x0e2\x12.m1p.v1.JudgeLocusR\x05locus\"\xbf\x02\n" +
+	"\fJudgeRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x19\n" +
+	"\bjudge_id\x18\x02 \x01(\tR\ajudgeId\x12\x17\n" +
+	"\atask_id\x18\x03 \x01(\fR\x06taskId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x04 \x01(\fR\tsessionId\x12\x18\n" +
+	"\aattempt\x18\x05 \x01(\rR\aattempt\x12\x16\n" +
+	"\x06rubric\x18\x06 \x01(\tR\x06rubric\x12(\n" +
+	"\x04tier\x18\a \x01(\x0e2\x14.m1p.v1.EvidenceTierR\x04tier\x12\x14\n" +
+	"\x05model\x18\b \x01(\tR\x05model\x12!\n" +
+	"\ftoken_budget\x18\t \x01(\rR\vtokenBudget\x12(\n" +
+	"\x05locus\x18\n" +
+	" \x01(\x0e2\x12.m1p.v1.JudgeLocusR\x05locus\"k\n" +
 	"\aRmScore\x12\x19\n" +
 	"\bmodel_id\x18\x01 \x01(\tR\amodelId\x12\x14\n" +
 	"\x05score\x18\x02 \x01(\x01R\x05score\x12/\n" +
@@ -873,7 +1019,7 @@ func file_m1p_v1_verify_proto_rawDescGZIP() []byte {
 }
 
 var file_m1p_v1_verify_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_m1p_v1_verify_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_m1p_v1_verify_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_m1p_v1_verify_proto_goTypes = []any{
 	(DiffClassification)(0),  // 0: m1p.v1.DiffClassification
 	(JudgeLocus)(0),          // 1: m1p.v1.JudgeLocus
@@ -882,32 +1028,35 @@ var file_m1p_v1_verify_proto_goTypes = []any{
 	(*AnchorVote)(nil),       // 4: m1p.v1.AnchorVote
 	(*AnchorIntegrity)(nil),  // 5: m1p.v1.AnchorIntegrity
 	(*JudgeVote)(nil),        // 6: m1p.v1.JudgeVote
-	(*RmScore)(nil),          // 7: m1p.v1.RmScore
-	(*ConsistencyVote)(nil),  // 8: m1p.v1.ConsistencyVote
-	(*VerdictEvent)(nil),     // 9: m1p.v1.VerdictEvent
-	nil,                      // 10: m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
-	(Verdict)(0),             // 11: m1p.v1.Verdict
-	(*EvidenceRecord)(nil),   // 12: m1p.v1.EvidenceRecord
-	(EvidenceTier)(0),        // 13: m1p.v1.EvidenceTier
+	(*JudgeRequest)(nil),     // 7: m1p.v1.JudgeRequest
+	(*RmScore)(nil),          // 8: m1p.v1.RmScore
+	(*ConsistencyVote)(nil),  // 9: m1p.v1.ConsistencyVote
+	(*VerdictEvent)(nil),     // 10: m1p.v1.VerdictEvent
+	nil,                      // 11: m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
+	(Verdict)(0),             // 12: m1p.v1.Verdict
+	(*EvidenceRecord)(nil),   // 13: m1p.v1.EvidenceRecord
+	(EvidenceTier)(0),        // 14: m1p.v1.EvidenceTier
 }
 var file_m1p_v1_verify_proto_depIdxs = []int32{
-	11, // 0: m1p.v1.AnchorVote.vote:type_name -> m1p.v1.Verdict
-	12, // 1: m1p.v1.AnchorVote.evidence:type_name -> m1p.v1.EvidenceRecord
+	12, // 0: m1p.v1.AnchorVote.vote:type_name -> m1p.v1.Verdict
+	13, // 1: m1p.v1.AnchorVote.evidence:type_name -> m1p.v1.EvidenceRecord
 	5,  // 2: m1p.v1.AnchorVote.integrity:type_name -> m1p.v1.AnchorIntegrity
-	10, // 3: m1p.v1.AnchorIntegrity.resolved_binary_hashes:type_name -> m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
+	11, // 3: m1p.v1.AnchorIntegrity.resolved_binary_hashes:type_name -> m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
 	0,  // 4: m1p.v1.AnchorIntegrity.diff_classification:type_name -> m1p.v1.DiffClassification
-	11, // 5: m1p.v1.JudgeVote.vote:type_name -> m1p.v1.Verdict
-	13, // 6: m1p.v1.JudgeVote.tier_used:type_name -> m1p.v1.EvidenceTier
+	12, // 5: m1p.v1.JudgeVote.vote:type_name -> m1p.v1.Verdict
+	14, // 6: m1p.v1.JudgeVote.tier_used:type_name -> m1p.v1.EvidenceTier
 	1,  // 7: m1p.v1.JudgeVote.locus:type_name -> m1p.v1.JudgeLocus
-	11, // 8: m1p.v1.ConsistencyVote.vote:type_name -> m1p.v1.Verdict
-	2,  // 9: m1p.v1.VerdictEvent.stage:type_name -> m1p.v1.VerdictStage
-	11, // 10: m1p.v1.VerdictEvent.verdict:type_name -> m1p.v1.Verdict
-	3,  // 11: m1p.v1.VerdictEvent.certification:type_name -> m1p.v1.CertificationStatus
-	12, // [12:12] is the sub-list for method output_type
-	12, // [12:12] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	14, // 8: m1p.v1.JudgeRequest.tier:type_name -> m1p.v1.EvidenceTier
+	1,  // 9: m1p.v1.JudgeRequest.locus:type_name -> m1p.v1.JudgeLocus
+	12, // 10: m1p.v1.ConsistencyVote.vote:type_name -> m1p.v1.Verdict
+	2,  // 11: m1p.v1.VerdictEvent.stage:type_name -> m1p.v1.VerdictStage
+	12, // 12: m1p.v1.VerdictEvent.verdict:type_name -> m1p.v1.Verdict
+	3,  // 13: m1p.v1.VerdictEvent.certification:type_name -> m1p.v1.CertificationStatus
+	14, // [14:14] is the sub-list for method output_type
+	14, // [14:14] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_verify_proto_init() }
@@ -922,7 +1071,7 @@ func file_m1p_v1_verify_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_m1p_v1_verify_proto_rawDesc), len(file_m1p_v1_verify_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   7,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

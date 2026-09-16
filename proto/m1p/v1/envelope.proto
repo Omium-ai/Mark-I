@@ -166,6 +166,7 @@ message Event {
     // set, so a gauge is added or refused in exactly one place. See
     // EdgeHealth in events.proto.
     EdgeHealth edge_health = 22;
+    QuarantineDeletion quarantine_deletion = 23;  // diagnostic class; NFR-OPERABILITY-003
 
     // intelligence.proto families (30–49)
     AnchorVote anchor_vote = 30;

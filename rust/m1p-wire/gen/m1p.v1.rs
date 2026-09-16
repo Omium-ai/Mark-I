@@ -398,6 +398,11 @@ pub struct TaskOpen {
     /// auditable without carrying paths.
     #[prost(bytes="vec", tag="4")]
     pub file_set_digest: ::prost::alloc::vec::Vec<u8>,
+    /// \[P1\] The CPVS/ladder key (07 "route" CDDL: bare-identifier production).
+    /// "*" until a classifier exists; stamped at the edge so the compiler reads
+    /// it from the ledger instead of assuming one class (06 §10.1).
+    #[prost(string, tag="5")]
+    pub task_class: ::prost::alloc::string::String,
 }
 /// Closes a task into exactly one denominator class. 07 §3.
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -551,6 +556,39 @@ pub struct Usage {
 // Edge fleet health — ratified by 07 §3, specified by 11 §2.3
 // ---------------------------------------------------------------------------
 
+/// The edge's record that a quarantined batch was deleted at the 30-day
+/// retention boundary (founder ruling 2026-09-16; NFR-OPERABILITY-003). The
+/// daemon writes a device-signed receipt file BESIDE the bytes before removing
+/// them; this event carries that same payload to the ledger so controld can
+/// persist a `quarantine_deletion` receipt row. Diagnostic class on the spool
+/// (07 §6 closes the billing set at three families): if it is shed, the on-disk
+/// receipt is still the durable evidence and `Dropped{}` says so.
+/// Event.session_id MUST be empty: the fact is per-device, like EdgeHealth.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QuarantineDeletion {
+    /// \[P0\] 16-byte UUIDv7 of the quarantined batch
+    #[prost(bytes="vec", tag="1")]
+    pub batch_id: ::prost::alloc::vec::Vec<u8>,
+    /// \[P0\] events the batch carried (0 when the manifest was torn)
+    #[prost(uint32, tag="2")]
+    pub event_count: u32,
+    /// \[P0\] unix ms; the manifest's time or the file mtime
+    #[prost(uint64, tag="3")]
+    pub quarantined_at_ms: u64,
+    /// \[P0\] unix ms
+    #[prost(uint64, tag="4")]
+    pub deleted_at_ms: u64,
+    /// \[P0\] "retention_30d"; free text never rides here
+    #[prost(string, tag="5")]
+    pub reason: ::prost::alloc::string::String,
+    /// \[P0\] key that signed the on-disk receipt
+    #[prost(string, tag="6")]
+    pub device_key_id: ::prost::alloc::string::String,
+    /// \[P0\] Ed25519 over the canonical receipt payload
+    #[prost(bytes="vec", tag="7")]
+    pub device_signature: ::prost::alloc::vec::Vec<u8>,
+}
 /// The edge's own counters and gauges. This is the ONLY channel by which fleet
 /// health reaches Omium: a laptop daemon exposes no metrics endpoint and no
 /// Prometheus can route to it (04 §2.11, 11 §0.4), so there is nothing to
@@ -1147,6 +1185,11 @@ pub enum InjectionChannel {
     McpPull = 3,
     /// PostToolUseFailure-triggered
     ReactivePitfall = 4,
+    /// PostToolUse-triggered next-turn correction (04 §4 fast/slow split, 08 §5.1
+    /// PostToolUse row): a slow anchor's REVISED verdict superseding the
+    /// provisional one the agent already acted on. Rides ContextQuery/ContextReply
+    /// as its own channel rather than a new frame arm (founder ruling 2026-09-16).
+    Correction = 5,
 }
 impl InjectionChannel {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1160,6 +1203,7 @@ impl InjectionChannel {
             InjectionChannel::HookContext => "INJECTION_CHANNEL_HOOK_CONTEXT",
             InjectionChannel::McpPull => "INJECTION_CHANNEL_MCP_PULL",
             InjectionChannel::ReactivePitfall => "INJECTION_CHANNEL_REACTIVE_PITFALL",
+            InjectionChannel::Correction => "INJECTION_CHANNEL_CORRECTION",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1170,6 +1214,7 @@ impl InjectionChannel {
             "INJECTION_CHANNEL_HOOK_CONTEXT" => Some(Self::HookContext),
             "INJECTION_CHANNEL_MCP_PULL" => Some(Self::McpPull),
             "INJECTION_CHANNEL_REACTIVE_PITFALL" => Some(Self::ReactivePitfall),
+            "INJECTION_CHANNEL_CORRECTION" => Some(Self::Correction),
             _ => None,
         }
     }
@@ -1463,6 +1508,11 @@ pub struct AnchorVote {
     /// \[P0/P1\] anti-tamper envelope, device-signed
     #[prost(message, optional, tag="4")]
     pub integrity: ::core::option::Option<AnchorIntegrity>,
+    ///          at origin
+    ///
+    /// \[P0\] Ed25519 by the device origin key over
+    #[prost(bytes="vec", tag="5")]
+    pub signature: ::prost::alloc::vec::Vec<u8>,
 }
 /// The anti-tamper envelope, computed per anchor run and device-signed at
 /// origin (04 §2.2 "The anti-tamper envelope"; consumed by 06 §2.4, which
@@ -1551,6 +1601,46 @@ pub struct JudgeVote {
     pub rubric_hash: ::prost::alloc::vec::Vec<u8>,
     /// \[P0\]
     #[prost(enumeration="JudgeLocus", tag="5")]
+    pub locus: i32,
+}
+/// adjudicator-svc → mark1d, the client-side-first path (06 §6.2 step 2, ADR-0008):
+/// what crosses to the edge so the daemon can run the judge with the CUSTOMER'S
+/// OWN key. Rubric is prompt DATA; no command, no evidence, no key ever crosses.
+/// Rides the policy-dist SSE stream as `event: judge_request` (protojson); the
+/// daemon answers with a JudgeVote{locus: CLIENT_SIDE} in its next batch and
+/// ignores a task it does not own. Founder ruling 2026-09-16.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct JudgeRequest {
+    /// \[P0\] idempotency: one vote per request_id
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// \[P0\] "judge:<name>@<version>", JudgeVote.judge_id
+    #[prost(string, tag="2")]
+    pub judge_id: ::prost::alloc::string::String,
+    /// \[P0\] 16 bytes, Event.task_id
+    #[prost(bytes="vec", tag="3")]
+    pub task_id: ::prost::alloc::vec::Vec<u8>,
+    /// \[P0\] 16 bytes, the session that owns the task
+    #[prost(bytes="vec", tag="4")]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    /// \[P0\] attempt index within the task
+    #[prost(uint32, tag="5")]
+    pub attempt: u32,
+    /// \[P0\] prompt data, ≤ 16 KiB
+    #[prost(string, tag="6")]
+    pub rubric: ::prost::alloc::string::String,
+    /// \[P0\] what the edge may show the judge (never above consent)
+    #[prost(enumeration="EvidenceTier", tag="7")]
+    pub tier: i32,
+    /// \[P0\] pinned model id the customer key may call
+    #[prost(string, tag="8")]
+    pub model: ::prost::alloc::string::String,
+    /// \[P0\] hard cap on judge tokens
+    #[prost(uint32, tag="9")]
+    pub token_budget: u32,
+    /// \[P0\] CLIENT_SIDE here; CLOUD requests never reach the edge
+    #[prost(enumeration="JudgeLocus", tag="10")]
     pub locus: i32,
 }
 /// One T2 learned reward model's scalar score.
@@ -1957,7 +2047,7 @@ pub struct Event {
     #[prost(sint64, tag="903")]
     pub clock_skew_ms: i64,
     /// ---- Body (exactly one) -------------------------------------------------
-    #[prost(oneof="event::Body", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39")]
+    #[prost(oneof="event::Body", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39")]
     pub body: ::core::option::Option<event::Body>,
 }
 /// Nested message and enum types in `Event`.
@@ -1997,6 +2087,9 @@ pub mod event {
         /// EdgeHealth in events.proto.
         #[prost(message, tag="22")]
         EdgeHealth(super::EdgeHealth),
+        /// diagnostic class; NFR-OPERABILITY-003
+        #[prost(message, tag="23")]
+        QuarantineDeletion(super::QuarantineDeletion),
         /// intelligence.proto families (30–49)
         #[prost(message, tag="30")]
         AnchorVote(super::AnchorVote),
@@ -2323,6 +2416,12 @@ pub struct GateVerdict {
     /// resolvable on THIS device only — never a URL, never uploaded content.
     #[prost(string, tag="5")]
     pub evidence_ref: ::prost::alloc::string::String,
+    /// At the knee (08 §5.1 Stop row): the shim exits 0 with no decision and
+    /// surfaces this as the hook's systemMessage — verdict plus evidence for the
+    /// human, never for the model (founder ruling 2026-09-16). Empty below the
+    /// knee and on ALLOW.
+    #[prost(string, tag="6")]
+    pub system_message: ::prost::alloc::string::String,
 }
 /// Mandatory drain barrier on SessionEnd/shutdown (08 §4.2): the writer sends
 /// Flush and MUST wait for FlushAck before exiting its drain path — the one
