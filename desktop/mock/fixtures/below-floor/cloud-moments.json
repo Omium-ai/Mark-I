@@ -1,0 +1,32 @@
+[
+  {
+    "type": "arrest",
+    "id": "mom_1",
+    "time": "2026-09-16T14:12:00.000Z",
+    "task_id": "task_401",
+    "project": "/Users/dev/myrepo",
+    "agent": "claude-code",
+    "summary": "Mark 1 stopped a retry loop on payments.py — saved ~4,200 tokens",
+    "tokens_saved": 4200
+  },
+  {
+    "type": "injection",
+    "id": "mom_2",
+    "time": "2026-09-16T13:57:00.000Z",
+    "task_id": "task_402",
+    "project": "/Users/dev/myrepo",
+    "agent": "claude-code",
+    "summary": "Remembered pitfall: idempotency key required on charge endpoint",
+    "tokens_saved": 1600
+  },
+  {
+    "type": "route",
+    "id": "mom_3",
+    "time": "2026-09-16T13:42:00.000Z",
+    "task_id": "task_403",
+    "project": "/Users/dev/myrepo",
+    "agent": "claude-code",
+    "summary": "Routed to a cheaper rung for a lint-fix task",
+    "tokens_saved": 900
+  }
+]

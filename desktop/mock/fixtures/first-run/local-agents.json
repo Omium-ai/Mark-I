@@ -1,0 +1,90 @@
+[
+  {
+    "name": "claude-code",
+    "installed": true,
+    "version": "2.1.4",
+    "compat": "pinned",
+    "regime": "apikey",
+    "provisioned": {
+      "mechanism": "hook_settings_json",
+      "files": [
+        {
+          "path": "~/.claude/settings.json",
+          "lines_added": 6,
+          "byte_equal_revert": true
+        }
+      ],
+      "notes": []
+    }
+  },
+  {
+    "name": "codex",
+    "installed": true,
+    "version": "0.44.0",
+    "compat": "compatible_unpinned",
+    "regime": "apikey",
+    "provisioned": {
+      "mechanism": "hook_settings_json",
+      "files": [
+        {
+          "path": "~/.codex/config.toml",
+          "lines_added": 4,
+          "byte_equal_revert": true
+        }
+      ],
+      "notes": [
+        "hooks are inert until you accept the review inside Codex once"
+      ]
+    }
+  },
+  {
+    "name": "cursor",
+    "installed": true,
+    "version": "1.2.0",
+    "compat": "pinned",
+    "regime": "apikey",
+    "provisioned": {
+      "mechanism": "observe_only",
+      "files": [],
+      "notes": [
+        "observe/gate only, no proxy"
+      ]
+    }
+  },
+  {
+    "name": "github-copilot-cli",
+    "installed": true,
+    "version": "1.9.2",
+    "compat": "compatible_unpinned",
+    "regime": "apikey",
+    "provisioned": {
+      "mechanism": "byok_env",
+      "files": [
+        {
+          "path": "~/.copilot/config.json",
+          "lines_added": 1,
+          "byte_equal_revert": true
+        }
+      ],
+      "notes": [
+        "no proxy pointer; BYOK base URL is an env var"
+      ]
+    }
+  },
+  {
+    "name": "gemini-cli",
+    "installed": false,
+    "version": null,
+    "compat": "incompatible",
+    "regime": "apikey",
+    "provisioned": null
+  },
+  {
+    "name": "opencode",
+    "installed": false,
+    "version": null,
+    "compat": "incompatible",
+    "regime": "apikey",
+    "provisioned": null
+  }
+]

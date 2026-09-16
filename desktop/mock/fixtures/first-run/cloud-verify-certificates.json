@@ -1,0 +1,9 @@
+[
+  {
+    "id": "cert_5601",
+    "status": "bootstrapping",
+    "project": "/Users/dev/myrepo",
+    "issued_at": "2026-09-16T14:32:00.000Z",
+    "epsilon": null
+  }
+]

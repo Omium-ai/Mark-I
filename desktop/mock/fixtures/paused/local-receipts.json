@@ -1,0 +1,29 @@
+{
+  "status": "sealed",
+  "checkpoints": [
+    {
+      "seq": 1040,
+      "time": "2026-09-16T12:32:00.000Z",
+      "events_covered": 214,
+      "device_signature": "ok",
+      "server_countersignature": "ok",
+      "witness": null
+    },
+    {
+      "seq": 1041,
+      "time": "2026-09-16T13:32:00.000Z",
+      "events_covered": 198,
+      "device_signature": "ok",
+      "server_countersignature": "ok",
+      "witness": "wit_2026_09_16_13"
+    },
+    {
+      "seq": 1042,
+      "time": "2026-09-16T14:12:00.000Z",
+      "events_covered": 87,
+      "device_signature": "ok",
+      "server_countersignature": "ok",
+      "witness": null
+    }
+  ]
+}

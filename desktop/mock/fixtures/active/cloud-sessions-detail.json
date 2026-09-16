@@ -1,0 +1,101 @@
+{
+  "id": "ses_9a1",
+  "agent": "claude-code",
+  "project": "/Users/dev/myrepo",
+  "time": "2026-09-16T14:12:00.000Z",
+  "tokens": {
+    "input": 21000,
+    "output": 7400,
+    "cache": 48200
+  },
+  "coverage": {
+    "observed_fraction": 0.98,
+    "floor": 0.95
+  },
+  "tasks": [
+    {
+      "task_id": "task_401",
+      "name": "fix retry storm in payments.py",
+      "attempts": [
+        {
+          "n": 1,
+          "cost": 800,
+          "p_lcb": 0.62
+        },
+        {
+          "n": 2,
+          "cost": 1700,
+          "p_lcb": 0.41
+        },
+        {
+          "n": 3,
+          "cost": 2900,
+          "p_lcb": 0.18
+        }
+      ],
+      "verdict_trail": [
+        {
+          "state": "provisional",
+          "certificate_id": null
+        },
+        {
+          "state": "revised",
+          "certificate_id": null
+        },
+        {
+          "state": "certified",
+          "certificate_id": "cert_5591"
+        }
+      ],
+      "evidence": [
+        {
+          "check": "pytest",
+          "code": "FAIL::test_retry_backoff",
+          "counts": {
+            "failed": 1,
+            "passed": 22
+          }
+        }
+      ],
+      "injections": []
+    },
+    {
+      "task_id": "task_402",
+      "name": "add idempotency key to charge endpoint",
+      "attempts": [
+        {
+          "n": 1,
+          "cost": 1100,
+          "p_lcb": 0.71
+        }
+      ],
+      "verdict_trail": [
+        {
+          "state": "provisional",
+          "certificate_id": null
+        },
+        {
+          "state": "certified",
+          "certificate_id": "cert_5592"
+        }
+      ],
+      "evidence": [
+        {
+          "check": "ruff",
+          "code": "OK",
+          "counts": {
+            "failed": 0,
+            "passed": 1
+          }
+        }
+      ],
+      "injections": [
+        {
+          "artifact_id": "art_pit_7",
+          "tokens": 180
+        }
+      ]
+    }
+  ],
+  "receipt_checkpoint_seq": 1042
+}

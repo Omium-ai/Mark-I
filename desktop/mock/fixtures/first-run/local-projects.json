@@ -1,0 +1,21 @@
+[
+  {
+    "path": "/Users/dev/myrepo",
+    "enabled_at": "2026-09-10T14:32:00.000Z",
+    "agents_seen": [
+      "claude-code",
+      "codex"
+    ],
+    "tests_enabled": true,
+    "ignore_present": true
+  },
+  {
+    "path": "/Users/dev/api-service",
+    "enabled_at": "2026-09-12T14:32:00.000Z",
+    "agents_seen": [
+      "claude-code"
+    ],
+    "tests_enabled": true,
+    "ignore_present": false
+  }
+]

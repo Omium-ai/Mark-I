@@ -1,0 +1,69 @@
+{
+  "agents": [
+    {
+      "name": "claude-code",
+      "status": "ok",
+      "detail": "provisioned lines verified"
+    },
+    {
+      "name": "codex",
+      "status": "ok",
+      "detail": "provisioned lines verified"
+    },
+    {
+      "name": "cursor",
+      "status": "ok",
+      "detail": "provisioned lines verified"
+    },
+    {
+      "name": "github-copilot-cli",
+      "status": "ok",
+      "detail": "provisioned lines verified"
+    }
+  ],
+  "fragments": [
+    {
+      "path": "~/.claude/settings.json",
+      "status": "ok"
+    },
+    {
+      "path": "~/.codex/config.toml",
+      "status": "ok"
+    }
+  ],
+  "anchors": [
+    {
+      "id": "anc_ruff",
+      "status": "ok"
+    },
+    {
+      "id": "anc_eslint",
+      "status": "ok"
+    },
+    {
+      "id": "anc_tsc",
+      "status": "ok"
+    },
+    {
+      "id": "anc_pytest",
+      "status": "ok"
+    }
+  ],
+  "health": [
+    {
+      "check": "daemon",
+      "status": "ok",
+      "detail": "mark1d running"
+    },
+    {
+      "check": "cortexd",
+      "status": "ok",
+      "detail": "cortexd running"
+    },
+    {
+      "check": "proxy",
+      "status": "ok",
+      "detail": "mark1-proxy reachable"
+    }
+  ]
+}

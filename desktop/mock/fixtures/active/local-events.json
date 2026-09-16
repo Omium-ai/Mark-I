@@ -1,0 +1,89 @@
+[
+  {
+    "delayMs": 400,
+    "event": "session_start",
+    "data": {
+      "task_id": null,
+      "session_id": "ses_9a1",
+      "agent": "claude-code",
+      "project": "/Users/dev/myrepo"
+    }
+  },
+  {
+    "delayMs": 900,
+    "event": "turn",
+    "data": {
+      "task_id": "task_401",
+      "session_id": "ses_9a1",
+      "turn": 1
+    }
+  },
+  {
+    "delayMs": 900,
+    "event": "tool",
+    "data": {
+      "task_id": "task_401",
+      "session_id": "ses_9a1",
+      "tool": "edit",
+      "path": "payments.py"
+    }
+  },
+  {
+    "delayMs": 900,
+    "event": "usage",
+    "data": {
+      "task_id": "task_401",
+      "session_id": "ses_9a1",
+      "input": 1800,
+      "output": 620,
+      "cache": 4100
+    }
+  },
+  {
+    "delayMs": 900,
+    "event": "verdict",
+    "data": {
+      "task_id": "task_401",
+      "session_id": "ses_9a1",
+      "state": "provisional"
+    }
+  },
+  {
+    "delayMs": 900,
+    "event": "arrest",
+    "data": {
+      "task_id": "task_401",
+      "session_id": "ses_9a1",
+      "attempt": 3,
+      "tokens_saved_estimate": 4200
+    }
+  },
+  {
+    "delayMs": 900,
+    "event": "injection",
+    "data": {
+      "task_id": "task_402",
+      "session_id": "ses_9a1",
+      "artifact_id": "art_pit_7",
+      "tokens_used": 180
+    }
+  },
+  {
+    "delayMs": 900,
+    "event": "route_decision",
+    "data": {
+      "task_id": "task_403",
+      "session_id": "ses_9a1",
+      "served_model": "sonnet-4.5",
+      "action": "stay"
+    }
+  },
+  {
+    "delayMs": 900,
+    "event": "coverage_transition",
+    "data": {
+      "project": "/Users/dev/myrepo",
+      "observed_fraction": 0.97
+    }
+  }
+]

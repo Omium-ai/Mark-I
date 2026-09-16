@@ -1,0 +1,46 @@
+[
+  {
+    "id": "anc_ruff",
+    "tool": "ruff",
+    "version": "0.8.2",
+    "tier": "static",
+    "side_effect": "none",
+    "consented": true,
+    "exec_hash": "sha256:9f1c…a02",
+    "last_run": "2026-09-16T14:12:00.000Z",
+    "latency_class": "fast"
+  },
+  {
+    "id": "anc_eslint",
+    "tool": "eslint",
+    "version": "9.11.0",
+    "tier": "static",
+    "side_effect": "none",
+    "consented": true,
+    "exec_hash": "sha256:2b7e…c14",
+    "last_run": "2026-09-16T13:47:00.000Z",
+    "latency_class": "fast"
+  },
+  {
+    "id": "anc_tsc",
+    "tool": "tsc",
+    "version": "5.6.2",
+    "tier": "static",
+    "side_effect": "none",
+    "consented": true,
+    "exec_hash": "sha256:71ad…f30",
+    "last_run": "2026-09-16T13:47:00.000Z",
+    "latency_class": "fast"
+  },
+  {
+    "id": "anc_pytest",
+    "tool": "pytest",
+    "version": "8.3.2",
+    "tier": "test",
+    "side_effect": "sandboxed",
+    "consented": true,
+    "exec_hash": "sha256:c40e…9b1",
+    "last_run": "2026-09-16T12:32:00.000Z",
+    "latency_class": "slow"
+  }
+]

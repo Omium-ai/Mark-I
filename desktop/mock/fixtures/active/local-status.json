@@ -1,0 +1,23 @@
+{
+  "running": true,
+  "paused": false,
+  "version": "0.9.0",
+  "since": "2026-09-10T14:32:00.000Z",
+  "agents_live": [
+    {
+      "agent": "claude-code",
+      "project": "/Users/dev/myrepo",
+      "session_id": "ses_9a1",
+      "tokens": 28400
+    }
+  ],
+  "projects_enabled": [
+    "/Users/dev/myrepo",
+    "/Users/dev/api-service"
+  ],
+  "spool": {
+    "bytes": 120000,
+    "cap": 50000000,
+    "hard_stop": false
+  }
+}

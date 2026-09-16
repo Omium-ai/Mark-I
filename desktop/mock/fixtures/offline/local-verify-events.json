@@ -1,0 +1,30 @@
+[
+  {
+    "type": "arrest",
+    "id": "ve_1",
+    "time": "2026-09-16T14:12:00.000Z",
+    "task_id": "task_401",
+    "attempt": 3,
+    "inequality": "p_lcb * V <= c(n)",
+    "p_lcb": 0.18,
+    "v": 6000,
+    "c_n": 2900,
+    "evidence_ref": "ev_task_401_3"
+  },
+  {
+    "type": "verdict",
+    "id": "ve_2",
+    "time": "2026-09-16T14:14:00.000Z",
+    "task_id": "task_401",
+    "state": "certified",
+    "certificate_id": "cert_5591"
+  },
+  {
+    "type": "verdict",
+    "id": "ve_3",
+    "time": "2026-09-16T14:02:00.000Z",
+    "task_id": "task_402",
+    "state": "certified",
+    "certificate_id": "cert_5592"
+  }
+]

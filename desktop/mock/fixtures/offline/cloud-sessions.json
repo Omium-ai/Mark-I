@@ -1,0 +1,82 @@
+[
+  {
+    "id": "ses_9a1",
+    "time": "2026-09-16T14:12:00.000Z",
+    "agent": "claude-code",
+    "project": "/Users/dev/myrepo",
+    "tasks_count": 4,
+    "tokens": {
+      "input": 21000,
+      "output": 7400,
+      "cache": 48200
+    },
+    "verified_outcomes": 3,
+    "arrests": 1,
+    "injections": 1,
+    "route_decisions": 2,
+    "coverage": {
+      "observed_fraction": 0.98,
+      "floor": 0.95
+    }
+  },
+  {
+    "id": "ses_871",
+    "time": "2026-09-16T11:32:00.000Z",
+    "agent": "codex",
+    "project": "/Users/dev/myrepo",
+    "tasks_count": 2,
+    "tokens": {
+      "input": 9800,
+      "output": 3100,
+      "cache": 11000
+    },
+    "verified_outcomes": 2,
+    "arrests": 0,
+    "injections": 0,
+    "route_decisions": 1,
+    "coverage": {
+      "observed_fraction": 0.95,
+      "floor": 0.95
+    }
+  },
+  {
+    "id": "ses_820",
+    "time": "2026-09-15T14:32:00.000Z",
+    "agent": "claude-code",
+    "project": "/Users/dev/api-service",
+    "tasks_count": 3,
+    "tokens": {
+      "input": 14200,
+      "output": 5300,
+      "cache": 26000
+    },
+    "verified_outcomes": 4,
+    "arrests": 1,
+    "injections": 2,
+    "route_decisions": 0,
+    "coverage": {
+      "observed_fraction": 0.97,
+      "floor": 0.95
+    }
+  },
+  {
+    "id": "ses_799",
+    "time": "2026-09-14T14:32:00.000Z",
+    "agent": "codex",
+    "project": "/Users/dev/api-service",
+    "tasks_count": 2,
+    "tokens": {
+      "input": 7600,
+      "output": 2400,
+      "cache": 9800
+    },
+    "verified_outcomes": 4,
+    "arrests": 0,
+    "injections": 0,
+    "route_decisions": 1,
+    "coverage": {
+      "observed_fraction": 0.9,
+      "floor": 0.95
+    }
+  }
+]

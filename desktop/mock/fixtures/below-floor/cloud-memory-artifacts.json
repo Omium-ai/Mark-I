@@ -1,0 +1,32 @@
+[
+  {
+    "id": "art_pit_7",
+    "kind": "pitfall",
+    "trigger": "editing a Stripe charge handler",
+    "guidance": "Charge endpoints need an idempotency key or retries double-charge.",
+    "utility_lcb": 0.34,
+    "state": "admitted",
+    "scope": "mine",
+    "n": 11
+  },
+  {
+    "id": "art_fix_3",
+    "kind": "fix_pattern",
+    "trigger": "flaky pytest on retry backoff",
+    "guidance": "Freeze the clock in the test instead of sleeping.",
+    "utility_lcb": 0.21,
+    "state": "admitted",
+    "scope": "team",
+    "n": 6
+  },
+  {
+    "id": "art_inv_2",
+    "kind": "invariant",
+    "trigger": "touching payments.py",
+    "guidance": "Every charge write must be wrapped in the outbox transaction.",
+    "utility_lcb": 0.12,
+    "state": "extracted",
+    "scope": "mine",
+    "n": 2
+  }
+]

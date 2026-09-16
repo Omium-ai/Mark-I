@@ -1,0 +1,27 @@
+{
+  "tvo": null,
+  "trend": [],
+  "coverage_band": {
+    "observed_fraction": 0,
+    "floor": 0.95
+  },
+  "cost_basis": "usd",
+  "task_seg_version": "task_seg.v1",
+  "waste": {
+    "retry_loop_tokens": 0,
+    "re_exploration_tokens": 0,
+    "over_model_tokens": 0,
+    "unattributed_tokens": 0
+  },
+  "tokens_saved": {
+    "arrests": 0,
+    "re_exploration_avoided": 0,
+    "routing": 0,
+    "total": 0
+  },
+  "price_table_version": "pt_2026_09_01",
+  "guarantee_grade": "indicative",
+  "refusal": {
+    "reason": "not enough sessions yet — your first report arrives after about a day of use"
+  }
+}

@@ -1,0 +1,46 @@
+[
+  {
+    "id": "anc_ruff",
+    "tool": "ruff",
+    "version": "0.8.2",
+    "tier": "static",
+    "side_effect": "none",
+    "consented": true,
+    "exec_hash": null,
+    "last_run": null,
+    "latency_class": "fast"
+  },
+  {
+    "id": "anc_eslint",
+    "tool": "eslint",
+    "version": "9.11.0",
+    "tier": "static",
+    "side_effect": "none",
+    "consented": true,
+    "exec_hash": null,
+    "last_run": null,
+    "latency_class": "fast"
+  },
+  {
+    "id": "anc_tsc",
+    "tool": "tsc",
+    "version": "5.6.2",
+    "tier": "static",
+    "side_effect": "none",
+    "consented": true,
+    "exec_hash": null,
+    "last_run": null,
+    "latency_class": "fast"
+  },
+  {
+    "id": "anc_pytest",
+    "tool": "pytest",
+    "version": "8.3.2",
+    "tier": "test",
+    "side_effect": "sandboxed",
+    "consented": true,
+    "exec_hash": null,
+    "last_run": null,
+    "latency_class": "slow"
+  }
+]

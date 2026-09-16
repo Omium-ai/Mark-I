@@ -1,0 +1,23 @@
+[
+  {
+    "id": "cert_5591",
+    "status": "certified",
+    "project": "/Users/dev/myrepo",
+    "issued_at": "2026-09-16T14:14:00.000Z",
+    "epsilon": 1.1
+  },
+  {
+    "id": "cert_5592",
+    "status": "certified",
+    "project": "/Users/dev/myrepo",
+    "issued_at": "2026-09-16T14:02:00.000Z",
+    "epsilon": 1.1
+  },
+  {
+    "id": "cert_5601",
+    "status": "uncertified",
+    "project": "/Users/dev/api-service",
+    "issued_at": "2026-09-15T14:32:00.000Z",
+    "epsilon": null
+  }
+]

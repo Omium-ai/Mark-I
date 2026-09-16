@@ -1,0 +1,8 @@
+{
+  "ok": false,
+  "checked_checkpoints": 0,
+  "defect": {
+    "kind": "no_chain",
+    "detail": "no checkpoints sealed yet"
+  }
+}

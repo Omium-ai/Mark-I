@@ -1,0 +1,20 @@
+[
+  {
+    "id": "inj_1",
+    "artifact_id": "art_pit_7",
+    "time": "2026-09-16T13:57:00.000Z",
+    "session_id": "ses_9a1",
+    "channel": "hook_context",
+    "tokens_used": 180,
+    "outcome": "verified"
+  },
+  {
+    "id": "inj_2",
+    "artifact_id": "art_fix_3",
+    "time": "2026-09-16T11:32:00.000Z",
+    "session_id": "ses_871",
+    "channel": "mcp_pull",
+    "tokens_used": 140,
+    "outcome": "verified"
+  }
+]

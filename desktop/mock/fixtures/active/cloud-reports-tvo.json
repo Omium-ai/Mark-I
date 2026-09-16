@@ -1,0 +1,33 @@
+{
+  "tvo": 13000,
+  "trend": [
+    15200,
+    14800,
+    14100,
+    13900,
+    13500,
+    13200,
+    13000
+  ],
+  "coverage_band": {
+    "observed_fraction": 0.97,
+    "floor": 0.95
+  },
+  "cost_basis": "usd",
+  "task_seg_version": "task_seg.v1",
+  "waste": {
+    "retry_loop_tokens": 12000,
+    "re_exploration_tokens": 9000,
+    "over_model_tokens": 6000,
+    "unattributed_tokens": 3000
+  },
+  "tokens_saved": {
+    "arrests": 42000,
+    "re_exploration_avoided": 18500,
+    "routing": 9500,
+    "total": 70000
+  },
+  "price_table_version": "pt_2026_09_01",
+  "guarantee_grade": "guarantee",
+  "refusal": null
+}

@@ -1,0 +1,22 @@
+{
+  "members": [
+    {
+      "id": "usr_1",
+      "name": "Anurag",
+      "email": "anurag@omium.ai",
+      "role": "owner"
+    }
+  ],
+  "invite_link": "https://app.omium.ai/invite/tenant_1/abc123",
+  "shared_memory": false,
+  "tvo": {
+    "tvo": 13000,
+    "coverage_band": {
+      "observed_fraction": 0.97,
+      "floor": 0.95
+    },
+    "cost_basis": "usd",
+    "guarantee_grade": "guarantee"
+  },
+  "fleet_status": null
+}

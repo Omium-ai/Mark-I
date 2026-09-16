@@ -1,0 +1,46 @@
+{
+  "ladders": [
+    {
+      "task_class": "lint_fix",
+      "rungs": [
+        {
+          "model": "haiku-4.5",
+          "keep_prefix": true
+        },
+        {
+          "model": "sonnet-4.5",
+          "keep_prefix": true
+        }
+      ]
+    },
+    {
+      "task_class": "feature_impl",
+      "rungs": [
+        {
+          "model": "sonnet-4.5",
+          "keep_prefix": true
+        },
+        {
+          "model": "opus-4.5",
+          "keep_prefix": false
+        }
+      ]
+    }
+  ],
+  "knee_table": [
+    {
+      "task_class": "lint_fix",
+      "model": "haiku-4.5",
+      "threshold_tokens": 1200
+    },
+    {
+      "task_class": "feature_impl",
+      "model": "sonnet-4.5",
+      "threshold_tokens": 6000
+    }
+  ],
+  "cost_basis": "usd",
+  "exploration_epsilon": 0,
+  "price_table_version": "pt_2026_09_01",
+  "gateway_status": "up"
+}
