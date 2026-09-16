@@ -1,0 +1,63 @@
+{
+ "agent": "cursor",
+ "agent_version": "2026.09.10-fd3934a",
+ "vendor_pin": {
+  "cli": "cursor-agent 2026.09.10-fd3934a (https://downloads.cursor.com/lab/2026.09.10-fd3934a/linux/x64/agent-cli-package.tar.gz)",
+  "cli_tgz_sha256": "27997c8391ad853a5a732b1845db8ef82a8ba6afb0f7829cc739464f8966e96e",
+  "cli_index_js_sha256": "3f26b0fe79c6788e7c0fc59bbf20956fcfce5950e7db8ab5dfc7e42c50eb6a80",
+  "cli_runner_190_sha256": "07d06c8059faeb725bba1a96be909b96e365d6f18fc13258214d4fdc0c70e715",
+  "ide": "Cursor 3.20.21",
+  "ide_commit": "f09fca384ceca23f7bf21f9c23655b162641d740",
+  "ide_agent_exec_sha256": "7a62b0b8833c8ac1a397eaf39a0a442459b8f1415fa67dd0ee9b458bdb5d4e2a",
+  "docs": "https://cursor.com/docs/hooks.md",
+  "docs_sha256": "7294a2d63b19d79a5283c948afe174cba8b06a7585563d34a2c41b90f5df0d39"
+ },
+ "transcribed_at": "2026-09-16",
+ "live_recording": "none \u2014 transcribed from the vendor bundles; unconfirmed live on both the CLI and the IDE",
+ "workspace_root": "/home/devuser/acme-app",
+ "usage_class": "none",
+ "usage_events_expected": 0,
+ "hooks": {
+  "config": "~/.cursor/hooks.json {version:1, hooks:{<event>:[{command, timeout, loop_limit, failClosed, matcher}]}}",
+  "registered": [
+   "sessionStart",
+   "beforeSubmitPrompt",
+   "preToolUse",
+   "postToolUse",
+   "postToolUseFailure",
+   "stop",
+   "subagentStop",
+   "sessionEnd"
+  ],
+  "cli_dispatched_at_pin": [
+   "preCompact",
+   "subagentStart",
+   "subagentStop",
+   "beforeSubmitPrompt",
+   "afterAgentResponse",
+   "afterAgentThought",
+   "stop",
+   "preToolUse",
+   "postToolUse",
+   "postToolUseFailure"
+  ],
+  "ide_only_at_pin": [
+   "sessionStart",
+   "sessionEnd"
+  ],
+  "stop_gate": {
+   "event": "stop",
+   "block_output_accepted": {
+    "decision": "block",
+    "reason": "<continuation>"
+   },
+   "vendor_translation": "followup_message = reason.trim() (hooks-module.js z())",
+   "hard_cap": "vendor loop_limit per script, default 5; no stop_hook_active field"
+  }
+ },
+ "no_go": {
+  "wire_proxy": "permanent \u2014 every request transits Cursor's backend in every regime (docs/spikes/cursor-observe-gate.md Q3)",
+  "model_rewrite": "permanent \u2014 same reason",
+  "usage_source": "none durable and local; stop/afterAgentResponse token fields exist in the vendor builder but are unconfirmed live and never a Usage"
+ }
+}

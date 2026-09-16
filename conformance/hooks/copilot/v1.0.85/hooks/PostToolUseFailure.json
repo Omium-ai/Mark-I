@@ -1,0 +1,1 @@
+{"hook_event_name":"PostToolUseFailure","session_id":"c0910000-0000-4000-8000-00000000aa02","timestamp":"2026-09-16T10:21:30.349Z","cwd":"/home/devuser/acme-app","tool_name":"Read","tool_input":{"path":"/home/devuser/acme-app/synth-missing.txt"},"error":"Path does not exist"}

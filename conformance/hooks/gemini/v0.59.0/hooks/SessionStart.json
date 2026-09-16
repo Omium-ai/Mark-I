@@ -1,0 +1,8 @@
+{
+  "session_id": "6f1e2d3c-0000-4000-8000-00000000aa01",
+  "transcript_path": "/home/devuser/.gemini/tmp/acme-app/chats/session-2026-09-16T08-25-6f1e2d3c.jsonl",
+  "cwd": "/home/devuser/workspace/acme-app",
+  "hook_event_name": "SessionStart",
+  "timestamp": "2026-09-16T08:25:00.050Z",
+  "source": "startup"
+}

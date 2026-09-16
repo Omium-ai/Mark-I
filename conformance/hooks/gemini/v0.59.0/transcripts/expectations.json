@@ -1,0 +1,128 @@
+{
+  "suite": "conf_hooks_gemini_0.59.0_replay",
+  "agent": "gemini",
+  "agent_version": "0.59.0",
+  "vendor_pin": {
+    "npm": "@google/gemini-cli@0.59.0",
+    "git_tag": "v0.59.0",
+    "commit": "fb0d535af931b27c51e87e5e6ade72905b1e8390",
+    "fetched_at": "2026-09-16"
+  },
+  "idem_key_recipe": "idem_key = HMAC_tenant(session_id, message_id, request_id) -- the 07 §7 / 08 §5.1 recipe with session_id := the stream's PARENT sessionId (16 raw bytes; a subagent stream under chats/<parent>/ is tailed under the parent, as claudecode does), message_id := MessageRecord.id (randomUUID per model response), request_id := chat:<the stream's own sessionId> because this surface carries no per-request id (the codex exec-stream precedent)",
+  "usage_field_map": {
+    "input_tokens": "tokens.input (promptTokenCount: INCLUDES cachedContentTokenCount, mapped verbatim like OpenAI's input_tokens)",
+    "output_tokens": "tokens.output + tokens.thoughts (candidatesTokenCount + thoughtsTokenCount: thoughts are billed as output and this surface reports them apart)",
+    "cache_read_input_tokens": "tokens.cached (cachedContentTokenCount)",
+    "cache_creation_input_tokens": "absent on this surface (Gemini reports no cache-write count) -> 0",
+    "model": "MessageRecord.model on the same line",
+    "service_tier": "absent on this surface",
+    "not_mapped": "tokens.tool (toolUsePromptTokenCount) and tokens.total are on the line and unmapped: m1p.v1.Usage has no field for either"
+  },
+  "workspace_root": "/home/devuser/workspace/acme-app",
+  "project_hash_rule": "metadata.projectHash == sha256hex(<slug>/.project_root); utils/paths.ts getProjectHash over config.getProjectRoot(), the same string projectRegistry.ts writes to the marker",
+  "out_of_workspace_streams": [
+    {
+      "file": "transcripts/tmp/other-app/chats/session-2026-09-16T09-02-6f1e2d3c.jsonl",
+      "project_root": "/home/devuser/workspace/other-app",
+      "never_emit_message_id": "7a1c00ff-0000-4000-8000-0000000000ff",
+      "reason": "Gemini keeps ONE tmp tree for every project (~/.gemini/tmp/<slug>/), so every project's chats share the enabled workspace's parent directory. The slug's .project_root resolves outside the enabled root, so discover never offers the stream (04 §0.3 invariant 3, 04 §2.1)."
+    }
+  ],
+  "unattributable_streams": [
+    {
+      "file": "transcripts/tmp/acme-app/chats/session-2026-09-16T09-30-6f1e2d3c.jsonl",
+      "never_emit_message_id": "7a1c00fe-0000-4000-8000-0000000000fe",
+      "reason": "filed under the enabled slug but its metadata projectHash is another project's: the hash is the stream's own attribution and it does not resolve to an admitted marker, so the stream is never tailed rather than assumed to belong to the directory it sits in"
+    }
+  ],
+  "streams": [
+    {
+      "file": "transcripts/tmp/acme-app/chats/session-2026-09-16T08-25-6f1e2d3c.jsonl",
+      "role": "parent",
+      "usage_events": [
+        {
+          "idem_key_inputs": {
+            "session_id": "6f1e2d3c-0000-4000-8000-00000000aa01",
+            "message_id": "7a1c0001-0000-4000-8000-000000000001",
+            "request_id": "chat:6f1e2d3c-0000-4000-8000-00000000aa01"
+          },
+          "usage": {
+            "input_tokens": 1200,
+            "output_tokens": 220,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          },
+          "model": "gemini-2.5-pro",
+          "occurred_at": "2026-09-16T08:25:04.312Z"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "6f1e2d3c-0000-4000-8000-00000000aa01",
+            "message_id": "7a1c0001-0000-4000-8000-000000000002",
+            "request_id": "chat:6f1e2d3c-0000-4000-8000-00000000aa01"
+          },
+          "usage": {
+            "input_tokens": 2100,
+            "output_tokens": 410,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 1900
+          },
+          "model": "gemini-2.5-pro",
+          "occurred_at": "2026-09-16T08:25:09.871Z"
+        }
+      ],
+      "never_emit": [
+        {
+          "line": "the second line carrying id 7a1c0001-...-000000000001",
+          "reason": "recordToolCalls re-appends the whole message (same id) with toolCalls attached and identical tokens; one Usage, not two (07 §7 layer 1)"
+        },
+        {
+          "line_type": "user / $set",
+          "reason": "no tokens on the line"
+        }
+      ]
+    },
+    {
+      "file": "transcripts/tmp/acme-app/chats/6f1e2d3c-0000-4000-8000-00000000aa01/6f1e2d3c-0000-4000-8000-00000000aa02.jsonl",
+      "role": "subagent",
+      "usage_events": [
+        {
+          "idem_key_inputs": {
+            "session_id": "6f1e2d3c-0000-4000-8000-00000000aa01",
+            "message_id": "7a1c0001-0000-4000-8000-000000000003",
+            "request_id": "chat:6f1e2d3c-0000-4000-8000-00000000aa02"
+          },
+          "usage": {
+            "input_tokens": 900,
+            "output_tokens": 320,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          },
+          "model": "gemini-2.5-flash",
+          "occurred_at": "2026-09-16T08:31:14.000Z"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "6f1e2d3c-0000-4000-8000-00000000aa01",
+            "message_id": "7a1c0001-0000-4000-8000-000000000004",
+            "request_id": "chat:6f1e2d3c-0000-4000-8000-00000000aa02"
+          },
+          "usage": {
+            "input_tokens": 1300,
+            "output_tokens": 56,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 896
+          },
+          "model": "gemini-2.5-flash",
+          "occurred_at": "2026-09-16T08:31:17.300Z"
+        }
+      ],
+      "never_emit": [
+        {
+          "line": "the first line carrying id 7a1c0001-...-000000000003",
+          "reason": "a gemini message recorded by recordToolCalls before its tokens arrived (queuedTokens path): no tokens, no Usage; the re-append with tokens is the one that counts"
+        }
+      ]
+    }
+  ]
+}

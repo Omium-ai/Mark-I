@@ -1,0 +1,24 @@
+{
+ "conversation_id": "cc0e0000-0000-4000-8000-00000000aa01",
+ "generation_id": "cc0e0000-0000-4000-8000-00000000aa02",
+ "model": "claude-opus-4-7-thinking-max",
+ "model_id": "claude-opus-4-7",
+ "model_params": [
+  {
+   "id": "thinking",
+   "value": "true"
+  }
+ ],
+ "reason": "completed",
+ "duration_ms": 45000,
+ "is_background_agent": false,
+ "final_status": "completed",
+ "session_id": "cc0e0000-0000-4000-8000-00000000aa01",
+ "hook_event_name": "sessionEnd",
+ "cursor_version": "3.20.21",
+ "workspace_roots": [
+  "/home/devuser/acme-app"
+ ],
+ "user_email": null,
+ "transcript_path": null
+}

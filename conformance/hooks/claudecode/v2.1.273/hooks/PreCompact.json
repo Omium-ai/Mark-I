@@ -1,0 +1,10 @@
+{
+  "session_id": "aa000000-0000-4000-8000-000000000201",
+  "transcript_path": "/home/devuser/.claude/projects/-home-devuser-workspace-acme-app/aa000000-0000-4000-8000-000000000201.jsonl",
+  "cwd": "/home/devuser/workspace/acme-app",
+  "prompt_id": "aa000000-0000-4000-8000-000000000004",
+  "hook_event_name": "PreCompact",
+  "trigger": "manual",
+  "custom_instructions": null
+}
+

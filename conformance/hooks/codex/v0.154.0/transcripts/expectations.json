@@ -1,0 +1,198 @@
+{
+  "suite": "conf_hooks_codex_0.154.0_replay",
+  "agent": "codex",
+  "agent_version": "0.154.0",
+  "vendor_pin": {
+    "npm": "@openai/codex@0.154.0",
+    "git_tag": "rust-v0.154.0",
+    "commit": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
+    "tagged_at": "2026-09-09T21:43:48Z"
+  },
+  "idem_key_recipe": "idem_key = HMAC_tenant(thread_id, turn_id, response_id) — the 07 §7 / 08 §5.1 recipe with session_id:=thread_id (16 raw bytes), message_id:=turn_id, request_id:=response_id; each Codex thread (root or spawned sub-agent) is its own m1p session and the record's session_id names the root thread for a parent join",
+  "usage_field_map": {
+    "input_tokens": "usage.input_tokens (OpenAI semantics: INCLUDES cached_input_tokens)",
+    "output_tokens": "usage.output_tokens (INCLUDES reasoning_output_tokens)",
+    "cache_read_input_tokens": "usage.cached_input_tokens",
+    "cache_creation_input_tokens": "usage.cache_write_input_tokens",
+    "model": "the last preceding turn_context.payload.model in the same stream",
+    "service_tier": "absent on this surface"
+  },
+  "workspace_root": "/home/devuser/workspace/acme-app",
+  "out_of_workspace_streams": [
+    {
+      "file": "transcripts/sessions/2026/09/16/rollout-2026-09-16T09-02-45-019965a0-0000-7000-8000-00000000aa03.jsonl",
+      "cwd": "/home/devuser/workspace/other-app",
+      "never_emit_response_id": "resp_SynthForeignGGGGGGGG",
+      "reason": "Codex has ONE sessions tree for every workspace ($CODEX_HOME/sessions/YYYY/MM/DD/), so every rollout of every project shares the enabled workspace's directory. 04 §0.3 invariant 3 + 04 §2.1: the session_meta cwd resolves outside the enabled root, so the stream is never tailed and none of its keys ever emit."
+    }
+  ],
+  "streams": [
+    {
+      "file": "transcripts/sessions/2026/09/16/rollout-2026-09-16T08-25-00-019965a0-0000-7000-8000-00000000aa01.jsonl",
+      "role": "parent",
+      "usage_events": [
+        {
+          "idem_key_inputs": {
+            "session_id": "019965a0-0000-7000-8000-00000000aa01",
+            "message_id": "019965a0-0101-7000-8000-000000000101",
+            "request_id": "resp_SynthFixtureAAAAAAAA"
+          },
+          "usage": {
+            "input_tokens": 1200,
+            "output_tokens": 180,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          },
+          "model": "gpt-5.3-codex",
+          "occurred_at": "2026-09-16T08:25:04.312Z",
+          "root_session_id": "019965a0-0000-7000-8000-00000000aa01"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "019965a0-0000-7000-8000-00000000aa01",
+            "message_id": "019965a0-0101-7000-8000-000000000101",
+            "request_id": "resp_SynthFixtureBBBBBBBB"
+          },
+          "usage": {
+            "input_tokens": 1450,
+            "output_tokens": 96,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 1024
+          },
+          "model": "gpt-5.3-codex",
+          "occurred_at": "2026-09-16T08:25:09.871Z",
+          "root_session_id": "019965a0-0000-7000-8000-00000000aa01"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "019965a0-0000-7000-8000-00000000aa01",
+            "message_id": "019965a0-0102-7000-8000-000000000102",
+            "request_id": "resp_SynthFixtureCCCCCCCC"
+          },
+          "usage": {
+            "input_tokens": 2100,
+            "output_tokens": 410,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 1900
+          },
+          "model": "gpt-5.3-codex",
+          "occurred_at": "2026-09-16T08:30:15.400Z",
+          "root_session_id": "019965a0-0000-7000-8000-00000000aa01"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "019965a0-0000-7000-8000-00000000aa01",
+            "message_id": "019965a0-0102-7000-8000-000000000102",
+            "request_id": "resp_SynthFixtureDDDDDDDD"
+          },
+          "usage": {
+            "input_tokens": 2350,
+            "output_tokens": 58,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 2240
+          },
+          "model": "gpt-5.3-codex",
+          "occurred_at": "2026-09-16T08:30:19.250Z",
+          "root_session_id": "019965a0-0000-7000-8000-00000000aa01"
+        }
+      ],
+      "never_emit": [
+        {
+          "line_type": "event_msg/token_count",
+          "reason": "TokenCountEvent is a UI snapshot (cumulative + last), re-emitted on rate-limit-only refreshes with unchanged usage (openai/codex#14489); the tailer reads token_usage_record lines only, so these cannot count by construction"
+        },
+        {
+          "line_type": "compacted.latest_token_usage_record",
+          "reason": "a copy of resp_SynthFixtureCCCCCCCC nested inside a compaction payload; not a top-level token_usage_record line"
+        }
+      ]
+    },
+    {
+      "file": "transcripts/sessions/2026/09/16/rollout-2026-09-16T08-31-12-019965a0-0000-7000-8000-00000000aa02.jsonl",
+      "role": "subagent",
+      "usage_events": [
+        {
+          "idem_key_inputs": {
+            "session_id": "019965a0-0000-7000-8000-00000000aa02",
+            "message_id": "019965a0-0201-7000-8000-000000000201",
+            "request_id": "resp_SynthFixtureEEEEEEEE"
+          },
+          "usage": {
+            "input_tokens": 900,
+            "output_tokens": 320,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          },
+          "model": "gpt-5.3-codex",
+          "occurred_at": "2026-09-16T08:31:14.900Z",
+          "root_session_id": "019965a0-0000-7000-8000-00000000aa01"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "019965a0-0000-7000-8000-00000000aa02",
+            "message_id": "019965a0-0201-7000-8000-000000000201",
+            "request_id": "resp_SynthFixtureFFFFFFFF"
+          },
+          "usage": {
+            "input_tokens": 1300,
+            "output_tokens": 44,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 896
+          },
+          "model": "gpt-5.3-codex",
+          "occurred_at": "2026-09-16T08:31:17.300Z",
+          "root_session_id": "019965a0-0000-7000-8000-00000000aa01"
+        }
+      ],
+      "never_emit": []
+    }
+  ],
+  "rate_limit_reemit_case": {
+    "file": "transcripts/sessions/2026/09/16/rollout-2026-09-16T08-25-00-019965a0-0000-7000-8000-00000000aa01.jsonl",
+    "response_id": "resp_SynthFixtureBBBBBBBB",
+    "token_count_lines_carrying_it_as_last_usage": 3,
+    "token_usage_record_lines": 1,
+    "correct_usage_events": 1,
+    "why": "openai/codex#14489: three token_count snapshots carry the same last_token_usage (one real, two rate-limit-only refreshes); a per-line summer over token_count would report 3x. FR-SPINE-003 class."
+  },
+  "exec_stream": {
+    "file": "exec/codex-exec.jsonl",
+    "source": "codex exec --json (codex-rs/exec/src/exec_events.rs ThreadEvent JSONL at the pinned commit)",
+    "thread_id": "019965a0-0000-7000-8000-00000000aa01",
+    "usage_events": [
+      {
+        "idem_key_inputs": {
+          "session_id": "019965a0-0000-7000-8000-00000000aa01",
+          "message_id": "turn:1",
+          "request_id": "exec:019965a0-0000-7000-8000-00000000aa01"
+        },
+        "usage": {
+          "input_tokens": 2650,
+          "output_tokens": 276,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 1024
+        }
+      },
+      {
+        "idem_key_inputs": {
+          "session_id": "019965a0-0000-7000-8000-00000000aa01",
+          "message_id": "turn:3",
+          "request_id": "exec:019965a0-0000-7000-8000-00000000aa01"
+        },
+        "usage": {
+          "input_tokens": 4450,
+          "output_tokens": 468,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 4140
+        }
+      }
+    ],
+    "never_emit": [
+      {
+        "line_type": "turn.failed",
+        "reason": "no usage on a failed turn"
+      }
+    ],
+    "dedupe_note": "the exec stream carries no turn_id/response_id (TurnCompletedEvent{usage} only), so its key is the 1-based turn ordinal within the thread — weaker than the rollout key and never run concurrently with the rollout tail of the same thread (codex.DetectUsage picks one)"
+  }
+}

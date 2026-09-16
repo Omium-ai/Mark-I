@@ -1,0 +1,23 @@
+{
+ "conversation_id": "cc0e0000-0000-4000-8000-00000000aa01",
+ "generation_id": "cc0e0000-0000-4000-8000-00000000aa02",
+ "model": "claude-opus-4-7-thinking-max",
+ "model_id": "claude-opus-4-7",
+ "model_params": [
+  {
+   "id": "thinking",
+   "value": "true"
+  }
+ ],
+ "prompt": "run echo synth-ok in the shell, then say ok",
+ "attachments": [],
+ "composer_mode": "agent",
+ "session_id": "cc0e0000-0000-4000-8000-00000000aa01",
+ "hook_event_name": "beforeSubmitPrompt",
+ "cursor_version": "2026.09.10-fd3934a",
+ "workspace_roots": [
+  "/home/devuser/acme-app"
+ ],
+ "user_email": null,
+ "transcript_path": null
+}

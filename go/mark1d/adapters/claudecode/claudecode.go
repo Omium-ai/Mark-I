@@ -128,6 +128,7 @@ func (a *Adapter) Detect() (adapters.Detection, error) {
 // all, and capture is fail-open-for-availability, not fail-static.
 var SupportedVersions = map[string]struct{}{
 	"2.1.251": {},
+	"2.1.273": {},
 }
 
 // Supported reports whether the transcript tailer may parse this agent's
@@ -249,6 +250,7 @@ func mungeCwd(abs string) string {
 type TailConfig struct {
 	StateDir     string
 	UsageIdemKey []byte
+	Observe      func(*m1pv1.Event) // tailers.Config.Observe: the segmenter's task_id stamp
 	Emit         func(context.Context, *m1pv1.Event) error
 	Log          *slog.Logger
 }
@@ -276,6 +278,7 @@ func (a *Adapter) StartTail(ws adapters.Workspace, set tailers.WorkspaceSet, cfg
 		StateDir:     cfg.StateDir,
 		Allowed:      set.Allowed,
 		UsageIdemKey: cfg.UsageIdemKey,
+		Observe:      cfg.Observe,
 		Emit:         cfg.Emit,
 		Log:          cfg.Log,
 	})

@@ -1,0 +1,11 @@
+{"type":"thread.started","thread_id":"019965a0-0000-7000-8000-00000000aa01"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"bash -lc ./scripts/run-tests.sh","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"bash -lc ./scripts/run-tests.sh","aggregated_output":"12 passed in 0.41s\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Added retry helper; tests pass."}}
+{"type":"turn.completed","usage":{"input_tokens":2650,"cached_input_tokens":1024,"cache_write_input_tokens":0,"output_tokens":276,"reasoning_output_tokens":64}}
+{"type":"turn.started"}
+{"type":"turn.failed","error":{"message":"stream disconnected before completion"}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Documented."}}
+{"type":"turn.completed","usage":{"input_tokens":4450,"cached_input_tokens":4140,"cache_write_input_tokens":0,"output_tokens":468,"reasoning_output_tokens":220}}

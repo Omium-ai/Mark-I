@@ -1,0 +1,99 @@
+{
+ "agent": "copilot",
+ "agent_version": "1.0.85",
+ "vendor_pin": {
+  "npm": "@github/copilot@1.0.85",
+  "loader_tgz_sha256": "d26e3c15310bdcdcc910ed223285bed8d68aaebce0d344f97224b5cfdaeeee36",
+  "runtime_npm": "@github/copilot-linux-x64@1.0.85",
+  "runtime_tgz_sha256": "4a0081b1b615639c8101ccd39c71bbef4f194e86a1be81fd03962a59daae1026",
+  "build_git_commit": "4848e944",
+  "docs_repo": "github/docs",
+  "docs_commit": "b87a8cfb5931ae735ff4dc3d936ccbc2a4c0b1e7",
+  "byok_docs_commit": "1765b5624b3ec9a2841b385345757140cd29eb7c"
+ },
+ "recorded_at": "2026-09-16",
+ "workspace_root": "/home/devuser/acme-app",
+ "usage_class": "DIAGNOSTIC",
+ "usage_events_expected": 0,
+ "streams": [
+  {
+   "file": "transcripts/session-state/c0910000-0000-4000-8000-00000000aa01/events.jsonl",
+   "session_id": "c0910000-0000-4000-8000-00000000aa01",
+   "cwd": "/home/devuser/acme-app",
+   "diagnostic_events": [
+    {
+     "body": "session_start",
+     "agent": "copilot",
+     "agent_version": "1.0.85",
+     "capture_path": "CAPTURE_PATH_TRANSCRIPT"
+    },
+    {
+     "body": "session_end",
+     "reason": "END_REASON_EXIT",
+     "duration_ms": 360,
+     "drained": false
+    }
+   ],
+   "never_usage_from_rollup": {
+    "models": [
+     "fake-model"
+    ],
+    "note": "session.shutdown.data.modelMetrics is a per-session, per-model rollup with no per-request id; it is never a Usage source (08 section 2 idem_key invariant)"
+   }
+  },
+  {
+   "file": "transcripts/session-state/c0910000-0000-4000-8000-00000000aa02/events.jsonl",
+   "session_id": "c0910000-0000-4000-8000-00000000aa02",
+   "cwd": "/home/devuser/acme-app",
+   "diagnostic_events": [
+    {
+     "body": "session_start",
+     "agent": "copilot",
+     "agent_version": "1.0.85",
+     "capture_path": "CAPTURE_PATH_TRANSCRIPT"
+    },
+    {
+     "body": "session_end",
+     "reason": "END_REASON_EXIT",
+     "duration_ms": 328,
+     "drained": false
+    }
+   ],
+   "never_usage_from_rollup": {
+    "models": [
+     "fake-model"
+    ],
+    "note": "session.shutdown.data.modelMetrics is a per-session, per-model rollup with no per-request id; it is never a Usage source (08 section 2 idem_key invariant)"
+   }
+  }
+ ],
+ "out_of_workspace_streams": [
+  {
+   "file": "transcripts/session-state/c0910000-0000-4000-8000-00000000ff01/events.jsonl",
+   "session_id": "c0910000-0000-4000-8000-00000000ff01",
+   "cwd": "/home/devuser/other-app",
+   "never_emit_session_id": "c0910000-0000-4000-8000-00000000ff01"
+  }
+ ],
+ "hooks": {
+  "format": "PascalCase (VS Code compatible): hook_event_name + session_id + ISO timestamp",
+  "registered": [
+   "SessionStart",
+   "UserPromptSubmit",
+   "PreToolUse",
+   "PostToolUse",
+   "PostToolUseFailure",
+   "Stop",
+   "SessionEnd"
+  ],
+  "stop_gate": {
+   "event": "Stop",
+   "block_output": {
+    "decision": "block",
+    "reason": "<continuation>"
+   },
+   "hard_cap_field": "stop_hook_active",
+   "vendor_runaway_cap": 8
+  }
+ }
+}

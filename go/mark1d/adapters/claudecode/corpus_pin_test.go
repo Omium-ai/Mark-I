@@ -35,6 +35,7 @@ import (
 // from disk, so a new one with no entry fails closed — nobody has to remember.
 var recordedCorpusDigest = map[string]string{
 	"2.1.251": "feab581125d058af1a707f496e36c7732da93692517c879a7aa498385ed5d6dd",
+	"2.1.273": "e30d55464eb310273d36af755209c33997a5d8fe778f2ece3337e6aa4e5f2044",
 }
 
 // corpusPinExempt: the two files under a version directory that are not
@@ -161,10 +162,11 @@ func digestCorpus(t *testing.T, dir, version string) (string, int) {
 }
 
 // assertTranscript: a transcript line is the vendor's, and it says so. Every
-// v2.1.251 line stamps `version` and `sessionId`; checking the first line
-// against the directory the file is filed under makes a fixture that drifted
-// into some other version's shape a failure here rather than a silent
-// re-pinning of what "2.1.251" means.
+// line that stamps `version` must stamp the directory's — v2.1.251 stamps it on
+// every line, v2.1.273 leads with unversioned meta lines (queue-operation,
+// atis-latch) and stamps every message line — so a fixture that drifted into
+// some other version's shape fails here rather than silently re-pinning what
+// the version means. Line 1 must still be a session-stamped vendor line.
 func assertTranscript(t *testing.T, rel string, b []byte, version string) {
 	t.Helper()
 	var line struct {
@@ -172,16 +174,25 @@ func assertTranscript(t *testing.T, rel string, b []byte, version string) {
 		SessionID string `json:"sessionId"`
 		Type      string `json:"type"`
 	}
-	first, _, _ := strings.Cut(string(b), "\n")
-	if err := json.Unmarshal([]byte(first), &line); err != nil {
-		t.Errorf("%s line 1 is not JSON (%v) — this is meant to be a recorded transcript", rel, err)
-		return
+	stamped := 0
+	for i, raw := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
+			t.Errorf("%s line %d is not JSON (%v) — this is meant to be a recorded transcript", rel, i+1, err)
+			return
+		}
+		if i == 0 && (line.SessionID == "" || line.Type == "") {
+			t.Errorf("%s line 1 has no sessionId/type — not a transcript line", rel)
+		}
+		if line.Version == "" {
+			continue
+		}
+		stamped++
+		if line.Version != version {
+			t.Errorf("%s line %d carries version %q but is filed under v%s", rel, i+1, line.Version, version)
+		}
 	}
-	if line.Version != version {
-		t.Errorf("%s line 1 carries version %q but is filed under v%s", rel, line.Version, version)
-	}
-	if line.SessionID == "" || line.Type == "" {
-		t.Errorf("%s line 1 has no sessionId/type — not a transcript line", rel)
+	if stamped == 0 {
+		t.Errorf("%s stamps no version on any line — not a vendor transcript", rel)
 	}
 }
 

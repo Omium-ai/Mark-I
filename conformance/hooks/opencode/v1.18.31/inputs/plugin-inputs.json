@@ -1,0 +1,501 @@
+{
+  "source": "vendor-shaped arguments to the plugin hooks in schema/plugin-index.ts (Hooks): `event` carries {id, type, properties} as plugin/index.ts builds it from the bus; trigger hooks carry (input, output). Event bodies follow schema/v1-session.ts (SessionInfo, AssistantMessage, StepFinishPart) and schema/session-status-event.ts (session.idle).",
+  "instances": [
+    {
+      "directory": "/home/devuser/workspace/acme-app",
+      "worktree": "/home/devuser/workspace/acme-app",
+      "calls": [
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE001",
+            "type": "session.created",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+              "info": {
+                "id": "ses_0199a1b2c3d4SynthFixtuAA01",
+                "slug": "synth-fixture",
+                "projectID": "prj_SynthFixtureProject00",
+                "directory": "/home/devuser/workspace/acme-app",
+                "title": "add a retry to the uploader",
+                "version": "1.18.31",
+                "time": {
+                  "created": 1789547100000,
+                  "updated": 1789547100000
+                }
+              }
+            }
+          }
+        },
+        {
+          "hook": "chat.message",
+          "input": {
+            "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+            "agent": "build",
+            "model": {
+              "providerID": "anthropic",
+              "modelID": "claude-sonnet-4-5"
+            },
+            "messageID": "msg_0199a1b2c3d4SynthFixtuU001"
+          },
+          "output": {
+            "message": {
+              "id": "msg_0199a1b2c3d4SynthFixtuU001",
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+              "role": "user",
+              "time": {
+                "created": 1789547101000
+              }
+            },
+            "parts": [
+              {
+                "id": "prt_0199a1b2c3d4SynthFixtuPU01",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+                "messageID": "msg_0199a1b2c3d4SynthFixtuU001",
+                "type": "text",
+                "text": "add a retry to the uploader"
+              }
+            ]
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE002",
+            "type": "message.updated",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+              "info": {
+                "id": "msg_0199a1b2c3d4SynthFixtuM001",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+                "role": "assistant",
+                "time": {
+                  "created": 1789547101100
+                },
+                "parentID": "msg_0199a1b2c3d4SynthFixtuU001",
+                "modelID": "claude-sonnet-4-5",
+                "providerID": "anthropic",
+                "mode": "build",
+                "agent": "build",
+                "path": {
+                  "cwd": "/home/devuser/workspace/acme-app",
+                  "root": "/home/devuser/workspace/acme-app"
+                },
+                "cost": 0,
+                "tokens": {
+                  "input": 0,
+                  "output": 0,
+                  "reasoning": 0,
+                  "cache": {
+                    "read": 0,
+                    "write": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE003",
+            "type": "message.part.updated",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+              "part": {
+                "id": "prt_0199a1b2c3d4SynthFixtuPT01",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+                "messageID": "msg_0199a1b2c3d4SynthFixtuM001",
+                "type": "text",
+                "text": "I will run the tests first.",
+                "time": {
+                  "start": 1789547102000
+                }
+              },
+              "time": 1789547102000
+            }
+          }
+        },
+        {
+          "hook": "tool.execute.before",
+          "input": {
+            "tool": "bash",
+            "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+            "callID": "call_SynthFixtureTTTTTTTT"
+          },
+          "output": {
+            "args": {
+              "command": "go test ./..."
+            }
+          }
+        },
+        {
+          "hook": "tool.execute.after",
+          "input": {
+            "tool": "bash",
+            "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+            "callID": "call_SynthFixtureTTTTTTTT",
+            "args": {
+              "command": "go test ./..."
+            }
+          },
+          "output": {
+            "title": "go test ./...",
+            "output": "ok",
+            "metadata": {
+              "exit": 0
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE004",
+            "type": "message.part.updated",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+              "part": {
+                "id": "prt_0199a1b2c3d4SynthFixtuP001",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+                "messageID": "msg_0199a1b2c3d4SynthFixtuM001",
+                "type": "step-finish",
+                "reason": "tool-calls",
+                "cost": 0.0123,
+                "tokens": {
+                  "input": 1200,
+                  "output": 180,
+                  "reasoning": 40,
+                  "cache": {
+                    "read": 0,
+                    "write": 0
+                  }
+                }
+              },
+              "time": 1789547104312
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE005",
+            "type": "message.updated",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+              "info": {
+                "id": "msg_0199a1b2c3d4SynthFixtuM001",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+                "role": "assistant",
+                "time": {
+                  "created": 1789547101100
+                },
+                "parentID": "msg_0199a1b2c3d4SynthFixtuU001",
+                "modelID": "claude-sonnet-4-5",
+                "providerID": "anthropic",
+                "mode": "build",
+                "agent": "build",
+                "path": {
+                  "cwd": "/home/devuser/workspace/acme-app",
+                  "root": "/home/devuser/workspace/acme-app"
+                },
+                "cost": 0.0123,
+                "tokens": {
+                  "input": 1200,
+                  "output": 180,
+                  "reasoning": 40,
+                  "cache": {
+                    "read": 0,
+                    "write": 0
+                  }
+                },
+                "finish": "tool-calls"
+              }
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE006",
+            "type": "message.part.updated",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+              "part": {
+                "id": "prt_0199a1b2c3d4SynthFixtuP002",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+                "messageID": "msg_0199a1b2c3d4SynthFixtuM001",
+                "type": "step-finish",
+                "reason": "stop",
+                "cost": 0.0311,
+                "tokens": {
+                  "input": 2100,
+                  "output": 410,
+                  "reasoning": 0,
+                  "cache": {
+                    "read": 1900,
+                    "write": 300
+                  }
+                }
+              },
+              "time": 1789547109871
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE007",
+            "type": "message.part.updated",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+              "part": {
+                "id": "prt_0199a1b2c3d4SynthFixtuP002",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+                "messageID": "msg_0199a1b2c3d4SynthFixtuM001",
+                "type": "step-finish",
+                "reason": "stop",
+                "cost": 0.0311,
+                "tokens": {
+                  "input": 2100,
+                  "output": 410,
+                  "reasoning": 0,
+                  "cache": {
+                    "read": 1900,
+                    "write": 300
+                  }
+                }
+              },
+              "time": 1789547109871
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE008",
+            "type": "message.updated",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+              "info": {
+                "id": "msg_0199a1b2c3d4SynthFixtuM001",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+                "role": "assistant",
+                "time": {
+                  "created": 1789547101100
+                },
+                "parentID": "msg_0199a1b2c3d4SynthFixtuU001",
+                "modelID": "claude-sonnet-4-5",
+                "providerID": "anthropic",
+                "mode": "build",
+                "agent": "build",
+                "path": {
+                  "cwd": "/home/devuser/workspace/acme-app",
+                  "root": "/home/devuser/workspace/acme-app"
+                },
+                "cost": 0.0434,
+                "tokens": {
+                  "input": 2100,
+                  "output": 410,
+                  "reasoning": 0,
+                  "cache": {
+                    "read": 1900,
+                    "write": 300
+                  }
+                },
+                "finish": "stop"
+              }
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE009",
+            "type": "session.idle",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01"
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE010",
+            "type": "message.updated",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+              "info": {
+                "id": "msg_0199a1b2c3d4SynthFixtuM002",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+                "role": "assistant",
+                "time": {
+                  "created": 1789547160000
+                },
+                "parentID": "msg_0199a1b2c3d4SynthFixtuU001",
+                "modelID": "claude-sonnet-4-5",
+                "providerID": "anthropic",
+                "mode": "build",
+                "agent": "build",
+                "path": {
+                  "cwd": "/home/devuser/workspace/acme-app",
+                  "root": "/home/devuser/workspace/acme-app"
+                },
+                "cost": 0,
+                "tokens": {
+                  "input": 0,
+                  "output": 0,
+                  "reasoning": 0,
+                  "cache": {
+                    "read": 0,
+                    "write": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE011",
+            "type": "message.part.updated",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+              "part": {
+                "id": "prt_0199a1b2c3d4SynthFixtuP003",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01",
+                "messageID": "msg_0199a1b2c3d4SynthFixtuM002",
+                "type": "step-finish",
+                "reason": "stop",
+                "cost": 0.009,
+                "tokens": {
+                  "input": 900,
+                  "output": 320,
+                  "reasoning": 0,
+                  "cache": {
+                    "read": 0,
+                    "write": 0
+                  }
+                }
+              },
+              "time": 1789547163000
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE012",
+            "type": "session.idle",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuAA01"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "directory": "/home/devuser/workspace/other-app",
+      "worktree": "/home/devuser/workspace/other-app",
+      "calls": [
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE013",
+            "type": "session.created",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuFF01",
+              "info": {
+                "id": "ses_0199a1b2c3d4SynthFixtuFF01",
+                "slug": "synth-fixture",
+                "projectID": "prj_SynthFixtureProject00",
+                "directory": "/home/devuser/workspace/other-app",
+                "title": "rename the service",
+                "version": "1.18.31",
+                "time": {
+                  "created": 1789547100000,
+                  "updated": 1789547100000
+                }
+              }
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE014",
+            "type": "message.updated",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuFF01",
+              "info": {
+                "id": "msg_0199a1b2c3d4SynthFixtuMF01",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuFF01",
+                "role": "assistant",
+                "time": {
+                  "created": 1789547220000
+                },
+                "parentID": "msg_0199a1b2c3d4SynthFixtuU001",
+                "modelID": "claude-sonnet-4-5",
+                "providerID": "anthropic",
+                "mode": "build",
+                "agent": "build",
+                "path": {
+                  "cwd": "/home/devuser/workspace/other-app",
+                  "root": "/home/devuser/workspace/other-app"
+                },
+                "cost": 0,
+                "tokens": {
+                  "input": 0,
+                  "output": 0,
+                  "reasoning": 0,
+                  "cache": {
+                    "read": 0,
+                    "write": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE015",
+            "type": "message.part.updated",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuFF01",
+              "part": {
+                "id": "prt_0199a1b2c3d4SynthFixtuPF01",
+                "sessionID": "ses_0199a1b2c3d4SynthFixtuFF01",
+                "messageID": "msg_0199a1b2c3d4SynthFixtuMF01",
+                "type": "step-finish",
+                "reason": "stop",
+                "cost": 0.007,
+                "tokens": {
+                  "input": 700,
+                  "output": 90,
+                  "reasoning": 0,
+                  "cache": {
+                    "read": 0,
+                    "write": 0
+                  }
+                }
+              },
+              "time": 1789547223000
+            }
+          }
+        },
+        {
+          "hook": "event",
+          "event": {
+            "id": "evt_0199a1b2c3d4SynthFixtuE016",
+            "type": "session.idle",
+            "properties": {
+              "sessionID": "ses_0199a1b2c3d4SynthFixtuFF01"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

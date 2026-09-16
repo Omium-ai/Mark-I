@@ -68,11 +68,11 @@ type Slot struct {
 // silence followed by a missing receipt.
 var Roster = []Slot{
 	{"claudecode", "B", true, "1"}, // strict-JSON settings, no include mechanism
-	{"codex", "", false, "2"},
-	{"gemini", "", false, "3"},
-	{"opencode", "", false, "4"},
-	{"copilot", "", false, "5"},
-	{"cursor", "", false, "5"},
+	{"codex", "A/B", true, "2"},    // hooks.json: owned file when absent, fenced entries when present
+	{"gemini", "B", true, "3"},     // ~/.gemini/settings.json: fenced entries; MARK1_AGENT rides the hook entry's env
+	{"opencode", "A", true, "4"},   // $XDG_CONFIG_HOME/opencode/plugins/mark1.js: owned plugin; usage via its own capture JSONL
+	{"copilot", "A", true, "5"},    // $COPILOT_HOME/hooks/mark1.json: owned file; events.jsonl is DIAGNOSTIC-class, Usage rides the BYOK wire path
+	{"cursor", "A/B", true, "5"},   // ~/.cursor/hooks.json: owned when absent, fenced when present; hooks only, the wire proxy is a permanent NO-GO
 	{"crush", "", false, "roadmap"},
 }
 

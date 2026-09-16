@@ -1,0 +1,1 @@
+{"hook_event_name":"PreToolUse","session_id":"c0910000-0000-4000-8000-00000000aa01","timestamp":"2026-09-16T10:19:24.596Z","cwd":"/home/devuser/acme-app","tool_name":"Bash","tool_input":{"command":"echo synth-ok","description":"say ok"}}

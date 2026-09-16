@@ -389,7 +389,7 @@ func TestShimStopGateAgainstTheRealServer(t *testing.T) {
 			Posterior: []float64{0.02, 0.95, 0.02, 0.01},
 		},
 		Knee: verdict.KneeState{N: 2, PLCB: 0.4, VTask: 10, CostN: 1, CostBasis: "usd"},
-	}}, verdict.NewBlocks(), t.TempDir())
+	}}, verdict.NewBlocks(), fabrictest.OptedInStateDir(t))
 	// The daemon's segmenter stands in as a constant: this test is about the two
 	// languages agreeing on the wire, and D-AA makes an unresolved task a miss,
 	// so without a resolver the gate would answer ALLOW and prove nothing.

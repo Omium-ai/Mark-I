@@ -1,0 +1,110 @@
+{
+ "source": "agent.v1 hook messages, proto3 field lists as registered in extensions/cursor-agent-exec/dist/main.js of Cursor IDE 3.20.21 (commit f09fca384ceca23f7bf21f9c23655b162641d740, sha256 7a62b0b8833c8ac1a397eaf39a0a442459b8f1415fa67dd0ee9b458bdb5d4e2a)",
+ "note": "sessionStart/sessionEnd/beforeShellExecution/afterShellExecution/beforeReadFile/afterFileEdit/before-afterMCPExecution/workspaceOpen have no agent.v1 query message: they are dispatched by the IDE client, not the agent runtime, and the CLI does not dispatch them at this pin",
+ "messages": {
+  "StopRequestQuery": [
+   "status",
+   "loop_count",
+   "conversation_id",
+   "generation_id",
+   "model",
+   "model_id",
+   "model_params",
+   "input_tokens",
+   "output_tokens",
+   "cache_read_tokens",
+   "cache_write_tokens"
+  ],
+  "StopRequestResponse": [
+   "followup_message"
+  ],
+  "PreToolUseRequestQuery": [
+   "tool_name",
+   "tool_input",
+   "tool_use_id",
+   "cwd",
+   "conversation_id",
+   "generation_id",
+   "model",
+   "model_id",
+   "model_params"
+  ],
+  "PreToolUseRequestResponse": [
+   "permission",
+   "user_message",
+   "agent_message",
+   "updated_input",
+   "additional_context"
+  ],
+  "PostToolUseRequestQuery": [
+   "tool_name",
+   "tool_input",
+   "tool_output",
+   "duration_ms",
+   "tool_use_id",
+   "cwd",
+   "conversation_id",
+   "generation_id",
+   "model",
+   "model_id",
+   "model_params"
+  ],
+  "PostToolUseFailureRequestQuery": [
+   "tool_name",
+   "tool_input",
+   "error_message",
+   "failure_type",
+   "duration_ms",
+   "tool_use_id",
+   "is_interrupt",
+   "conversation_id",
+   "generation_id",
+   "model",
+   "model_id",
+   "model_params"
+  ],
+  "BeforeSubmitPromptRequestQuery": [
+   "prompt",
+   "attachments",
+   "composer_mode",
+   "conversation_id",
+   "generation_id",
+   "model",
+   "model_id",
+   "model_params"
+  ],
+  "SubagentStopRequestQuery": [
+   "subagent_id",
+   "subagent_type",
+   "status",
+   "duration_ms",
+   "summary",
+   "parent_conversation_id",
+   "message_count",
+   "tool_call_count",
+   "error_message",
+   "modified_files",
+   "git_branch",
+   "conversation_id",
+   "generation_id",
+   "model",
+   "loop_count",
+   "task",
+   "description",
+   "model_id",
+   "model_params"
+  ],
+  "AfterAgentResponseRequestQuery": [
+   "text",
+   "conversation_id",
+   "generation_id",
+   "model",
+   "model_id",
+   "model_params",
+   "input_tokens",
+   "output_tokens",
+   "cache_read_tokens",
+   "cache_write_tokens"
+  ]
+ }
+}

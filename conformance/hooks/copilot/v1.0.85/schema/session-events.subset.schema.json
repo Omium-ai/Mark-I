@@ -1,0 +1,907 @@
+{
+ "$schema": "http://json-schema.org/draft-07/schema#",
+ "description": "JSON Schema for session events emitted by the Copilot CLI runtime.",
+ "x-mark1-subset": "verbatim definitions extracted from schemas/session-events.schema.json of @github/copilot-linux-x64@1.0.85 (sha256 20e13b3f689f554814142d3467fa1dd68469ddf16533954bd29ff89cbd8e805d); the full file is 856 KB",
+ "definitions": {
+  "StartEvent": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+    },
+    "timestamp": {
+     "type": "string",
+     "format": "date-time",
+     "description": "ISO 8601 timestamp when the event was created"
+    },
+    "parentId": {
+     "anyOf": [
+      {
+       "type": "string",
+       "format": "uuid"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+    },
+    "ephemeral": {
+     "type": "boolean",
+     "description": "When true, the event is transient and not persisted to the session event log on disk"
+    },
+    "agentId": {
+     "type": "string",
+     "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+    },
+    "type": {
+     "type": "string",
+     "const": "session.start",
+     "description": "Type discriminator. Always \"session.start\"."
+    },
+    "data": {
+     "$ref": "#/definitions/StartData",
+     "description": "Session initialization metadata including context and configuration"
+    }
+   },
+   "required": [
+    "id",
+    "timestamp",
+    "parentId",
+    "type",
+    "data"
+   ],
+   "additionalProperties": false,
+   "description": "Session event \"session.start\". Session initialization metadata including context and configuration",
+   "title": "StartEvent"
+  },
+  "StartData": {
+   "type": "object",
+   "properties": {
+    "sessionId": {
+     "type": "string",
+     "description": "Unique identifier for the session"
+    },
+    "version": {
+     "type": "integer",
+     "exclusiveMinimum": 0,
+     "description": "Schema version number for the session event format"
+    },
+    "producer": {
+     "type": "string",
+     "description": "Identifier of the software producing the events (e.g., \"copilot-agent\")"
+    },
+    "copilotVersion": {
+     "type": "string",
+     "description": "Version string of the Copilot application"
+    },
+    "startTime": {
+     "type": "string",
+     "format": "date-time",
+     "description": "ISO 8601 timestamp when the session was created"
+    },
+    "selectedModel": {
+     "type": "string",
+     "description": "Model selected at session creation time, if any"
+    },
+    "reasoningEffort": {
+     "type": "string",
+     "description": "Reasoning effort level used for model calls, if applicable (e.g. \"none\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\")"
+    },
+    "reasoningSummary": {
+     "$ref": "#/definitions/ReasoningSummary",
+     "description": "Reasoning summary mode used for model calls, if applicable (e.g. \"none\", \"concise\", \"detailed\")"
+    },
+    "verbosity": {
+     "$ref": "#/definitions/Verbosity",
+     "description": "Output verbosity level used for model calls, if applicable (e.g. \"low\", \"medium\", \"high\")"
+    },
+    "contextTier": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/ContextTier"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Context tier selected at session creation time for models with tiered context pricing; null when no tier is selected (e.g., non-tiered model)"
+    },
+    "autoTier": {
+     "$ref": "#/definitions/AutoTier",
+     "description": "Auto routing preference selected at session creation time"
+    },
+    "sessionLimits": {
+     "$ref": "#/definitions/SessionLimitsConfig",
+     "description": "Session limits configured at session creation time, if any"
+    },
+    "context": {
+     "$ref": "#/definitions/WorkingDirectoryContext",
+     "description": "Working directory and git context at session start"
+    },
+    "githubMcpToolConfig": {
+     "$ref": "#/definitions/GitHubMcpToolConfig",
+     "description": "Per-session GitHub MCP override persisted for cold resume"
+    },
+    "alreadyInUse": {
+     "type": "boolean",
+     "description": "Whether the session was already in use by another client at start time"
+    },
+    "remoteSteerable": {
+     "type": "boolean",
+     "description": "Whether this session supports remote steering via GitHub"
+    },
+    "detachedFromSpawningParentSessionId": {
+     "type": "string",
+     "description": "When set, identifies a parent session whose context this session continues \u2014 e.g., a detached headless rem-agent run launched on the parent's interactive shutdown. Telemetry from this session is reported under the parent's session_id."
+    }
+   },
+   "required": [
+    "sessionId",
+    "version",
+    "producer",
+    "copilotVersion",
+    "startTime"
+   ],
+   "additionalProperties": false,
+   "description": "Session initialization metadata including context and configuration",
+   "title": "StartData"
+  },
+  "WorkingDirectoryContext": {
+   "type": "object",
+   "properties": {
+    "cwd": {
+     "type": "string",
+     "description": "Current working directory path"
+    },
+    "gitRoot": {
+     "type": "string",
+     "description": "Root directory of the git repository, resolved via git rev-parse"
+    },
+    "repository": {
+     "type": "string",
+     "description": "Repository identifier derived from the git remote URL (\"owner/name\" for GitHub, \"org/project/repo\" for Azure DevOps)"
+    },
+    "hostType": {
+     "$ref": "#/definitions/WorkingDirectoryContextHostType",
+     "description": "Hosting platform type of the repository (github or ado)"
+    },
+    "repositoryHost": {
+     "type": "string",
+     "description": "Raw host string from the git remote URL (e.g. \"github.com\", \"mycompany.ghe.com\", \"dev.azure.com\")"
+    },
+    "branch": {
+     "type": "string",
+     "description": "Current git branch name"
+    },
+    "headCommit": {
+     "type": "string",
+     "description": "Head commit of current git branch at session start time"
+    },
+    "baseCommit": {
+     "type": "string",
+     "description": "Base commit of current git branch at session start time"
+    },
+    "pendingGitContext": {
+     "type": "boolean",
+     "description": "Set on the immediate preliminary event of a working-directory change, before the git context is resolved. A settled follow-up event (enriched with git context, or cwd-only for a non-repository) is always emitted afterward, so observers may defer to it. Absent on standalone/final events (e.g. relay context changes)."
+    }
+   },
+   "required": [
+    "cwd"
+   ],
+   "additionalProperties": false,
+   "description": "Working directory and git context at session start",
+   "title": "WorkingDirectoryContext"
+  },
+  "ShutdownEvent": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+    },
+    "timestamp": {
+     "type": "string",
+     "format": "date-time",
+     "description": "ISO 8601 timestamp when the event was created"
+    },
+    "parentId": {
+     "anyOf": [
+      {
+       "type": "string",
+       "format": "uuid"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+    },
+    "ephemeral": {
+     "type": "boolean",
+     "description": "When true, the event is transient and not persisted to the session event log on disk"
+    },
+    "agentId": {
+     "type": "string",
+     "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+    },
+    "type": {
+     "type": "string",
+     "const": "session.shutdown",
+     "description": "Type discriminator. Always \"session.shutdown\"."
+    },
+    "data": {
+     "$ref": "#/definitions/ShutdownData",
+     "description": "Session termination metrics including usage statistics, code changes, and shutdown reason"
+    }
+   },
+   "required": [
+    "id",
+    "timestamp",
+    "parentId",
+    "type",
+    "data"
+   ],
+   "additionalProperties": false,
+   "description": "Session event \"session.shutdown\". Session termination metrics including usage statistics, code changes, and shutdown reason",
+   "title": "ShutdownEvent"
+  },
+  "ShutdownData": {
+   "type": "object",
+   "properties": {
+    "shutdownType": {
+     "$ref": "#/definitions/ShutdownType",
+     "description": "Whether the session ended normally (\"routine\") or due to a crash/fatal error (\"error\")"
+    },
+    "errorReason": {
+     "type": "string",
+     "description": "Error description when shutdownType is \"error\""
+    },
+    "totalPremiumRequests": {
+     "type": "number",
+     "minimum": 0,
+     "description": "Total number of premium API requests used during the session",
+     "visibility": "internal"
+    },
+    "totalNanoAiu": {
+     "type": "number",
+     "minimum": 0,
+     "description": "Session-wide accumulated nano-AI units cost",
+     "stability": "experimental"
+    },
+    "tokenDetails": {
+     "type": "object",
+     "additionalProperties": {
+      "$ref": "#/definitions/ShutdownTokenDetail",
+      "description": "A session-wide shutdown token-type entry storing the accumulated token count."
+     },
+     "description": "Session-wide per-token-type accumulated token counts"
+    },
+    "totalApiDurationMs": {
+     "type": "integer",
+     "minimum": 0,
+     "format": "duration",
+     "description": "Cumulative time spent in API calls during the session, in milliseconds"
+    },
+    "sessionStartTime": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Unix timestamp (milliseconds) when the session started"
+    },
+    "eventsFileSizeBytes": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "On-disk byte size of the session's persisted events.jsonl file at shutdown time; omitted when the file does not exist or cannot be stat'd"
+    },
+    "codeChanges": {
+     "$ref": "#/definitions/ShutdownCodeChanges",
+     "description": "Aggregate code change metrics for the session"
+    },
+    "modelMetrics": {
+     "type": "object",
+     "additionalProperties": {
+      "$ref": "#/definitions/ShutdownModelMetric",
+      "description": "Per-model shutdown metrics with request counts, token usage, nano-AI units, and token details."
+     },
+     "description": "Per-model usage breakdown, keyed by model identifier"
+    },
+    "agentMetrics": {
+     "type": "object",
+     "additionalProperties": {
+      "$ref": "#/definitions/ShutdownAgentMetric",
+      "description": "Usage attributed to one agent instance at session shutdown."
+     },
+     "description": "Per-agent usage breakdown, keyed by agent instance identifier. The main conversation uses the stable key `main`."
+    },
+    "currentModel": {
+     "type": "string",
+     "description": "Model that was selected at the time of shutdown"
+    },
+    "currentTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Total tokens in context window at shutdown"
+    },
+    "systemTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "System message token count at shutdown"
+    },
+    "conversationTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Non-system message token count at shutdown"
+    },
+    "toolDefinitionsTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Tool definitions token count at shutdown"
+    }
+   },
+   "required": [
+    "shutdownType",
+    "totalApiDurationMs",
+    "sessionStartTime",
+    "codeChanges",
+    "modelMetrics"
+   ],
+   "additionalProperties": false,
+   "description": "Session termination metrics including usage statistics, code changes, and shutdown reason",
+   "title": "ShutdownData"
+  },
+  "ShutdownType": {
+   "type": "string",
+   "enum": [
+    "routine",
+    "error"
+   ],
+   "description": "Whether the session ended normally (\"routine\") or due to a crash/fatal error (\"error\")",
+   "title": "ShutdownType",
+   "x-enumDescriptions": {
+    "routine": "The session ended normally.",
+    "error": "The session ended because of a crash or fatal error."
+   }
+  },
+  "ShutdownModelMetric": {
+   "type": "object",
+   "properties": {
+    "requests": {
+     "$ref": "#/definitions/ShutdownModelMetricRequests",
+     "description": "Request count and cost metrics"
+    },
+    "usage": {
+     "$ref": "#/definitions/ShutdownModelMetricUsage",
+     "description": "Token usage breakdown"
+    },
+    "totalNanoAiu": {
+     "type": "number",
+     "minimum": 0,
+     "description": "Accumulated nano-AI units cost for this model",
+     "stability": "experimental"
+    },
+    "tokenDetails": {
+     "type": "object",
+     "additionalProperties": {
+      "$ref": "#/definitions/ShutdownModelMetricTokenDetail",
+      "description": "A token-type entry in a shutdown model metric, storing the accumulated token count."
+     },
+     "description": "Token count details per type"
+    }
+   },
+   "required": [
+    "requests",
+    "usage"
+   ],
+   "additionalProperties": false,
+   "description": "Per-model shutdown metrics with request counts, token usage, nano-AI units, and token details.",
+   "title": "ShutdownModelMetric"
+  },
+  "ShutdownModelMetricRequests": {
+   "type": "object",
+   "properties": {
+    "count": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Total number of API requests made to this model",
+     "stability": "experimental"
+    },
+    "cost": {
+     "type": "number",
+     "description": "Cumulative cost multiplier for requests to this model",
+     "stability": "experimental"
+    }
+   },
+   "additionalProperties": false,
+   "description": "Request count and cost metrics",
+   "title": "ShutdownModelMetricRequests"
+  },
+  "ShutdownModelMetricUsage": {
+   "type": "object",
+   "properties": {
+    "inputTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Total input tokens consumed across all requests to this model"
+    },
+    "outputTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Total output tokens produced across all requests to this model"
+    },
+    "cacheReadTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Total tokens read from prompt cache across all requests"
+    },
+    "cacheWriteTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Total tokens written to prompt cache across all requests"
+    },
+    "reasoningTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Total reasoning tokens produced across all requests to this model"
+    }
+   },
+   "required": [
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens"
+   ],
+   "additionalProperties": false,
+   "description": "Token usage breakdown",
+   "title": "ShutdownModelMetricUsage"
+  },
+  "AssistantUsageEvent": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+    },
+    "timestamp": {
+     "type": "string",
+     "format": "date-time",
+     "description": "ISO 8601 timestamp when the event was created"
+    },
+    "parentId": {
+     "anyOf": [
+      {
+       "type": "string",
+       "format": "uuid"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+    },
+    "ephemeral": {
+     "type": "boolean",
+     "const": true,
+     "description": "Always true for events that are transient and not persisted to the session event log on disk."
+    },
+    "agentId": {
+     "type": "string",
+     "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+    },
+    "type": {
+     "type": "string",
+     "const": "assistant.usage",
+     "description": "Type discriminator. Always \"assistant.usage\"."
+    },
+    "data": {
+     "$ref": "#/definitions/AssistantUsageData",
+     "description": "LLM API call usage metrics including tokens, costs, quotas, and billing information"
+    }
+   },
+   "required": [
+    "id",
+    "timestamp",
+    "parentId",
+    "ephemeral",
+    "type",
+    "data"
+   ],
+   "additionalProperties": false,
+   "description": "Session event \"assistant.usage\". LLM API call usage metrics including tokens, costs, quotas, and billing information",
+   "title": "AssistantUsageEvent"
+  },
+  "AssistantUsageData": {
+   "type": "object",
+   "properties": {
+    "model": {
+     "type": "string",
+     "description": "Model identifier used for this API call"
+    },
+    "inputTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Number of input tokens consumed"
+    },
+    "outputTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Number of output tokens produced"
+    },
+    "cacheReadTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Number of tokens read from prompt cache"
+    },
+    "cacheWriteTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Number of tokens written to prompt cache"
+    },
+    "cacheExpiresAt": {
+     "type": "string",
+     "format": "date-time",
+     "description": "Updated prompt-cache expiration for this model call. Present only when the call establishes or refreshes known cache state."
+    },
+    "reasoningTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Number of output tokens used for reasoning (e.g., chain-of-thought)"
+    },
+    "cost": {
+     "type": "number",
+     "description": "Model multiplier cost for billing purposes",
+     "stability": "experimental"
+    },
+    "duration": {
+     "type": "integer",
+     "minimum": 0,
+     "format": "duration",
+     "description": "Duration of the API call in milliseconds"
+    },
+    "timeToFirstTokenMs": {
+     "type": "number",
+     "minimum": 0,
+     "format": "duration",
+     "description": "Time to first token in milliseconds. Only available for streaming requests"
+    },
+    "outputTtftMs": {
+     "type": "number",
+     "minimum": 0,
+     "format": "duration",
+     "description": "Time to first observable model output in milliseconds. Includes text, reasoning, and tool-call output; only available for streaming requests that produce observable output."
+    },
+    "interTokenLatencyMs": {
+     "type": "number",
+     "minimum": 0,
+     "format": "duration",
+     "description": "Average inter-token latency in milliseconds. Only available for streaming requests"
+    },
+    "initiator": {
+     "type": "string",
+     "description": "What initiated this API call (e.g., \"sub-agent\", \"mcp-sampling\"); absent for user-initiated calls"
+    },
+    "interactionType": {
+     "type": "string",
+     "description": "Coarse classification of the interaction that produced this call, mirroring the session's per-request agent context (e.g. `conversation-agent`, `conversation-subagent`, `conversation-sampling`, `conversation-background`, `conversation-compaction`, `conversation-user`). Non-billing; lets consumers attribute a model call to a call class (e.g. sub-agent/sidekick) independently of the billing initiator. Absent when the runtime did not classify the request."
+    },
+    "isByok": {
+     "type": "boolean",
+     "description": "Whether this model call used a bring-your-own-key provider"
+    },
+    "isAuto": {
+     "type": "boolean",
+     "description": "Whether Auto mode was selected for this model call"
+    },
+    "maxPromptTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Effective maximum prompt-token limit used for this model call"
+    },
+    "maxOutputTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Requested maximum output tokens used for this model call"
+    },
+    "acceptedPredictionTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Number of accepted speculative prediction tokens"
+    },
+    "rejectedPredictionTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Number of rejected speculative prediction tokens"
+    },
+    "transport": {
+     "$ref": "#/definitions/AssistantUsageTransport",
+     "description": "Transport used for this model call (http or websocket)"
+    },
+    "apiCallId": {
+     "type": "string",
+     "description": "Completion ID from the model provider (e.g., chatcmpl-abc123)"
+    },
+    "providerCallId": {
+     "type": "string",
+     "description": "GitHub request tracing ID (x-github-request-id header) for server-side log correlation"
+    },
+    "serviceRequestId": {
+     "type": "string",
+     "description": "Copilot service request ID (x-copilot-service-request-id header) for CAPI log correlation"
+    },
+    "rte": {
+     "type": "boolean",
+     "description": "Per-request treatment/eligibility signal returned by the Copilot API in the `X-GitHub-Copilot-Request-TE` response header for the associated model call; `false` when the header was absent or unparseable."
+    },
+    "apiEndpoint": {
+     "$ref": "#/definitions/AssistantUsageApiEndpoint",
+     "description": "API endpoint used for this model call, matching CAPI supported_endpoints vocabulary"
+    },
+    "parentToolCallId": {
+     "type": "string",
+     "description": "Parent tool call ID when this usage originates from a sub-agent",
+     "deprecated": true
+    },
+    "quotaSnapshots": {
+     "type": "object",
+     "additionalProperties": {
+      "$ref": "#/definitions/AssistantUsageQuotaSnapshot",
+      "description": "Internal per-quota snapshot for assistant usage, including entitlement, consumed requests, overage, reset date, and remaining quota.",
+      "visibility": "internal"
+     },
+     "description": "Per-quota resource usage snapshots, keyed by quota identifier",
+     "visibility": "internal"
+    },
+    "copilotUsage": {
+     "$ref": "#/definitions/AssistantUsageCopilotUsage",
+     "description": "Per-request cost and usage data from the CAPI copilot_usage response field"
+    },
+    "reasoningEffort": {
+     "type": "string",
+     "description": "Reasoning effort level used for model calls, if applicable (e.g. \"none\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\")"
+    },
+    "reasoningSummary": {
+     "$ref": "#/definitions/ReasoningSummary",
+     "description": "Reasoning summary mode used for this model call, if applicable"
+    },
+    "availableToolCount": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Number of tools available to the model for this call",
+     "visibility": "internal"
+    },
+    "toolTokenCount": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Number of tokens used by tool definitions for this call",
+     "visibility": "internal"
+    },
+    "frontierSource": {
+     "type": "string",
+     "description": "How the prompt-cache frontier was determined for this call",
+     "visibility": "internal"
+    },
+    "cacheTtlSeconds": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Effective prompt-cache lifetime in seconds for this call",
+     "visibility": "internal"
+    },
+    "cacheDetailsReported": {
+     "type": "boolean",
+     "description": "Whether the provider reported prompt-cache usage details for this call",
+     "visibility": "internal"
+    },
+    "numToolCalls": {
+     "type": "integer",
+     "minimum": 0,
+     "description": "Number of tool calls returned by the model",
+     "visibility": "internal"
+    },
+    "toolCounts": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "integer"
+     },
+     "description": "Tool-call counts keyed by tool name",
+     "visibility": "internal"
+    },
+    "finishReason": {
+     "type": "string",
+     "description": "Finish reason reported by the model for this API call (e.g. \"stop\", \"length\", \"tool_calls\", \"content_filter\"). Normalized to OpenAI vocabulary; for Anthropic models a \"refusal\" stop reason maps to \"content_filter\"."
+    },
+    "contentFilterTriggered": {
+     "type": "boolean",
+     "description": "Whether the model response was blocked or truncated by content filtering (finish_reason === 'content_filter'). For Anthropic models this corresponds to a 'refusal' stop reason."
+    },
+    "fusion": {
+     "$ref": "#/definitions/FusionAttribution",
+     "description": "Experimental HydraFusion attribution for this concrete model call's usage.",
+     "stability": "experimental"
+    }
+   },
+   "required": [
+    "model"
+   ],
+   "additionalProperties": false,
+   "description": "LLM API call usage metrics including tokens, costs, quotas, and billing information",
+   "title": "AssistantUsageData"
+  },
+  "HookStartEvent": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+    },
+    "timestamp": {
+     "type": "string",
+     "format": "date-time",
+     "description": "ISO 8601 timestamp when the event was created"
+    },
+    "parentId": {
+     "anyOf": [
+      {
+       "type": "string",
+       "format": "uuid"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+    },
+    "ephemeral": {
+     "type": "boolean",
+     "description": "When true, the event is transient and not persisted to the session event log on disk"
+    },
+    "agentId": {
+     "type": "string",
+     "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+    },
+    "type": {
+     "type": "string",
+     "const": "hook.start",
+     "description": "Type discriminator. Always \"hook.start\"."
+    },
+    "data": {
+     "$ref": "#/definitions/HookStartData",
+     "description": "Hook invocation start details including type and input data"
+    }
+   },
+   "required": [
+    "id",
+    "timestamp",
+    "parentId",
+    "type",
+    "data"
+   ],
+   "additionalProperties": false,
+   "description": "Session event \"hook.start\". Hook invocation start details including type and input data",
+   "title": "HookStartEvent"
+  },
+  "HookStartData": {
+   "type": "object",
+   "properties": {
+    "hookInvocationId": {
+     "type": "string",
+     "description": "Unique identifier for this hook invocation"
+    },
+    "hookType": {
+     "type": "string",
+     "description": "Type of hook being invoked (e.g., \"preToolUse\", \"postToolUse\", \"sessionStart\")"
+    },
+    "input": {
+     "description": "Input data passed to the hook. For postToolUse hooks the retained copy served by session.eventLog.read (and by a resumed session) drops the tool result's inline `contents`/`uiResource`/`skillInvocation` and replaces duplicated text result fields with a `[copilot:elided ...]` marker; the live subscription stream still delivers the full value. Canonical tool output remains in the adjacent tool.execution_complete event, while an invoked skill's authoritative body remains in its skill invocation event.",
+     "x-opaque-json": true
+    },
+    "parentToolCallId": {
+     "type": "string",
+     "description": "Tool call ID of the parent tool invocation when this event originates from a sub-agent"
+    }
+   },
+   "required": [
+    "hookInvocationId",
+    "hookType"
+   ],
+   "additionalProperties": false,
+   "description": "Hook invocation start details including type and input data",
+   "title": "HookStartData"
+  },
+  "HookEndEvent": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "description": "Unique event identifier (UUID v4), generated when the event is emitted"
+    },
+    "timestamp": {
+     "type": "string",
+     "format": "date-time",
+     "description": "ISO 8601 timestamp when the event was created"
+    },
+    "parentId": {
+     "anyOf": [
+      {
+       "type": "string",
+       "format": "uuid"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "ID of the chronologically preceding event in the session, forming a linked chain. Null for the first event."
+    },
+    "ephemeral": {
+     "type": "boolean",
+     "description": "When true, the event is transient and not persisted to the session event log on disk"
+    },
+    "agentId": {
+     "type": "string",
+     "description": "Sub-agent instance identifier. Absent for events from the root/main agent and session-level events."
+    },
+    "type": {
+     "type": "string",
+     "const": "hook.end",
+     "description": "Type discriminator. Always \"hook.end\"."
+    },
+    "data": {
+     "$ref": "#/definitions/HookEndData",
+     "description": "Hook invocation completion details including output, success status, and error information"
+    }
+   },
+   "required": [
+    "id",
+    "timestamp",
+    "parentId",
+    "type",
+    "data"
+   ],
+   "additionalProperties": false,
+   "description": "Session event \"hook.end\". Hook invocation completion details including output, success status, and error information",
+   "title": "HookEndEvent"
+  },
+  "HookEndData": {
+   "type": "object",
+   "properties": {
+    "hookInvocationId": {
+     "type": "string",
+     "description": "Identifier matching the corresponding hook.start event"
+    },
+    "hookType": {
+     "type": "string",
+     "description": "Type of hook that was invoked (e.g., \"preToolUse\", \"postToolUse\", \"sessionStart\")"
+    },
+    "output": {
+     "description": "Output data produced by the hook. Durable and resumed postToolUse receipts may omit messages owned by a successful skill invocation and replace an unchanged skill sessionLog copy with an elision marker; hook-modified or re-sourced values are preserved, and the authoritative body remains in the skill invocation event.",
+     "x-opaque-json": true
+    },
+    "success": {
+     "type": "boolean",
+     "description": "Whether the hook completed successfully"
+    },
+    "error": {
+     "$ref": "#/definitions/HookEndError",
+     "description": "Error details when the hook failed"
+    },
+    "parentToolCallId": {
+     "type": "string",
+     "description": "Tool call ID of the parent tool invocation when this event originates from a sub-agent"
+    }
+   },
+   "required": [
+    "hookInvocationId",
+    "hookType",
+    "success"
+   ],
+   "additionalProperties": false,
+   "description": "Hook invocation completion details including output, success status, and error information",
+   "title": "HookEndData"
+  }
+ }
+}

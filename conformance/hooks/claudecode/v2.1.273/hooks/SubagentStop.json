@@ -1,0 +1,19 @@
+{
+  "session_id": "aa000000-0000-4000-8000-000000000201",
+  "transcript_path": "/home/devuser/.claude/projects/-home-devuser-workspace-acme-app/aa000000-0000-4000-8000-000000000201.jsonl",
+  "cwd": "/home/devuser/workspace/acme-app",
+  "prompt_id": "aa000000-0000-4000-8000-000000000003",
+  "permission_mode": "default",
+  "agent_id": "a7f3e2d1c0b9a8001",
+  "agent_type": "general-purpose",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_transcript_path": "/home/devuser/.claude/projects/-home-devuser-workspace-acme-app/aa000000-0000-4000-8000-000000000201/subagents/agent-a7f3e2d1c0b9a8001.jsonl",
+  "last_assistant_message": "4",
+  "background_tasks": [],
+  "session_crons": []
+}
+

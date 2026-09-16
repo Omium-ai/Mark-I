@@ -1,0 +1,11 @@
+{
+  "session_id": "019965a0-0000-7000-8000-00000000aa01",
+  "transcript_path": "/home/devuser/.codex/sessions/2026/09/16/rollout-2026-09-16T08-25-00-019965a0-0000-7000-8000-00000000aa01.jsonl",
+  "cwd": "/home/devuser/workspace/acme-app",
+  "turn_id": "019965a0-0101-7000-8000-000000000101",
+  "model": "gpt-5.3-codex",
+  "permission_mode": "default",
+  "hook_event_name": "SubagentStart",
+  "agent_id": "019965a0-0000-7000-8000-00000000aa02",
+  "agent_type": "explorer"
+}

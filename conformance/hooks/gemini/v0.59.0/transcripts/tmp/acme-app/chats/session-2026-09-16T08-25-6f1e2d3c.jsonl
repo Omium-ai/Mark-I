@@ -1,0 +1,10 @@
+{"sessionId":"6f1e2d3c-0000-4000-8000-00000000aa01","projectHash":"daebdc91a9407051591cc1b410cdf3b5bff5216a4d0f53d1f7584d741f8ec23a","startTime":"2026-09-16T08:25:00.000Z","lastUpdated":"2026-09-16T08:25:00.000Z"}
+{"id":"5b2d0001-0000-4000-8000-000000000001","timestamp":"2026-09-16T08:25:01.000Z","type":"user","content":[{"text":"add a retry to the uploader"}]}
+{"$set":{"lastUpdated":"2026-09-16T08:25:01.000Z"}}
+{"id":"7a1c0001-0000-4000-8000-000000000001","timestamp":"2026-09-16T08:25:04.312Z","type":"gemini","content":"I will run the tests first.","thoughts":[],"tokens":{"input":1200,"output":180,"cached":0,"thoughts":40,"tool":0,"total":1420},"model":"gemini-2.5-pro"}
+{"$set":{"lastUpdated":"2026-09-16T08:25:04.312Z"}}
+{"id":"7a1c0001-0000-4000-8000-000000000001","timestamp":"2026-09-16T08:25:04.312Z","type":"gemini","content":"I will run the tests first.","thoughts":[],"tokens":{"input":1200,"output":180,"cached":0,"thoughts":40,"tool":0,"total":1420},"model":"gemini-2.5-pro","toolCalls":[{"id":"call_SynthFixtureTTTTTTTT","name":"run_shell_command","args":{"command":"go test ./..."},"result":[{"functionResponse":{"id":"call_SynthFixtureTTTTTTTT","name":"run_shell_command","response":{"output":"ok"}}}],"status":"success","timestamp":"2026-09-16T08:25:06.100Z","displayName":"Shell","description":"go test ./...","renderOutputAsMarkdown":false}]}
+{"id":"5b2d0001-0000-4000-8000-000000000002","timestamp":"2026-09-16T08:25:06.200Z","type":"user","content":[{"functionResponse":{"id":"call_SynthFixtureTTTTTTTT","name":"run_shell_command","response":{"output":"ok"}}}]}
+{"$set":{"lastUpdated":"2026-09-16T08:25:06.200Z"}}
+{"id":"7a1c0001-0000-4000-8000-000000000002","timestamp":"2026-09-16T08:25:09.871Z","type":"gemini","content":"Tests pass; adding the retry.","thoughts":[{"subject":"Plan","description":"wrap the upload in a retry loop","timestamp":"2026-09-16T08:25:08.000Z"}],"tokens":{"input":2100,"output":410,"cached":1900,"thoughts":0,"tool":0,"total":2510},"model":"gemini-2.5-pro"}
+{"$set":{"lastUpdated":"2026-09-16T08:25:09.871Z"}}

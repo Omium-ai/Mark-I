@@ -1,0 +1,106 @@
+{
+  "suite": "conf_hooks_opencode_1.18.31_replay",
+  "agent": "opencode",
+  "agent_version": "1.18.31",
+  "vendor_pin": {
+    "npm": "opencode-ai@1.18.31",
+    "git_tag": "v1.18.31",
+    "commit": "014614d35b397775e5d397a490fc72368c894ec2",
+    "repo": "github.com/anomalyco/opencode",
+    "fetched_at": "2026-09-16"
+  },
+  "session_id_recipe": "m1p session_id = UUIDv5(NameSpaceURL, 'opencode:' + sessionID): opencode session ids are ses_<26 chars> (schema/identifier.ts), not UUIDs; mark1.js sessionUUID, opencode.SessionUUID and selfcheck.py compute the same value",
+  "idem_key_recipe": "idem_key = HMAC_tenant(session_id, message_id, request_id) with session_id := SessionUUID(sessionID), message_id := StepFinishPart.messageID (the assistant message), request_id := StepFinishPart.id -- one step-finish part per LLM round-trip, and its id is unique where assistantMessageID is reused across a tool-loop turn (the spike's open dedupe risk, closed by the part id)",
+  "usage_field_map": {
+    "input_tokens": "part.tokens.input (session.ts getUsage: inputTokens MINUS cache read and write -- Anthropic semantics, not OpenAI's)",
+    "output_tokens": "part.tokens.output + part.tokens.reasoning (getUsage subtracts reasoning from output; it is billed as output)",
+    "cache_read_input_tokens": "part.tokens.cache.read",
+    "cache_creation_input_tokens": "part.tokens.cache.write",
+    "model": "AssistantMessage.providerID + '/' + AssistantMessage.modelID from the message.updated line of the same messageID",
+    "service_tier": "absent on this surface",
+    "not_mapped": "part.cost (opencode's own price computation) and AssistantMessage.tokens (the LAST step's tokens, overwritten per step -- never a per-call count)"
+  },
+  "workspace_root": "/home/devuser/workspace/acme-app",
+  "containment_rule": "every stream head is an assistant message.updated whose info.path.cwd is the session cwd (processor.ts runs session.updateMessage before any step-finish part); the capture dir is shared by every project, so the cwd is the stream own attribution",
+  "out_of_workspace_streams": [
+    {
+      "file": "transcripts/capture/ses_0199a1b2c3d4SynthFixtuFF01.jsonl",
+      "cwd": "/home/devuser/workspace/other-app",
+      "never_emit_request_id": "prt_0199a1b2c3d4SynthFixtuPF01",
+      "reason": "the capture dir holds every project sessions; this stream's path.cwd resolves outside the enabled root, so it is never tailed (04 \u00a70.3 invariant 3, 04 \u00a72.1)"
+    }
+  ],
+  "streams": [
+    {
+      "file": "transcripts/capture/ses_0199a1b2c3d4SynthFixtuAA01.jsonl",
+      "role": "parent",
+      "usage_events": [
+        {
+          "idem_key_inputs": {
+            "session_id": "27777fa2-d57a-5838-b8bd-bf4c0f358055",
+            "message_id": "msg_0199a1b2c3d4SynthFixtuM001",
+            "request_id": "prt_0199a1b2c3d4SynthFixtuP001"
+          },
+          "usage": {
+            "input_tokens": 1200,
+            "output_tokens": 220,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          },
+          "model": "anthropic/claude-sonnet-4-5",
+          "occurred_at": "2026-09-16T08:25:04.312Z"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "27777fa2-d57a-5838-b8bd-bf4c0f358055",
+            "message_id": "msg_0199a1b2c3d4SynthFixtuM001",
+            "request_id": "prt_0199a1b2c3d4SynthFixtuP002"
+          },
+          "usage": {
+            "input_tokens": 2100,
+            "output_tokens": 410,
+            "cache_creation_input_tokens": 300,
+            "cache_read_input_tokens": 1900
+          },
+          "model": "anthropic/claude-sonnet-4-5",
+          "occurred_at": "2026-09-16T08:25:09.871Z"
+        },
+        {
+          "idem_key_inputs": {
+            "session_id": "27777fa2-d57a-5838-b8bd-bf4c0f358055",
+            "message_id": "msg_0199a1b2c3d4SynthFixtuM002",
+            "request_id": "prt_0199a1b2c3d4SynthFixtuP003"
+          },
+          "usage": {
+            "input_tokens": 900,
+            "output_tokens": 320,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          },
+          "model": "anthropic/claude-sonnet-4-5",
+          "occurred_at": "2026-09-16T08:26:03Z"
+        }
+      ],
+      "never_emit": [
+        {
+          "line": "the second message.part.updated carrying prt_...P002",
+          "reason": "a re-published part with identical numbers is the streaming-rewrite duplicate (07 \u00a77 layer 1); one Usage"
+        },
+        {
+          "line_type": "message.updated",
+          "reason": "AssistantMessage.tokens is the last step's count overwritten per step (processor.ts step-finish), never summed; the line only supplies model and cwd"
+        }
+      ]
+    }
+  ],
+  "hooks": {
+    "composition": "mark1.js hook(): {hook_event_name: <plugin hook or bus event type>, session_id: SessionUUID(sessionID), cwd: <plugin input.directory>, ...vendor fields at top level}; `event` hooks pass {sessionID} only, chat.message and tool.execute.before pass their input verbatim, tool.execute.after passes {tool, sessionID, callID} (args dropped)",
+    "registered": [
+      "session.created",
+      "chat.message",
+      "tool.execute.before",
+      "tool.execute.after",
+      "session.idle"
+    ]
+  }
+}
