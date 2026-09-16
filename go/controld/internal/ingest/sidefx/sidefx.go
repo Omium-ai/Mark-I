@@ -24,8 +24,14 @@ package sidefx
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"hash/fnv"
 	"log"
+	"math"
 	"sync"
 	"time"
 
@@ -61,6 +67,22 @@ var (
 		Name: "controld_ingest_coverage_rows_total",
 		Help: "coverage_transitions rows inserted (m1_043; receipted at seal time)",
 	})
+	excerptsBound = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "controld_ingest_excerpts_bound_total",
+		Help: "E1 EvidenceExcerpt events bound to their redaction receipt (m1_077; FR-VERIFY-016)",
+	})
+	excerptRefusals = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "controld_ingest_excerpt_refusals_total",
+		Help: "E1 excerpts refused at stage 11 by defect code — unknown_receipt is a security event (FR-VERIFY-016)",
+	}, []string{"code"})
+	deletionsAppended = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "controld_ingest_quarantine_deletions_appended_total",
+		Help: "Edge quarantine_deletion receipts appended in their sealing checkpoint's transaction (m1_080; NFR-OPERABILITY-003)",
+	})
+	deletionRefusals = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "controld_ingest_quarantine_deletion_refusals_total",
+		Help: "Edge QuarantineDeletion events refused at stage 11 by defect code — every code is a security event (NFR-OPERABILITY-003)",
+	}, []string{"code"})
 )
 
 // DB is the WithTenant-shaped seam (05 §7.2); *pg.TenantDB satisfies it and
@@ -81,6 +103,7 @@ type ChainAppender interface {
 	AppendCheckpoint(ctx context.Context, tenant querychoke.TenantID, ev receipts.CheckpointEvent,
 		sealed func(tx pgx.Tx, r receipts.Appended) error) (receipts.Appended, error)
 	AlreadyAppended(ctx context.Context, tenant querychoke.TenantID, originSig []byte) (bool, error)
+	AppendServerRecordTx(ctx context.Context, tx pgx.Tx, tenant querychoke.TenantID, rec receipts.ServerRecord) (receipts.Appended, error)
 }
 
 var _ ChainAppender = (*receipts.Store)(nil)
@@ -101,11 +124,31 @@ type Coverage struct {
 	Reason          string
 }
 
+// Excerpt is one E1 EvidenceExcerpt's claim: the receipt it names and the evidence event it expands (m1_077).
+type Excerpt struct {
+	ReceiptID []byte
+	SubjectID uuid.UUID
+}
+
+// QuarantineDeletion is the edge's on-disk deletion receipt as the wire carries it (envelope arm 23). Verified under
+// the enrolled key at Apply, receipted in the chain when its checkpoint seals it (m1_080; NFR-OPERABILITY-003).
+type QuarantineDeletion struct {
+	BatchID         uuid.UUID
+	EventCount      uint32
+	QuarantinedAt   time.Time
+	DeletedAt       time.Time
+	Reason          string
+	DeviceKeyID     string
+	DeviceSignature []byte
+}
+
 // Effect is one event's stage-11 consequence, in spool order.
 type Effect struct {
 	EventID    uuid.UUID
 	Coverage   *Coverage                 // CoverageTransition events
 	Checkpoint *receipts.CheckpointEvent // ReceiptCheckpoint events
+	Excerpt    *Excerpt                  // EvidenceExcerpt events at tier E1
+	Deletion   *QuarantineDeletion       // QuarantineDeletion events
 }
 
 // EffectsFromBatch projects a decoded batch into stage-11 effects, in batch
@@ -149,6 +192,20 @@ func EffectsFromBatch(b *m1pv1.Batch, fallbackAt time.Time) []Effect {
 				OccurredAt:      occurred,
 				Reason:          ct.GetReasonCode(),
 			}
+		case *m1pv1.Event_EvidenceExcerpt:
+			// E2 carries no receipt by design (VPC/self-host only); E0 has no excerpt.
+			if x := body.EvidenceExcerpt; x.GetTier() == m1pv1.EvidenceTier_EVIDENCE_TIER_E1 {
+				subject, _ := uuid.FromBytes(x.GetEvidenceEventId())
+				e.Excerpt = &Excerpt{ReceiptID: x.GetRedactionReceiptId(), SubjectID: subject}
+			}
+		case *m1pv1.Event_QuarantineDeletion:
+			q := body.QuarantineDeletion
+			batch, _ := uuid.FromBytes(q.GetBatchId())
+			e.Deletion = &QuarantineDeletion{
+				BatchID: batch, EventCount: q.GetEventCount(),
+				QuarantinedAt: fromMillis(q.GetQuarantinedAtMs()), DeletedAt: fromMillis(q.GetDeletedAtMs()),
+				Reason: q.GetReason(), DeviceKeyID: q.GetDeviceKeyId(), DeviceSignature: q.GetDeviceSignature(),
+			}
 		}
 		effects = append(effects, e)
 	}
@@ -188,6 +245,7 @@ type pendKey struct{ tenant, device uuid.UUID }
 type leaf struct {
 	id  uuid.UUID
 	cov *Coverage
+	del *QuarantineDeletion // verified at Apply; nil when refused
 }
 
 // Sidefx applies the per-batch side effects on a small async pool (stage 11
@@ -297,10 +355,17 @@ func (s *Sidefx) Apply(ctx context.Context, tenant querychoke.TenantID, device u
 			s.applyCheckpoint(ctx, tenant, device, e.Checkpoint)
 			continue
 		}
+		if e.Excerpt != nil {
+			s.applyExcerpt(ctx, tenant, device, e.EventID, e.Excerpt)
+		}
+		var del *QuarantineDeletion
+		if e.Deletion != nil && s.verifyDeletion(ctx, tenant, device, e.EventID, e.Deletion) {
+			del = e.Deletion
+		}
 		// Every non-checkpoint landed event is a leaf of the device's NEXT
 		// checkpoint; the checkpoint announcement itself is sealed AFTER its
 		// tree and is deliberately not a leaf of any tree.
-		s.addLeaf(tenant, device, leaf{id: e.EventID, cov: e.Coverage})
+		s.addLeaf(tenant, device, leaf{id: e.EventID, cov: e.Coverage, del: del})
 	}
 }
 
@@ -397,6 +462,14 @@ func (s *Sidefx) applyCheckpoint(ctx context.Context, tenant querychoke.TenantID
 			}
 			coverageRows.Add(float64(tag.RowsAffected()))
 		}
+		// Same-tx deletion receipts: the edge's receipt lands right behind the checkpoint that sealed its leaf.
+		for _, l := range sealed {
+			if l.del != nil {
+				if err := s.appendDeletion(ctx, tx, tenant, l.del); err != nil {
+					return err
+				}
+			}
+		}
 		return nil
 	})
 	consume := func() {
@@ -446,6 +519,199 @@ func (s *Sidefx) applyCheckpoint(ctx context.Context, tenant querychoke.TenantID
 		// object replays this checkpoint (05 §2.5).
 		log.Printf("sidefx: checkpoint append failed (tenant %s): %v", tenant, err)
 	}
+}
+
+// applyExcerpt binds an E1 excerpt once to the receipt it names (m1_077); any other claim is a security event.
+func (s *Sidefx) applyExcerpt(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, event uuid.UUID, x *Excerpt) {
+	if len(x.ReceiptID) != 32 || x.SubjectID == uuid.Nil {
+		excerptRefusals.WithLabelValues("malformed").Inc()
+		s.security(tenant.UUID(), device, event, "E1 excerpt without a 32-byte redaction_receipt_id and evidence_event_id (FR-VERIFY-016)", time.Now())
+		return
+	}
+	var bound int64
+	err := s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE m1_redaction_receipts SET excerpt_event_id = $1
+			 WHERE tenant_id = $2 AND device_id = $3 AND receipt_id = $4 AND subject_id = $5
+			   AND (excerpt_event_id IS NULL OR excerpt_event_id = $1)`,
+			event, tenant.UUID(), device, x.ReceiptID, x.SubjectID)
+		bound = tag.RowsAffected()
+		return err
+	})
+	switch {
+	case err != nil:
+		log.Printf("sidefx: excerpt %s receipt bind failed (tenant %s): %v", event, tenant, err)
+	case bound == 0:
+		excerptRefusals.WithLabelValues("unknown_receipt").Inc()
+		s.security(tenant.UUID(), device, event,
+			"E1 excerpt names a redaction receipt this device never uploaded for that evidence event (unknown_receipt, FR-VERIFY-016)", time.Now())
+	default:
+		excerptsBound.Inc()
+	}
+}
+
+// AdmitRedactionReceipt is the attach upload's receipt half (08 §2.1): verified under the enrolled key like a checkpoint, stored once.
+func (s *Sidefx) AdmitRedactionReceipt(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, payloadText string, deviceSig []byte) ([32]byte, error) {
+	var id [32]byte
+	decoded, err := receipts.DecodePayload([]byte(payloadText))
+	fields, _ := decoded.(map[string]any)
+	if err != nil || fields == nil {
+		return id, &receipts.RefusalError{Code: receipts.DefectNonCanonicalPayload, Detail: "redaction payload is not a JSON object"}
+	}
+	if canon, cerr := receipts.CanonicalJSON(decoded); cerr != nil || canon != payloadText {
+		return id, &receipts.RefusalError{Code: receipts.DefectNonCanonicalPayload, Detail: "redaction payload is not its own canonical form"}
+	}
+	str := func(k string) string { v, _ := fields[k].(string); return v }
+	subject, serr := uuid.Parse(str("subject_id"))
+	pre, perr := hex.DecodeString(str("pre_hash"))
+	post, qerr := hex.DecodeString(str("post_hash"))
+	switch {
+	case str("type") != "redaction" || str("tier") != "E1":
+		return id, &receipts.RefusalError{Code: receipts.DefectPayloadMismatch, Detail: "payload is not a tier-E1 redaction receipt"}
+	case str("tenant_id") != tenant.String() || str("device_id") != device.String():
+		return id, &receipts.RefusalError{Code: receipts.DefectPayloadMismatch, Detail: "payload names a tenant or device other than the authenticated one (08 §2.1)"}
+	case serr != nil || subject == uuid.Nil || perr != nil || len(pre) != 32 || qerr != nil || len(post) != 32:
+		return id, &receipts.RefusalError{Code: receipts.DefectPayloadMismatch, Detail: "payload lacks a subject_id or 32-byte pre_hash/post_hash"}
+	}
+	keyID := str("device_key_id")
+	signingInput := append([]byte(receipts.DomainPrefix), payloadText...)
+	id = sha256.Sum256(signingInput)
+	return id, s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		pub, err := deviceOriginKey(ctx, tx, keyID, device)
+		if err != nil {
+			return err
+		}
+		if !receipts.Verify(pub, deviceSig, signingInput) {
+			return &receipts.RefusalError{Code: receipts.DefectBadSignature, Detail: "origin signature does not verify over the redaction payload"}
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO m1_redaction_receipts
+			  (tenant_id, receipt_id, device_id, device_key_id, device_signature, subject_id, payload, pre_hash, post_hash)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (tenant_id, receipt_id) DO NOTHING`,
+			tenant.UUID(), id[:], device, keyID, deviceSig, subject, payloadText, pre, post)
+		return err
+	})
+}
+
+// deviceOriginKey is the enrolled-key lookup every device-signed claim at this stage shares (the AppendCheckpoint
+// shape): the wrong table's key, a revoked key and another device's key are refusals with their own names.
+func deviceOriginKey(ctx context.Context, tx pgx.Tx, keyID string, device uuid.UUID) (ed25519.PublicKey, error) {
+	var pub []byte
+	var keyDevice uuid.UUID
+	var revokedAt *time.Time
+	switch err := tx.QueryRow(ctx,
+		`SELECT public_key, device_id, revoked_at FROM m1_device_keys WHERE key_id = $1`, keyID).
+		Scan(&pub, &keyDevice, &revokedAt); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, &receipts.RefusalError{Code: receipts.DefectUnknownKey, Detail: fmt.Sprintf("key_id %q is not a device origin key for this tenant", keyID)}
+	case err != nil:
+		return nil, err
+	case keyDevice != device:
+		return nil, &receipts.RefusalError{Code: receipts.DefectUnknownKey, Detail: fmt.Sprintf("key_id %q belongs to device %s, not the authenticated device", keyID, keyDevice)}
+	case revokedAt != nil:
+		return nil, &receipts.RefusalError{Code: receipts.DefectUnknownKey, Detail: fmt.Sprintf("key_id %q was revoked at %s; it signs nothing new", keyID, revokedAt.UTC().Format(time.RFC3339))}
+	}
+	return ed25519.PublicKey(pub), nil
+}
+
+// DeletionReason is the one closed value the wire may carry (events.proto: free text never rides here).
+const DeletionReason = "retention_30d"
+
+func fromMillis(ms uint64) time.Time {
+	if ms > math.MaxInt64 {
+		return time.Time{}
+	}
+	return time.UnixMilli(int64(ms)).UTC()
+}
+
+// MillisString is the edge receipt's timestamp rendering (uplink/retention.go MillisString): whole milliseconds
+// through RFC3339Nano, so the signed bytes rebuild from the wire's unix ms exactly.
+func MillisString(t time.Time) string {
+	return t.UTC().Truncate(time.Millisecond).Format(time.RFC3339Nano)
+}
+
+// DeletionPayload rebuilds the edge's signed receipt payload from the wire fields and the VERIFIED identity — the
+// checkpoint discipline (07 §checkpoint model): the device never sends payload text, the server reconstructs it.
+func DeletionPayload(tenant, device string, d *QuarantineDeletion) map[string]any {
+	return map[string]any{
+		"v":              1,
+		"type":           "quarantine_deletion",
+		"batch_id":       d.BatchID.String(),
+		"event_count":    int(d.EventCount),
+		"quarantined_at": MillisString(d.QuarantinedAt),
+		"deleted_at":     MillisString(d.DeletedAt),
+		"reason":         d.Reason,
+		"tenant_id":      tenant,
+		"device_id":      device,
+		"device_key_id":  d.DeviceKeyID,
+	}
+}
+
+// verifyDeletion checks the edge's signature under its enrolled key before the leaf waits for its checkpoint. Every
+// refusal is a security event and a counter, never a silent skip: a forged deletion claim is tampering-shaped.
+func (s *Sidefx) verifyDeletion(ctx context.Context, tenant querychoke.TenantID, device, event uuid.UUID, d *QuarantineDeletion) bool {
+	refuse := func(code receipts.Defect, detail string) bool {
+		deletionRefusals.WithLabelValues(string(code)).Inc()
+		s.security(tenant.UUID(), device, event, "QuarantineDeletion refused ("+string(code)+"): "+detail, time.Now())
+		return false
+	}
+	if d.BatchID == uuid.Nil || d.DeviceKeyID == "" || len(d.DeviceSignature) != ed25519.SignatureSize ||
+		d.Reason != DeletionReason || d.QuarantinedAt.IsZero() || d.DeletedAt.IsZero() {
+		return refuse(receipts.DefectPayloadMismatch, "batch_id, device_key_id, a 64-byte signature, reason retention_30d and both timestamps are required")
+	}
+	text, err := receipts.CanonicalJSON(DeletionPayload(tenant.String(), device.String(), d))
+	if err != nil {
+		return refuse(receipts.DefectNonCanonicalPayload, err.Error())
+	}
+	signingInput := append([]byte(receipts.DomainPrefix), text...)
+	err = s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		pub, err := deviceOriginKey(ctx, tx, d.DeviceKeyID, device)
+		if err != nil {
+			return err
+		}
+		if !receipts.Verify(pub, d.DeviceSignature, signingInput) {
+			return &receipts.RefusalError{Code: receipts.DefectBadSignature, Detail: "device signature does not verify over the reconstructed deletion receipt"}
+		}
+		return nil
+	})
+	if refusal, ok := receipts.AsRefusal(err); ok {
+		return refuse(refusal.Code, refusal.Detail)
+	}
+	if err != nil {
+		log.Printf("sidefx: quarantine deletion %s key lookup failed (tenant %s): %v", event, tenant, err) // replay re-derives
+		return false
+	}
+	return true
+}
+
+// appendDeletion writes the edge's receipt as a quarantine_deletion server record inside the sealing checkpoint's
+// transaction. The idempotency key absorbs a replayed leaf whose earlier seal already landed the record.
+func (s *Sidefx) appendDeletion(ctx context.Context, tx pgx.Tx, tenant querychoke.TenantID, d *QuarantineDeletion) error {
+	key := "edge:" + d.BatchID.String()
+	var one int
+	err := tx.QueryRow(ctx, `SELECT 1 FROM m1_receipts WHERE record_type = 'quarantine_deletion' AND idempotency_key = $1`, key).Scan(&one)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	_, err = s.chain.AppendServerRecordTx(ctx, tx, tenant, receipts.ServerRecord{
+		RecordType: "quarantine_deletion",
+		SubjectID:  d.BatchID,
+		IssuedAt:   d.DeletedAt,
+		Fields: map[string]any{
+			"origin": "edge", "reason": d.Reason, "event_count": int(d.EventCount),
+			"quarantined_at": MillisString(d.QuarantinedAt), "deleted_at": MillisString(d.DeletedAt),
+			"device_key_id": d.DeviceKeyID,
+		},
+		IdempotencyKey: key,
+	})
+	if err == nil {
+		deletionsAppended.Inc()
+	}
+	return err
 }
 
 // ApplyLastSeen stamps m1_devices.last_seen_at under the tenant GUC. GREATEST

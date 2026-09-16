@@ -156,20 +156,43 @@ func (s *Scanner) entropyOK(r compiledRule, span []byte) bool {
 // never admit-raw (F-35). The returned buffer replaces the input; when
 // Redacted, the substitution count is exact (kept spans never overlap).
 func (s *Scanner) Admit(buf []byte) (out []byte, outcome Outcome, substitutions uint32) {
+	out, outcome, spans := s.AdmitSpans(buf)
+	// Kept spans never overlap and one substitution each: the count is exact
+	// and cannot exceed len(buf); the clamp is unreachable and only bounds
+	// the int→uint32 conversion.
+	subs := len(spans)
+	if subs > math.MaxInt32 {
+		subs = math.MaxInt32
+	}
+	return out, outcome, uint32(subs) //nolint:gosec // G115: clamped above; count ≤ len(buf) in practice
+}
+
+// Span is one substituted span as the redaction receipt names it (FR-VERIFY-016):
+// the class and the token's hash leg, never the pre-image.
+type Span struct {
+	Class  Class
+	Digest string
+}
+
+// AdmitSpans is Admit with the per-span report the receipt is computed over.
+func (s *Scanner) AdmitSpans(buf []byte) (out []byte, outcome Outcome, spans []Span) {
 	defer func() {
 		if recover() != nil {
-			out, outcome, substitutions = nil, Quarantine, 0
+			out, outcome, spans = nil, Quarantine, nil
 		}
 	}()
 	findings := s.findAll(buf)
 	if len(findings) == 0 {
-		return buf, Clean, 0
+		return buf, Clean, nil
 	}
 	res := make([]byte, 0, len(buf))
+	spans = make([]Span, 0, len(findings))
 	cursor := 0
 	for _, f := range findings {
 		res = append(res, buf[cursor:f.start]...)
-		res = append(res, s.token(f.class, buf[f.start:f.end])...)
+		digest := s.digest(buf[f.start:f.end])
+		res = append(res, "⟨redacted:"+string(f.class)+":"+digest+"⟩"...)
+		spans = append(spans, Span{Class: f.class, Digest: digest})
 		cursor = f.end
 	}
 	res = append(res, buf[cursor:]...)
@@ -180,22 +203,20 @@ func (s *Scanner) Admit(buf []byte) (out []byte, outcome Outcome, substitutions 
 	for i := range buf {
 		buf[i] = 0
 	}
-	// Kept spans never overlap and one substitution each: the count is exact
-	// and cannot exceed len(buf); the clamp is unreachable and only bounds
-	// the int→uint32 conversion.
-	subs := len(findings)
-	if subs > math.MaxInt32 {
-		subs = math.MaxInt32
-	}
-	return res, Redacted, uint32(subs) //nolint:gosec // G115: clamped above; count ≤ len(buf) in practice
+	return res, Redacted, spans
 }
 
-// token: `⟨redacted:class:hash⟩`, hash = first 8 bytes of HMAC-SHA256(tenant
-// key, span) as lowercase hex — byte-identical to mark1-redact's token().
-func (s *Scanner) token(class Class, span []byte) []byte {
+// digest is the token's hash leg: first 8 bytes of HMAC-SHA256(tenant key,
+// span) as lowercase hex — byte-identical to mark1-redact's token().
+func (s *Scanner) digest(span []byte) string {
 	mac := hmac.New(sha256.New, s.hmacKey)
 	mac.Write(span)
-	return []byte("⟨redacted:" + string(class) + ":" + hex.EncodeToString(mac.Sum(nil)[:8]) + "⟩")
+	return hex.EncodeToString(mac.Sum(nil)[:8])
+}
+
+// token: `⟨redacted:class:hash⟩`, the exact bytes AdmitSpans substitutes.
+func (s *Scanner) token(class Class, span []byte) []byte {
+	return []byte("⟨redacted:" + string(class) + ":" + s.digest(span) + "⟩")
 }
 
 // shannonBitsPerByte mirrors the Rust f32 arithmetic. ponytail: the log2 leg

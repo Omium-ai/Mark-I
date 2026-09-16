@@ -10,7 +10,7 @@ import (
 )
 
 // Store writes under one 0700 directory; a nil *Store stores nothing.
-type Store struct{ dir string }
+type Store struct{ dir, state string }
 
 // Dir is the store's location under the daemon state root.
 func Dir(stateDir string) string { return filepath.Join(stateDir, "evidence") }
@@ -24,7 +24,7 @@ func Open(stateDir string) (*Store, error) {
 	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: a directory needs x; 0700 is the NFR-PRIVACY-005 mode
 		return nil, err
 	}
-	return &Store{dir: dir}, nil
+	return &Store{dir: dir, state: stateDir}, nil
 }
 
 // Put files one run as <dir>/<task hex>/<anchor id>-<ns>/{stdout,stderr,diff} (0600, empty parts skipped); ponytail: no retention, age out by mtime when disk notices.

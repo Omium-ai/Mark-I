@@ -52,6 +52,11 @@ func (f *fakeChain) AlreadyAppended(_ context.Context, _ querychoke.TenantID, or
 	return f.inChain[string(originSig)], nil
 }
 
+// AppendServerRecordTx is reachable only inside a real sealed tx (integration_test.go); the fake never gets there.
+func (f *fakeChain) AppendServerRecordTx(context.Context, pgx.Tx, querychoke.TenantID, receipts.ServerRecord) (receipts.Appended, error) {
+	return receipts.Appended{}, errors.New("fakeChain: no transaction")
+}
+
 func testTenant(t *testing.T) querychoke.TenantID {
 	t.Helper()
 	tid, err := querychoke.FromClaims(auth.Claims{TenantID: uuid.New()})
