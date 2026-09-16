@@ -51,6 +51,14 @@
 // 05 §4.4, which is what makes a fork detectable at all; (2) verify head.sig
 // against a pinned ring once ADR-0004's key ceremony freezes the signed bytes
 // and picks the signer — the ring already has a home in keys.json.
+//
+// KEY ROTATION (ADR-0004) is the one way the pinned ring grows without an
+// operator touching keys.json: a bundle signed by a key we do not pin triggers
+// ONE read of the manifest, and a new section key is admitted iff its
+// cross_sig is by a key ALREADY pinned for that same section. A self-signed
+// key, a key endorsed from outside its section, or a manifest whose update
+// key is also a bundle key (R5) admits nothing; the bundle is then refused as
+// before and last-known-good stays in force.
 package bundle
 
 import (
@@ -62,6 +70,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"math/rand/v2"
@@ -70,6 +79,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/policy"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
@@ -113,6 +123,7 @@ type Config struct {
 	// Test seams; nil/zero ⇒ production defaults.
 	HTTPClient *http.Client
 	Now        func() time.Time
+	After      func(d time.Duration) <-chan time.Time
 	Rand       func() float64 // U(0,1) full-jitter source
 	Poll       time.Duration
 	FreshEvery time.Duration
@@ -139,10 +150,12 @@ type Client struct {
 	token       string
 	edgeVersion string
 	keys        *policy.SectionKeys
+	trust       trustFile // the pinned entries keys was built from; rotation appends here
 	log         *slog.Logger
 	health      *obs.Health
 	http        *http.Client
 	now         func() time.Time
+	after       func(time.Duration) <-chan time.Time
 	rand        func() float64
 	poll        time.Duration
 	freshEvery  time.Duration
@@ -152,6 +165,9 @@ type Client struct {
 	// owns it from then on. nil is legal — the client then only maintains
 	// custody, which is what a test of the persistence half wants.
 	Apply func(verdict.BundleMatrices)
+	// ApplyRanker publishes the applied bundle's cortex learned_ranker (nil
+	// when absent or stale) under the same rules as Apply; cortex.Plane.SetRanker.
+	ApplyRanker func(*policy.LearnedRanker)
 
 	lkg  *applied
 	boot verdict.BundleMatrices
@@ -184,6 +200,7 @@ func New(cfg Config) (*Client, error) {
 		health:      cfg.Health,
 		http:        cfg.HTTPClient,
 		now:         cfg.Now,
+		after:       cfg.After,
 		rand:        cfg.Rand,
 		poll:        cfg.Poll,
 		freshEvery:  cfg.FreshEvery,
@@ -207,6 +224,9 @@ func New(cfg Config) (*Client, error) {
 	if c.now == nil {
 		c.now = time.Now
 	}
+	if c.after == nil {
+		c.after = time.After
+	}
 	if c.rand == nil {
 		c.rand = rand.Float64
 	}
@@ -220,7 +240,7 @@ func New(cfg Config) (*Client, error) {
 		return nil, err
 	}
 
-	c.keys = c.loadKeys()
+	c.keys, c.trust = c.loadKeys()
 	if c.keys == nil {
 		// No pinned keys ⇒ nothing can ever verify ⇒ built-ins forever. That
 		// is the honest posture, not an error: the daemon's job is capture,
@@ -243,10 +263,38 @@ func (c *Client) Matrices() verdict.BundleMatrices { return c.boot }
 // before Run, so it needs no lock -- the daemon does not respawn cortexd on
 // a bundle change (NFR-FOOTPRINT-003 residual: budget applies at next boot).
 func (c *Client) Cortex() policy.CortexSection {
-	if c.lkg == nil || !c.lkg.b.IsFresh(c.epoch()) {
-		return policy.CortexSection{}
+	if b := c.fresh(); b != nil {
+		return b.Cortex
 	}
-	return c.lkg.b.Cortex
+	return policy.CortexSection{}
+}
+
+func (c *Client) Memory() policy.MemorySection {
+	if b := c.fresh(); b != nil {
+		return b.Memory
+	}
+	return policy.MemorySection{}
+}
+
+// Gates is the applied bundle's gates section under the same freshness
+// posture as Matrices and Cortex: no bundle, or one past max_age, is the zero
+// section -- stop_gate_enabled false, which is FR-POLICY-005's "gates open".
+// Boot-only like Cortex: fabric.Gate.ApplyGates clamps it into the gate
+// before Serve (FR-POLICY-006), so a later bundle's gates apply at next boot.
+func (c *Client) Gates() policy.GatesSection {
+	if b := c.fresh(); b != nil {
+		return b.Gates
+	}
+	return policy.GatesSection{}
+}
+
+// fresh is the last-known-good bundle while it is inside max_age, else nil --
+// the one freshness rule every boot-time section accessor reads through.
+func (c *Client) fresh() *policy.Bundle {
+	if c.lkg == nil || !c.lkg.b.IsFresh(c.epoch()) {
+		return nil
+	}
+	return c.lkg.b
 }
 
 // Run drives the state machine until ctx is done. It returns only on
@@ -255,30 +303,29 @@ func (c *Client) Run(ctx context.Context) {
 	if c.canFetch() {
 		go c.stream(ctx)
 	}
-	fresh := time.NewTicker(c.freshEvery)
-	defer fresh.Stop()
-	timer := time.NewTimer(c.nextPoll())
-	defer timer.Stop()
+	fresh := c.after(c.freshEvery)
+	poll := c.after(c.nextPoll())
 
 	attempt := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-fresh.C:
+		case <-fresh:
 			// The BUILTINS edge of 04 §9.4, and the way back from it. No
 			// fetch: this transition is driven by the clock alone.
 			c.publish()
+			fresh = c.after(c.freshEvery)
 			continue
 		case <-c.hint:
-		case <-timer.C:
+		case <-poll:
 		}
 		if c.tick(ctx) {
 			attempt = 0
-			timer.Reset(c.nextPoll())
+			poll = c.after(c.nextPoll())
 		} else {
 			attempt++
-			timer.Reset(c.backoff(attempt))
+			poll = c.after(c.backoff(attempt))
 		}
 	}
 }
@@ -326,6 +373,9 @@ func (c *Client) tick(ctx context.Context) bool {
 		lastSeq = &c.lkg.b.Seq
 	}
 	b, rej := policy.VerifyAndDecode(res.body, c.keys, lastSeq, head)
+	if rej != nil && rej.Kind() == "unknown_key" && c.admitRotation(ctx) {
+		b, rej = policy.VerifyAndDecode(res.body, c.keys, lastSeq, head)
+	}
 	if rej != nil {
 		c.reject(ctx, res, rej.Code(), rej.Error())
 		return true
@@ -429,6 +479,9 @@ func (c *Client) publish() {
 	if c.Apply != nil {
 		c.Apply(m)
 	}
+	if c.ApplyRanker != nil {
+		c.ApplyRanker(c.Cortex().LearnedRanker)
+	}
 	switch {
 	case stale && !wasStale:
 		c.log.Warn("mark1d: policy past max_age — conservative built-ins, gates open, verdicts flagged stale_cert (M1E-3006)", "seq", seq)
@@ -494,53 +547,178 @@ const (
 // `bundle_section_keys` so enrollment can eventually write the manifest's
 // subset straight through. `key_id` is deliberately absent: SectionKeys
 // DERIVES it, so a ring can never hold a key under a name that will not
-// verify it.
+// verify it. cross_sig is kept on an admitted key as its provenance.
 type trustFile struct {
-	BundleSectionKeys []struct {
-		Section   string `json:"section"`
-		PubkeyHex string `json:"pubkey_hex"`
-		NotBefore string `json:"not_before"`
-		NotAfter  string `json:"not_after"`
-	} `json:"bundle_section_keys"`
+	BundleSectionKeys []pinnedKey `json:"bundle_section_keys"`
+}
+
+type pinnedKey struct {
+	Section   string    `json:"section"`
+	PubkeyHex string    `json:"pubkey_hex"`
+	NotBefore string    `json:"not_before"`
+	NotAfter  string    `json:"not_after"`
+	CrossSig  *crossSig `json:"cross_sig,omitempty"`
+}
+
+type crossSig struct {
+	ByKeyID      string `json:"by_key_id"`
+	SignatureHex string `json:"signature_hex"`
 }
 
 // loadKeys returns nil when there is no usable pinned material — the caller
 // then never fetches, which is the correct posture: unverifiable bundles are
 // worse than no bundles.
-func (c *Client) loadKeys() *policy.SectionKeys {
+func (c *Client) loadKeys() (*policy.SectionKeys, trustFile) {
 	raw, err := os.ReadFile(filepath.Join(c.dir, keysFile))
 	if err != nil {
-		return nil
+		return nil, trustFile{}
 	}
 	var tf trustFile
 	if err := json.Unmarshal(raw, &tf); err != nil {
 		c.log.Error("mark1d: pinned bundle keys unparseable", "err", err)
-		return nil
+		return nil, trustFile{}
 	}
-	byName := map[string]policy.Section{}
+	sk, err := ringOf(tf)
+	if err != nil {
+		c.log.Error("mark1d: pinned bundle keys unusable", "err", err)
+		return nil, trustFile{}
+	}
+	return sk, tf
+}
+
+func sectionOf(name string) (policy.Section, bool) {
 	for _, s := range policy.AllSections() {
-		byName[s.Name()] = s
+		if s.Name() == name {
+			return s, true
+		}
 	}
+	return 0, false
+}
+
+// ringOf builds the section-split ring from pinned entries; nil with no
+// error means the file pins nothing.
+func ringOf(tf trustFile) (*policy.SectionKeys, error) {
 	sk := policy.NewSectionKeys()
-	n := 0
 	for _, e := range tf.BundleSectionKeys {
-		s, ok := byName[e.Section]
+		s, ok := sectionOf(e.Section)
 		if !ok {
-			c.log.Error("mark1d: pinned key names an unknown section class", "section", e.Section)
-			return nil
+			return nil, fmt.Errorf("pinned key names an unknown section class %q", e.Section)
 		}
 		pub, err := hex.DecodeString(e.PubkeyHex)
 		if err != nil || len(pub) != ed25519.PublicKeySize {
-			c.log.Error("mark1d: pinned key is not a 32-byte hex ed25519 public key", "section", e.Section)
-			return nil
+			return nil, fmt.Errorf("pinned %s key is not a 32-byte hex ed25519 public key", e.Section)
 		}
 		sk.Insert(s, policy.KeyEntry{Public: pub, NotBefore: e.NotBefore, NotAfter: e.NotAfter})
-		n++
 	}
-	if n == 0 {
-		return nil
+	if len(tf.BundleSectionKeys) == 0 {
+		return nil, nil
 	}
-	return sk
+	return sk, nil
+}
+
+// crossSignDomain and crossSignInput mirror controld's receipts.CrossSignInput
+// and rust/mark1-policy's cross_sign_input: domain || role || 0x00 || pub.
+const crossSignDomain = "mark1-key-rotation-v1\x00"
+
+func crossSignInput(role string, pub []byte) []byte {
+	out := append([]byte(crossSignDomain), role...)
+	out = append(out, 0)
+	return append(out, pub...)
+}
+
+// admitRotation reads the key manifest once and admits every section key it
+// does not yet pin whose cross_sig is by a key ALREADY pinned for that
+// section (rust/mark1-policy apply_rotation, mirrored). All or nothing: one
+// refusal admits no key, so a manifest cannot smuggle a root in beside a
+// genuine rotation. Returns true iff the ring grew.
+func (c *Client) admitRotation(ctx context.Context) bool {
+	req, err := c.request(ctx, http.MethodGet, pathKeys, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		c.log.Warn("mark1d: key manifest unavailable; rotation not applied", "err", err)
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, ackBodyLimit))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var km struct {
+		BundleSectionKeys []pinnedKey `json:"bundle_section_keys"`
+		UpdateKeys        []pinnedKey `json:"update_keys"`
+	}
+	if err := json.Unmarshal(raw, &km); err != nil {
+		c.log.Error("mark1d: key manifest unparseable; rotation not applied", "err", err)
+		return false
+	}
+	refuse := func(kind, why string) bool {
+		c.log.Error("mark1d: key manifest refused; pinned ring unchanged, last-known-good retained (ADR-0004)", "kind", kind, "why", why)
+		return false
+	}
+	for _, u := range km.UpdateKeys {
+		for _, b := range km.BundleSectionKeys {
+			if u.PubkeyHex == b.PubkeyHex {
+				return refuse("update_equals_bundle", "update key "+u.PubkeyHex[:16]+" is also the "+b.Section+" section key (R5)")
+			}
+		}
+	}
+	pinned := map[string]map[string]ed25519.PublicKey{}
+	for _, e := range c.trust.BundleSectionKeys {
+		pub, _ := hex.DecodeString(e.PubkeyHex)
+		if pinned[e.Section] == nil {
+			pinned[e.Section] = map[string]ed25519.PublicKey{}
+		}
+		pinned[e.Section][identity.DeriveKeyID(pub)] = pub
+	}
+	staged := trustFile{BundleSectionKeys: append([]pinnedKey(nil), c.trust.BundleSectionKeys...)}
+	admitted := 0
+	for _, e := range km.BundleSectionKeys {
+		if _, ok := sectionOf(e.Section); !ok {
+			return refuse("unknown_section", e.Section)
+		}
+		pub, err := hex.DecodeString(e.PubkeyHex)
+		if err != nil || len(pub) != ed25519.PublicKeySize {
+			return refuse("key_id_mismatch", e.Section+" key is not a 32-byte hex public key")
+		}
+		id := identity.DeriveKeyID(pub)
+		if _, have := pinned[e.Section][id]; have {
+			continue
+		}
+		switch {
+		case e.CrossSig == nil:
+			return refuse("unsigned", id+" for "+e.Section+" carries no cross_sig")
+		case e.CrossSig.ByKeyID == id:
+			return refuse("self_signed", id+" cross-signs itself")
+		}
+		by, ok := pinned[e.Section][e.CrossSig.ByKeyID]
+		if !ok {
+			return refuse("unknown_signer", id+" is cross-signed by "+e.CrossSig.ByKeyID+", not pinned for "+e.Section)
+		}
+		sig, err := hex.DecodeString(e.CrossSig.SignatureHex)
+		if err != nil || !ed25519.Verify(by, crossSignInput("bundle:"+e.Section, pub), sig) {
+			return refuse("bad_cross_signature", id+" by "+e.CrossSig.ByKeyID)
+		}
+		staged.BundleSectionKeys = append(staged.BundleSectionKeys, e)
+		admitted++
+	}
+	if admitted == 0 {
+		return false
+	}
+	keys, err := ringOf(staged)
+	if err != nil {
+		return refuse("key_id_mismatch", err.Error())
+	}
+	c.keys, c.trust = keys, staged
+	if raw, err := json.Marshal(staged); err == nil {
+		if err := writeAtomic(filepath.Join(c.dir, keysFile), raw); err != nil {
+			c.log.Error("mark1d: persisting rotated pinned keys", "err", err)
+		}
+	}
+	c.log.Info("mark1d: bundle section key rotation admitted through pinned cross-signature (ADR-0004)", "admitted", admitted)
+	return true
 }
 
 type lkgMeta struct {

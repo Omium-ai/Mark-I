@@ -493,7 +493,7 @@ func decodeRoute(v any) (RouteSection, *Reject) {
 	if rej != nil {
 		return out, rej
 	}
-	if rej = strictKeys(m, []string{"cpvs", "ladders", "knee"}, []string{"exploration"}, p); rej != nil {
+	if rej = strictKeys(m, []string{"cpvs", "ladders", "knee"}, []string{"exploration", "exploration_opt_in"}, p); rej != nil {
 		return out, rej
 	}
 
@@ -653,6 +653,17 @@ func decodeRoute(v any) (RouteSection, *Reject) {
 			}
 		}
 	}
+	// D-EF: ε>0 needs the publisher-signed opt-in; ponytail: absent ⇒ pre-ruling grammar until the re-freeze fixes `full` (ε 0.05, no opt-in).
+	if o, ok := m["exploration_opt_in"]; ok {
+		op := p + ".exploration_opt_in"
+		optIn, rej := boolVal(o, op)
+		if rej != nil {
+			return out, rej
+		}
+		if !optIn && out.ExplorationEpsilon > 0 {
+			return out, schemaErr(op, "exploration.epsilon > 0 without opt-in")
+		}
+	}
 	return out, nil
 }
 
@@ -713,7 +724,7 @@ func decodeCortex(v any) (CortexSection, *Reject) {
 	if rej != nil {
 		return out, rej
 	}
-	if rej = strictKeys(m, []string{"map_budget_tokens", "channels"}, nil, p); rej != nil {
+	if rej = strictKeys(m, []string{"map_budget_tokens", "channels"}, []string{"learned_ranker"}, p); rej != nil {
 		return out, rej
 	}
 	bp := p + ".map_budget_tokens"
@@ -755,6 +766,52 @@ func decodeCortex(v any) (CortexSection, *Reject) {
 			return out, schemaErr(p+".channels", "not a cortex channel: "+t)
 		}
 	}
+	if rv, ok := m["learned_ranker"]; ok {
+		if out.LearnedRanker, rej = decodeRanker(rv, p+".learned_ranker"); rej != nil {
+			return out, rej
+		}
+	}
+	return out, nil
+}
+
+func decodeRanker(v any, p string) (*LearnedRanker, *Reject) {
+	m, rej := mapOf(v, p)
+	if rej != nil {
+		return nil, rej
+	}
+	if rej = strictKeys(m, []string{"stage", "weight", "bias", "coefficients"}, nil, p); rej != nil {
+		return nil, rej
+	}
+	out := &LearnedRanker{}
+	stage, rej := textVal(m["stage"], p+".stage")
+	if rej != nil {
+		return nil, rej
+	}
+	switch RankerStage(stage) {
+	case RankerProbation, RankerShadow, RankerActive:
+		out.Stage = RankerStage(stage)
+	default:
+		return nil, schemaErr(p+".stage", "not a ranker stage: "+stage)
+	}
+	if out.Weight, rej = probVal(m["weight"], p+".weight"); rej != nil {
+		return nil, rej
+	}
+	if out.Bias, rej = finiteVal(m["bias"], p+".bias"); rej != nil {
+		return nil, rej
+	}
+	cp := p + ".coefficients"
+	c, rej := arrayVal(m["coefficients"], cp)
+	if rej != nil {
+		return nil, rej
+	}
+	if len(c) != 4 {
+		return nil, schemaErr(cp, "coefficients must have exactly 4 entries")
+	}
+	for i, cv := range c {
+		if out.Coefficients[i], rej = finiteVal(cv, cp); rej != nil {
+			return nil, rej
+		}
+	}
 	return out, nil
 }
 
@@ -783,8 +840,19 @@ func decodeGates(v any) (GatesSection, *Reject) {
 	if out.HourlyBlockCeiling, rej = uintVal(m["hourly_block_ceiling"], p); rej != nil {
 		return out, rej
 	}
+	if out.HourlyBlockCeiling > maxHourlyBlockCeiling {
+		// Same direction as mcb (FR-VERIFY-010): lower only; 0 = edge default.
+		return out, schemaErr(p, "hourly_block_ceiling > 30")
+	}
 	return out, nil
 }
+
+// ponytail: 30 mirrors fabric/gate.go:27 DefaultHourlyCeiling (and controld
+// policydist/bundle.go maxHourlyBlockCeiling) — 07's CDDL types
+// hourly_block_ceiling as a bare uint and no doc names a number, so the edge
+// built-in is the only ceiling a bundle can lower. Hand-copied const (policy
+// must not import fabric): bump all three or none.
+const maxHourlyBlockCeiling = 30
 
 func decodeAgentMaps(v any) (AgentMaps, *Reject) {
 	var out AgentMaps

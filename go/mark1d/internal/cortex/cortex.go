@@ -51,6 +51,7 @@ import (
 	"github.com/google/uuid"
 	"lukechampine.com/blake3"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/memory"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
@@ -76,7 +77,10 @@ type Config struct {
 	StateDir string
 	Roots    []string
 	Budget   uint32
-	Log      *slog.Logger
+	// Ranker is the boot bundle's cortex learned_ranker (nil = none); later
+	// bundles arrive through SetRanker (bundle.Client.ApplyRanker).
+	Ranker *policy.LearnedRanker
+	Log    *slog.Logger
 	// Binary overrides the lookup (test seam and packaging escape hatch).
 	Binary string
 	// Home overrides $HOME for the transcript-dir oracle (test seam).
@@ -149,6 +153,52 @@ type sessionFile struct {
 	StartedAt    string `json:"started_at"`
 }
 
+// RankerFile is where the daemon publishes the applied bundle's learned
+// ranker for every cortexd (`--ranker-file`): <state>/run/ranker.json. One
+// file, not per workspace — the weights are tenant policy, not tree state.
+func RankerFile(stateDir string) string {
+	return filepath.Join(stateDir, "run", "ranker.json")
+}
+
+// rankerFile is the on-disk shape; cortexd parses it with serde
+// (rust/cortexd/src/session/mod.rs RankerFile) through RankerWeights::new only.
+type rankerFile struct {
+	Stage        policy.RankerStage `json:"stage"`
+	Weight       float64            `json:"weight"`
+	Bias         float64            `json:"bias"`
+	Coefficients [4]float64         `json:"coefficients"`
+}
+
+// SetRanker publishes r for the supervised cortexds, or removes the file when
+// the bundle in force carries none. Called from New (boot) and from the bundle
+// client's Run goroutine on every posture change; cortexd polls the file.
+func (p *Plane) SetRanker(r *policy.LearnedRanker) {
+	path := RankerFile(p.cfg.StateDir)
+	if r == nil {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			p.log.Error("cortex: stale ranker file could not be removed; cortexd keeps the old weights", "path", path, "err", err)
+		}
+		return
+	}
+	b, err := json.Marshal(rankerFile{Stage: r.Stage, Weight: r.Weight, Bias: r.Bias, Coefficients: r.Coefficients})
+	if err == nil {
+		err = writeAtomic(path, b)
+	}
+	if err != nil {
+		p.log.Error("cortex: ranker file not published; cortexd serves PPR order", "path", path, "err", err)
+	}
+}
+
+// writeAtomic is tmp + rename at 0600: cortexd reads these files between two
+// of our writes and must never see a torn one.
+func writeAtomic(path string, b []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // Plane owns the per-workspace children and the session registry both they
 // and the root consumer key on.
 type Plane struct {
@@ -187,6 +237,7 @@ func New(cfg Config) (*Plane, error) {
 		published: map[string][16]byte{},
 		set:       map[string]func([]byte){},
 	}
+	p.SetRanker(cfg.Ranker)
 	a := &claudecode.Adapter{Home: cfg.Home}
 	byDir := map[string][]string{}
 	for _, root := range cfg.Roots {
@@ -286,12 +337,7 @@ func (p *Plane) publish(root string, sid [16]byte) {
 	path := SessionFile(p.cfg.StateDir, root)
 	b, err := json.Marshal(sessionFile{SessionIDHex: hex.EncodeToString(sid[:]), StartedAt: time.Now().UTC().Format(time.RFC3339)})
 	if err == nil {
-		// tmp + rename: cortexd reads this between two of our writes and must
-		// never see a torn one.
-		tmp := path + ".tmp"
-		if err = os.WriteFile(tmp, b, 0o600); err == nil {
-			err = os.Rename(tmp, path)
-		}
+		err = writeAtomic(path, b)
 	}
 	if err != nil {
 		p.log.Error("cortex: session file not published; cortexd holds its pushes", "path", path, "err", err)
@@ -363,7 +409,9 @@ func (p *Plane) child(bin, root string) supervise.Child {
 			cmd := exec.CommandContext(ctx, bin, //nolint:gosec // G204: bin is FindCortexd() or an operator-set MARK1_CORTEXD; args are a fixed slice, no shell
 				"--root", root, "--store", store,
 				"--budget", strconv.FormatUint(uint64(budget), 10),
-				"--session-file", file)
+				"--session-file", file,
+				"--memory-file", memory.CustodyPath(p.cfg.StateDir),
+				"--ranker-file", RankerFile(p.cfg.StateDir))
 			cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 			cmd.Cancel = func() error {
 				// SIGINT is the only stop cortexd listens for (tokio ctrl_c,

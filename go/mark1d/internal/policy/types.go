@@ -149,6 +149,7 @@ type RouteSection struct {
 	Knee    KneeTable
 	// `exploration.epsilon`, defaulted to 0.0 when the map is absent —
 	// ε>0 is per-tenant contractual opt-in (07 CDDL comment).
+	// D-EF: refused at decode under a signed `exploration_opt_in: false`; the edge applies ε>0 only via fabric.ExplorationEpsilon.
 	ExplorationEpsilon float64
 }
 
@@ -219,6 +220,27 @@ type CortexSection struct {
 	MapBudgetTokensMin uint64
 	MapBudgetTokensMax uint64
 	Channels           []CortexChannel
+	// nil = absent: no learned ranker, cortexd serves PPR order (06 §12.4).
+	LearnedRanker *LearnedRanker
+}
+
+// RankerStage is the closed enum on the wire; decode admits only the three.
+type RankerStage string
+
+const (
+	RankerProbation RankerStage = "probation"
+	RankerShadow    RankerStage = "shadow"
+	RankerActive    RankerStage = "active"
+)
+
+// LearnedRanker's 4 coefficients are cortexd's file features
+// [fan_in, recency, path_depth, tag_count].
+type LearnedRanker struct {
+	Stage RankerStage
+	// Blend weight in [0,1]; decode refuses outside it (M1E-3001).
+	Weight       float64
+	Bias         float64
+	Coefficients [4]float64
 }
 
 type GatesSection struct {

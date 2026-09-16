@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/policy"
 )
@@ -211,12 +210,10 @@ func (c *Client) stream(ctx context.Context) {
 		} else {
 			attempt++
 		}
-		t := time.NewTimer(c.backoff(attempt))
 		select {
 		case <-ctx.Done():
-			t.Stop()
 			return
-		case <-t.C:
+		case <-c.after(c.backoff(attempt)):
 		}
 	}
 }

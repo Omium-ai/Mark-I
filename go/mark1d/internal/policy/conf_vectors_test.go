@@ -215,9 +215,9 @@ func TestConfVectorsBundle(t *testing.T) {
 			kindsSeen[v.Kind] = true
 		}
 	}
-	// The frozen contract: 4 accepts, 20 rejects covering all 10 kinds. A
+	// The frozen contract: 5 accepts, 28 rejects covering all 10 kinds. A
 	// shrunken manifest must fail loudly, not pass vacuously.
-	if accepts != 4 || rejects != 20 {
+	if accepts != 5 || rejects != 28 {
 		t.Fatalf("manifest shape changed: accepts=%d rejects=%d", accepts, rejects)
 	}
 	for _, k := range kindNames {
@@ -343,6 +343,26 @@ func TestConfVectorsBundleKneePLCB(t *testing.T) {
 }
 
 func ptr(f float64) *float64 { return &f }
+
+// TestConfVectorsBundleCortexLearnedRanker: the accept alone only proves the
+// key is tolerated; a decoder that dropped it would still accept. Assert the
+// values that reach cortexd.
+func TestConfVectorsBundleCortexLearnedRanker(t *testing.T) {
+	m := loadBundleManifest(t)
+	raw := readVectorFile(t, vectorByName(t, m, "cortex_learned_ranker"))
+	b, rej := VerifyAndDecode(raw, bundleKeys(t, m), nil, nil)
+	if rej != nil {
+		t.Fatalf("cortex_learned_ranker must accept: %v", rej)
+	}
+	want := LearnedRanker{Stage: RankerShadow, Weight: 0.5, Bias: 0.05, Coefficients: [4]float64{0.6, 0.25, -0.1, 0.15}}
+	if b.Cortex.LearnedRanker == nil || *b.Cortex.LearnedRanker != want {
+		t.Fatalf("learned_ranker: got %+v, want %+v", b.Cortex.LearnedRanker, want)
+	}
+	raw = readVectorFile(t, vectorByName(t, m, "bundle_zero"))
+	if b, _ = VerifyAndDecode(raw, bundleKeys(t, m), nil, nil); b == nil || b.Cortex.LearnedRanker != nil {
+		t.Fatal("a bundle without the key must decode to a nil ranker")
+	}
+}
 
 // TestConfVectorsBundleFreshness: the is_fresh staleness twin (04 §7.3) on
 // the decoded bundle_zero — boundary INCLUSIVE (age == max_age is fresh),

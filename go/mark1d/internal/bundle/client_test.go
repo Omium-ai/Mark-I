@@ -116,12 +116,7 @@ func writeTrust(t *testing.T, stateDir string, m *manifest) {
 		if b, err := hex.DecodeString(k.PublicHex); err != nil || len(b) != ed25519.PublicKeySize {
 			t.Fatalf("manifest key for %s is not a 32-byte hex public key", s.Name())
 		}
-		tf.BundleSectionKeys = append(tf.BundleSectionKeys, struct {
-			Section   string `json:"section"`
-			PubkeyHex string `json:"pubkey_hex"`
-			NotBefore string `json:"not_before"`
-			NotAfter  string `json:"not_after"`
-		}{Section: s.Name(), PubkeyHex: k.PublicHex})
+		tf.BundleSectionKeys = append(tf.BundleSectionKeys, pinnedKey{Section: s.Name(), PubkeyHex: k.PublicHex})
 	}
 	raw, err := json.Marshal(tf)
 	if err != nil {
@@ -142,9 +137,10 @@ type cp struct {
 	seq  string //   and this X-Mark1-Bundle-Seq echo
 	head *vecHead
 
-	bundleStatus int  // non-zero ⇒ GET /bundle fails with it
-	keysStatus   int  // non-zero ⇒ GET /.well-known/mark1-keys fails with it
-	ackFail      bool // ⇒ POST /ack 503s
+	bundleStatus int    // non-zero ⇒ GET /bundle fails with it
+	keysStatus   int    // non-zero ⇒ GET /.well-known/mark1-keys fails with it
+	ackFail      bool   // ⇒ POST /ack 503s
+	keysDoc      []byte // the manifest's key lists served beside tlog (rotation tests)
 
 	acks     []ackBody
 	getN     int
@@ -198,6 +194,9 @@ func (s *cp) handler() http.Handler {
 			return
 		}
 		out := map[string]any{"tlog": map[string]any{}}
+		if s.keysDoc != nil {
+			_ = json.Unmarshal(s.keysDoc, &out)
+		}
 		if s.head != nil {
 			out["tlog"] = map[string]any{"head": map[string]any{"size": s.head.TreeSize, "root": s.head.RootHex}}
 		}
@@ -765,5 +764,87 @@ func TestClientRunDoesNotBlockStartup(t *testing.T) {
 	}
 	if _, n := h.cp.snapshot(); n.get == 0 {
 		t.Fatal("Run never attempted a fetch — the loop is not wired to the poll timer")
+	}
+}
+
+// TestClientGatesFollowsFreshness: Gates() is the applied bundle's gates
+// section under Matrices' posture -- `full` carries {enabled, mcb 3, hourly
+// 20}; past max_age it is the zero section (stop gate open, FR-POLICY-005),
+// and a clock back inside the window restores it. No bundle at all is the
+// zero section too.
+// TestClientApplyRankerFollowsBundleAndFreshness: an applied bundle's cortex
+// learned_ranker reaches the hook decoded; a bundle without the key, or the
+// clock passing max_age, publishes nil — the removal side of the ranker file.
+func TestClientApplyRankerFollowsBundleAndFreshness(t *testing.T) {
+	h := newHarness(t)
+	if got := h.m.vec(t, "cortex_learned_ranker").Summary.Channel; got != "local" {
+		t.Fatalf("vector premise moved: cortex_learned_ranker channel is %q", got)
+	}
+	c, err := New(Config{
+		StateDir: h.state, BaseURL: h.srv.URL, Channel: "local", Token: "dev",
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		HTTPClient: h.srv.Client(),
+		Now:        func() time.Time { return h.now },
+		Rand:       func() float64 { return 0.5 },
+		Poll:       time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var seen []*policy.LearnedRanker
+	c.ApplyRanker = func(r *policy.LearnedRanker) { seen = append(seen, r) }
+	h.serve("cortex_learned_ranker", `"t7-local-000000"`, "0")
+	if !c.tick(context.Background()) || c.lkg == nil {
+		t.Fatal("cortex_learned_ranker did not apply")
+	}
+	want := policy.LearnedRanker{Stage: policy.RankerShadow, Weight: 0.5, Bias: 0.05, Coefficients: [4]float64{0.6, 0.25, -0.1, 0.15}}
+	if len(seen) != 1 || seen[0] == nil || *seen[0] != want {
+		t.Fatalf("apply must publish the decoded ranker once: %+v", seen)
+	}
+	h.now = h.now.Add(time.Duration(c.lkg.b.MaxAgeS)*time.Second + time.Second)
+	c.publish()
+	if len(seen) != 2 || seen[1] != nil {
+		t.Fatalf("past max_age the ranker must be withdrawn: %+v", seen)
+	}
+	h.now = h.now.Add(-2 * time.Second)
+	c.publish()
+	if len(seen) != 3 || seen[2] == nil || *seen[2] != want {
+		t.Fatalf("back inside max_age the ranker must return: %+v", seen)
+	}
+
+	// A bundle that lacks the key publishes nil on apply, not a stale ranker.
+	h2 := newHarness(t)
+	c2 := h2.client()
+	c2.ApplyRanker = func(r *policy.LearnedRanker) { seen = append(seen, r) }
+	h2.serve("full", `"t7-stable-000001"`, "1")
+	if !c2.tick(context.Background()) {
+		t.Fatal("full did not apply")
+	}
+	if len(seen) != 4 || seen[3] != nil {
+		t.Fatalf("a bundle without learned_ranker must publish nil: %+v", seen)
+	}
+}
+
+func TestClientGatesFollowsFreshness(t *testing.T) {
+	h := newHarness(t)
+	c := h.client()
+	if g := c.Gates(); g != (policy.GatesSection{}) {
+		t.Fatalf("no bundle: Gates() = %+v, want the zero section", g)
+	}
+	h.serve("full", `"t7-stable-000001"`, "1")
+	if !c.tick(context.Background()) {
+		t.Fatal("seq 1 did not apply")
+	}
+	want := policy.GatesSection{StopGateEnabled: true, MaxConsecutiveBlocks: 3, HourlyBlockCeiling: 20}
+	if g := c.Gates(); g != want {
+		t.Fatalf("fresh: Gates() = %+v, want %+v", g, want)
+	}
+	h.now = h.now.Add(time.Duration(c.lkg.b.MaxAgeS)*time.Second + time.Second)
+	if g := c.Gates(); g != (policy.GatesSection{}) {
+		t.Fatalf("past max_age: Gates() = %+v, want the zero section (gates open)", g)
+	}
+	h.now = h.now.Add(-2 * time.Second)
+	if g := c.Gates(); g != want {
+		t.Fatalf("back inside max_age: Gates() = %+v, want %+v", g, want)
 	}
 }

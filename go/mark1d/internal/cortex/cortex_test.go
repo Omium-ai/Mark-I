@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"lukechampine.com/blake3"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/memory"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
@@ -159,6 +160,8 @@ func TestCortexChildIsSupervisedPerWorkspace(t *testing.T) {
 			"--store", filepath.Join(state, "cortex", WorkspaceID(root)),
 			"--budget", "4096",
 			"--session-file", SessionFile(state, root),
+			"--memory-file", memory.CustodyPath(state),
+			"--ranker-file", RankerFile(state),
 		}, "\n")
 		found := false
 		for _, a := range argvs {
@@ -437,6 +440,60 @@ func TestCortexInjectionRootReachesTheAnchorRunner(t *testing.T) {
 	}
 	if roots := em.roots(); len(roots) != 2 || !bytes.Equal(roots[1], want) {
 		t.Fatalf("a push under an ended session moved the root: %x", roots)
+	}
+}
+
+// TestRankerFileFollowsTheBundle: the boot bundle's learned_ranker is
+// published at New, a later bundle's through SetRanker, and a bundle without
+// the key removes the file — a stale one from a previous daemon included.
+func TestRankerFileFollowsTheBundle(t *testing.T) {
+	state := t.TempDir()
+	r := &policy.LearnedRanker{Stage: policy.RankerShadow, Weight: 0.5, Bias: 0.05, Coefficients: [4]float64{0.6, 0.25, -0.1, 0.15}}
+	p, err := New(Config{StateDir: state, Ranker: r, Log: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := RankerFile(state)
+	read := func() (rankerFile, os.FileMode) {
+		t.Helper()
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("ranker file: %v", err)
+		}
+		b, _ := os.ReadFile(path)
+		var rf rankerFile
+		if err := json.Unmarshal(b, &rf); err != nil {
+			t.Fatalf("ranker file %q: %v", b, err)
+		}
+		return rf, fi.Mode().Perm()
+	}
+	got, mode := read()
+	if mode != 0o600 || got != (rankerFile{Stage: "shadow", Weight: 0.5, Bias: 0.05, Coefficients: r.Coefficients}) {
+		t.Fatalf("boot ranker file: %+v mode %o", got, mode)
+	}
+	r2 := *r
+	r2.Stage, r2.Weight = policy.RankerActive, 0.25
+	p.SetRanker(&r2)
+	if got, _ = read(); got.Stage != "active" || got.Weight != 0.25 {
+		t.Fatalf("SetRanker did not rewrite: %+v", got)
+	}
+	p.SetRanker(nil)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("a bundle without learned_ranker must remove the file: %v", err)
+	}
+	p.SetRanker(nil)
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatal("no tmp file may be left behind")
+	}
+	// A file a SIGKILLed daemon left names weights this bundle does not carry.
+	if err := os.WriteFile(path, []byte(`{"stage":"active","weight":1,"bias":0,"coefficients":[1,1,1,1]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(Config{StateDir: state, Log: quiet()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("boot without a ranker must clear the stale file: %v", err)
 	}
 }
 
