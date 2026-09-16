@@ -80,7 +80,7 @@ Nothing latency-critical to a coding session ever calls this service: the edge g
 
 | Job | Cadence | Output |
 |---|---|---|
-| `readjudicate` | hourly, per (tenant, window) | `VerdictEvent{CERTIFIED\|REVISED}` events → ingest; per-verdict rows |
+| `readjudicate` | nightly after `spectral.estimate` (as built 2026-09-16: `app/jobs/readjudicate.py`) | per-(tenant, task) rows in the adjudicator's `escalations` table (adj_002): the provisional fusion, the D18-margin escalation with the T3 certified run and its ConsistencyVote at `escalation=True`, the RM shadow pair. No adjudicator→ingest write path exists (05 §2 admits device tokens only), so the REVISED verdict does not re-enter the ledger yet — a `VerdictEvent{REVISED}` ingest seam is owed |
 | `spectral_estimate` | nightly, per tenant + one global pass | confusion matrices + priors → `verifier_registry`, → policy compiler input |
 | `gold_score` | nightly | gold-set agreement stats → certificate inputs |
 | `cert_recompute` | nightly, after `gold_score` | noise-certificate rows (per-event receipted — C13's rare class) |
@@ -514,6 +514,8 @@ WHY one service and not five: the modules share every seam (pool, ledger reads v
 
 ### 7.2 The scheduler
 
+**As built (2026-09-16):** the scheduler is a pure entrypoint, `python -m app.jobs run (--job N | --all [--nightly|--hourly]) --tenant ID… [--day]`, driven by external cadence (cron / a Kubernetes CronJob), over a validated in-code registry (`app/jobs/registry.py`: `Job(name, "module:attr", cadence, runs_after)`, topo-ordered by `graphlib`) and ledgered per `(job, tenant, window_start)` in `job_runs` (m1_067; outcomes `running|succeeded|failed|parked|skipped_prereq_failed`, a 2 h lease on a stale `running`, parked after 5 attempts, an absent or non-succeeded prerequisite row skips the dependent). The adjudicator carries a byte-identical twin of the framework. The design below (in-process asyncio loop, `intel_jobs`, specs-as-rows) is retained as the intent it was reconciled against; the deviations are: cadence is external, specs are code, the table is `job_runs`.
+
 An asyncio loop in `lifespan` (no Celery, no cron sidecar — the estate runs schedulers in-process, and a second orchestration system is a second failure domain):
 
 - ticks every 60 s; for each due job spec, attempts to **lease** via `SELECT … FOR UPDATE SKIP LOCKED` on `intel_jobs` — multiple replicas coexist safely; exactly one wins each job;
@@ -617,7 +619,7 @@ Runs over **certified-`satisfied` tasks only** (§5.4 check first — an uncerti
 Grammar (Paper III's abstraction operator, instantiated):
 
 ```
-artifact := { artifact_id, type: workflow_template | pitfall_remedy | invariant | routing_hint,
+artifact := { artifact_id, type: pitfall | fix_pattern | preference | invariant,   # 07's artifact_kind enum (m1_040); routing hints are bundle route-section rows, never artifacts
               trigger:  { error_sig_digest? , repo_features?, task_class? },   # when to surface
               body:     typed steps / claim — NO verbatim code spans > 40 tokens (D24),
                         identifiers abstracted to roles,
@@ -625,7 +627,7 @@ artifact := { artifact_id, type: workflow_template | pitfall_remedy | invariant 
               provenance: [event digests], support_n, created_from_cert_id }
 ```
 
-`routing_hint` artifacts never inject into context — they compile into bundles (contract C8); `invariant` artifacts are excluded from federation by schema (enforcement point 7).
+Routing hints are not artifacts: they compile into the bundle route section (contract C8) and never inject into context; `invariant` artifacts are excluded from federation by schema (enforcement point 7). (Reconciled 2026-09-16: earlier drafts named `workflow_template | pitfall_remedy | routing_hint`; the DDL and code use the enum above, `pitfall` being the reactive `PostToolUseFailure` kind and `fix_pattern` the workflow kind.)
 
 Sanitization, in order, each stage receipted as a pass/mutate/kill count:
 
@@ -668,7 +670,7 @@ where `d̂` is the discrepancy-distance estimate from **unlabeled repo features*
 ### 9.5 Injection rules
 
 - **Memory pack at TaskOpen** (contract C8): top-scoring artifacts by §9.4, within the bundle's `pack_tokens_max` budget.
-- **Reactive pitfall injection:** `pitfall_remedy` artifacts fire on `PostToolUseFailure` whose error signature matches the artifact's trigger (exact digest, else HNSW fuzz within distance 0.15, D29) — the remedy arrives at the moment of the mistake, which is when it is worth tokens.
+- **Reactive pitfall injection:** `pitfall` artifacts fire on `PostToolUseFailure` whose error signature matches the artifact's trigger (exact digest, else HNSW fuzz within distance 0.15, D29) — the remedy arrives at the moment of the mistake, which is when it is worth tokens.
 - **Interaction-bounded multi-artifact retrieval** (Paper III): at most `m_inject = 3` artifacts per task (D30), and utility attribution (`ArtifactOutcome`) is recorded per artifact only for injection sets of size ≤ m_inject. WHY: ADMIT-LCB's samples assume near-additive utility; unbounded co-injection makes `u_i` unattributable and quietly voids the do-no-harm precondition. Larger packs are a research toggle, off in production.
 
 ### 9.6 Bounded poisoning — the theorem and the quota that makes it true

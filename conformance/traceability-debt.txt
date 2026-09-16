@@ -23,14 +23,15 @@
 # NFR-CORRECTNESS-002 were fully proven by their tests but 02 s12 gates their acceptance on
 # ADR-0002, which is still Proposed. A ledger that closes a row the spec says cannot close is
 # wrong in the direction this file exists to prevent, so they come back until the signature.
+#
+# 2026-09-16: 44 -> 42. FR-AGENT-002 and FR-AGENT-004 paid off (D-EE structural version
+# admission; the pinned corpus now spans 2.1.251 and 2.1.273).
 CON-003
 CON-004
 CON-008
 CON-010
 CON-012
 FR-AGENT-001
-FR-AGENT-002
-FR-AGENT-004
 FR-AGENT-010
 FR-CLI-001
 FR-CLI-002

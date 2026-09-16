@@ -12,7 +12,7 @@ What `drive()` does, in order (03 §7.a's sequence, replayed from the frozen cor
              m1_tenants; the REAL `mark1 enroll` runs the device-code flow against controld
   5. enable  the REAL `mark1 enable` on a workspace under a fake $HOME, which registers the
              nine 08 §5.1 hooks in ~/.claude/settings.json pointing at the shipped shim
-  6. mark1d  booted with a fake pinned `claude` on PATH and the identity enrollment minted
+  6. mark1d  booted with a fake pinned `claude` on PATH, identity read from enrollment.json
   7. replay  each pinned hook body → the command settings.json registered, on stdin, the way
              Claude Code fires it; the pinned transcripts laid under
              ~/.claude/projects/<munged cwd>/ for the tailer (cwd rewritten to the real root)
@@ -261,7 +261,7 @@ class Rig:
     device_id: uuid.UUID = field(init=False)
     device_token: str = field(init=False)
     device_key_id: str = field(init=False)
-    tenant_root: bytes = field(default_factory=lambda: os.urandom(32))
+    tenant_root: bytes = field(init=False)  # delivered by enrollment (04 §2.9), read off the doc
 
     settings_hooks: dict[str, str] = field(default_factory=dict)  # event → command
     hook_runs: list[HookRun] = field(default_factory=list)
@@ -650,6 +650,12 @@ class Rig:
         doc = json.loads((self.state / "enrollment.json").read_text())
         self.device_id = uuid.UUID(doc["device_id"])
         self.device_token = doc["device_token"]
+        # 04 §2.9's per-tenant HMAC root, delivered on the ACTIVE poll body as tenant_root_hex
+        # (additive to 08 §3.1) and persisted beside the token: the harness recomputes idem
+        # keys from what the server delivered, never from a value it chose itself.
+        self.tenant_root = bytes.fromhex(doc["tenant_root_hex"])
+        if len(self.tenant_root) != 32:
+            fail(f"enrollment.json tenant_root_hex is {len(self.tenant_root)} bytes, want 32")
         if uuid.UUID(doc["tenant_id"]) != self.tenant_id:
             fail(f"enrollment.json names tenant {doc['tenant_id']}, onboarded {self.tenant_id}")
         rows = self.pg("SELECT key_id FROM m1_device_keys WHERE device_id = $1", self.device_id)
@@ -683,24 +689,10 @@ class Rig:
     # ---- mark1d ----------------------------------------------------------
     def _mark1d(self) -> None:
         env = self._cli_env()
-        cmd = [
-            str(self.bins["mark1d"]),
-            "--state-dir",
-            str(self.state),
-            "--tenant-salt",
-            self.tenant_root.hex(),
-            "--ingest-url",
-            f"{self.controld_url}/m1p/v1/ingest",
-            # DEV SEAMS by the daemon's own naming (cmd/main.go): mark1d does not read the
-            # enrollment.json `mark1 enroll` just wrote, so the harness bridges the identity
-            # the real enrollment minted into the flags the daemon exposes.
-            "--device-token",
-            self.device_token,
-            "--tenant-id",
-            str(self.tenant_id),
-            "--device-id",
-            str(self.device_id),
-        ]
+        # Started the way a customer's supervisor unit starts it (04 §9.3): --state-dir only.
+        # Token, tenant, device, tenant root and the ingest endpoint all come from the
+        # enrollment.json `mark1 enroll` just wrote; the DEV SEAM flags stay unset.
+        cmd = [str(self.bins["mark1d"]), "--state-dir", str(self.state)]
         self._spawn("mark1d", cmd, env)
         sock = self.tmp / "run" / "omium-mark1" / "m1p.sock"
         deadline = time.monotonic() + 30

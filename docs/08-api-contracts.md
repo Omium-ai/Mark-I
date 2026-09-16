@@ -202,14 +202,16 @@ POST /api/v1/enroll/device/poll                          auth: none (device_code
         "device_token": "…", "expires_in": 86400,        # ≤ 24 h, always
         "server_min_edge": "1.2.0",                      # §10.1 minimum-version handshake
         "endpoints": { "ingest": "https://ingest.…", "attach": "https://…", "policy_stream": "…" },
-        "key_manifest_uri": "/.well-known/mark1-keys" }
+        "key_manifest_uri": "/.well-known/mark1-keys",
+        "tenant_root_hex": "…" }                         # 04 §2.9's per-tenant HMAC root (idem_key salt); only on an ACTIVE body,
+                                                        # never in a list; absent (not empty) when the server holds no pepper
 Errors: 400 M1E-1004 (unknown/expired device_code → state EXPIRED),
         403 M1E-1005 (user denied at IdP), 429 M1E-9001 (poll faster than `interval`).
 
 POST /api/v1/enroll/token                                auth: none (proof-of-possession)
   { "device_id": "0191…", "signed_nonce": { "nonce_from": "/api/v1/enroll/nonce",
       "sig": "ed25519 over (nonce ‖ device_id ‖ requested_at)" } }
-→ 200 { "device_token": "…", "expires_in": 86400 }
+→ 200 { "device_token": "…", "expires_in": 86400, "tenant_root_hex": "…" }   # the root rides every PoP refresh too
 Errors: 401 M1E-1002 (bad signature), 403 M1E-1003 (REVOKED — terminal; body says re-enroll).
 
 POST /api/v1/enroll/revoke                               auth: operator token
@@ -300,6 +302,7 @@ GET /api/v1/reports/tvo?window=30d&cohort=all&cost_basis=auto     auth: operator
         "cost_basis": "usd" | "quota",                  # never mixed; `auto` splits cohorts
         "task_seg_version": "task_seg.v1",
         "waste": { "retry_loop_tokens": …, "re_exploration_tokens": …, "over_model_tokens": … },
+        "price_table_version": "model_prices.v1@sha256:…",   # usd only: the pinned price table the figures were priced under (06 §8.4)
         "guarantee_grade": true | false }
 → 200 with "guarantee_grade": false and "refusal": "M1E-5004 coverage below floor"
         # the number still renders, the guarantee is refused — refused outright, not footnoted
@@ -392,6 +395,37 @@ POST /api/v1/federation/optout                            auth: operator token
 ```
 
 There is no endpoint that returns another tenant's contribution, pre-DP aggregate, or membership fact — the (k,m)-intersection gate and the DP release layer run inside `controld.dp-release`, and only their outputs have a route.
+
+### 3.7 Memory delivery (06 §9.4–9.5; edge consumer `mark1d/internal/memory`)
+
+```
+GET /api/v1/memory/artifacts                              auth: device token
+  X-Mark1-Edge-Version: mark1d/<semver>                    # recorded/forwarded, never a rejection axis (§10.1)
+  If-None-Match: "<etag>"                                  # optional
+→ 200 { "artifacts": [ { "artifact_id", "kind": "pitfall" | "fix_pattern" | "invariant",
+          "trigger", "guidance", "utility_lcb", "error_sig_digest"? } … ] }
+  ETag: "<sha256 of the body>"   Cache-Control: no-cache
+→ 304 Not Modified                                        # exact ETag match; no body
+```
+The admitted, injectable set for the token's tenant, LCB-ordered (06 §9.4 with d̂ = 0); routing hints (DB kind `preference`) are never served. The body carries no tenant field: the tenant is stamped from the verified token and forwarded to mark1-intel on the internal seam (ADR-0010 §2.2, `INTEL_BASE_URL` + `INTEL_SERVICE_TOKEN`, which intel verifies in turn), never read from the request. Errors: 401 M1E-1002 · 403 M1E-1003 · 502 M1E-9500 (intel unavailable/5xx/deadline; the edge keeps last-known-good) · 503 M1E-9500 (memory service not configured).
+
+```
+POST /api/v1/memory/match                                 auth: device token
+  { "error": "<PostToolUseFailure text, ≤4096 chars>", "limit": 3 }   # exactly these fields; ≤64 KiB
+→ 200 { "artifacts": [ { …as above…, "distance": 0.05 } … ], "signature_digest": "<sha256 of the normalized signature>" }
+```
+The reactive fuzz tier (06 §9.5 D29): admitted `pitfall` artifacts within cosine 0.15 over the one halfvec HNSW column, at most `limit` ≤ m_inject = 3. The server hop is deadline-bounded at 1.5 s, the edge's own budget. A `tenant_id` (or any unknown field) in the body is refused, not ignored. Errors: 400 M1E-2001 (malformed/oversize body, unknown field, or intel refused the request) · 401 M1E-1002 · 403 M1E-1003 · 502 M1E-9500 · 503 M1E-9500. No §8.2 rate-limit row exists yet for these two routes.
+
+### 3.8 Internal service surface (never public; service credential, ADR-0010 §2.2)
+
+```
+POST /internal/v1/receipts/append                         auth: Bearer <INTEL_SERVICE_TOKEN>
+  { "tenant_id", "record_type": "noise_certificate" | "memory_admission" | "bundle_publication"
+                              | "corpus_export" | "verifier_promotion",
+    "subject_id", "idempotency_key", "payload": { …integers and strings only… } }
+→ 200 { "receipt_id", "seq", "receipt_hash", "payload" }
+```
+The one chain writer (m1_002 §5): the intelligence services hold no chain key and no `m1_receipts` INSERT grant; they request their per-event rare-class receipts here and commit their own row in the same local transaction AFTER the receipt id returns. The credential is asserted before the body is decoded; the tenant comes from the body only because the verified principal is the service. Idempotency is keyed on the caller's attempt — `(tenant, record_type, idempotency_key)`, m1_072 — never on `subject_id` (re-admission and cert re-issue legitimately repeat a subject); a repeat answers the existing receipt. Errors: 401/403 on the credential, 400 on a class outside the set above or a payload the canonical form refuses.
 
 ---
 
@@ -581,22 +615,19 @@ Spike landed 2026-09-15 (`docs/spikes/codex-token-count-event.md`, GO-WITH-CONDI
 
 ### 5.3 gemini (Gemini CLI)
 
-Phase 3 adapter. Spike target (runs concurrently in Phase 1): `BeforeModel` in OAuth mode — whether the extension point fires on subscription-authenticated traffic and what its request/mutation contract is; if it does, `BeforeModel` is the injection point for ranked maps and (API-key regime only) routing.
-Payload fields, return contract, timing: `UNVERIFIED — spike gates this adapter slot`.
+Landed 2026-09-16 at pin `v0.59.0` (`go/mark1d/adapters/gemini`, `conformance/hooks/gemini/v0.59.0/`, shim map `maps/gemini.json`). Spike verdict GO with a two-source design (`docs/spikes/gemini-cli-beforemodel-oauth.md`). **Usage source is the CLI's chat recording** (`~/.gemini/tmp/<slug>/chats/*.jsonl`; `MessageRecord.tokens` carries the full `usageMetadata` breakdown in every auth mode), keyed `(MessageRecord.id, "chat:"+sessionId)` — there is no per-request id on this surface; `output_tokens = output + thoughts`, `input` includes cached, `cache_creation = 0`. Containment: a slug is offered only when its `.project_root` marker equals the enabled root and a stream only when its `projectHash == sha256(marker)`. Hooks: mechanism B into `~/.gemini/settings.json` (user file; absent ⇒ M1E-7101; JSONC ⇒ a plain parse refusal with no M1E code), seven registrations from `hooks/types.ts HookEventName` — SessionStart, BeforeAgent (turn_human), BeforeTool/AfterTool, PreCompress (none), AfterAgent (the stop gate: `decision:"block"` + reason continues the turn with `stop_hook_active`), SessionEnd; timeouts in **ms**; `MARK1_AGENT=gemini` rides the hook entry's `env`. BeforeModel/AfterModel are deliberately not registered (AfterModel fires per streamed chunk; no shim kind answers `llm_request`). Regime mirrors `validateNonInterActiveAuth` + `getAuthTypeFromEnv`: only `gemini-api-key` is API-key; OAuth is capture-only, never proxied.
 
 ### 5.4 opencode
 
-Phase 4 adapter. Plugin/event surface exists per the research pass; nothing about payload shape, usage availability, or gate points is verified.
-Everything: `UNVERIFIED — spike gates this adapter slot`.
+Landed 2026-09-16 at pin `v1.18.31` (`go/mark1d/adapters/opencode`, `conformance/hooks/opencode/v1.18.31/`, shim map `maps/opencode.json`). Spike verdict GO-WITH-CONDITIONS (`docs/spikes/opencode-adapter.md`). Plugins are in-process (`default export {id, server}`) and persistence is SQLite-only, so the adapter is mechanism A: an owned plugin file `$XDG_CONFIG_HOME/opencode/plugins/mark1.js` that execs the shim for lifecycle hooks (fire-and-forget, JSON on stdin) and appends `step-finish` parts + assistant `message.updated` verbatim to `~/.omium/mark1/capture/opencode/<sessionID>.jsonl`, which mark1d tails as a `tailers.Format`. Dedupe key `(StepFinishPart.messageID, StepFinishPart.id)` (one step-finish per LLM call; `AssistantMessage.tokens` is the LAST step's count and never counts). `output_tokens = output + reasoning`, `cache_read/creation = cache.read/write`. Session identity: `m1p session_id = UUIDv5(NameSpaceURL, "opencode:"+sessionID)`, computed identically in mark1.js, Go and the selfcheck. No SessionEnd or gate exists on this surface (`session.idle` is observation only). Regime from `opencode.json` `model` else `model.json recent[0]`; a stored `auth.json` `type:"api"` or a `provider.<id>.options.apiKey` ⇒ API-key, everything else subscription.
 
 ### 5.5 copilot (GitHub Copilot CLI)
 
-Phase 5 adapter (BYOK). Spike target: the `events.jsonl` usage surface — location, line schema, dedupe key, retention.
-Payloads and injection points: `UNVERIFIED — spike gates this adapter slot`. Wire capture only via BYOK credentials under the API-key regime.
+Landed 2026-09-16 at pin `@github/copilot@1.0.85` (`go/mark1d/adapters/copilot`, `conformance/hooks/copilot/v1.0.85/` — **recorded** offline in BYOK mode against a loopback fake provider, shim map `maps/copilot.json`). The spike's finding holds: `assistant.usage` is `ephemeral: true` and never written; only the `session.shutdown.data.modelMetrics` rollup exists, so `events.jsonl` is **DIAGNOSTIC** class (SessionStart/SessionEnd only, never Usage) and Usage rides the BYOK wire path (`Authorization: Bearer $COPILOT_PROVIDER_API_KEY` to `<base>/chat/completions`, OpenAI-chat dialect). Hooks: mechanism A, owned `$COPILOT_HOME/hooks/mark1.json`, PascalCase Claude-compatible bodies; **`PreToolUse` command hooks fail CLOSED at the pin** (a missing shim binary denies every tool call), so the fragment writes `bash: "<shim> || true"` to restore fail-open (rule 5). Stop gate `decision:"block"` → continuation with `stop_hook_active:true`; `SessionEnd` fires after every `agentStop` in `-p` mode. Regime: `providers.json` (entries must all be plain keys) else `COPILOT_PROVIDER_BASE_URL` + `COPILOT_PROVIDER_API_KEY` with no bearer token / key command ⇒ API-key; GitHub-billed ⇒ subscription, capture-only. `WireCredential()` yields a credential only for a plain env key; a `gho_` token is refused on the wire regardless (gateway tripwire). Context injection is inert on this surface (the shim renders Claude's nested `hookSpecificOutput`, which the PascalCase format is not documented to read).
 
 ### 5.6 cursor (Cursor)
 
-Phase 5 observe/gate adapter. Hook surface and payloads: `UNVERIFIED — spike gates this adapter slot`. Cursor's own model traffic is subscription-shaped by default — the provenance guard applies in full; only customer API-key configurations are proxy-eligible.
+Landed 2026-09-16 (`go/mark1d/adapters/cursor`, `conformance/hooks/cursor/v2026.09.10-fd3934a/` — transcribed from the pinned `cursor-agent` CLI bundle `2026.09.10-fd3934a` and IDE 3.20.21, not recorded: Cursor has no offline or BYOK path, so a live fixture needs an account). Observe/gate only; the wire proxy and model rewrite are a **permanent NO-GO** in every regime (typed `ErrWireNoGo`, M1E-7105) and `Detect()` is subscription unconditionally. Hooks: A/B fence into `~/.cursor/hooks.json` (owned `{"version":1}` when absent, fenced `_mark1` entries when present; the validator rejects unknown event names for the whole file and requires a numeric `version`). The CLI dispatches ten hook steps; `stop` is wired and carries `loop_count` (vendor cap `loop_limit` 5), no `stop_hook_active`; Cursor's normalizer converts `{decision:"block", reason}` into `followup_message` on every command hook, so the shim's block output works unchanged; `sessionStart/sessionEnd/beforeShell*` are IDE-only at the pin. Cursor also loads `~/.claude/settings.json` hooks translated (`Stop→stop`), so the claudecode fragment is exec'd by Cursor with `MARK1_AGENT` unset and maps nothing. Context injection is inert (Cursor reads top-level `additionalContext`, the shim renders the nested Claude shape). No durable local usage surface is GO, so the daemon runs no cursor tailer.
 
 ### 5.7 crush (Charm Crush)
 

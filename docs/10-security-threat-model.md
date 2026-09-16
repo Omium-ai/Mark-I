@@ -639,7 +639,7 @@ Nothing enters a shared corpus without certified labels, consent, DP, and enumer
 | C-54 | Corpus admission requires certified labels | Spec §9.8 | corpus export path (Phases 5–6) | runtime | `12/corpus-certified-labels-only` | partial |
 | C-55 | Cross-tenant sets require receipted contractual opt-in + DP-SGD with ledgered ε + contribution caps | Spec §9.8 | training plane intake | runtime | `12/training-dp-budget-ledger` | partial |
 | C-56 | Per-tenant canary memorization test as a checkpoint release gate | Spec §9.8 | training CI | CI | `12/checkpoint-canary-memorization` | partial |
-| C-57 | Export-batch receipts carry checkpoint lineage — retrain-on-erasure is *enumerable* | Spec §9.8 | §10.6, receipts plane | receipted | `12/corpus-lineage-enumerable` | partial |
+| C-57 | Export-batch receipts carry checkpoint lineage — retrain-on-erasure is *enumerable* | Spec §9.8 | §10.6, receipts plane | receipted | `test_lineage_finds_exports_and_erasure_marks_them`, `test_one_receipt_covers_both_artifacts` (python/intel/tests/test_corpus_export.py) | receipted |
 | C-58 | Retrain-on-erasure *execution* — actually rebuilding affected checkpoints | Spec §9.8 | §10.6 | policy | — (obligation enumerable via C-57; execution is a runbook) | gap |
 
 ### 12.10 Spec §9.9 — Auditability against Omium itself

@@ -9,6 +9,7 @@ authored from memory.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import uuid
 
@@ -258,15 +259,9 @@ def test_e2e_verifier_offline_accepts_chain(rig: Rig) -> None:
 
 
 def test_e2e_tvo_session_rollup_matches_hand_computation(rig: Rig) -> None:
-    """TVO, at the grain this lane can reach: the m1_ch_002 session rollup read through
-    controld's querychoke (`usage_by_session`, the 08 §3.3 surface, device token) equals the
-    field-by-field hand sum of expectations.json.
-
-    The tenant-day rollup (`tvo_tenant_day`, python/intel/app/tvo/rollup.py) cannot run
-    here: its reader's `tvo_task_window` template is absent from the choke's v1 registry
-    (reader.py attempt_window; templates.go v1Templates), and transcript-path Usage carries
-    no task_id (cmd/main.go tailWorkspaces admits without the segmenter), so tvo_task holds
-    nothing to roll up. That gap is reported, not papered over."""
+    """TVO at session grain: the m1_ch_002 session rollup read through controld's querychoke
+    (`usage_by_session`, the 08 §3.3 surface, device token) equals the field-by-field hand
+    sum of expectations.json. Task grain — ADR-0002's denominator — is the next test."""
     exp = rig.expectations()
     hand = {"tokens_in": 0, "tokens_out": 0, "tokens_cache_read": 0, "tokens_cache_create": 0}
     for s in exp["streams"]:
@@ -293,6 +288,92 @@ def test_e2e_tvo_session_rollup_matches_hand_computation(rig: Rig) -> None:
     assert got == hand, (got, hand)
     # Tenancy is bound from the token's claims: a tenant with no session sees none.
     assert {uuid.UUID(r["session_id"]) for r in rows} == {SESSION_ID}
+
+
+def test_e2e_tvo_task_rollup_matches_hand_computation(rig: Rig) -> None:
+    """TVO at task grain — the ADR-0002 denominator — read through the `tvo_task_window`
+    template reader.py's attempt_window consumes (the rollup driver's only ledger read).
+
+    Hand-derived from the corpus, rule by rule: the nine hook bodies carry ONE UserPromptSubmit
+    ⇒ R1 opens exactly one task (task_seg.v1); no second prompt ⇒ R2/R3 never fire; the rig
+    consents no anchor ⇒ no stage-final verdict ⇒ ONE attempt with fused_verdict '' ; SessionEnd
+    ⇒ R4 closes it UNRESOLVED_SESSION_END. Every one of the 7 Usage events is admitted while
+    that task is open, so the attempt's gen_tokens is expectations.json's four-field sum
+    (46 + 2302 + 3904 + 11008 = 17260); verifier_tokens is 0 because no ledger row carries
+    judge or anchor tokens; cost_usd is 0 because chproj projects none. The window runs from
+    the vendor-stamped Usage day (2026-08-29) past today: TaskOpen carries the daemon's clock."""
+    exp = rig.expectations()
+    hand_gen = sum(
+        ev["usage"][f]
+        for s in exp["streams"]
+        for ev in s["usage_events"]
+        for f in (
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        )
+    )
+    assert hand_gen == 17260
+    scope = f"tenant_id = toUUID('{rig.tenant_id}') AND session_id = toUUID('{SESSION_ID}')"
+    opens = rig.ch_query(f"""
+        SELECT DISTINCT task_id, JSONExtractString(payload, 'task_seg_version') AS v
+        FROM mark1.m1p_events WHERE {scope} AND event_type = 'TaskOpen'""")
+    assert len(opens) == 1 and opens[0]["v"] == "task_seg.v1", opens  # R1, once
+    task = opens[0]["task_id"]
+    closes = rig.ch_query(f"""
+        SELECT DISTINCT task_id, JSONExtractString(payload, 'resolution') AS r
+        FROM mark1.m1p_events WHERE {scope} AND event_type = 'TaskClose'""")
+    assert closes == [{"task_id": task, "r": "RESOLUTION_UNRESOLVED_SESSION_END"}], closes  # R4
+    stamped = rig.ch_query(f"""
+        SELECT uniqExact(task_id) AS tasks, uniqExact(event_id) AS n
+        FROM mark1.m1p_events WHERE {scope} AND event_type = 'Usage'
+          AND task_id = toUUID('{task}')""")
+    if int(stamped[0]["n"]) != 7:
+        pytest.fail(
+            f"{stamped[0]['n']}/7 transcript Usage rows carry the open task's task_id. Seam: "
+            "cmd/main.go tailWorkspaces builds claudecode.TailConfig without Observe — set "
+            "Observe to func(ev) { seg.Observe(ev, nil) } (tailers.Config.Observe runs before "
+            "Emit, so route.Decision inherits the id) and pass seg into tailWorkspaces.",
+            pytrace=False,
+        )
+
+    to = (dt.datetime.now(dt.UTC).date() + dt.timedelta(days=2)).isoformat()
+    rows = rig.choke("tvo_task_window", {"from": "2026-08-29", "to": to})
+    assert len(rows) == 1, rows  # one task, one attempt — the tenant is this run's alone
+    row = rows[0]
+    got = {
+        "task_id": row["task_id"],
+        "attempt_n": int(row["attempt_n"]),
+        "gen_tokens": int(row["gen_tokens"]),
+        "verifier_tokens": int(row["verifier_tokens"]),
+        "fused_verdict": str(row["fused_verdict"]),
+        "verdict_stage": str(row["verdict_stage"]),
+        "task_seg_version": row["task_seg_version"],
+        "cost_usd": float(row["cost_usd"]),
+    }
+    assert got == {
+        "task_id": task,
+        "attempt_n": 1,
+        "gen_tokens": hand_gen,
+        "verifier_tokens": 0,
+        "fused_verdict": "",
+        "verdict_stage": "",
+        "task_seg_version": "task_seg.v1",
+        "cost_usd": 0.0,
+    }, got
+    # The same rows through reader.py's own mapping: the AttemptRow seam the tenant-day rollup
+    # (rollup.py) reads — one attempt, terminal verdict blank ⇒ the `unresolved` class (R5).
+    assert {k for k in row} >= {
+        "task_id",
+        "attempt_n",
+        "gen_tokens",
+        "verifier_tokens",
+        "fused_verdict",
+        "verdict_stage",
+        "task_seg_version",
+        "cost_usd",
+    }
 
 
 def test_e2e_run_shape(rig: Rig) -> None:

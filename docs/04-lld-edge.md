@@ -546,6 +546,8 @@ type Reader interface{ Get(TaskID) (Cached, bool) }
 >
 > **D-Y(b) — `n` below the knee table's first row.** `Stop` is **false**, always. You cannot be past the knee before the first attempt exists, and clamping up to row 1 evaluates attempt-1 economics for attempt 0. Absent rows are not conservative defaults; they are absent.
 >
+> **D-Y(c) — exactly at the knee.** The inequality is `≤`, so `p̂_LCB(n)·V(task) == c(n)` is **at the knee and stops**: the expected value of one more attempt equals its cost, and a governor that lets a coin-flip attempt run is a governor that runs forever on a flat curve. The gate therefore ALLOWS the Stop hook (the agent may stop) and the ladder evaluator STAYS (no escalation on a verdict the economics already closed) — `TestStopGateAllowsAtTheKnee`, `TestGateKneeStops`, `ladder_test.go` `three: violated at the knee stays`. Posture: fail-open for availability (an unevaluable knee never blocks), fail-static for the table (last-known-good rows), never fail-closed.
+>
 > **D-Y(c) — `deadline_ms == 0`.** Proto3 cannot distinguish "zero" from "unset", so `0` means **unspecified**, never "already expired". The daemon applies its own 5 ms cache-read budget and answers normally. Reading 0 as expired silently disables gating for any writer that forgets the field while accounting the result as timeouts — a product feature quietly off, with telemetry that says everything is fine.
 
 **Failure posture: fail-static then fail-open.** No bundle matrices (never received, or `max_age` exceeded) ⇒ conservative built-ins: gates answer allow, verdicts flagged `stale_cert` (`M1E-3006`). Cache miss for a task ⇒ `GateVerdict{ALLOW}` + `Dropped{gate_timeout}` accounting (`M1E-5001`). A verdict subsystem failure can never block a developer.
@@ -703,7 +705,7 @@ type TokenSource interface{ Token(ctx context.Context) (string, error) }
 func OnRevoked()
 ```
 
-Also here: the per-tenant HMAC key material for digests/`idem_key` (delivered at enrollment, custody same ladder) and the X25519 device spill keypair (§5.4) — the private half exists only inside `mark1d`, which is why the shim and proxy can encrypt spill they cannot read back.
+Also here: the per-tenant HMAC key material for digests/`idem_key` (delivered at enrollment as 08 §3.1's `tenant_root_hex` on the ACTIVE poll body and every PoP refresh; `mark1 enroll` persists it with the device identity in `<state>/enrollment.json` (08 §7.1), which `mark1d` reads at boot — the `--tenant-salt`, `--device-token`, `--tenant-id`, `--device-id`, `--ingest-url` flags are dev-seam overrides of that document, and a daemon with neither refuses to start naming `mark1 enroll`; custody same ladder) and the X25519 device spill keypair (§5.4) — the private half exists only inside `mark1d`, which is why the shim and proxy can encrypt spill they cannot read back.
 
 ### 2.10 `adapters/*` — seven agents, one interface
 
@@ -1371,8 +1373,8 @@ The point of this document. Posture column uses the frozen matrix (open = availa
 | F-29 | bundle past `max_age`, control plane gone (`M1E-3006`) | age timer | **static → built-ins** | status `stale: true`; verdicts flagged `stale_cert` | conservative built-ins until any valid bundle | `12/bundle-maxage-builtins` |
 | F-30 | unknown bundle section version | decode | static (per section) | ACK `sections_skipped` | skip-and-retain; LKG section keeps running | `12/bundle-skip-and-retain` |
 | F-31 | anchor crash / timeout / sandbox-setup failure | runner result; sandbox error | open | none | `AnchorVote{VERDICT_ERROR}` — never `violated`; schedule continues | `12/anchor-error-not-violated` |
-| F-32 | PATH shim / swapped binary | `resolved_binary_hashes` mismatch vs consent | integrity | none visible; vote flagged | `tamper: true` — vote never certifies; doctor surfaces | `12/antitamper-path-shim` |
-| F-33 | worktree mutated around anchor / suppression-directive spike | merkle root mismatch; `suppression_directive_delta` | integrity | none | tamper flag; anchor-vs-T3 divergence feeds the adversarial-ML metric | `12/antitamper-worktree-suppression` |
+| F-32 | PATH shim / swapped binary | `resolved_binary_hashes` mismatch vs consent | closed (integrity: the vote carries `tamper`) | none visible; vote flagged | `tamper: true` — vote never certifies; doctor surfaces | `12/antitamper-path-shim` |
+| F-33 | worktree mutated around anchor / suppression-directive spike | merkle root mismatch; `suppression_directive_delta` | closed (integrity: the vote carries `tamper`) | none | tamper flag; anchor-vs-T3 divergence feeds the adversarial-ML metric | `12/antitamper-worktree-suppression` |
 | F-34 | cortexd absent when anchor runs | no fresh L0 root in cache | open | none | integrity-incomplete vote; never certifies | `12/anchor-integrity-incomplete` |
 | F-35 | redact scanner internal failure | `AdmitOutcome::Quarantine` | **closed** | none | event locally quarantined + `Dropped{LOCAL_QUARANTINE}`; never admitted raw | `12/redact-fails-closed` |
 | F-36 | secret detected in event | admit axis hit | **closed, no off switch** | none | span → `⟨redacted:class:hash⟩` before spool admission | `12/redact-substitution-pre-spool` |
@@ -1384,8 +1386,8 @@ The point of this document. Posture column uses the frozen matrix (open = availa
 | F-42 | keychain/TPM unavailable at runtime | custody API errors | closed (secrets) | enroll fails loudly, or falls to 0600 file floor with doctor warning | never silently downgrade below the floor | `12/custody-floor` |
 | F-43 | machine sleep/wake | monotonic clock; network-change signal | open | none | §1.4: cursors re-stat, parks re-queue, slow anchors deferred | `12/chaos-sleep-wake` |
 | F-44 | clock skew | server computes from `sent_at` | open | none | the pair `(session_epoch, seq)` carries causal order; wall time is display-only (07 §2) | `12/skew-ordering-invariance` |
-| F-45 | user edits inside a managed fragment (`M1E-7102`) | fence checksum mismatch | refusal | doctor shows FRAGMENT-DAMAGED | repair only via explicit `doctor --fix` (08 §8.3) | `12/fragment-user-edit-refusal` |
-| F-46 | `mark1 off` under any of the above | off-marker check precedes every gate | n/a | everything stops gating; byte-equality revert | `CoverageTransition{disable}` receipted; snapshot test | `12/off-byte-equality` |
+| F-45 | user edits inside a managed fragment (`M1E-7102`) | fence checksum mismatch | closed (refusal: nothing is rewritten) | doctor shows FRAGMENT-DAMAGED | repair only via explicit `doctor --fix` (08 §8.3) | `12/fragment-user-edit-refusal` |
+| F-46 | `mark1 off` under any of the above | off-marker check precedes every gate | open (the off-marker outranks every posture above) | everything stops gating; byte-equality revert | `CoverageTransition{disable}` receipted; snapshot test | `12/off-byte-equality` |
 
 Reading rule: every fail-**closed** row protects legality or secrets and is allowed to cost availability; no fail-**open** row is allowed to lose billing-grade data (it parks, blocks, or spills instead); every gap any row creates must surface as `Dropped{}` or a `CoverageTransition` — the two accounting channels are the difference between a failure and a lie.
 
