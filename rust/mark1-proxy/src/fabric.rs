@@ -55,12 +55,50 @@ impl Fabric {
 
     /// §3.1 step 3 — the refusal record that D-AJ calls "the evidence for the legal claim".
     pub fn guard_decision(&self, decision: pb::GuardDecision) {
+        self.event(pb::event::Body::GuardDecision(decision));
+    }
+
+    /// 04 §4's transport-level pair for one observed request, built only from the tee's allow-list.
+    pub fn tee_report(&self, r: &crate::tee::TeeReport) {
+        let requested = r.request.requested_model.clone().unwrap_or_default();
+        self.event(pb::event::Body::ModelRequest(pb::ModelRequest {
+            request_id: r.response.request_id.clone(),
+            served_model: r
+                .request
+                .served_model
+                .clone()
+                .unwrap_or_else(|| requested.clone()),
+            model: requested,
+            stream: r.response.stream,
+            request_bytes: r.response.request_bytes,
+        }));
+        let stop_reason = r
+            .observations
+            .iter()
+            .find_map(|o| match o {
+                mark1_frames::WireObservation::ResponseEnd { stop_reason } => {
+                    Some(stop_reason.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.event(pb::event::Body::ModelResponse(pb::ModelResponse {
+            request_id: r.response.request_id.clone(),
+            status_code: u32::from(r.response.status),
+            ttfb_ms: r.response.ttfb_micros / 1000,
+            duration_ms: r.response.elapsed_micros / 1000,
+            response_bytes: r.response.response_bytes,
+            stop_reason,
+        }));
+    }
+
+    /// One `Event` under this proxy's session; seq / session_epoch are stamped by mark1d (R-4).
+    pub fn event(&self, body: pb::event::Body) {
         let event = pb::Event {
             event_id: uuid::Uuid::now_v7().as_bytes().to_vec(),
             session_id: self.session_id.to_vec(),
             occurred_at: Some(now()),
-            body: Some(pb::event::Body::GuardDecision(decision)),
-            // seq / session_epoch are stamped by mark1d at admission (R-4).
+            body: Some(body),
             ..Default::default()
         };
         let mut frame = Vec::new();

@@ -7,6 +7,8 @@
 # directions. Reviewed baseline: 143 crates (2026-09-15). Adding a line here is adding a crate
 # to the process that holds the credential in memory and puts it on the wire — say why in the
 # same PR. Regenerate with the command in the gate's header comment.
+# + mark1-harden (2026-09-15, reviewed change, now 144): first-party, NFR-SECURITY-002 core-dump
+#   suppression; its only deps are libc and windows-sys, both already in this closure.
 aead
 aho-corasick
 anyhow
@@ -67,6 +69,7 @@ lazy_static
 libc
 log
 m1p-wire
+mark1-harden
 mark1-frames
 mark1-policy
 mark1-proxy

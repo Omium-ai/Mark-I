@@ -19,6 +19,7 @@ use hyper::body::Incoming;
 use hyper::client::conn::http1::SendRequest;
 
 use crate::guard::ForwardTicket;
+use crate::request::UpstreamBody;
 use crate::Upstream;
 
 /// Bounded so a burst of distinct credentials cannot pin unbounded connection state against
@@ -38,7 +39,7 @@ pub struct Key {
 struct Idle {
     /// `Mutex<..>` and never held across an await — the pool is a lookup, not a lock the hot
     /// path can be parked on.
-    conns: Mutex<HashMap<Key, Vec<SendRequest<Incoming>>>>,
+    conns: Mutex<HashMap<Key, Vec<SendRequest<UpstreamBody>>>>,
 }
 
 pub struct Pool {
@@ -51,7 +52,7 @@ pub struct Pool {
 /// is not reusable, and never on a mid-stream abort, because it is not safe to.
 pub struct Checkout {
     key: Key,
-    sender: SendRequest<Incoming>,
+    sender: SendRequest<UpstreamBody>,
     idle: Arc<Idle>,
 }
 
@@ -118,7 +119,7 @@ impl Pool {
         })
     }
 
-    async fn dial(&self, up: &Upstream) -> std::io::Result<SendRequest<Incoming>> {
+    async fn dial(&self, up: &Upstream) -> std::io::Result<SendRequest<UpstreamBody>> {
         let tcp = tokio::net::TcpStream::connect((up.host.as_str(), up.port)).await?;
         // Nagle off: the request head is small and the next write is the body, so waiting for
         // a coalescing partner costs exactly the latency this component budgets in whole.
@@ -155,7 +156,7 @@ fn client_config() -> Result<rustls::ClientConfig, rustls::Error> {
     Ok(config)
 }
 
-async fn handshake<I>(io: I) -> std::io::Result<SendRequest<Incoming>>
+async fn handshake<I>(io: I) -> std::io::Result<SendRequest<UpstreamBody>>
 where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
@@ -174,7 +175,7 @@ impl Checkout {
     /// out of the response's lifetime.
     pub async fn send(
         &mut self,
-        req: http::Request<Incoming>,
+        req: http::Request<UpstreamBody>,
     ) -> Result<http::Response<Incoming>, hyper::Error> {
         self.sender.send_request(req).await
     }

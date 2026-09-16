@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -19,8 +19,11 @@ use http::{Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
+use mark1_frames::Dialect;
+use mark1_policy::RouteSection;
 
 use crate::fabric::Fabric;
+use crate::gateway::Gateway;
 use crate::guard::provenance::{fingerprint_hex, parse_fingerprint_hex};
 use crate::guard::{Decision, Enrollment, ForwardTicket, Guard, Refusal};
 use crate::response::ForwardBody;
@@ -37,12 +40,64 @@ pub type ProxyBody = BoxBody<Bytes, BoxError>;
 /// and a second grammar is a second parser to get wrong.
 const KILL_FILE: &str = "guard-killed";
 
+/// FR-ROUTE-008: the applied bundle's `route` section, decoded once into `requested model →
+/// served model`. Every rung of a ladder is served by that ladder's entry rung (the prefix
+/// principle: the cheapest rung that earned its place runs first); the first ladder naming a
+/// model wins. Only ε=0 tables exist — see [`RouteTable::from_route`].
+pub struct RouteTable {
+    served: std::collections::HashMap<String, String>,
+    bundle_seq: u64,
+    /// `issued_at + max_age` epoch seconds; `u64::MAX` for a table built without a bundle envelope.
+    fresh_until: u64,
+}
+
+impl RouteTable {
+    /// `None` at ε≠0: exploration is not implemented, and a rewrite whose propensity this
+    /// binary cannot state honestly is not made (FR-ROUTE-003) — the table stays ADVISORY.
+    pub fn from_route(route: &RouteSection, bundle_seq: u64) -> Option<Self> {
+        if route.exploration_epsilon != 0.0 {
+            return None;
+        }
+        let mut served = std::collections::HashMap::new();
+        for ladder in &route.ladders {
+            let Some(entry) = ladder.rungs.first() else {
+                continue;
+            };
+            for rung in &ladder.rungs {
+                served
+                    .entry(rung.model_id.clone())
+                    .or_insert_with(|| entry.model_id.clone());
+            }
+        }
+        Some(RouteTable {
+            served,
+            bundle_seq,
+            fresh_until: u64::MAX,
+        })
+    }
+
+    pub fn fresh_until(mut self, epoch_s: u64) -> Self {
+        self.fresh_until = epoch_s;
+        self
+    }
+
+    pub fn served(&self, requested: &str) -> Option<&str> {
+        self.served.get(requested).map(String::as_str)
+    }
+
+    pub fn bundle_seq(&self) -> u64 {
+        self.bundle_seq
+    }
+}
+
 pub struct Proxy {
     cfg: Arc<ProxyConfig>,
     guard: Arc<Guard>,
     pool: Arc<Pool>,
     tee: Tee,
     fabric: Fabric,
+    /// `None` ⇒ no rewrite, every request ADVISORY. Swapped by `policy::watch` via [`Proxy::set_route`].
+    route: RwLock<Option<Arc<RouteTable>>>,
     /// §3.1 step 6: "all further requests for that session refused". Keyed by `M1-Cred-Ref`
     /// rather than by connection, because the ref is what identifies the agent config whose
     /// fragment must be reverted, and it survives the client reconnecting — which a
@@ -58,6 +113,8 @@ pub struct Proxy {
     killed: Arc<Mutex<HashSet<String>>>,
     /// What `Host` must equal (M1E-4004).
     bound_authority: String,
+    /// `Some` ⇒ 04 §3.4 gateway: mTLS accept, credentials by reference.
+    gateway: Option<Gateway>,
 }
 
 impl Proxy {
@@ -76,9 +133,36 @@ impl Proxy {
             pool,
             tee,
             fabric,
+            route: RwLock::new(None),
             killed: Arc::new(Mutex::new(killed)),
             bound_authority: bound.to_string(),
+            gateway: None,
         }
+    }
+
+    pub fn with_gateway(mut self, gateway: Gateway) -> Self {
+        self.gateway = Some(gateway);
+        self
+    }
+
+    pub fn with_route(self, table: RouteTable) -> Self {
+        self.set_route(Some(Arc::new(table)));
+        self
+    }
+
+    pub fn set_route(&self, table: Option<Arc<RouteTable>>) {
+        if let Ok(mut r) = self.route.write() {
+            *r = table;
+        }
+    }
+
+    fn route_table(&self) -> Option<Arc<RouteTable>> {
+        self.route.read().ok().and_then(|r| r.clone())
+    }
+
+    pub fn route_stale(&self, now_epoch_s: u64) -> bool {
+        self.route_table()
+            .is_some_and(|t| now_epoch_s > t.fresh_until)
     }
 
     pub async fn serve(self: Arc<Self>, listener: tokio::net::TcpListener) {
@@ -89,18 +173,34 @@ impl Proxy {
             let _ = stream.set_nodelay(true);
             let me = Arc::clone(&self);
             tokio::spawn(async move {
-                let svc = hyper::service::service_fn(move |req| {
-                    let me = Arc::clone(&me);
-                    async move { Ok::<_, std::convert::Infallible>(me.handle(req).await) }
-                });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(hyper_util::rt::TokioIo::new(stream), svc)
-                    .await;
+                match me.gateway.as_ref().map(|g| g.acceptor.clone()) {
+                    // The handshake is where a missing or wrong-CA client certificate is refused.
+                    Some(acceptor) => match acceptor.accept(stream).await {
+                        Ok(tls) => me.connection(tls).await,
+                        Err(e) => {
+                            tracing::warn!(target: "mark1_proxy::gateway", %e, "mTLS refused")
+                        }
+                    },
+                    None => me.connection(stream).await,
+                }
             });
         }
     }
 
-    pub async fn handle(&self, req: http::Request<Incoming>) -> Response<ProxyBody> {
+    async fn connection<I>(self: Arc<Self>, io: I)
+    where
+        I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let svc = hyper::service::service_fn(move |req| {
+            let me = Arc::clone(&self);
+            async move { Ok::<_, std::convert::Infallible>(me.handle(req).await) }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(hyper_util::rt::TokioIo::new(io), svc)
+            .await;
+    }
+
+    pub async fn handle(&self, mut req: http::Request<Incoming>) -> Response<ProxyBody> {
         let started = Instant::now();
 
         // Step 1 — edge invariant 2: the off-check precedes every gate evaluation.
@@ -130,6 +230,38 @@ impl Proxy {
                 .is_some_and(|r| self.killed.lock().is_ok_and(|k| k.contains(r)));
             if killed {
                 return killed_response();
+            }
+        }
+
+        // Gateway: the credential is fetched by reference for this one request; a client that
+        // brought its own is refused before the guard runs, so no code path forwards it.
+        if let Some(gw) = &self.gateway {
+            if req.headers().contains_key("x-api-key")
+                || req.headers().contains_key(http::header::AUTHORIZATION)
+            {
+                return error(
+                    StatusCode::FORBIDDEN,
+                    "M1E-8001",
+                    "gateway takes credentials by reference; request carried one",
+                );
+            }
+            let cred_ref = req
+                .headers()
+                .get(crate::guard::CRED_REF_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let name = crate::gateway::credential_header(up.dialect(req.uri().path()));
+            let value = match cred_ref {
+                Some(r) => gw
+                    .source
+                    .resolve(&r)
+                    .await
+                    .and_then(|secret| crate::gateway::credential_value(&name, &secret)),
+                None => None,
+            };
+            // Unresolvable ⇒ no credential header ⇒ the guard refuses (M1E-8001) and records it.
+            if let Some(v) = value {
+                req.headers_mut().insert(name, v);
             }
         }
 
@@ -214,8 +346,21 @@ impl Proxy {
         observe: bool,
         started: Instant,
     ) -> Response<ProxyBody> {
-        let facts = crate::request::facts(&req, &up);
+        let mut facts = crate::request::facts(&req, &up);
         let dialect = facts.dialect;
+        let _ = crate::request::redact_in_transit_eligible(false, dialect, &req);
+
+        let req = crate::request::sanitize(req, &up);
+        // Anthropic only: the tee cannot confirm a served model on a dialect it cannot parse.
+        let req = match self.route_table() {
+            Some(table) if dialect == Dialect::AnthropicSse => {
+                match crate::request::rewrite_model(req, &table, &ticket, &mut facts).await {
+                    Ok(r) => r,
+                    Err(e) => return error(StatusCode::BAD_REQUEST, "M1E-2001", &e.to_string()),
+                }
+            }
+            _ => req.map(crate::request::UpstreamBody::from),
+        };
         // ponytail: request byte count from Content-Length; a chunked upload reports 0. A
         // counting body wrapper would be exact — add it when a dialect ships chunked
         // requests, which none of the five currently does.
@@ -225,9 +370,6 @@ impl Proxy {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
-        let _ = crate::request::redact_in_transit_eligible(false, dialect, &req);
-
-        let req = crate::request::sanitize(req, &up);
 
         let mut checkout = match self.pool.connect(&up, &ticket).await {
             Ok(c) => c,
@@ -248,11 +390,30 @@ impl Proxy {
         }
 
         let (parts, body) = upstream_response.into_parts();
-        let status = parts.status.as_u16();
+        let header = |name: &str| {
+            parts
+                .headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let response_facts = crate::tee::ResponseFacts {
+            status: parts.status.as_u16(),
+            request_bytes,
+            response_bytes: 0,
+            elapsed_micros: 0,
+            ttfb_micros: 0,
+            request_id: [header("request-id"), header("x-request-id")]
+                .into_iter()
+                .find(|v| !v.is_empty())
+                .unwrap_or_default(),
+            stream: header("content-type").starts_with("text/event-stream"),
+        };
         // Sampled-out (D-AJ) and off-marker requests are forwarded byte for byte with no tee
         // stream at all. Same code path, one fewer observer.
         let tee = observe.then(|| self.tee.open(facts));
-        let forward = ForwardBody::new(body, tee, checkout, started, status, request_bytes);
+        let forward = ForwardBody::new(body, tee, checkout, started, response_facts);
         Response::from_parts(parts, forward.map_err(|e| Box::new(e) as BoxError).boxed())
     }
 

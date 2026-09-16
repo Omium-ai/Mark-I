@@ -453,8 +453,10 @@ const REVIEWED_SINKS: &[(&str, &str, &str)] = &[
     ("mark1-hookshim/src/spill.rs", "append", "a7e3c71a7c1230da"),
     // Fixed or non-event bytes: no event frame can reach these.
     ("mark1-proxy/src/main.rs", "write_port", "a061b025faee4a4f"), // the listener port
-    ("mark1-proxy/src/main.rs", "main", "f7551a83cf3d58a6"), // startup errors to stderr, pre-`run`
+    ("mark1-proxy/src/main.rs", "main", "ba1a3633112865e7"), // startup errors to stderr, pre-`run` (re-reviewed 2026-09-16: mark1_harden::apply)
     ("mark1-proxy/src/router.rs", "record_kill", "afc6365810cd742e"), // cred_ref + fingerprint + reason
+    ("mark1-proxy/src/router.rs", "set_route", "7a51b04ba05099d5"), // RwLock write guard swapping the RouteTable; no byte leaves the process
+    ("mark1-hookshim/src/context.rs", "run", "47f42531d408c737"), // rendered ContextReply JSON to stdout (the daemon's reply, never the event frame); the frame goes to fabric::context_query and the admit-guarded spill
     ("mark1-hookshim/src/spill.rs", "count", "3c7cadf50427b079"), // one constant byte, a counter
     ("mark1-hookshim/src/gate.rs", "block", "ec2a2117fd48220a"), // block-decision JSON to stdout
     // `write!` into a `String` — an in-memory formatter, no byte leaves the

@@ -13,10 +13,23 @@
 //! no panics on any input, a hard cap on retained bytes, and no I/O.
 
 pub mod anthropic_sse;
+pub mod azure;
 pub mod bedrock_eventstream;
 pub mod gemini;
 pub mod openai_chat;
 pub mod openai_responses;
+pub mod vertex;
+
+/// Every independently-versioned revision this crate ships: the five wire grammars plus the two host dialects that select among them.
+pub const DIALECT_REVS: [&str; 7] = [
+    anthropic_sse::DIALECT_REV,
+    openai_responses::DIALECT_REV,
+    openai_chat::DIALECT_REV,
+    gemini::DIALECT_REV,
+    bedrock_eventstream::DIALECT_REV,
+    vertex::DIALECT_REV,
+    azure::DIALECT_REV,
+];
 
 use serde::{Deserialize, Serialize};
 
@@ -200,8 +213,17 @@ mod tests {
         assert_eq!(revs.len(), 5);
     }
 
-    /// Exactly one dialect parses in Phase 3. If a stub starts returning `Ok`, either it
-    /// was implemented (update this test) or it silently stopped degrading (a billing bug).
+    #[test]
+    fn host_dialect_revs_are_distinct_from_every_grammar_rev() {
+        let mut revs: Vec<&str> = DIALECT_REVS.to_vec();
+        revs.sort_unstable();
+        revs.dedup();
+        assert_eq!(revs.len(), DIALECT_REVS.len(), "a DIALECT_REV is shared");
+    }
+
+    /// Anthropic SSE and Bedrock parse; the other three stubs must keep degrading. If a stub
+    /// starts returning `Ok`, either it was implemented (update this test) or it silently
+    /// stopped degrading (a billing bug).
     #[test]
     fn only_anthropic_sse_is_implemented() {
         for d in Dialect::ALL {
@@ -209,6 +231,11 @@ mod tests {
             let out = p.feed(b"data: {}\n\n");
             if d == Dialect::AnthropicSse {
                 assert!(out.is_ok(), "anthropic_sse must parse");
+            } else if d == Dialect::BedrockEventstream {
+                assert!(
+                    out.is_ok(),
+                    "bedrock buffers a partial prelude without degrading"
+                );
             } else {
                 assert_eq!(
                     out.unwrap_err().reason,

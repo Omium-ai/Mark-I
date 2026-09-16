@@ -6,6 +6,8 @@
 # directions. Reviewed baseline: 68 crates (2026-09-15). Adding a line here is adding a crate
 # to a process that runs inside the agent's hook with the customer's file access — say why in
 # the same PR. Regenerate with the command in the gate's header comment.
+# + mark1-harden (2026-09-15, reviewed change, now 69): first-party, NFR-SECURITY-002 core-dump
+#   suppression; its only deps are libc and windows-sys, both already in this closure.
 aead
 aho-corasick
 anyhow
@@ -30,6 +32,7 @@ itertools
 itoa
 libc
 m1p-wire
+mark1-harden
 mark1-hookshim
 mark1-redact
 memchr

@@ -144,7 +144,7 @@ data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5","u
 #[test]
 fn unimplemented_dialects_degrade_on_every_input() {
     for dialect in Dialect::ALL {
-        if dialect == Dialect::AnthropicSse {
+        if matches!(dialect, Dialect::AnthropicSse | Dialect::BedrockEventstream) {
             continue;
         }
         let mut parser = dialect.parser();
@@ -164,4 +164,97 @@ fn unimplemented_dialects_degrade_on_every_input() {
             DegradeReason::NotImplemented
         );
     }
+}
+
+/// The eventstream framer under the same hostile inputs as the SSE one: no panic, no unbounded
+/// buffer, and a lying prelude (a `total_len` past the cap, or a CRC that does not match) is a
+/// counted degradation at the message's own offset, never a guess.
+#[test]
+fn bedrock_pathological_input_never_panics_and_bounds_its_buffer() {
+    let feed_split = |bytes: &[u8]| {
+        let mut p = Dialect::BedrockEventstream.parser();
+        let mut last = None;
+        for i in 0..bytes.len() {
+            if let Err(d) = p.feed(&bytes[i..=i]) {
+                last = Some(d.reason);
+                break;
+            }
+        }
+        if last.is_none() {
+            if let Err(d) = p.finish() {
+                last = Some(d.reason);
+            }
+        }
+        let _ = p.finish();
+        last
+    };
+    // A prelude claiming 4 GiB: refused at byte 0, before a single payload byte is retained.
+    assert_eq!(
+        feed_split(&[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0]),
+        Some(DegradeReason::PendingBufferOverflow)
+    );
+    // A prelude shorter than a prelude can be.
+    assert_eq!(
+        feed_split(&[0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0]),
+        Some(DegradeReason::MalformedEvent)
+    );
+    // Sixteen bytes of zeros: total_len 0 is malformed; nothing is inferred.
+    assert_eq!(feed_split(&[0u8; 16]), Some(DegradeReason::MalformedEvent));
+    // A truncated message is a cut stream, not drift: no degradation, no observation.
+    let golden = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/frames/bedrock_eventstream/invoke_stream_anthropic.bytes"
+    ))
+    .unwrap();
+    assert_eq!(feed_split(&golden[..golden.len() - 7]), None);
+    // One flipped byte inside a valid message's payload fails its CRC at that message.
+    let mut flipped = golden.clone();
+    let i = flipped.len() - 20;
+    flipped[i] ^= 0x01;
+    assert_eq!(feed_split(&flipped), Some(DegradeReason::MalformedEvent));
+
+    // A well-formed prelude (CRC correct) promising a 2 MiB message: refused at the prelude,
+    // deferred to the next call as every degradation is, and nothing of the message retained.
+    let mut p = Dialect::BedrockEventstream.parser();
+    let mut head = vec![0u8, 0x20, 0, 0, 0, 0, 0, 0];
+    head.extend_from_slice(&crc32_ieee(&head).to_be_bytes());
+    assert!(p.feed(&head).unwrap().is_empty());
+    assert_eq!(
+        p.feed(&vec![0u8; 64 * 1024]).unwrap_err().reason,
+        DegradeReason::PendingBufferOverflow
+    );
+    // And a dribbled message under the cap that never completes is bounded by the cap too.
+    let mut p = Dialect::BedrockEventstream.parser();
+    let mut head = vec![0u8, 0x0f, 0xff, 0xff, 0, 0, 0, 0];
+    head.extend_from_slice(&crc32_ieee(&head).to_be_bytes());
+    assert!(p.feed(&head).unwrap().is_empty());
+    let mut accepted = head.len();
+    loop {
+        match p.feed(&[0u8; 4096]) {
+            Ok(v) => assert!(v.is_empty()),
+            Err(d) => {
+                assert_eq!(d.reason, DegradeReason::PendingBufferOverflow);
+                break;
+            }
+        }
+        accepted += 4096;
+        assert!(accepted <= (1 << 20) + 4096, "retained {accepted} bytes");
+    }
+}
+
+/// Restated here rather than shared with the parser, so this file proves the parser's CRC
+/// against an independent implementation (the check value is CRC-32/IEEE's published one).
+fn crc32_ieee(data: &[u8]) -> u32 {
+    let mut c = !0u32;
+    for &b in data {
+        c ^= u32::from(b);
+        for _ in 0..8 {
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0xEDB8_8320
+            } else {
+                c >> 1
+            };
+        }
+    }
+    !c
 }

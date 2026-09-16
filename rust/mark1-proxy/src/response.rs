@@ -63,9 +63,8 @@ pub struct ForwardBody {
     /// http1 connection with an unread body is not reusable.
     checkout: Option<Checkout>,
     started: Instant,
-    status: u16,
-    request_bytes: u64,
-    response_bytes: u64,
+    /// Pre-filled by the router; `response_bytes`/`elapsed_micros` are completed in `finish`.
+    facts: ResponseFacts,
     /// The upstream body reached its end. Tracked rather than inferred from `poll_frame`
     /// returning `None`, because for a `Content-Length` response hyper's server stops polling
     /// once it has written the declared number of bytes — so the terminal `None` may never
@@ -82,17 +81,14 @@ impl ForwardBody {
         tee: Option<TeeStream>,
         checkout: Checkout,
         started: Instant,
-        status: u16,
-        request_bytes: u64,
+        facts: ResponseFacts,
     ) -> Self {
         ForwardBody {
             inner,
             tee,
             checkout: Some(checkout),
             started,
-            status,
-            request_bytes,
-            response_bytes: 0,
+            facts,
             complete: false,
         }
     }
@@ -100,12 +96,9 @@ impl ForwardBody {
     /// Idempotent: called from the terminal `poll_frame` arm and again from `Drop`.
     fn finish(&mut self) {
         if let Some(tee) = self.tee.take() {
-            tee.close(ResponseFacts {
-                status: self.status,
-                request_bytes: self.request_bytes,
-                response_bytes: self.response_bytes,
-                elapsed_micros: self.started.elapsed().as_micros().min(u64::MAX as u128) as u64,
-            });
+            let mut facts = self.facts.clone();
+            facts.elapsed_micros = self.started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            tee.close(facts);
         }
         // Only a fully-read body may go back to the pool. Returning one with bytes still on
         // it would hand the next request for this credential a connection whose next read is
@@ -129,7 +122,11 @@ impl Body for ForwardBody {
         match Pin::new(&mut this.inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
-                    this.response_bytes += data.len() as u64;
+                    if this.facts.response_bytes == 0 {
+                        this.facts.ttfb_micros =
+                            this.started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                    }
+                    this.facts.response_bytes += data.len() as u64;
                     if let Some(tee) = this.tee.as_mut() {
                         // Return value ignored on purpose: a refused chunk degrades that
                         // stream's parse (04 §4) and is already counted inside the tee. It

@@ -1,0 +1,29 @@
+{
+  "observations": [
+    {
+      "kind": "usage",
+      "message_id": "msg_bdrk_01Xy",
+      "model": "claude-sonnet-4-5",
+      "input_tokens": 25,
+      "output_tokens": 1,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "service_tier": ""
+    },
+    {
+      "kind": "usage",
+      "message_id": "msg_bdrk_01Xy",
+      "model": "claude-sonnet-4-5",
+      "input_tokens": 25,
+      "output_tokens": 12,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "service_tier": ""
+    },
+    {
+      "kind": "response_end",
+      "stop_reason": "end_turn"
+    }
+  ],
+  "degraded": null
+}

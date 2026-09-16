@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use m1p_wire::pb::RouteFidelity;
 use mark1_frames::{Dialect, DialectParser, ParseDegraded, WireObservation};
 use tokio::sync::mpsc;
 
@@ -41,20 +42,29 @@ pub const TEE_INFLIGHT_MAX: usize = 8 * 1024 * 1024;
 /// The request-side allow-list. Every field is copied in by name at exactly one call site
 /// (`crate::request::facts`), and the negative test constructs this exhaustively so that
 /// adding a field cannot happen without the test failing to compile.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RequestFacts {
     pub method: String,
     /// Path **without** the query string — see the module header.
     pub path: String,
     pub upstream_host: String,
     pub dialect: Dialect,
-    /// Always `None` until 04 §3.2's model rewrite lands (deferred this phase). Present
-    /// because the allow-list is the specification of what the tee may ever see, and a field
-    /// added later is a field added without this review.
+    /// `ModelRequest.model`: the top-level `"model"` as the client sent it. `None` when the
+    /// prefix scan (`request::rewrite_model`) found none, or was not run.
     pub requested_model: Option<String>,
+    /// `ModelRequest.served_model`: as forwarded. Differs from `requested_model` only on a
+    /// `WireEnforced` rewrite.
+    pub served_model: Option<String>,
+    /// `RouteDecision.fidelity`: `WireEnforced` iff the applied route table named this
+    /// request's model (rewritten or already the entry rung); `Advisory` otherwise.
+    pub route_fidelity: RouteFidelity,
+    /// `RouteDecision.propensity`: 1.0 — ε=0 is the only table the proxy accepts (FR-ROUTE-003).
+    pub propensity: f64,
+    /// `RouteDecision.bundle_seq`: the table's bundle, 0 when none is applied.
+    pub bundle_seq: u64,
 }
 
-/// The response-side allow-list. The *served* model is not here: it arrives as
+/// The response-side allow-list. The model the vendor *reports* is not here: it arrives as
 /// `WireObservation::Usage(..).model` on [`TeeReport::observations`], parsed from the
 /// response body by `mark1-frames`, which is the only thing that can honestly know it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +73,12 @@ pub struct ResponseFacts {
     pub request_bytes: u64,
     pub response_bytes: u64,
     pub elapsed_micros: u64,
+    /// `ModelResponse.ttfb_ms`: time to the first response body frame.
+    pub ttfb_micros: u64,
+    /// `ModelRequest.request_id`: the vendor's `request-id`/`x-request-id` response header, by name.
+    pub request_id: String,
+    /// `ModelRequest.stream`: the response was `text/event-stream`.
+    pub stream: bool,
 }
 
 pub enum TeeMsg {
@@ -305,6 +321,10 @@ mod tests {
             upstream_host: "api.anthropic.com".to_owned(),
             dialect: Dialect::AnthropicSse,
             requested_model: None,
+            served_model: None,
+            route_fidelity: RouteFidelity::Advisory,
+            propensity: 1.0,
+            bundle_seq: 0,
         }
     }
 
@@ -358,6 +378,9 @@ mod tests {
                 request_bytes: 0,
                 response_bytes: 3,
                 elapsed_micros: 0,
+                ttfb_micros: 0,
+                request_id: String::new(),
+                stream: false,
             });
         }
         assert_sync_producer();

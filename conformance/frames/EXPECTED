@@ -7,8 +7,9 @@
 # is the commit-time act that arms the gate for it.
 #
 # One dialect per line, matching the module name under rust/mark1-frames/src/.
-# Only anthropic_sse is armed: it is the Phase 3 dialect and the only one with a parser.
-# openai_responses, openai_chat, gemini and bedrock_eventstream degrade by design, so a
-# transcript for them would assert nothing about parsing. Add each line in the SAME change
-# that lands both the parser and its fixtures.
+# anthropic_sse (Phase 3, recorded) and bedrock_eventstream (Phase 5, SYNTHETIC per its gen.py —
+# no live Bedrock transcript exists yet) are armed. openai_responses, openai_chat and gemini
+# degrade by design, so a transcript for them would assert nothing about parsing. Add each
+# line in the SAME change that lands both the parser and its fixtures.
 anthropic_sse
+bedrock_eventstream

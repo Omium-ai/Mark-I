@@ -1,39 +1,38 @@
 //! mark1-proxy — API-key-only micro-proxy (04 §3).
 //!
-//! Startup order is load-bearing and is the reason this file is short: `harden()` is the
-//! first statement, before the tokio runtime exists and before any path that could read the
-//! guard key is opened (04 §3.3, §11.6, NFR-SECURITY-002). A core written by a process that
+//! Startup order is load-bearing and is the reason this file is short: `mark1_harden::apply`
+//! is the first statement, before the tokio runtime exists and before any path that could read
+//! the guard key is opened (04 §3.3, §11.6, NFR-SECURITY-002). A core written by a process that
 //! had already loaded a credential is not recoverable after the fact, so there is no ordering
-//! here that "usually" works.
+//! here that "usually" works — and `harden_order::proxy_harden_precedes_runtime` pins it.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use mark1_proxy::gateway::{self, Gateway, TlsPaths};
 use mark1_proxy::guard::{Guard, Sampling};
 use mark1_proxy::router::Proxy;
 use mark1_proxy::{fabric, tee, upstream, Mode, ProxyConfig, Upstream};
 
+/// Gateway-only argv: listener identity, pinned client CA, and the dev credential source.
+struct GatewayArgs {
+    tls: TlsPaths,
+    cred_dir: std::path::PathBuf,
+}
+
 fn main() -> std::process::ExitCode {
     // FIRST. Not after logging init, not after argv parsing.
-    let hardening = match mark1_proxy::harden::harden() {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("mark1-proxy: refusing to start: {e}");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
+    if let Err(e) = mark1_harden::apply() {
+        eprintln!("mark1-proxy: refusing to start: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
 
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
-    tracing::info!(
-        target: "mark1_proxy",
-        core_limit_zero = hardening.core_limit_zero,
-        dumpable = ?hardening.dumpable,
-        "hardened"
-    );
+    tracing::info!(target: "mark1_proxy", "hardened");
 
-    let cfg = match config() {
+    let (cfg, gateway) = match config() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("mark1-proxy: {e}");
@@ -51,7 +50,7 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(cfg)) {
+    match runtime.block_on(run(cfg, gateway)) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("mark1-proxy: {e}");
@@ -60,7 +59,16 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-async fn run(cfg: ProxyConfig) -> anyhow::Result<()> {
+async fn run(cfg: ProxyConfig, gateway: Option<GatewayArgs>) -> anyhow::Result<()> {
+    // TLS material is read before the listener exists: an unreadable CA must not leave a
+    // plaintext port open for even one accept.
+    let gateway = match gateway {
+        Some(g) => Some(Gateway::new(
+            gateway::acceptor(&g.tls)?,
+            Arc::new(gateway::FileSource::new(g.cred_dir)),
+        )),
+        None => None,
+    };
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     let bound = listener.local_addr()?;
 
@@ -74,16 +82,22 @@ async fn run(cfg: ProxyConfig) -> anyhow::Result<()> {
     let (tee, tee_rx) = tee::channel();
     let (reports_tx, reports_rx) = tokio::sync::mpsc::channel(256);
     spawn_tee_thread(tee_rx, reports_tx)?;
-    tokio::spawn(drain_reports(reports_rx));
 
     let fabric = fabric::Fabric::new(cfg.base.clone());
+    tokio::spawn(drain_reports(reports_rx, fabric.clone()));
     let cfg = Arc::new(cfg);
     // The bound port is the sidecar's per-boot secret (§3.4 "a random high port"): written
     // 0600 so the provisioner can point the agent's base URL at it.
     write_port(&cfg.base, bound);
 
     tracing::info!(target: "mark1_proxy", %bound, "listening");
-    let proxy = Arc::new(Proxy::new(cfg, guard, pool, tee, fabric, bound));
+    let base = cfg.base.clone();
+    let proxy = Proxy::new(cfg, guard, pool, tee, fabric, bound);
+    let proxy = Arc::new(match gateway {
+        Some(g) => proxy.with_gateway(g),
+        None => proxy,
+    });
+    tokio::spawn(mark1_proxy::policy::watch(base, Arc::downgrade(&proxy)));
     tokio::select! {
         () = Arc::clone(&proxy).serve(listener) => {}
         _ = tokio::signal::ctrl_c() => {}
@@ -114,10 +128,11 @@ fn spawn_tee_thread(
     Ok(())
 }
 
-/// The tee's reports terminate here this phase. Wiring them to `Event{ModelRequest/Usage}`
-/// on the fabric is the ledger row, not this one; counting them is what keeps the tee task
-/// from being unobservable in the meantime.
-async fn drain_reports(mut rx: tokio::sync::mpsc::Receiver<tee::TeeReport>) {
+/// Every tee report becomes `Event{ModelRequest}` + `Event{ModelResponse}` on the fabric (04 §4).
+async fn drain_reports(
+    mut rx: tokio::sync::mpsc::Receiver<tee::TeeReport>,
+    fabric: fabric::Fabric,
+) {
     while let Some(report) = rx.recv().await {
         tracing::debug!(
             target: "mark1_proxy::tee",
@@ -127,6 +142,7 @@ async fn drain_reports(mut rx: tokio::sync::mpsc::Receiver<tee::TeeReport>) {
             chunks_dropped = report.chunks_dropped,
             "tee report"
         );
+        fabric.tee_report(&report);
     }
 }
 
@@ -163,6 +179,30 @@ fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+/// NFR-SECURITY-002's ordering clause, pinned rather than inspected: in this file's text the
+/// harden call precedes the runtime construction. Comment lines are dropped first so prose
+/// mentioning either cannot satisfy it.
+#[cfg(test)]
+mod harden_order {
+    #[test]
+    fn proxy_harden_precedes_runtime() {
+        let src: String = include_str!("main.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Only the text above this module: its own string literals are not evidence.
+        let src = &src[..src.find("mod harden_order").unwrap()];
+        let harden = src
+            .find("mark1_harden::apply()")
+            .expect("main calls mark1_harden::apply()");
+        let runtime = src
+            .find("tokio::runtime::Builder")
+            .expect("main builds the runtime");
+        assert!(harden < runtime, "harden at {harden}, runtime at {runtime}");
+    }
+}
+
 #[cfg(all(test, unix))]
 mod port_file_tests {
     use std::os::unix::fs::PermissionsExt;
@@ -190,11 +230,13 @@ mod port_file_tests {
 
 /// argv/env only — there is no config file, and there is nothing here whose value could
 /// widen what the proxy will carry. `--upstream` can only ever *narrow* the allow-list.
-fn config() -> anyhow::Result<ProxyConfig> {
+fn config() -> anyhow::Result<(ProxyConfig, Option<GatewayArgs>)> {
     let mut mode = Mode::Sidecar;
     let mut port = 0u16;
+    let mut bind: Option<SocketAddr> = None;
     let mut upstreams = Vec::new();
     let mut sample = mark1_proxy::guard::DEFAULT_FORWARD_SAMPLE_RATE;
+    let (mut tls_cert, mut tls_key, mut client_ca, mut cred_dir) = (None, None, None, None);
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -239,16 +281,35 @@ fn config() -> anyhow::Result<ProxyConfig> {
                 });
             }
             "--forward-sample-rate" => sample = value()?.parse()?,
+            // Gateway only (04 §3.4): the listener address, its identity, the pinned client CA
+            // and the dev credential directory (`gateway::FileSource`).
+            "--bind" => bind = Some(value()?.parse()?),
+            "--tls-cert" => tls_cert = Some(value()?.into()),
+            "--tls-key" => tls_key = Some(value()?.into()),
+            "--client-ca" => client_ca = Some(value()?.into()),
+            "--cred-dir" => cred_dir = Some(value()?.into()),
             other => anyhow::bail!("unknown argument {other}"),
         }
     }
 
-    if mode == Mode::Gateway {
-        // Declared in §3.4, built in Phase 5. Refusing is the honest arm: the alternative is
-        // binding a plaintext loopback listener while the operator believes they asked for
-        // an mTLS listener on customer infra.
-        anyhow::bail!("gateway mode is declared (04 §3.4) and not implemented; Phase 5");
-    }
+    let gateway = match mode {
+        Mode::Sidecar => {
+            if bind.is_some() || tls_cert.is_some() || client_ca.is_some() || cred_dir.is_some() {
+                anyhow::bail!("--bind/--tls-*/--client-ca/--cred-dir are gateway-mode flags");
+            }
+            None
+        }
+        // Every piece is required: a gateway missing its CA is a plaintext listener on customer infra.
+        Mode::Gateway => Some(GatewayArgs {
+            tls: TlsPaths {
+                cert: tls_cert.ok_or_else(|| anyhow::anyhow!("gateway mode needs --tls-cert"))?,
+                key: tls_key.ok_or_else(|| anyhow::anyhow!("gateway mode needs --tls-key"))?,
+                client_ca: client_ca
+                    .ok_or_else(|| anyhow::anyhow!("gateway mode needs --client-ca"))?,
+            },
+            cred_dir: cred_dir.ok_or_else(|| anyhow::anyhow!("gateway mode needs --cred-dir"))?,
+        }),
+    };
     if upstreams.is_empty() {
         upstreams.push(
             Upstream::new("api.anthropic.com", 443, true)
@@ -259,13 +320,16 @@ fn config() -> anyhow::Result<ProxyConfig> {
         .ok_or_else(|| anyhow::anyhow!("no HOME/USERPROFILE"))?
         .join(".omium/mark1");
 
-    Ok(ProxyConfig {
-        mode,
-        bind: SocketAddr::from(([127, 0, 0, 1], port)),
-        upstreams,
-        forward_sample_rate: sample,
-        base,
-    })
+    Ok((
+        ProxyConfig {
+            mode,
+            bind: bind.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], port))),
+            upstreams,
+            forward_sample_rate: sample,
+            base,
+        },
+        gateway,
+    ))
 }
 
 fn is_loopback(host: &str) -> bool {

@@ -52,9 +52,19 @@ impl AnthropicSse {
     }
 
     fn handle(&mut self, ev: &sse::Event, out: &mut Vec<WireObservation>) -> Result<(), ()> {
-        match ev.name.as_str() {
+        self.handle_event(&ev.name, &ev.data, out)
+    }
+
+    /// One Anthropic event by name and JSON body; shared with `bedrock_eventstream`, whose `chunk` payloads carry these same events base64-wrapped.
+    pub(crate) fn handle_event(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        out: &mut Vec<WireObservation>,
+    ) -> Result<(), ()> {
+        match name {
             "message_start" => {
-                let m: MessageStart = serde_json::from_slice(&ev.data).map_err(|_| ())?;
+                let m: MessageStart = serde_json::from_slice(data).map_err(|_| ())?;
                 let usage = WireUsage {
                     message_id: m.message.id,
                     model: m.message.model,
@@ -76,7 +86,7 @@ impl AnthropicSse {
                 out.push(WireObservation::Usage(usage));
             }
             "message_delta" => {
-                let d: MessageDelta = serde_json::from_slice(&ev.data).map_err(|_| ())?;
+                let d: MessageDelta = serde_json::from_slice(data).map_err(|_| ())?;
                 let u = d.usage.ok_or(())?;
                 // No snapshot means `message_start` never arrived — the identity fields
                 // this Usage needs are only on that event, so a Usage built here would
@@ -104,7 +114,7 @@ impl AnthropicSse {
                 }
             }
             "error" => {
-                let e: ErrorEvent = serde_json::from_slice(&ev.data).map_err(|_| ())?;
+                let e: ErrorEvent = serde_json::from_slice(data).map_err(|_| ())?;
                 out.push(WireObservation::UpstreamError {
                     error_type: e.error.r#type,
                 });

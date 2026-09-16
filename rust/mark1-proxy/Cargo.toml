@@ -34,8 +34,10 @@ webpki-roots = { workspace = true }
 # --- workspace crates ---
 m1p-wire = { workspace = true }
 mark1-frames = { workspace = true }
+mark1-harden = { workspace = true }   # RLIMIT_CORE=0 + PR_SET_DUMPABLE=0 (WER exclusion on Windows) before credential load
 mark1-policy = { workspace = true }
-# No mark1-receipt: 04 §3.1(6)'s receipt is minted by mark1d, which owns the device Ed25519
+mark1-receipt = { workspace = true }   # KeyEntry (validity windows) for policy.rs's keys.json reader ONLY; no receipt is minted here:
+# No mark1-receipt receipts: 04 §3.1(6)'s receipt is minted by mark1d, which owns the device Ed25519
 # origin key and the gap-free chain (`guard_contamination` is already a DeviceOriginType).
 # Two processes appending to one chain would race the `seq` invariant, so a receipt minted
 # here would be wrong rather than merely unimplemented. The dependency was declared with a
@@ -61,7 +63,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-libc = { workspace = true }            # RLIMIT_CORE=0 + PR_SET_DUMPABLE=0 before credential load
+libc = { workspace = true }            # O_NOFOLLOW on the spill ring (tee/spill.rs)
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
@@ -69,6 +71,7 @@ windows-sys = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 tempfile = { workspace = true }
+rcgen = { workspace = true }
 
 [[bench]]
 name = "latency"

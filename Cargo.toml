@@ -16,6 +16,7 @@ members = [
     "rust/mark1-redact",
     "rust/mark1-policy",
     "rust/mark1-frames",
+    "rust/mark1-harden",
     "rust/mark1-hookshim",
     "rust/mark1-proxy",
     "rust/cortexd",
@@ -111,7 +112,9 @@ clap = { version = "4.5", features = ["derive"] }   # cortexd, tools/verifier; t
 
 # --- platform ---
 libc = "0.2"                                     # prctl/PR_SET_DUMPABLE, RLIMIT_CORE, ioprio
-windows-sys = { version = "0.60", features = ["Win32_System_Pipes", "Win32_System_JobObjects", "Win32_Security", "Win32_Foundation", "Win32_Storage_FileSystem"] }
+# Win32_System_ErrorReporting: WerAddExcludedApplication, 04 §11.6's Windows core-dump arm
+# (rust/mark1-harden). A feature, not a crate — no closure changes.
+windows-sys = { version = "0.60", features = ["Win32_System_Pipes", "Win32_System_JobObjects", "Win32_Security", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_ErrorReporting"] }
 
 # --- intra-workspace ---
 m1p-wire = { path = "rust/m1p-wire" }
@@ -119,9 +122,11 @@ mark1-redact = { path = "rust/mark1-redact" }
 mark1-receipt = { path = "rust/mark1-receipt" }
 mark1-policy = { path = "rust/mark1-policy" }
 mark1-frames = { path = "rust/mark1-frames" }
+mark1-harden = { path = "rust/mark1-harden" }
 
 # --- dev/test only ---
 tempfile = "3"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }   # gateway mTLS test PKI, minted per test run (gitleaks forbids committed PEM keys)
 criterion = { version = "0.6", features = ["html_reports"] }
 proptest = "1"
 

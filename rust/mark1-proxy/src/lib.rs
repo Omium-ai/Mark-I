@@ -23,8 +23,9 @@ use std::path::{Path, PathBuf};
 use mark1_frames::Dialect;
 
 pub mod fabric;
+pub mod gateway;
 pub mod guard;
-pub mod harden;
+pub mod policy;
 pub mod request;
 pub mod response;
 pub mod router;
@@ -38,8 +39,7 @@ pub use secret::Secret;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Sidecar,
-    /// Declared, not implemented (Phase 5). `main` refuses to start in this mode rather than
-    /// silently binding a plaintext listener where an mTLS one was promised.
+    /// 04 §3.4: mTLS listener on customer infra, credentials by reference (`gateway.rs`).
     Gateway,
 }
 
@@ -106,6 +106,8 @@ impl Upstream {
             "api.anthropic.com" => Dialect::AnthropicSse,
             "generativelanguage.googleapis.com" => Dialect::Gemini,
             h if h.starts_with("bedrock-runtime.") => Dialect::BedrockEventstream,
+            h if mark1_frames::vertex::is_host(h) => mark1_frames::vertex::dialect_for(path),
+            h if mark1_frames::azure::is_host(h) => mark1_frames::azure::dialect_for(path),
             "api.openai.com" => openai_dialect(path),
             // ponytail: an allow-listed host with no known grammar still forwards, and
             // observation degrades to transport counters (04 §4) — but only because the
@@ -216,6 +218,31 @@ mod tests {
         assert_eq!(o.dialect("/v1/chat/completions"), Dialect::OpenaiChat);
         let b = Upstream::new("bedrock-runtime.us-east-1.amazonaws.com", 443, true).unwrap();
         assert_eq!(b.dialect("/model/x/invoke"), Dialect::BedrockEventstream);
+        // Vertex and Azure are hosts serving several grammars; the path picks the parser.
+        let v = Upstream::new("us-east5-aiplatform.googleapis.com", 443, true).unwrap();
+        assert_eq!(
+            v.dialect(
+                "/v1/projects/p/locations/us-east5/publishers/anthropic/models/m:streamRawPredict"
+            ),
+            Dialect::AnthropicSse
+        );
+        assert_eq!(
+            v.dialect(
+                "/v1/projects/p/locations/l/publishers/google/models/g:streamGenerateContent"
+            ),
+            Dialect::Gemini
+        );
+        let az = Upstream::new("acme.openai.azure.com", 443, true).unwrap();
+        assert_eq!(
+            az.dialect("/openai/deployments/d/chat/completions"),
+            Dialect::OpenaiChat
+        );
+        assert_eq!(az.dialect("/openai/responses"), Dialect::OpenaiResponses);
+        let foundry = Upstream::new("acme.services.ai.azure.com", 443, true).unwrap();
+        assert_eq!(
+            foundry.dialect("/anthropic/v1/messages"),
+            Dialect::AnthropicSse
+        );
     }
 
     #[test]

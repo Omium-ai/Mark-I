@@ -1,0 +1,19 @@
+{
+  "observations": [
+    {
+      "kind": "response_end",
+      "stop_reason": "end_turn"
+    },
+    {
+      "kind": "usage",
+      "message_id": "",
+      "model": "",
+      "input_tokens": 40,
+      "output_tokens": 9,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 30,
+      "service_tier": ""
+    }
+  ],
+  "degraded": null
+}
