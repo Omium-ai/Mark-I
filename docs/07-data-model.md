@@ -3416,6 +3416,10 @@ route-section = {
     ladders:  [* ladder],
     knee:     knee-table,
     ? exploration: { epsilon: float .default 0.0 },  ; ε>0 is per-tenant contractual opt-in; default 0 ⇒ propensity 1.0 logged honestly
+    ? exploration_opt_in: bool,                       ; D-EF: the signed half of that opt-in. ε>0 with this key present-and-false is a
+                                                      ; schema refusal (M1E-3001) in both decoders and at the publisher; the edge additionally
+                                                      ; applies ε>0 only under a local `<state>/gates/opt-in.json` {"exploration": true},
+                                                      ; else ε=0. Key absence keeps the pre-ruling grammar until the next vector re-freeze.
 }
 
 ladder = {
@@ -3453,7 +3457,22 @@ memory-section = {
 cortex-section = {
     map_budget_tokens: { min: uint, max: uint },   ; budget-binary-search bounds
     channels: [* ("session_start" / "prompt_submit" / "before_model")],
+    ? learned_ranker: learned-ranker,              ; ABSENT ⇒ no learned ranker: cortexd serves PPR order (06 §12.4)
 }
+
+learned-ranker = {
+    stage:        "probation" / "shadow" / "active",  ; closed enum (rule 1c): probation/shadow are diagnostic-only and serve PPR order
+                                                      ; bit-identically; active blends (ppr + w·learned)/(1+w) INSIDE PPR's top-k, never
+                                                      ; admitting or dropping a file (10 §11.3)
+    weight:       float,                              ; blend weight w ∈ [0,1]; outside it, or non-finite, is M1E-3001 at decode — never clamped at cortexd
+    bias:         float,                              ; finite
+    coefficients: [4 float],                          ; finite; one per cortexd file feature [fan_in, recency, path_depth, tag_count]
+                                                      ; (l2_graph::FEATURES). Exactly 4: a different arity is M1E-3001.
+}
+; Delivery: mark1d publishes the applied bundle's learned_ranker at <state>/run/ranker.json (0600, atomic) and every
+; supervised cortexd reads it via --ranker-file at boot and on change; the only constructor is RankerWeights::new, so a
+; file the decoder would have refused leaves cortexd on PPR order and counts ranker_rejected. Frozen vectors:
+; cortex_learned_ranker (accept), cortex_ranker_weight_out_of_range, cortex_ranker_bad_stage (schema negatives).
 
 gates-section = {
     stop_gate_enabled:      bool,
@@ -3763,10 +3782,20 @@ Precisely what surviving hashes buy after a deletion request:
 - **The deletion itself becomes provable.** The offboarding job's steps are receipted into the same chain, so "you deleted my data" is not a support-ticket assertion; it is a signed, witnessed, offline-verifiable chain suffix — the receipt product's answer to its own deletion obligation.
 - **Retained digests are not retained data.** Every content-derived digest in the chain and ledger is per-tenant HMAC-salted, and step 5 destroys the tenant's HMAC key. After key destruction a retained digest is unlinkable to any content even by dictionary attack over low-entropy inputs — it degrades from "commitment to specific content" to "opaque random string that once anchored a signature." That is the precise sense in which keeping the chain satisfies the deletion obligation: what remains can verify, but can no longer reveal, correlate, or reconstruct.
 
+## Schema additions landed 2026-09-16 (migrations m1_064 – m1_075, adj_001)
 
+Reconciliation appendix: every table below exists in `migrations/` with canonical FORCE-RLS `tenant_isolation` (the two-arg `current_setting('app.tenant_id', true)` form) unless marked cross-tenant, and its grants follow the m1_060 role split. The printed DDL earlier in this document is the design; this section is the as-built delta and names the section it extends.
 
-
-
-
-
-
+| Migration | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_064_federation_fixes` | `m1_tenants.federation_opted_out_at`; `org_verification` becomes a VIEW over `m1_organizations` (one verification truth, m1_001); `federation_contributions` view (`security_invoker`) = contributions ⋈ verified org ⋈ not-opted-out tenant; `fed_domain_root()`, `fed_debit_epsilon()` (SECURITY DEFINER, the gate trigger's last step), `trg_fed_append_only` on publications/spans/producers; partial unique `(tenant_id, publication_id)` on `epsilon_ledger` | §Federation | Closes 2026-09-15 findings 1, 2, 3, 6 + opt-out (CON-011). Collusion collapse is derived transitively over shared `billing_customer_id` or domain root (last two labels; PSL upgrade noted). |
+| `m1_065_judge_consent` | `m1_cloud_judge_consents(tenant_id, judge_id, subprocessor, region, max_tier, consented_by, consented_at, revoked_at, revoked_reason)`; partial unique on live rows | §Judges (06 §6.5 preconditions) | `judge_id` CHECK widened by m1_073/m1_074 to `^(judge\|rm\|t3):[a-z0-9-]+@[1-9][0-9]*$` — the T2 reward model and the T3 certified run consent under the same row shape. |
+| `m1_066_rollout_cursor` | `rollout_cursor(tenant_id, channel) → seq, cohort_percent, step_started_at, health_ticks, halted_at, halt_reason, rollback_seq` (FKs to `policy_bundles`, CHECK `rollback_seq > seq`) | §Policy bundles (05 §4.3 canary controller) | CAS-saved per tick; the controller re-scopes M1E-3005 to the rollout's own seq. |
+| `m1_067_job_runs` | `job_runs(job, tenant_id, window_start) PK → outcome ∈ running\|succeeded\|failed\|parked\|skipped_prereq_failed, attempts, requested, receipt_id, error, started_at, finished_at`; CHECK running ⇔ `finished_at IS NULL` | 06 §7.2/§7.3 (replaces the designed `intel_jobs`) | Shared by intel and adjudicator (`intel_app`, `adjudicator_app` SELECT/INSERT/UPDATE). An absent or non-succeeded prerequisite row skips the dependent. |
+| `m1_068_key_rotation` | `m1_server_signing_keys.cross_signed_by / cross_signature`; `key_rotation` admitted to both `m1_receipts` CHECKs; `key_manifests` (tlog leaves of kind `key_manifest`) | §Receipts, 05 §4.4/§4.5 (ADR-0004) | Cross-sign input `"mark1-key-rotation-v1\0" ‖ role ‖ 0x00 ‖ pub32`, roles `server_chain \| update \| bundle:<section>`. |
+| `m1_069_verifier_promotion` | `m1_verifier_promotions(tenant_id, verifier_id) → state ∈ probation\|shadow\|lcb_promoted\|canary\|active\|retired, shadow_n, lcb, ucb, bar, cert_id, measured_at, state_since`; append-only `m1_verifier_promotion_transitions`; triggers `born_in_probation`, `state_via_ledger` (the head's state changes only from inside the ledger trigger), `promotion_transition` (legal edges, D38 count, LCB > bar, fresh evidence, `mark1_assert_certified`); `promoted_is_earned` CHECK; receipt class `verifier_promotion` | 06 §12.4 (one promotion law) | Per `(tenant, verifier)`, not a column on `m1_verifiers` (m1_020 immutability; labels are per-tenant certified verdicts). |
+| `m1_070_bundle_drafts` | `bundle_drafts(tenant_id, channel, window_start)` → six per-section `bytea`, `draft_hash`, `max_age`, `knee_gate_ok`, `knee_note`, `state ∈ pending\|published\|refused`, `refusal_reason`, `published_seq` FK, `canary_plan jsonb`, `claimed_at` | §Policy bundles, 05 §4.1 (the in-repo publication path) | The compiler holds no key and no publish verb: it INSERTs a draft (intel_app), controld's draft publisher vets (hash, knee gate, strict decode) and calls `Module.Publish`. |
+| `m1_072_receipt_idempotency_key` | `m1_receipts.idempotency_key text` + partial unique `(tenant_id, record_type, idempotency_key)` | §Receipts (C13) | Idempotency for `POST /internal/v1/receipts/append` is keyed on the caller's attempt, never on `subject_id` (a re-admitted artifact or re-issued cert legitimately repeats a subject). |
+| `m1_074_certified_runs` | `m1_certified_runs` (E1-only CHECK, FK `consent_id → m1_cloud_judge_consents`, signed `divergence`, `tenant_divergence` running mean, `receipt_id` NULL until a `certified_run` receipt class exists) | 06 §2 (tier T3), 10 §11.3 (anchor-vs-T3 divergence) | Consent key `t3:e2b@1`. |
+| `m1_075_tenant_regimes` | `m1_tenant_regimes(tenant_id PK → cost_basis usd\|quota, price_model_id, window_limit_tokens, shadow_price_usd numeric(12,4), v_default numeric(14,4) > 0, set_by, set_at)` with CHECK usd ⇒ model set and quota fields NULL, quota ⇒ model NULL, `window_limit_tokens > 0`, `shadow_price_usd ≥ 0`; `m1_tenant_regime_history` append-only via `m1_append_only()`, mirrored by an AFTER INSERT OR UPDATE trigger | 06 §8.4 / §10.3 (cost bases) | The usd `model_prices` table is repo data: `python/intel/app/pricing/model_prices.v1.json`; reports and drafts stamp `model_prices.v1@sha256:<file digest>`. One regime row per tenant (06 §10.3's two tables per tenant need a `(tenant, channel)` key that does not exist yet). |
+| `adj_001_spectral_runs` (adjudicator) | `spectral_runs(tenant_id, window_start) PK → window_days, n_tasks, passed, diagnostics jsonb, confusion jsonb, prior jsonb` | 06 §4.3 (G1–G6 persisted per run) | `certs.recompute` copies `passed` + diagnostics onto the certificate row. |
