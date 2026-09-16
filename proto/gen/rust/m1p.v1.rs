@@ -2178,13 +2178,12 @@ impl DropReason {
 /// remain structurally unspoolable: there is no oneof arm a spool record can
 /// carry, because admission takes the Event, not the frame.
 /// TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
-/// next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, cortex
-/// pull, Phase 4), 10 = ContaminationAlert (defined below). 8 and 9 are
-/// reserved by this note and by the ruling ledger, not yet by a field.
+/// next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
+/// memory/cortex pull — fields below), 10 = ContaminationAlert (defined below).
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FabricFrame {
-    #[prost(oneof="fabric_frame::Kind", tags="1, 2, 3, 4, 5, 6, 7, 10")]
+    #[prost(oneof="fabric_frame::Kind", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
     pub kind: ::core::option::Option<fabric_frame::Kind>,
 }
 /// Nested message and enum types in `FabricFrame`.
@@ -2206,9 +2205,42 @@ pub mod fabric_frame {
         Flush(super::Flush),
         #[prost(message, tag="7")]
         FlushAck(super::FlushAck),
+        #[prost(message, tag="8")]
+        ContextQuery(super::ContextQuery),
+        #[prost(message, tag="9")]
+        ContextReply(super::ContextReply),
         #[prost(message, tag="10")]
         ContaminationAlert(super::ContaminationAlert),
     }
+}
+/// The shim's pull for injected context (D-AE): the session rides the Hello
+/// that bound this connection, exactly as GateQuery. The daemon answers from
+/// its synced memory cache and the cortex map; every failure is an empty reply
+/// (fail-open for availability, 08 §5 rule 5). Byte contract pinned by
+/// go/mark1d/internal/fabric/context_test.go and rust/mark1-hookshim/src/context.rs.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ContextQuery {
+    #[prost(enumeration="InjectionChannel", tag="1")]
+    pub channel: i32,
+    #[prost(string, tag="2")]
+    pub tool_name: ::prost::alloc::string::String,
+    /// The vendor's error text on PostToolUseFailure, normalized on the daemon
+    /// side into the pitfall signature (06 §9.5); never stored, never uploaded.
+    #[prost(string, tag="3")]
+    pub error: ::prost::alloc::string::String,
+    #[prost(uint32, tag="4")]
+    pub deadline_ms: u32,
+    #[prost(bool, tag="5")]
+    pub is_interrupt: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ContextReply {
+    /// Rendered additionalContext, empty when nothing injects; the shim prints
+    /// nothing on empty. The daemon has already admitted the MemoryInjection.
+    #[prost(string, tag="1")]
+    pub additional_context: ::prost::alloc::string::String,
 }
 /// First frame on every connection (08 §4.3 step 2: any other first frame ⇒
 /// close M1E-4003). mark1d replies HelloAck or closes.

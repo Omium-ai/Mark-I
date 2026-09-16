@@ -154,9 +154,8 @@ func (GateDecision) EnumDescriptor() ([]byte, []int) {
 // remain structurally unspoolable: there is no oneof arm a spool record can
 // carry, because admission takes the Event, not the frame.
 // TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
-// next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, cortex
-// pull, Phase 4), 10 = ContaminationAlert (defined below). 8 and 9 are
-// reserved by this note and by the ruling ledger, not yet by a field.
+// next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
+// memory/cortex pull — fields below), 10 = ContaminationAlert (defined below).
 type FabricFrame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Kind:
@@ -168,6 +167,8 @@ type FabricFrame struct {
 	//	*FabricFrame_GateVerdict
 	//	*FabricFrame_Flush
 	//	*FabricFrame_FlushAck
+	//	*FabricFrame_ContextQuery
+	//	*FabricFrame_ContextReply
 	//	*FabricFrame_ContaminationAlert
 	Kind          isFabricFrame_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
@@ -274,6 +275,24 @@ func (x *FabricFrame) GetFlushAck() *FlushAck {
 	return nil
 }
 
+func (x *FabricFrame) GetContextQuery() *ContextQuery {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_ContextQuery); ok {
+			return x.ContextQuery
+		}
+	}
+	return nil
+}
+
+func (x *FabricFrame) GetContextReply() *ContextReply {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_ContextReply); ok {
+			return x.ContextReply
+		}
+	}
+	return nil
+}
+
 func (x *FabricFrame) GetContaminationAlert() *ContaminationAlert {
 	if x != nil {
 		if x, ok := x.Kind.(*FabricFrame_ContaminationAlert); ok {
@@ -315,6 +334,14 @@ type FabricFrame_FlushAck struct {
 	FlushAck *FlushAck `protobuf:"bytes,7,opt,name=flush_ack,json=flushAck,proto3,oneof"`
 }
 
+type FabricFrame_ContextQuery struct {
+	ContextQuery *ContextQuery `protobuf:"bytes,8,opt,name=context_query,json=contextQuery,proto3,oneof"`
+}
+
+type FabricFrame_ContextReply struct {
+	ContextReply *ContextReply `protobuf:"bytes,9,opt,name=context_reply,json=contextReply,proto3,oneof"`
+}
+
 type FabricFrame_ContaminationAlert struct {
 	ContaminationAlert *ContaminationAlert `protobuf:"bytes,10,opt,name=contamination_alert,json=contaminationAlert,proto3,oneof"`
 }
@@ -333,7 +360,140 @@ func (*FabricFrame_Flush) isFabricFrame_Kind() {}
 
 func (*FabricFrame_FlushAck) isFabricFrame_Kind() {}
 
+func (*FabricFrame_ContextQuery) isFabricFrame_Kind() {}
+
+func (*FabricFrame_ContextReply) isFabricFrame_Kind() {}
+
 func (*FabricFrame_ContaminationAlert) isFabricFrame_Kind() {}
+
+// The shim's pull for injected context (D-AE): the session rides the Hello
+// that bound this connection, exactly as GateQuery. The daemon answers from
+// its synced memory cache and the cortex map; every failure is an empty reply
+// (fail-open for availability, 08 §5 rule 5). Byte contract pinned by
+// go/mark1d/internal/fabric/context_test.go and rust/mark1-hookshim/src/context.rs.
+type ContextQuery struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Channel  InjectionChannel       `protobuf:"varint,1,opt,name=channel,proto3,enum=m1p.v1.InjectionChannel" json:"channel,omitempty"`
+	ToolName string                 `protobuf:"bytes,2,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
+	// The vendor's error text on PostToolUseFailure, normalized on the daemon
+	// side into the pitfall signature (06 §9.5); never stored, never uploaded.
+	Error         string `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	DeadlineMs    uint32 `protobuf:"varint,4,opt,name=deadline_ms,json=deadlineMs,proto3" json:"deadline_ms,omitempty"`
+	IsInterrupt   bool   `protobuf:"varint,5,opt,name=is_interrupt,json=isInterrupt,proto3" json:"is_interrupt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ContextQuery) Reset() {
+	*x = ContextQuery{}
+	mi := &file_m1p_v1_fabric_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ContextQuery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ContextQuery) ProtoMessage() {}
+
+func (x *ContextQuery) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_fabric_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ContextQuery.ProtoReflect.Descriptor instead.
+func (*ContextQuery) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ContextQuery) GetChannel() InjectionChannel {
+	if x != nil {
+		return x.Channel
+	}
+	return InjectionChannel_INJECTION_CHANNEL_UNSPECIFIED
+}
+
+func (x *ContextQuery) GetToolName() string {
+	if x != nil {
+		return x.ToolName
+	}
+	return ""
+}
+
+func (x *ContextQuery) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *ContextQuery) GetDeadlineMs() uint32 {
+	if x != nil {
+		return x.DeadlineMs
+	}
+	return 0
+}
+
+func (x *ContextQuery) GetIsInterrupt() bool {
+	if x != nil {
+		return x.IsInterrupt
+	}
+	return false
+}
+
+type ContextReply struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Rendered additionalContext, empty when nothing injects; the shim prints
+	// nothing on empty. The daemon has already admitted the MemoryInjection.
+	AdditionalContext string `protobuf:"bytes,1,opt,name=additional_context,json=additionalContext,proto3" json:"additional_context,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *ContextReply) Reset() {
+	*x = ContextReply{}
+	mi := &file_m1p_v1_fabric_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ContextReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ContextReply) ProtoMessage() {}
+
+func (x *ContextReply) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_fabric_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ContextReply.ProtoReflect.Descriptor instead.
+func (*ContextReply) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ContextReply) GetAdditionalContext() string {
+	if x != nil {
+		return x.AdditionalContext
+	}
+	return ""
+}
 
 // First frame on every connection (08 §4.3 step 2: any other first frame ⇒
 // close M1E-4003). mark1d replies HelloAck or closes.
@@ -364,7 +524,7 @@ type Hello struct {
 
 func (x *Hello) Reset() {
 	*x = Hello{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[1]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -376,7 +536,7 @@ func (x *Hello) String() string {
 func (*Hello) ProtoMessage() {}
 
 func (x *Hello) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[1]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -389,7 +549,7 @@ func (x *Hello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Hello.ProtoReflect.Descriptor instead.
 func (*Hello) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{1}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Hello) GetComponent() string {
@@ -436,7 +596,7 @@ type HelloAck struct {
 
 func (x *HelloAck) Reset() {
 	*x = HelloAck{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[2]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -448,7 +608,7 @@ func (x *HelloAck) String() string {
 func (*HelloAck) ProtoMessage() {}
 
 func (x *HelloAck) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[2]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -461,7 +621,7 @@ func (x *HelloAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HelloAck.ProtoReflect.Descriptor instead.
 func (*HelloAck) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{2}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *HelloAck) GetAccepted() bool {
@@ -504,7 +664,7 @@ type GateQuery struct {
 
 func (x *GateQuery) Reset() {
 	*x = GateQuery{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[3]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -516,7 +676,7 @@ func (x *GateQuery) String() string {
 func (*GateQuery) ProtoMessage() {}
 
 func (x *GateQuery) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[3]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -529,7 +689,7 @@ func (x *GateQuery) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateQuery.ProtoReflect.Descriptor instead.
 func (*GateQuery) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{3}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GateQuery) GetTaskId() []byte {
@@ -572,7 +732,7 @@ type GateVerdict struct {
 
 func (x *GateVerdict) Reset() {
 	*x = GateVerdict{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -584,7 +744,7 @@ func (x *GateVerdict) String() string {
 func (*GateVerdict) ProtoMessage() {}
 
 func (x *GateVerdict) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -597,7 +757,7 @@ func (x *GateVerdict) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateVerdict.ProtoReflect.Descriptor instead.
 func (*GateVerdict) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{4}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GateVerdict) GetDecision() GateDecision {
@@ -647,7 +807,7 @@ type Flush struct {
 
 func (x *Flush) Reset() {
 	*x = Flush{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -659,7 +819,7 @@ func (x *Flush) String() string {
 func (*Flush) ProtoMessage() {}
 
 func (x *Flush) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -672,7 +832,7 @@ func (x *Flush) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Flush.ProtoReflect.Descriptor instead.
 func (*Flush) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{5}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{7}
 }
 
 type FlushAck struct {
@@ -686,7 +846,7 @@ type FlushAck struct {
 
 func (x *FlushAck) Reset() {
 	*x = FlushAck{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[6]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -698,7 +858,7 @@ func (x *FlushAck) String() string {
 func (*FlushAck) ProtoMessage() {}
 
 func (x *FlushAck) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[6]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -711,7 +871,7 @@ func (x *FlushAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FlushAck.ProtoReflect.Descriptor instead.
 func (*FlushAck) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{6}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *FlushAck) GetDrained() uint64 {
@@ -757,7 +917,7 @@ type ContaminationAlert struct {
 
 func (x *ContaminationAlert) Reset() {
 	*x = ContaminationAlert{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[7]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -769,7 +929,7 @@ func (x *ContaminationAlert) String() string {
 func (*ContaminationAlert) ProtoMessage() {}
 
 func (x *ContaminationAlert) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[7]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -782,7 +942,7 @@ func (x *ContaminationAlert) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContaminationAlert.ProtoReflect.Descriptor instead.
 func (*ContaminationAlert) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{7}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ContaminationAlert) GetSessionId() []byte {
@@ -810,7 +970,7 @@ var File_m1p_v1_fabric_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"\n" +
-	"\x13m1p/v1/fabric.proto\x12\x06m1p.v1\x1a\x16m1p/v1/artifacts.proto\x1a\x15m1p/v1/envelope.proto\"\xa9\x03\n" +
+	"\x13m1p/v1/fabric.proto\x12\x06m1p.v1\x1a\x16m1p/v1/artifacts.proto\x1a\x15m1p/v1/envelope.proto\x1a\x19m1p/v1/intelligence.proto\"\xa3\x04\n" +
 	"\vFabricFrame\x12%\n" +
 	"\x05event\x18\x01 \x01(\v2\r.m1p.v1.EventH\x00R\x05event\x12%\n" +
 	"\x05hello\x18\x02 \x01(\v2\r.m1p.v1.HelloH\x00R\x05hello\x12/\n" +
@@ -819,10 +979,21 @@ const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"gate_query\x18\x04 \x01(\v2\x11.m1p.v1.GateQueryH\x00R\tgateQuery\x128\n" +
 	"\fgate_verdict\x18\x05 \x01(\v2\x13.m1p.v1.GateVerdictH\x00R\vgateVerdict\x12%\n" +
 	"\x05flush\x18\x06 \x01(\v2\r.m1p.v1.FlushH\x00R\x05flush\x12/\n" +
-	"\tflush_ack\x18\a \x01(\v2\x10.m1p.v1.FlushAckH\x00R\bflushAck\x12M\n" +
+	"\tflush_ack\x18\a \x01(\v2\x10.m1p.v1.FlushAckH\x00R\bflushAck\x12;\n" +
+	"\rcontext_query\x18\b \x01(\v2\x14.m1p.v1.ContextQueryH\x00R\fcontextQuery\x12;\n" +
+	"\rcontext_reply\x18\t \x01(\v2\x14.m1p.v1.ContextReplyH\x00R\fcontextReply\x12M\n" +
 	"\x13contamination_alert\x18\n" +
 	" \x01(\v2\x1a.m1p.v1.ContaminationAlertH\x00R\x12contaminationAlertB\x06\n" +
-	"\x04kind\"p\n" +
+	"\x04kind\"\xb9\x01\n" +
+	"\fContextQuery\x122\n" +
+	"\achannel\x18\x01 \x01(\x0e2\x18.m1p.v1.InjectionChannelR\achannel\x12\x1b\n" +
+	"\ttool_name\x18\x02 \x01(\tR\btoolName\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\x12\x1f\n" +
+	"\vdeadline_ms\x18\x04 \x01(\rR\n" +
+	"deadlineMs\x12!\n" +
+	"\fis_interrupt\x18\x05 \x01(\bR\visInterrupt\"=\n" +
+	"\fContextReply\x12-\n" +
+	"\x12additional_context\x18\x01 \x01(\tR\x11additionalContext\"p\n" +
 	"\x05Hello\x12\x1c\n" +
 	"\tcomponent\x18\x01 \x01(\tR\tcomponent\x12\x10\n" +
 	"\x03pid\x18\x02 \x01(\rR\x03pid\x12\x18\n" +
@@ -877,38 +1048,44 @@ func file_m1p_v1_fabric_proto_rawDescGZIP() []byte {
 }
 
 var file_m1p_v1_fabric_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_m1p_v1_fabric_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_m1p_v1_fabric_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_m1p_v1_fabric_proto_goTypes = []any{
 	(GateKind)(0),              // 0: m1p.v1.GateKind
 	(GateDecision)(0),          // 1: m1p.v1.GateDecision
 	(*FabricFrame)(nil),        // 2: m1p.v1.FabricFrame
-	(*Hello)(nil),              // 3: m1p.v1.Hello
-	(*HelloAck)(nil),           // 4: m1p.v1.HelloAck
-	(*GateQuery)(nil),          // 5: m1p.v1.GateQuery
-	(*GateVerdict)(nil),        // 6: m1p.v1.GateVerdict
-	(*Flush)(nil),              // 7: m1p.v1.Flush
-	(*FlushAck)(nil),           // 8: m1p.v1.FlushAck
-	(*ContaminationAlert)(nil), // 9: m1p.v1.ContaminationAlert
-	(*Event)(nil),              // 10: m1p.v1.Event
-	(Verdict)(0),               // 11: m1p.v1.Verdict
+	(*ContextQuery)(nil),       // 3: m1p.v1.ContextQuery
+	(*ContextReply)(nil),       // 4: m1p.v1.ContextReply
+	(*Hello)(nil),              // 5: m1p.v1.Hello
+	(*HelloAck)(nil),           // 6: m1p.v1.HelloAck
+	(*GateQuery)(nil),          // 7: m1p.v1.GateQuery
+	(*GateVerdict)(nil),        // 8: m1p.v1.GateVerdict
+	(*Flush)(nil),              // 9: m1p.v1.Flush
+	(*FlushAck)(nil),           // 10: m1p.v1.FlushAck
+	(*ContaminationAlert)(nil), // 11: m1p.v1.ContaminationAlert
+	(*Event)(nil),              // 12: m1p.v1.Event
+	(InjectionChannel)(0),      // 13: m1p.v1.InjectionChannel
+	(Verdict)(0),               // 14: m1p.v1.Verdict
 }
 var file_m1p_v1_fabric_proto_depIdxs = []int32{
-	10, // 0: m1p.v1.FabricFrame.event:type_name -> m1p.v1.Event
-	3,  // 1: m1p.v1.FabricFrame.hello:type_name -> m1p.v1.Hello
-	4,  // 2: m1p.v1.FabricFrame.hello_ack:type_name -> m1p.v1.HelloAck
-	5,  // 3: m1p.v1.FabricFrame.gate_query:type_name -> m1p.v1.GateQuery
-	6,  // 4: m1p.v1.FabricFrame.gate_verdict:type_name -> m1p.v1.GateVerdict
-	7,  // 5: m1p.v1.FabricFrame.flush:type_name -> m1p.v1.Flush
-	8,  // 6: m1p.v1.FabricFrame.flush_ack:type_name -> m1p.v1.FlushAck
-	9,  // 7: m1p.v1.FabricFrame.contamination_alert:type_name -> m1p.v1.ContaminationAlert
-	0,  // 8: m1p.v1.GateQuery.gate:type_name -> m1p.v1.GateKind
-	1,  // 9: m1p.v1.GateVerdict.decision:type_name -> m1p.v1.GateDecision
-	11, // 10: m1p.v1.GateVerdict.verdict:type_name -> m1p.v1.Verdict
-	11, // [11:11] is the sub-list for method output_type
-	11, // [11:11] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	12, // 0: m1p.v1.FabricFrame.event:type_name -> m1p.v1.Event
+	5,  // 1: m1p.v1.FabricFrame.hello:type_name -> m1p.v1.Hello
+	6,  // 2: m1p.v1.FabricFrame.hello_ack:type_name -> m1p.v1.HelloAck
+	7,  // 3: m1p.v1.FabricFrame.gate_query:type_name -> m1p.v1.GateQuery
+	8,  // 4: m1p.v1.FabricFrame.gate_verdict:type_name -> m1p.v1.GateVerdict
+	9,  // 5: m1p.v1.FabricFrame.flush:type_name -> m1p.v1.Flush
+	10, // 6: m1p.v1.FabricFrame.flush_ack:type_name -> m1p.v1.FlushAck
+	3,  // 7: m1p.v1.FabricFrame.context_query:type_name -> m1p.v1.ContextQuery
+	4,  // 8: m1p.v1.FabricFrame.context_reply:type_name -> m1p.v1.ContextReply
+	11, // 9: m1p.v1.FabricFrame.contamination_alert:type_name -> m1p.v1.ContaminationAlert
+	13, // 10: m1p.v1.ContextQuery.channel:type_name -> m1p.v1.InjectionChannel
+	0,  // 11: m1p.v1.GateQuery.gate:type_name -> m1p.v1.GateKind
+	1,  // 12: m1p.v1.GateVerdict.decision:type_name -> m1p.v1.GateDecision
+	14, // 13: m1p.v1.GateVerdict.verdict:type_name -> m1p.v1.Verdict
+	14, // [14:14] is the sub-list for method output_type
+	14, // [14:14] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_fabric_proto_init() }
@@ -918,6 +1095,7 @@ func file_m1p_v1_fabric_proto_init() {
 	}
 	file_m1p_v1_artifacts_proto_init()
 	file_m1p_v1_envelope_proto_init()
+	file_m1p_v1_intelligence_proto_init()
 	file_m1p_v1_fabric_proto_msgTypes[0].OneofWrappers = []any{
 		(*FabricFrame_Event)(nil),
 		(*FabricFrame_Hello)(nil),
@@ -926,6 +1104,8 @@ func file_m1p_v1_fabric_proto_init() {
 		(*FabricFrame_GateVerdict)(nil),
 		(*FabricFrame_Flush)(nil),
 		(*FabricFrame_FlushAck)(nil),
+		(*FabricFrame_ContextQuery)(nil),
+		(*FabricFrame_ContextReply)(nil),
 		(*FabricFrame_ContaminationAlert)(nil),
 	}
 	type x struct{}
@@ -934,7 +1114,7 @@ func file_m1p_v1_fabric_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_m1p_v1_fabric_proto_rawDesc), len(file_m1p_v1_fabric_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   8,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

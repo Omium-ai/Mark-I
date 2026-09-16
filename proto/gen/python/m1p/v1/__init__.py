@@ -1455,9 +1455,8 @@ class FabricFrame(betterproto.Message):
      remain structurally unspoolable: there is no oneof arm a spool record can
      carry, because admission takes the Event, not the frame.
      TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
-     next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, cortex
-     pull, Phase 4), 10 = ContaminationAlert (defined below). 8 and 9 are
-     reserved by this note and by the ruling ledger, not yet by a field.
+     next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
+     memory/cortex pull — fields below), 10 = ContaminationAlert (defined below).
     """
 
     event: "Event" = betterproto.message_field(1, group="kind")
@@ -1467,9 +1466,42 @@ class FabricFrame(betterproto.Message):
     gate_verdict: "GateVerdict" = betterproto.message_field(5, group="kind")
     flush: "Flush" = betterproto.message_field(6, group="kind")
     flush_ack: "FlushAck" = betterproto.message_field(7, group="kind")
+    context_query: "ContextQuery" = betterproto.message_field(8, group="kind")
+    context_reply: "ContextReply" = betterproto.message_field(9, group="kind")
     contamination_alert: "ContaminationAlert" = betterproto.message_field(
         10, group="kind"
     )
+
+
+@dataclass(eq=False, repr=False)
+class ContextQuery(betterproto.Message):
+    """
+    The shim's pull for injected context (D-AE): the session rides the Hello
+     that bound this connection, exactly as GateQuery. The daemon answers from
+     its synced memory cache and the cortex map; every failure is an empty reply
+     (fail-open for availability, 08 §5 rule 5). Byte contract pinned by
+     go/mark1d/internal/fabric/context_test.go and rust/mark1-hookshim/src/context.rs.
+    """
+
+    channel: "InjectionChannel" = betterproto.enum_field(1)
+    tool_name: str = betterproto.string_field(2)
+    error: str = betterproto.string_field(3)
+    """
+    The vendor's error text on PostToolUseFailure, normalized on the daemon
+     side into the pitfall signature (06 §9.5); never stored, never uploaded.
+    """
+
+    deadline_ms: int = betterproto.uint32_field(4)
+    is_interrupt: bool = betterproto.bool_field(5)
+
+
+@dataclass(eq=False, repr=False)
+class ContextReply(betterproto.Message):
+    additional_context: str = betterproto.string_field(1)
+    """
+    Rendered additionalContext, empty when nothing injects; the shim prints
+     nothing on empty. The daemon has already admitted the MemoryInjection.
+    """
 
 
 @dataclass(eq=False, repr=False)

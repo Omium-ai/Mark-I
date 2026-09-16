@@ -23,6 +23,7 @@ package m1p.v1;
 
 import "m1p/v1/artifacts.proto";
 import "m1p/v1/envelope.proto";
+import "m1p/v1/intelligence.proto";
 
 // DECISION D-U (lead, binding). The payload of EVERY M1PL frame is one
 // serialized FabricFrame. 07 §5 and 08 §4.2 always said the payload is "an
@@ -40,9 +41,8 @@ import "m1p/v1/envelope.proto";
 // remain structurally unspoolable: there is no oneof arm a spool record can
 // carry, because admission takes the Event, not the frame.
 // TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
-// next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, cortex
-// pull, Phase 4), 10 = ContaminationAlert (defined below). 8 and 9 are
-// reserved by this note and by the ruling ledger, not yet by a field.
+// next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
+// memory/cortex pull — fields below), 10 = ContaminationAlert (defined below).
 message FabricFrame {
   oneof kind {
     Event event = 1;
@@ -52,8 +52,31 @@ message FabricFrame {
     GateVerdict gate_verdict = 5;
     Flush flush = 6;
     FlushAck flush_ack = 7;
+    ContextQuery context_query = 8;
+    ContextReply context_reply = 9;
     ContaminationAlert contamination_alert = 10;
   }
+}
+
+// The shim's pull for injected context (D-AE): the session rides the Hello
+// that bound this connection, exactly as GateQuery. The daemon answers from
+// its synced memory cache and the cortex map; every failure is an empty reply
+// (fail-open for availability, 08 §5 rule 5). Byte contract pinned by
+// go/mark1d/internal/fabric/context_test.go and rust/mark1-hookshim/src/context.rs.
+message ContextQuery {
+  InjectionChannel channel = 1;
+  string tool_name = 2;
+  // The vendor's error text on PostToolUseFailure, normalized on the daemon
+  // side into the pitfall signature (06 §9.5); never stored, never uploaded.
+  string error = 3;
+  uint32 deadline_ms = 4;
+  bool is_interrupt = 5;
+}
+
+message ContextReply {
+  // Rendered additionalContext, empty when nothing injects; the shim prints
+  // nothing on empty. The daemon has already admitted the MemoryInjection.
+  string additional_context = 1;
 }
 
 // First frame on every connection (08 §4.3 step 2: any other first frame ⇒
