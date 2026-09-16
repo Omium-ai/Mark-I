@@ -133,7 +133,7 @@ func exitCode(t *testing.T, err error) int {
 }
 
 func TestLinuxInstallStatusUninstallRoundTrip(t *testing.T) {
-	goos = "linux"
+	Platform = "linux"
 	env, out := testEnv(t)
 	home := os.Getenv("HOME")
 	pid := "0"
@@ -218,7 +218,7 @@ func TestLinuxInstallStatusUninstallRoundTrip(t *testing.T) {
 }
 
 func TestLinuxChangedArtifactRestartsARunningDaemon(t *testing.T) {
-	goos = "linux"
+	Platform = "linux"
 	env, out := testEnv(t)
 	f := stub(t, func(argv string) (string, error) {
 		if strings.HasPrefix(argv, "systemctl --user show") {
@@ -247,7 +247,7 @@ func TestLinuxChangedArtifactRestartsARunningDaemon(t *testing.T) {
 }
 
 func TestLinuxFallsBackToAutostartWithoutSystemdUser(t *testing.T) {
-	goos = "linux"
+	Platform = "linux"
 	env, out := testEnv(t)
 	home := os.Getenv("HOME")
 	f := stub(t, func(argv string) (string, error) {
@@ -303,7 +303,7 @@ func TestLinuxFallsBackToAutostartWithoutSystemdUser(t *testing.T) {
 }
 
 func TestDarwinLaunchdArgv(t *testing.T) {
-	goos = "darwin"
+	Platform = "darwin"
 	env, out := testEnv(t)
 	home := os.Getenv("HOME")
 	loadedNow := false
@@ -379,7 +379,7 @@ func TestDarwinLaunchdArgv(t *testing.T) {
 }
 
 func TestWindowsSchtasksArgv(t *testing.T) {
-	goos = "windows"
+	Platform = "windows"
 	env, out := testEnv(t)
 	registered := false
 	f := stub(t, func(argv string) (string, error) {
@@ -439,7 +439,7 @@ func TestWindowsSchtasksArgv(t *testing.T) {
 }
 
 func TestStartStopRefuseWhenNotRegistered(t *testing.T) {
-	goos = "linux"
+	Platform = "linux"
 	env, _ := testEnv(t)
 	stub(t, func(string) (string, error) { return "0\n", nil })
 	for _, fn := range []func(*cli.Env, Options) error{Start, Stop} {
@@ -450,7 +450,7 @@ func TestStartStopRefuseWhenNotRegistered(t *testing.T) {
 }
 
 func TestInstallFailsWithoutADaemonBinary(t *testing.T) {
-	goos = "linux"
+	Platform = "linux"
 	env, _ := testEnv(t)
 	t.Setenv("PATH", t.TempDir())
 	stub(t, func(string) (string, error) { return "", nil })
@@ -461,7 +461,7 @@ func TestInstallFailsWithoutADaemonBinary(t *testing.T) {
 }
 
 func TestWaitStoppedPollsTheSupervisor(t *testing.T) {
-	goos = "linux"
+	Platform = "linux"
 	env, _ := testEnv(t)
 	unit := filepath.Join(os.Getenv("HOME"), ".config", "systemd", "user", "mark1d.service")
 	if err := os.MkdirAll(filepath.Dir(unit), 0o700); err != nil {

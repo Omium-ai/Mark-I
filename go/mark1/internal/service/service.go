@@ -57,7 +57,7 @@ var Exec = func(name string, args ...string) (string, error) {
 	return out.String(), nil
 }
 
-var goos = runtime.GOOS
+var Platform = runtime.GOOS // the supervisor kind is a build fact; tests in other packages pin it
 
 type target struct {
 	kind, path, daemon, stateDir string
@@ -170,7 +170,7 @@ func resolve(env *cli.Env, opts Options, probe bool) (*target, error) {
 		return nil, err
 	}
 	t := &target{stateDir: env.StateDir}
-	switch goos {
+	switch Platform {
 	case "darwin":
 		t.kind, t.path = "launchd", filepath.Join(home, "Library", "LaunchAgents", Label+".plist")
 	case "windows":
@@ -205,7 +205,7 @@ func daemonPath(explicit string) (string, error) {
 		return filepath.Abs(explicit)
 	}
 	name := "mark1d"
-	if goos == "windows" {
+	if Platform == "windows" {
 		name += ".exe"
 	}
 	if exe, err := os.Executable(); err == nil {

@@ -137,6 +137,9 @@ func newFixture(t *testing.T, running bool) *fixture {
 	}
 	t.Setenv("HOME", f.home)
 	t.Setenv("XDG_RUNTIME_DIR", "")
+	prevPlatform := service.Platform
+	service.Platform = "linux" // the fixture is a systemd-user rig whatever the host
+	t.Cleanup(func() { service.Platform = prevPlatform })
 	f.env = &cli.Env{StateDir: filepath.Join(f.home, ".omium", "mark1"), JSON: true, Stdout: f.out, Stderr: os.Stderr, Version: "0.1.0"}
 	unit := filepath.Join(f.home, ".config", "systemd", "user", "mark1d.service")
 	if err := os.MkdirAll(filepath.Dir(unit), 0o700); err != nil {
