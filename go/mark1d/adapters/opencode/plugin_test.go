@@ -145,7 +145,7 @@ func TestRefusals(t *testing.T) {
 	if RefusalCode(errors.New("disk on fire")) != "" {
 		t.Fatal("a genuine failure has no refusal code")
 	}
-	if !strings.HasPrefix(ManifestPath("/s"), "/s/provisioned/opencode/") {
+	if !strings.HasPrefix(ManifestPath("/s"), filepath.Join("/s", "provisioned", "opencode")+string(filepath.Separator)) {
 		t.Fatal("manifest lives under provisioned/opencode (08 §8.2)")
 	}
 }

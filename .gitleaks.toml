@@ -170,6 +170,14 @@ paths = [
   # derived from a string literal declared four lines above it, so anyone can recompute it — a
   # digest, not a credential. Named *IdemKey because idem_key is the protocol's word for it.
   '''(^|/)go/mark1d/internal/tailers/idemkey_test\.go$''',
+  # Three more scanner-shaped negatives, each read before listing (2026-09-16): the alphabet-run
+  # `gho_AaBbCc…` GitHub token the copilot adapter must classify as GitHub-billed and never yield
+  # as a wire credential, the same token the gateway must refuse even when enrolled, and a
+  # `sk_live_` alphabet run planted in an EvidenceRecord to prove the evidence store never reaches
+  # the wire. Not credentials; the tests exist to prove they are refused.
+  '''(^|/)go/mark1d/adapters/copilot/copilot_test\.go$''',
+  '''(^|/)rust/mark1-proxy/tests/proxy\.rs$''',
+  '''(^|/)go/mark1d/internal/anchors/wire_test\.go$''',
 ]
 
 regexes = [

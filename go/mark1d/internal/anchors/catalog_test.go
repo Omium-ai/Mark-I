@@ -12,6 +12,17 @@ import (
 
 // fakeBin drops an executable shell script named `name` into dir that prints
 // `version` for any invocation — enough for LookPath + the version sniff.
+// canonTemp is t.TempDir() with symlinks resolved: the catalog resolves argv[0] through
+// EvalSymlinks (FR-VERIFY-004), and macOS's /var/folders is itself a symlink to /private/var.
+func canonTemp(t *testing.T) string {
+	t.Helper()
+	d, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 func fakeBin(t *testing.T, dir, name, version string) string {
 	t.Helper()
 	p := filepath.Join(dir, name)
@@ -33,13 +44,13 @@ func writeFixture(t *testing.T, dir, name, content string) {
 // dir holding every fake tool. Returns (worktree, binDir).
 func fixtureWorkspace(t *testing.T) (string, string) {
 	t.Helper()
-	wt := t.TempDir()
+	wt := canonTemp(t)
 	writeFixture(t, wt, "pyproject.toml", "[tool.ruff]\nline-length = 100\n")
 	writeFixture(t, wt, "tsconfig.json", "{}")
 	writeFixture(t, wt, "Cargo.toml", "[package]\nname = \"x\"\n")
 	writeFixture(t, wt, "go.mod", "module x\n")
 	writeFixture(t, wt, "eslint.config.js", "export default []\n")
-	bin := t.TempDir()
+	bin := canonTemp(t)
 	for tool, ver := range map[string]string{
 		"ruff": "ruff 0.6.2", "tsc": "Version 5.5.4", "cargo": "cargo 1.80.0",
 		"go": "go version go1.25.0 linux/amd64", "eslint": "v9.9.0",
@@ -101,10 +112,10 @@ func TestDeriveFullWorkspace(t *testing.T) {
 // file when it runs; with a sandbox that refuses, that marker must not appear
 // and the entry must still derive with an empty ToolVersion.
 func TestDeriveNeverExecsOutsideTheSandbox(t *testing.T) {
-	wt := t.TempDir()
+	wt := canonTemp(t)
 	writeFixture(t, wt, "pyproject.toml", "[tool.ruff]\n")
-	bin := t.TempDir()
-	marker := filepath.Join(t.TempDir(), "i-ran")
+	bin := canonTemp(t)
+	marker := filepath.Join(canonTemp(t), "i-ran")
 	script := "#!/bin/sh\ntouch " + marker + "\necho 'ruff 0.6.2'\n"
 	if err := os.WriteFile(filepath.Join(bin, "ruff"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -134,12 +145,12 @@ func TestDeriveNeverExecsOutsideTheSandbox(t *testing.T) {
 }
 
 func TestDeriveNegatives(t *testing.T) {
-	bin := t.TempDir()
+	bin := canonTemp(t)
 	fakeBin(t, bin, "ruff", "ruff 0.6.2")
 	t.Setenv("PATH", bin)
 
 	t.Run("bare pyproject does not derive ruff", func(t *testing.T) {
-		wt := t.TempDir()
+		wt := canonTemp(t)
 		writeFixture(t, wt, "pyproject.toml", "[project]\nname = \"x\"\n")
 		got, err := Derive(testSandbox(t), wt)
 		if err != nil {
@@ -150,7 +161,7 @@ func TestDeriveNegatives(t *testing.T) {
 		}
 	})
 	t.Run("config present, binary absent", func(t *testing.T) {
-		wt := t.TempDir()
+		wt := canonTemp(t)
 		writeFixture(t, wt, "tsconfig.json", "{}")
 		got, err := Derive(testSandbox(t), wt)
 		if err != nil {
@@ -192,7 +203,7 @@ func TestExecHashDriftAxes(t *testing.T) {
 
 func TestConsentLifecycle(t *testing.T) {
 	wt, bin := fixtureWorkspace(t)
-	path := ConsentPath(t.TempDir())
+	path := ConsentPath(canonTemp(t))
 	now := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 
 	derived, err := Derive(testSandbox(t), wt)
@@ -291,7 +302,7 @@ func TestConsentLifecycle(t *testing.T) {
 }
 
 func TestLoadConsentCorruptIsError(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonTemp(t)
 	path := ConsentPath(dir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -316,7 +327,7 @@ func TestLoadConsentCorruptIsError(t *testing.T) {
 // caller is unix-tagged, and main_test.go builds on every GOOS for TestMain.
 func testSandbox(t *testing.T) Sandbox {
 	t.Helper()
-	return NewSandbox(t.TempDir())
+	return NewSandbox(canonTemp(t))
 }
 
 // optInTests writes the FR-VERIFY-003 per-repo opt-in into wt.
@@ -370,18 +381,18 @@ func TestDeriveTestRunnersNeedRepoOptIn(t *testing.T) {
 	if len(want) != 0 {
 		t.Errorf("test runners not derived: %v", want)
 	}
-	if TestsOptedIn(t.TempDir()) {
+	if TestsOptedIn(canonTemp(t)) {
 		t.Error("absent opt-in read as opted in")
 	}
 }
 
 // TestExecHashSymlinkIndependent: a symlinked PATH derives the real file's BinaryPath and exec hash.
 func TestExecHashSymlinkIndependent(t *testing.T) {
-	wt := t.TempDir()
+	wt := canonTemp(t)
 	writeFixture(t, wt, "pyproject.toml", "[tool.ruff]\n")
-	real := t.TempDir()
+	real := canonTemp(t)
 	target := fakeBin(t, real, "ruff", "ruff 0.6.2")
-	links := t.TempDir()
+	links := canonTemp(t)
 	if err := os.Symlink(target, filepath.Join(links, "ruff")); err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -135,8 +136,8 @@ func TestFencedApplyKeepsUserBytesAndOffIsByteEqual(t *testing.T) {
 	if !strings.Contains(user, `"echo hi"`) || strings.Index(user, `"matcher"`) > strings.Index(user, `"hooks"`) {
 		t.Fatalf("user's handler moved or reordered:\n%s", user)
 	}
-	if fi, _ := os.Stat(target); fi.Mode().Perm() != 0o644 {
-		t.Fatal("target mode not preserved")
+	if fi, _ := os.Stat(target); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o644 {
+		t.Fatal("target mode not preserved") // no POSIX mode bits on windows
 	}
 	st, err := Inspect(state)
 	if err != nil || st.State != StateOK || st.Mechanism != "B" || len(st.Lines) != len(hookRegistrations) {

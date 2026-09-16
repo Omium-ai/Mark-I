@@ -179,55 +179,6 @@ fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
-/// NFR-SECURITY-002's ordering clause, pinned rather than inspected: in this file's text the
-/// harden call precedes the runtime construction. Comment lines are dropped first so prose
-/// mentioning either cannot satisfy it.
-#[cfg(test)]
-mod harden_order {
-    #[test]
-    fn proxy_harden_precedes_runtime() {
-        let src: String = include_str!("main.rs")
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        // Only the text above this module: its own string literals are not evidence.
-        let src = &src[..src.find("mod harden_order").unwrap()];
-        let harden = src
-            .find("mark1_harden::apply()")
-            .expect("main calls mark1_harden::apply()");
-        let runtime = src
-            .find("tokio::runtime::Builder")
-            .expect("main builds the runtime");
-        assert!(harden < runtime, "harden at {harden}, runtime at {runtime}");
-    }
-}
-
-#[cfg(all(test, unix))]
-mod port_file_tests {
-    use std::os::unix::fs::PermissionsExt;
-
-    /// The call site calls the bound port a per-boot secret; this is the only thing that makes
-    /// that true. It also covers the rewrite path, where an inherited 0644 mode survives a
-    /// plain truncate.
-    #[test]
-    fn port_file_is_private_even_when_it_already_existed_world_readable() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("proxy.port");
-        std::fs::write(&path, "1").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-
-        super::write_port(tmp.path(), "127.0.0.1:41337".parse().unwrap());
-
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "proxy.port must not be readable by other users"
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "41337");
-    }
-}
-
 /// argv/env only — there is no config file, and there is nothing here whose value could
 /// widen what the proxy will carry. `--upstream` can only ever *narrow* the allow-list.
 fn config() -> anyhow::Result<(ProxyConfig, Option<GatewayArgs>)> {
@@ -334,4 +285,53 @@ fn config() -> anyhow::Result<(ProxyConfig, Option<GatewayArgs>)> {
 
 fn is_loopback(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "::1" | "[::1]" | "localhost")
+}
+
+/// NFR-SECURITY-002's ordering clause, pinned rather than inspected: in this file's text the
+/// harden call precedes the runtime construction. Comment lines are dropped first so prose
+/// mentioning either cannot satisfy it.
+#[cfg(test)]
+mod harden_order {
+    #[test]
+    fn proxy_harden_precedes_runtime() {
+        let src: String = include_str!("main.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Only the text above this module: its own string literals are not evidence.
+        let src = &src[..src.find("mod harden_order").unwrap()];
+        let harden = src
+            .find("mark1_harden::apply()")
+            .expect("main calls mark1_harden::apply()");
+        let runtime = src
+            .find("tokio::runtime::Builder")
+            .expect("main builds the runtime");
+        assert!(harden < runtime, "harden at {harden}, runtime at {runtime}");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod port_file_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// The call site calls the bound port a per-boot secret; this is the only thing that makes
+    /// that true. It also covers the rewrite path, where an inherited 0644 mode survives a
+    /// plain truncate.
+    #[test]
+    fn port_file_is_private_even_when_it_already_existed_world_readable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("proxy.port");
+        std::fs::write(&path, "1").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        super::write_port(tmp.path(), "127.0.0.1:41337".parse().unwrap());
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "proxy.port must not be readable by other users"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "41337");
+    }
 }

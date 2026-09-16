@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -438,7 +439,7 @@ func TestCacheIsFailStaticAndFreshnessBounded(t *testing.T) {
 	if strings.Contains(string(raw), "routing_hint") || strings.Contains(string(raw), `"preference"`) {
 		t.Fatal("non-injectable kinds persisted")
 	}
-	if st, _ := os.Stat(filepath.Join(dir, "memory", cacheFile)); st.Mode().Perm() != 0o600 {
+	if st, _ := os.Stat(filepath.Join(dir, "memory", cacheFile)); runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
 		t.Fatalf("cache mode %v", st.Mode().Perm())
 	}
 

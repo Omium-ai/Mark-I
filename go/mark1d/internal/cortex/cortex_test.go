@@ -468,7 +468,7 @@ func TestRankerFileFollowsTheBundle(t *testing.T) {
 		return rf, fi.Mode().Perm()
 	}
 	got, mode := read()
-	if mode != 0o600 || got != (rankerFile{Stage: "shadow", Weight: 0.5, Bias: 0.05, Coefficients: r.Coefficients}) {
+	if (runtime.GOOS != "windows" && mode != 0o600) || got != (rankerFile{Stage: "shadow", Weight: 0.5, Bias: 0.05, Coefficients: r.Coefficients}) {
 		t.Fatalf("boot ranker file: %+v mode %o", got, mode)
 	}
 	r2 := *r
