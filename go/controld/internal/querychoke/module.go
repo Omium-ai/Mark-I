@@ -5,12 +5,10 @@
 // disagree with (08 §3: "a tenant identifier in a path or body is never
 // trusted").
 //
-// PRODUCTION-WRITE GUARD (WHY header): ADR-0001 and ADR-0010 are UNSIGNED —
-// no production ClickHouse write may occur. The rollup write route therefore
-// ships DISABLED by default and mounts its execution only behind the
-// explicit QUERYCHOKE_ROLLUP_WRITE=1 run flag (test/dev lanes only); with
-// the flag off it answers 403 naming the unsigned ADR, so a driver pointed
-// at production fails loudly, not silently.
+// The rollup write route (ADR-0010, signed 2026-09-16) executes only under
+// the intel service credential; with RollupWriteEnabled off (no credential
+// configured, or QUERYCHOKE_ROLLUP_WRITE=0) it answers 403, so a driver
+// pointed at a dark surface fails loudly, not silently.
 package querychoke
 
 import (
@@ -508,11 +506,9 @@ type rollupRequest struct {
 }
 
 func (m *Module) handleRollupWrite(w http.ResponseWriter, r *http.Request) {
-	// PRODUCTION-WRITE GUARD: see the package WHY header. Flag off ⇒ loud
-	// refusal naming the unsigned ADR, never a silent no-op.
 	if !m.deps.RollupWriteEnabled {
 		writeErr(w, http.StatusForbidden, "M1E-1001",
-			"rollup writes disabled: ADR-0010 is unsigned; set QUERYCHOKE_ROLLUP_WRITE=1 only in test/dev lanes")
+			"rollup writes disabled on this controld (no INTEL_SERVICE_TOKEN, or QUERYCHOKE_ROLLUP_WRITE=0)")
 		return
 	}
 	// The service credential seam (ADR-0010 §2.2): the verified principal is

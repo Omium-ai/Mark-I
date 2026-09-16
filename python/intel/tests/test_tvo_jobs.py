@@ -1,5 +1,5 @@
-"""tvo.rollup_verify (06 §7.2, hourly): the not-yet-closed no-op, the unsigned-ADR guard
-threading through unchanged in production shape, and the outcomes -> receipt-id mapping —
+"""tvo.rollup_verify (06 §7.2, hourly): the not-yet-closed no-op, the close boundary, and the
+outcomes -> receipt-id mapping —
 against a fake reader (MockChoke), never the arithmetic rollup.py already owns."""
 
 from datetime import UTC, datetime
@@ -59,17 +59,8 @@ async def test_exactly_at_close_boundary_is_not_a_noop(monkeypatch):
     monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
     choke = _choke()
     async with choke.client() as http:
-        with pytest.raises(RuntimeError, match="ADR-0010 is UNSIGNED"):
-            await jobs.rollup_verify(_ctx(), http=http, now=EXACT_CLOSE)
-
-
-async def test_unsigned_adr_guard_still_blocks_by_default(monkeypatch):
-    monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
-    choke = _choke()
-    async with choke.client() as http:
-        with pytest.raises(RuntimeError, match="ADR-0010 is UNSIGNED"):
-            await jobs.rollup_verify(_ctx(), http=http, now=AFTER_CLOSE)
-    assert choke.requests == []  # refused before any read, exactly like rollup.py's own guard
+        receipt = await jobs.rollup_verify(_ctx(), http=http, now=EXACT_CLOSE)
+    assert receipt in choke.rollup_store  # the closing instant itself writes
 
 
 async def test_missing_bearer_fails_closed_before_any_call(monkeypatch):
@@ -85,9 +76,7 @@ async def test_written_outcome_returns_its_job_key(monkeypatch):
     monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
     choke = _choke()
     async with choke.client() as http:
-        receipt = await jobs.rollup_verify(
-            _ctx(), http=http, now=AFTER_CLOSE, allow_unsigned_write=True
-        )
+        receipt = await jobs.rollup_verify(_ctx(), http=http, now=AFTER_CLOSE)
     assert receipt is not None
     assert receipt in choke.rollup_store
     assert receipt.startswith("tvo.rollup_tenant_day:2026-08-01:2026-08-02:")
@@ -97,8 +86,6 @@ async def test_empty_day_returns_none(monkeypatch):
     monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
     choke = _choke(rows=[])
     async with choke.client() as http:
-        receipt = await jobs.rollup_verify(
-            _ctx(), http=http, now=AFTER_CLOSE, allow_unsigned_write=True
-        )
+        receipt = await jobs.rollup_verify(_ctx(), http=http, now=AFTER_CLOSE)
     assert receipt is None
     assert choke.rollup_store == {}

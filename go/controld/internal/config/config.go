@@ -50,11 +50,10 @@ type Config struct {
 	// refuses the template loudly at run time rather than mis-routing it.
 	CHOffboardPassword string
 
-	// QUERYCHOKE_ROLLUP_WRITE=1 arms the internal tvo_rollup_tenant_day
-	// write route. PRODUCTION-WRITE GUARD: ADR-0001/ADR-0010 are UNSIGNED,
-	// so this defaults OFF and is for test/dev lanes only; enabling it
-	// requires INTEL_SERVICE_TOKEN (a write surface that verifies nothing
-	// must be absent, never open).
+	// The internal tvo_rollup_tenant_day write route. ADR-0001 and ADR-0010
+	// were signed 2026-09-16 (D-EI), so it is ON whenever INTEL_SERVICE_TOKEN
+	// is set (a write surface that verifies nothing must be absent, never
+	// open); QUERYCHOKE_ROLLUP_WRITE=0 is the explicit opt-out.
 	RollupWriteEnabled bool
 	IntelServiceToken  string // INTEL_SERVICE_TOKEN — the ADR-0010 §2.2 service credential seam
 	IntelBaseURL       string // INTEL_BASE_URL — mark1-intel base URL for the memory proxy; unset ⇒ /api/v1/memory/* answer 503
@@ -67,6 +66,7 @@ type Config struct {
 	// under the tenant's dedicated key; the bucket policy makes a stamping bug
 	// a write FAILURE, not a cross-tenant write).
 	KMSTenantKeyAliasPrefix string
+	KMSPersonalAlias        string // KMS_PERSONAL_ALIAS — the pooled key for kind='personal' tenants (ADR-0011); empty restores the pre-ADR posture
 	// S3_DISABLE_SSEKMS=1 drops the SSE-KMS headers from landing PUTs — for
 	// the dev/compose MinIO stack ONLY, which has no KMS and refuses the
 	// headers, turning every landing into a 503 (s3land.Options.DisableSSEKMS).
@@ -124,6 +124,10 @@ type Config struct {
 	// a control plane without it enrolls devices that can never tail.
 	TenantHMACPepper []byte
 
+	// OMIUM_USER_ISSUER + OMIUM_USER_JWKS_PINNED — the Mark 1 user-token anchor (05 §10.1 B2 pin doctrine); both or neither.
+	OmiumUserIssuer     string
+	OmiumUserJWKSPinned string
+
 	// WITNESS_BUCKET — the object-lock bucket the hourly witness job (m1_003)
 	// publishes chain heads to. Empty ⇒ the job does not run (a dev stack
 	// without a witness is honest about it; prod alerting owns the gap).
@@ -162,6 +166,7 @@ func Load() (Config, error) {
 		PGPort:                  envOr("POSTGRES_PORT", "5432"),
 		CHDatabase:              envOr("CLICKHOUSE_DATABASE", "mark1"),
 		KMSTenantKeyAliasPrefix: envOr("KMS_TENANT_ALIAS_PREFIX", "alias/mark1-tenant-"),
+		KMSPersonalAlias:        envOr("KMS_PERSONAL_ALIAS", "alias/mark1-personal"),
 		S3Endpoint:              os.Getenv("S3_ENDPOINT"),
 		CHOffboardPassword:      os.Getenv("CLICKHOUSE_OFFBOARD_PASSWORD"),
 		AuthDevMode:             os.Getenv("AUTH_DEV_MODE") == "1",
@@ -223,6 +228,11 @@ func Load() (Config, error) {
 	} else if !c.AuthDevMode {
 		return Config{}, fmt.Errorf("config: required env TENANT_HMAC_PEPPER is unset (boot refusal R1, 05 §1.2; 04 §2.9 per-tenant HMAC root delivered at enrollment)")
 	}
+	c.OmiumUserIssuer = os.Getenv("OMIUM_USER_ISSUER")
+	c.OmiumUserJWKSPinned = os.Getenv("OMIUM_USER_JWKS_PINNED")
+	if (c.OmiumUserIssuer == "") != (c.OmiumUserJWKSPinned == "") {
+		return Config{}, fmt.Errorf("config: OMIUM_USER_ISSUER and OMIUM_USER_JWKS_PINNED must be set together — an issuer with no pinned key (or a key with no issuer) verifies nothing (boot refusal R1, 05 §1.2)")
+	}
 	if rawSeed := os.Getenv("BUNDLE_SECTION_ED25519_SEED"); rawSeed != "" {
 		seed, err := decodeSeed(rawSeed)
 		if err != nil {
@@ -254,13 +264,15 @@ func Load() (Config, error) {
 	}
 	switch v := os.Getenv("QUERYCHOKE_ROLLUP_WRITE"); v {
 	case "":
+		c.RollupWriteEnabled = c.IntelServiceToken != ""
 	case "1":
 		if c.IntelServiceToken == "" {
 			return Config{}, fmt.Errorf("config: QUERYCHOKE_ROLLUP_WRITE=1 without INTEL_SERVICE_TOKEN — a write surface that verifies nothing must be absent, never open (boot refusal R1, 05 §1.2)")
 		}
 		c.RollupWriteEnabled = true
+	case "0":
 	default:
-		return Config{}, fmt.Errorf("config: QUERYCHOKE_ROLLUP_WRITE=%q is not \"1\" or unset (boot refusal R1, 05 §1.2)", v)
+		return Config{}, fmt.Errorf("config: QUERYCHOKE_ROLLUP_WRITE=%q is not \"0\", \"1\" or unset (boot refusal R1, 05 §1.2)", v)
 	}
 
 	c.WitnessBucket = os.Getenv("WITNESS_BUCKET")

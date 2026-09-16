@@ -17,15 +17,12 @@ async def rollup_verify(
     *,
     http: httpx.AsyncClient | None = None,
     now: datetime | None = None,
-    allow_unsigned_write: bool = False,
 ) -> str | None:
     """Scheduler target `app.tvo.jobs:rollup_verify`. An hourly tick's OWN day never
     closes (window_close(ctx.day) is always >24h out), so this rolls up the PREVIOUS UTC
     day -- the one an hourly tick can actually observe crossing its D20 grace lag; a tick
-    inside that lag is a clean no-op, not a failure. `allow_unsigned_write` mirrors
-    run_rollup's own flag verbatim (ADR-0010 unsigned, test/dev-lane only) -- the
-    scheduler calls this with `ctx` alone, so production always takes the safe False
-    default; only a test opts in explicitly, same as rollup.py's own suite does.
+    inside that lag is a clean no-op, not a failure. ADR-0010 is signed (D-EI), so the
+    scheduler's ctx-only call writes for real.
     Returns the last write's job_key (RollupOutcome carries no other receipt-shaped id),
     or None when there is nothing to write yet."""
     now = now or datetime.now(UTC)
@@ -47,6 +44,5 @@ async def rollup_verify(
             day=day,
             bearer=bearer,
             now=now,
-            allow_unsigned_write=allow_unsigned_write,
         )
     return outcomes[-1].job_key if outcomes else None

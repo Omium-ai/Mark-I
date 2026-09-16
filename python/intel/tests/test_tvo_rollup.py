@@ -1,4 +1,4 @@
-"""ADR-0010 driver: deterministic job_key, the unsigned-ADR write guard, the D20 window
+"""ADR-0010 driver: deterministic job_key, the D20 window
 gate, tenant-day aggregate arithmetic, and idempotency proven AT THE CONTRACT LEVEL —
 the second run with the same job_key reaches the choke (two POSTs to the internal
 rollup seam), is acked with the IDENTICAL 200 (module.go: the no-op signal belongs to
@@ -77,7 +77,6 @@ async def _run(choke: MockChoke, **kw) -> list[RollupOutcome]:
         day=DAY,
         bearer=BEARER,
         now=AFTER_CLOSE,
-        allow_unsigned_write=True,
     )
     args.update(kw)
     return await run_rollup(_reader(choke), **args)
@@ -92,13 +91,6 @@ def test_job_key_is_deterministic_and_series_keyed():
     assert job_key(DAY, "ten-a", "task_seg.v1-restated.2", wm) != k1
     assert job_key(DAY, "ten-b", "", wm) != k1
     assert job_key(date(2026, 8, 2), "ten-a", "", watermark_for(date(2026, 8, 2))) != k1
-
-
-async def test_unsigned_adr_guard_blocks_by_default():
-    choke = make_choke()
-    with pytest.raises(RuntimeError, match="ADR-0010 is UNSIGNED"):
-        await _run(choke, allow_unsigned_write=False)
-    assert choke.requests == []  # refused before any read, let alone the write
 
 
 async def test_window_not_closed_is_refused():
@@ -190,7 +182,6 @@ async def test_write_body_matches_the_crosslang_fixture():
         day=date.fromisoformat(inputs["day"]),
         bearer=BEARER,
         now=AFTER_CLOSE,
-        allow_unsigned_write=True,
     )
     ((_, body, _),) = [r for r in choke.requests if r[0] == "tvo_rollup_tenant_day"]
     assert body == fixture["body"]

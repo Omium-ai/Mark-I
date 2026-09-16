@@ -217,3 +217,27 @@ func TestRevocationMaxAgeClampsDownNeverUp(t *testing.T) {
 		t.Fatalf("tightening must be allowed: %v", c.RevocationCacheMaxAge)
 	}
 }
+
+// The Omium user-token anchor is both-or-neither: an issuer with no pinned key
+// (or the reverse) is a verifier that verifies nothing, refused at boot (R1).
+func TestOmiumUserAnchorBothOrNeither(t *testing.T) {
+	setRequired(t)
+	c, err := Load()
+	if err != nil || c.OmiumUserIssuer != "" || c.OmiumUserJWKSPinned != "" {
+		t.Fatalf("unset anchor must load empty: %+v %v", c, err)
+	}
+	t.Setenv("OMIUM_USER_ISSUER", "https://api.omium.ai")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "OMIUM_USER_JWKS_PINNED") {
+		t.Fatalf("issuer without JWKS must refuse, got %v", err)
+	}
+	t.Setenv("OMIUM_USER_ISSUER", "")
+	t.Setenv("OMIUM_USER_JWKS_PINNED", `{"keys":[]}`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "OMIUM_USER_ISSUER") {
+		t.Fatalf("JWKS without issuer must refuse, got %v", err)
+	}
+	t.Setenv("OMIUM_USER_ISSUER", "https://api.omium.ai")
+	c, err = Load()
+	if err != nil || c.OmiumUserIssuer != "https://api.omium.ai" || c.OmiumUserJWKSPinned != `{"keys":[]}` {
+		t.Fatalf("anchor pair lost: %+v %v", c, err)
+	}
+}

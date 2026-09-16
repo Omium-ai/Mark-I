@@ -363,7 +363,7 @@ func TestRollupWriteSurfaceGates(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer intel-secret")
 	w := httptest.NewRecorder()
 	muxOff.ServeHTTP(w, req)
-	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "ADR-0010") {
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "rollup writes disabled") {
 		t.Fatalf("disabled write surface: got %d %s", w.Code, w.Body.String())
 	}
 	if runOff.last.SQL() != "" {

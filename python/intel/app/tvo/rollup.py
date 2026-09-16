@@ -1,10 +1,6 @@
 """ADR-0010 driver: `tvo.rollup_tenant_day` — intel DRIVES, querychoke EXECUTES.
 
-*** ADR-0010 IS UNSIGNED (Status: Proposed — founder sign-off required BEFORE the first
-`tvo_tenant_day` write). Until it is signed, every write this module drives is TEST/DEV
-LANE ONLY: the driver runs solely behind the explicit `allow_unsigned_write=True` /
-`--i-understand-adr-0010-is-unsigned` flag, is invoked by CLI/cron seam, and is NEVER a
-default-on loop. Same guard class as ADR-0001's "first production write" gate. ***
+ADR-0010 was signed by the founder 2026-09-16 (D-EI): this write lane is production.
 
 The mechanics, verbatim from ADR-0010 and the choke's write carve-out
 (go/controld/internal/querychoke/templates.go `tvo_rollup_tenant_day`):
@@ -166,7 +162,6 @@ async def run_rollup(
     bearer: str,
     series: str = "",
     now: datetime | None = None,
-    allow_unsigned_write: bool = False,
 ) -> list[RollupOutcome]:
     """One (tenant, day) invocation ⇒ one job per series present. `tenant_id` enters the
     job identity (ADR-0010 §3) AND the write call (the FromServiceJob path — `bearer`
@@ -174,13 +169,6 @@ async def run_rollup(
     still Build-bound by the choke, never trusted from us). Re-run with the same
     (tenant, day, series) ⇒ same job_key ⇒ the choke's dedupe reports a no-op.
     Restatement = new `series` ⇒ new key, new row beside the original."""
-    if not allow_unsigned_write:
-        # PRODUCTION-WRITE GUARD: ADR-0010 is unsigned; the first tvo_tenant_day write is
-        # founder-gated. No code path may default past this.
-        raise RuntimeError(
-            "ADR-0010 is UNSIGNED — tvo_tenant_day writes are test/dev-lane only; "
-            "pass allow_unsigned_write=True (CLI: --i-understand-adr-0010-is-unsigned)"
-        )
     now = now or datetime.now(UTC)
     close = window_close(day)
     if now < close:
@@ -218,12 +206,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--day", required=True, type=date.fromisoformat)
     parser.add_argument("--base-url", required=True, help="querychoke base URL")
     parser.add_argument("--series", default="", help="restatement series label (ADR-0010 §6)")
-    parser.add_argument(
-        "--i-understand-adr-0010-is-unsigned",
-        action="store_true",
-        dest="allow_unsigned",
-        help="required: ADR-0010 is unsigned; writes are test/dev-lane only",
-    )
     args = parser.parse_args(argv)
     bearer = os.environ.get("INTEL_QUERYCHOKE_TOKEN", "")
     if not bearer:
@@ -238,7 +220,6 @@ def main(argv: list[str] | None = None) -> int:
                 day=args.day,
                 bearer=bearer,
                 series=args.series,
-                allow_unsigned_write=args.allow_unsigned,
             )
 
     for outcome in asyncio.run(_run()):
