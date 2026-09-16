@@ -60,3 +60,39 @@ func (s *Signer) KeyID() string { return s.keyID }
 func (s *Signer) Public() ed25519.PublicKey {
 	return s.priv.Public().(ed25519.PublicKey)
 }
+
+// CrossSignDomain separates a rotation cross-signature from every other
+// signature in the estate (ADR-0004: the predecessor cross-signs the
+// successor's manifest entry).
+const CrossSignDomain = "mark1-key-rotation-v1\x00"
+
+// RoleUpdate is the update/transparency-log key class; bundle section keys
+// are "bundle:<section>". Both live only in the key manifest.
+const RoleUpdate KeyRole = "update"
+
+// CrossSignInput is CrossSignDomain || role || 0x00 || pub: the role is under
+// the signature so a server-chain successor cannot be replayed as a bundle
+// key, and the fixed-width pub after the NUL closes splice ambiguity.
+func CrossSignInput(role KeyRole, pub ed25519.PublicKey) []byte {
+	out := make([]byte, 0, len(CrossSignDomain)+len(role)+1+len(pub))
+	out = append(out, CrossSignDomain...)
+	out = append(out, role...)
+	out = append(out, 0)
+	return append(out, pub...)
+}
+
+// CrossSign is the retiring key endorsing its successor for one role.
+func CrossSign(retiring SignerLike, role KeyRole, successor ed25519.PublicKey) ([]byte, error) {
+	if len(successor) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("receipts: successor public key is %d bytes, want %d", len(successor), ed25519.PublicKeySize)
+	}
+	if DeriveKeyID(successor) == retiring.KeyID() {
+		return nil, fmt.Errorf("receipts: a key cannot cross-sign itself (%s)", retiring.KeyID())
+	}
+	return retiring.Sign(CrossSignInput(role, successor))
+}
+
+// VerifyCrossSign checks that retiringPub endorsed successor for role.
+func VerifyCrossSign(retiringPub ed25519.PublicKey, role KeyRole, successor ed25519.PublicKey, sig []byte) bool {
+	return len(successor) == ed25519.PublicKeySize && Verify(retiringPub, sig, CrossSignInput(role, successor))
+}

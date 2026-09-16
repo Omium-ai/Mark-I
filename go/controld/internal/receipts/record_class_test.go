@@ -33,12 +33,15 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/receipts"
 )
 
-// perEventClasses is 02 §88's list, spelled out rather than derived from the
-// maps under test: a test that computed the six from the same maps it grades
-// would agree with any edit to them, including the edit that drops a class.
+// perEventClasses is 02 §88's list plus ADR-0004's key_rotation (m1_066: the
+// retiring chain key's hand-over receipt), spelled out rather than derived
+// from the maps under test: a test that computed them from the same maps it
+// grades would agree with any edit to them, including the edit that drops a
+// class.
 var perEventClasses = []string{
 	"noise_certificate", "memory_admission", "bundle_publication",
 	"corpus_export", "coverage_transition", "guard_contamination",
+	"key_rotation", "verifier_promotion",
 }
 
 // unknownClass is 02 §9's "seventh event type": a name no layer knows. Shaped
@@ -122,8 +125,8 @@ func TestIntegrationRecordClassesAgreeWithM1_002(t *testing.T) {
 	h := setup(t)
 
 	// Anti-vacuity: every loop in this file iterates one of these two maps.
-	if got := len(receipts.ServerRecordTypes); got != 4 {
-		t.Fatalf("ServerRecordTypes holds %d classes %v, want the 4 server-originated arms of ck_m1_receipts_record_shape",
+	if got := len(receipts.ServerRecordTypes); got != 6 {
+		t.Fatalf("ServerRecordTypes holds %d classes %v, want the 6 server-originated arms of ck_m1_receipts_record_shape (m1_002 + m1_068 + m1_069)",
 			got, sortedClasses(receipts.ServerRecordTypes))
 	}
 	if got := len(receipts.DeviceOriginTypes); got != 3 {

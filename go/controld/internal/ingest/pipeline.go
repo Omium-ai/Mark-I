@@ -378,6 +378,25 @@ func checkInvariants(b *m1pv1.Batch, headerBatchID uuid.UUID) (apiErr, bool) {
 				badIDs, kinds = append(badIDs, id.String()), append(kinds, "verdict_stage")
 			}
 		}
+		// FR-ROUTE-001, same posture: a RouteDecision is the OPE logging row
+		// (06 §11.1), and a propensity outside (0, 1] — the zero a missing
+		// producer lands, NaN included — a fidelity the descriptor does not
+		// know (06 §11.2 filters on it), or an empty action is a row no
+		// estimator can read. Refused so it never lands as a null projection.
+		if r := ev.GetRouteDecision(); r != nil {
+			if p := r.GetPropensity(); !(p > 0 && p <= 1) {
+				invariantViolations.WithLabelValues("route_propensity").Inc()
+				badIDs, kinds = append(badIDs, id.String()), append(kinds, "route_propensity")
+			}
+			if f := r.GetFidelity(); f.Number() == 0 || f.Descriptor().Values().ByNumber(f.Number()) == nil {
+				invariantViolations.WithLabelValues("route_fidelity").Inc()
+				badIDs, kinds = append(badIDs, id.String()), append(kinds, "route_fidelity")
+			}
+			if r.GetAction() == "" {
+				invariantViolations.WithLabelValues("route_action").Inc()
+				badIDs, kinds = append(badIDs, id.String()), append(kinds, "route_action")
+			}
+		}
 	}
 	if len(badIDs) > 0 || len(kinds) > 0 {
 		return errInvariant(badIDs, kinds), true

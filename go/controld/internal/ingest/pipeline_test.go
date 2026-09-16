@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -747,6 +748,66 @@ func TestWellFormedVerdictEventProjectsAllFourColumns(t *testing.T) {
 	for c, want := range map[string]float32{"p_satisfied": 0.86, "p_violated": 0.09, "p_refused": 0.03, "p_error": 0.02} {
 		if got := projCol(t, row, c); got != want {
 			t.Fatalf("%s: want %v got %v (a null projection is the FR-VERIFY-020 failure)", c, want, got)
+		}
+	}
+}
+
+// routeDecision is the row mark1d's route.Emitter lands beside every Usage
+// (ε = 0 ⇒ propensity 1.0, ADVISORY, the applied bundle's seq); tests break
+// one field at a time.
+func routeDecision(t *testing.T, session uuid.UUID, seq uint64) *m1pv1.Event {
+	t.Helper()
+	ev := usageEvent(t, session, seq)
+	ev.Body = &m1pv1.Event_RouteDecision{RouteDecision: &m1pv1.RouteDecision{
+		DecisionId: ev.EventId,
+		Action:     "claude-test-1",
+		Candidates: []string{"claude-test-1"},
+		Propensity: 1,
+		Fidelity:   m1pv1.RouteFidelity_ROUTE_FIDELITY_ADVISORY,
+		BundleSeq:  7,
+	}}
+	return ev
+}
+
+func TestRouteDecisionWithBadPropensityIsRefused(t *testing.T) {
+	// 0 is what a missing producer lands (FR-ROUTE-001's zero propensity);
+	// NaN fails the same (0, 1] comparison rather than slipping past a
+	// hand-written pair of inequalities.
+	for _, p := range []float64{0, -0.1, 1.0001, math.NaN()} {
+		ev := routeDecision(t, mustV7(t), 1)
+		ev.GetRouteDecision().Propensity = p
+		assertVerdictRefused(t, newHarness(t), ev, "route_propensity")
+	}
+}
+
+func TestRouteDecisionWithUnspecifiedFidelityIsRefused(t *testing.T) {
+	for _, f := range []m1pv1.RouteFidelity{m1pv1.RouteFidelity_ROUTE_FIDELITY_UNSPECIFIED, m1pv1.RouteFidelity(99)} {
+		ev := routeDecision(t, mustV7(t), 1)
+		ev.GetRouteDecision().Fidelity = f
+		assertVerdictRefused(t, newHarness(t), ev, "route_fidelity")
+	}
+	ev := routeDecision(t, mustV7(t), 1)
+	ev.GetRouteDecision().Action = ""
+	assertVerdictRefused(t, newHarness(t), ev, "route_action")
+}
+
+// Positive control: the refusals above must not be satisfiable by a pipeline
+// that refuses every RouteDecision — the honest ε = 0 row lands all three
+// projected columns.
+func TestWellFormedRouteDecisionProjects(t *testing.T) {
+	h := newHarness(t)
+	b, id := testBatch(t, routeDecision(t, mustV7(t), 1))
+	if rec := h.post(t, id, encodeBatch(t, b), nil); rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	h.drain()
+	if h.ins.count() != 1 {
+		t.Fatalf("want 1 projected row, got %d", h.ins.count())
+	}
+	row := h.ins.rows[0]
+	for c, want := range map[string]any{"propensity": float64(1), "fidelity": "advisory", "bundle_seq": uint64(7), "event_class": "route"} {
+		if got := projCol(t, row, c); got != want {
+			t.Fatalf("%s: want %#v got %#v (a null projection is the FR-ROUTE-001 failure)", c, want, got)
 		}
 	}
 }

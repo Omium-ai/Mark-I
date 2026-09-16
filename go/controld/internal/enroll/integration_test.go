@@ -197,6 +197,7 @@ type harness struct {
 	cache   *enroll.RevocationCache
 	verify  auth.Verifier
 	api     *httptest.Server
+	mod     *enroll.Module
 	tenantA uuid.UUID
 	tenantB uuid.UUID
 }
@@ -313,11 +314,12 @@ func setup(t *testing.T) *harness {
 	cache := enroll.NewRevocationCache(db, 60*time.Second)
 	verify := auth.NewEd25519Verifier(signer.Public(), cache)
 
+	pepper := bytes.Repeat([]byte{0x5a}, 32)
 	mod := enroll.New(enroll.Deps{
 		DB: db, PG: db, Signer: signer, Verifier: verify,
 		ObsCfg: obs.Config{ServiceName: "controld-test"}, Cache: cache,
 		PublicBaseURL: "https://api.test.example", ServerMinEdge: "1.0.0",
-		Now: clk.Now,
+		Now: clk.Now, TenantPepper: pepper,
 	})
 	mux := http.NewServeMux()
 	mod.RegisterRoutes(mux)
@@ -325,7 +327,7 @@ func setup(t *testing.T) *harness {
 	t.Cleanup(api.Close)
 
 	return &harness{
-		t: t, admin: admin, db: db, idp: idp, clk: clk,
+		t: t, admin: admin, db: db, idp: idp, clk: clk, mod: mod,
 		signer: signer, cache: cache, verify: verify, api: api,
 		tenantA: tenantA, tenantB: tenantB,
 	}
@@ -897,4 +899,45 @@ func encodeGarbageCode(tenant uuid.UUID) string {
 		"h": hex.EncodeToString(make([]byte, 32)),
 	})
 	return base64.RawURLEncoding.EncodeToString(hdr) + ".never-issued"
+}
+
+// TestEnrollResponseCarriesTenantRoot: 04 §2.9's per-tenant HMAC root is
+// delivered on the ACTIVE poll body and again on every PoP refresh — the two
+// bodies a device earns by proving itself — as tenant_root_hex (additive to
+// 08 §3.1), stable across the two, equal to the module's own derivation, and
+// absent from the operator list surface.
+func TestEnrollResponseCarriesTenantRoot(t *testing.T) {
+	h := setup(t)
+	priv, code := h.startEnrollment()
+	h.idp.setLatest("approved:root@enroll-it.example")
+	st, body := h.poll(code)
+	if st != http.StatusOK {
+		t.Fatalf("active poll: %d %v", st, body)
+	}
+	want, err := h.mod.TenantRoot(h.tenantA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := body["tenant_root_hex"].(string)
+	if got != hex.EncodeToString(want) || len(want) != 32 {
+		t.Fatalf("poll tenant_root_hex = %q, want %x", got, want)
+	}
+	device := uuid.MustParse(body["device_id"].(string))
+	st, body = h.popRefresh(priv, device)
+	if st != http.StatusOK {
+		t.Fatalf("refresh: %d %v", st, body)
+	}
+	if body["tenant_root_hex"] != got {
+		t.Fatalf("refresh tenant_root_hex = %v, poll delivered %q", body["tenant_root_hex"], got)
+	}
+	// Never on a list endpoint: the root is per-device-authenticated delivery.
+	st, list := h.get("/api/v1/enroll/devices", map[string]string{
+		"X-M1-Tenant": h.tenantA.String(), "Authorization": "Bearer " + h.operatorToken("m1-admin"),
+	})
+	if st != http.StatusOK {
+		t.Fatalf("devices: %d %v", st, list)
+	}
+	if raw, _ := json.Marshal(list); bytes.Contains(raw, []byte(got)) || bytes.Contains(raw, []byte("tenant_root")) {
+		t.Fatalf("operator list leaks the tenant root: %s", raw)
+	}
 }

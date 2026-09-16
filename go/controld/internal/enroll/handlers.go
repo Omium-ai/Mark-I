@@ -224,7 +224,7 @@ func (m *Module) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 	transitionsTotal.WithLabelValues("active").Inc()
 	// APPROVED → ACTIVE: first token + endpoints + key manifest, 08 §3.1.
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"status":          "active",
 		"device_id":       device.String(),
 		"tenant_id":       tenant.String(), // informational; never trusted from the client later
@@ -237,7 +237,16 @@ func (m *Module) handlePoll(w http.ResponseWriter, r *http.Request) {
 			"policy_stream": m.baseURL + "/api/v1/policy/stream",
 		},
 		"key_manifest_uri": "/.well-known/mark1-keys",
-	})
+	}
+	m.addTenantRoot(body, tenant)
+	writeJSON(w, http.StatusOK, body)
+}
+
+// addTenantRoot puts 04 §2.9's per-tenant HMAC root on an ACTIVE-device body (08 §3.1: poll and token bodies). Absent pepper ⇒ the key is absent, never empty.
+func (m *Module) addTenantRoot(body map[string]any, tenant uuid.UUID) {
+	if root, err := m.TenantRoot(tenant); err == nil {
+		body["tenant_root_hex"] = hex.EncodeToString(root)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -349,13 +358,16 @@ func (m *Module) handleToken(w http.ResponseWriter, r *http.Request) {
 		log.Printf("enroll: last_seen heartbeat failed (device %s): %v", device, err)
 	}
 	// server_min_edge + key manifest ride the refresh: it is the fleet
-	// heartbeat (05 §3.3), additive to 08 §3.1's minimum body.
-	writeJSON(w, http.StatusOK, map[string]any{
+	// heartbeat (05 §3.3), additive to 08 §3.1's minimum body. So does the
+	// tenant root: a refreshed enrollment doc is the daemon's source too.
+	body := map[string]any{
 		"device_token":     token,
 		"expires_in":       int(exp.Sub(now).Seconds()),
 		"server_min_edge":  m.minEdge,
 		"key_manifest_uri": "/.well-known/mark1-keys",
-	})
+	}
+	m.addTenantRoot(body, rec.tenant)
+	writeJSON(w, http.StatusOK, body)
 }
 
 // ---------------------------------------------------------------------------

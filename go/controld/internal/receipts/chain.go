@@ -28,6 +28,10 @@ const (
 	DefectBadCountersignature  Defect = "bad_countersignature"
 	DefectMerkleMismatch       Defect = "merkle_mismatch"
 	DefectInclusionPathInvalid Defect = "inclusion_path_invalid"
+	// DefectRotationUnchained is outside the frozen eight: the server key
+	// changed between two links without the retiring key's receipt naming
+	// the successor AND a verifying cross-signature (ADR-0004 rotation).
+	DefectRotationUnchained Defect = "rotation_unchained"
 )
 
 // DefectVocabulary in manifest order — the conformance test asserts equality
@@ -59,8 +63,14 @@ const (
 	RoleServerChain  KeyRole = "server_chain"
 )
 
+// CrossSig is the retiring key's endorsement of this key (ADR-0004).
+type CrossSig struct {
+	ByKeyID string
+	Sig     []byte
+}
+
 // PublishedKey is one published key: raw public bytes + role + optional
-// tenant binding. TenantID is set for device keys (m1_001 scopes
+// tenant binding + the rotation cross-signature when it has a predecessor. TenantID is set for device keys (m1_001 scopes
 // m1_device_keys per tenant) so a device key cannot answer another tenant's
 // chain; the server chain key is global ("" — m1_002: the key signs for
 // Omium, not for a tenant).
@@ -68,6 +78,7 @@ type PublishedKey struct {
 	Pub      ed25519.PublicKey
 	Role     KeyRole
 	TenantID string
+	CrossSig *CrossSig
 }
 
 // KeySet is the published key set: key_id → published key. Rotated keys are
@@ -139,6 +150,9 @@ func VerifyChain(recs []Receipt, keys KeySet, startSeq int64) ChainReport {
 		rec := &recs[i]
 		rep.Checked++
 		defects := verifyLink(rec, keys, expectedPrev, expectedSeq)
+		if i > 0 && rec.ServerKeyID != recs[i-1].ServerKeyID {
+			defects = append(defects, verifyRotation(&recs[i-1], rec, keys)...)
+		}
 		rep.Defects = append(rep.Defects, defects...)
 		if len(defects) == 0 {
 			rep.LastGoodSeq = rec.Seq
@@ -157,6 +171,42 @@ func VerifyChain(recs []Receipt, keys KeySet, startSeq int64) ChainReport {
 	// empty: there is no chain to have a defect IN).
 	rep.Valid = rep.Checked > 0 && len(rep.Defects) == 0
 	return rep
+}
+
+// verifyRotation is the ADR-0004 rule for a server-key change between two
+// links: the retiring key's receipt must name the successor inside its signed
+// payload, and the successor must carry a cross-signature by the retiring key.
+// Either missing is one named defect: a key that simply appears is a chain
+// anyone holding any published key could continue.
+func verifyRotation(prev, rec *Receipt, keys KeySet) []ChainDefect {
+	var defects []ChainDefect
+	add := func(detail string) {
+		defects = append(defects, ChainDefect{Seq: rec.Seq, Defect: DefectRotationUnchained, Detail: detail})
+	}
+	fields, _ := decodeFields(prev.PayloadText)
+	if successor, _ := fields["successor_key_id"].(string); successor != rec.ServerKeyID {
+		add(fmt.Sprintf("server key changed %s -> %s but the retiring key's receipt (seq %d) names successor %q", prev.ServerKeyID, rec.ServerKeyID, prev.Seq, successor))
+	}
+	next, ok := keys[rec.ServerKeyID]
+	old, okOld := keys[prev.ServerKeyID]
+	switch {
+	case !ok || !okOld:
+		// verifyLink already named the unknown key; nothing to cross-check.
+	case next.CrossSig == nil || next.CrossSig.ByKeyID != prev.ServerKeyID:
+		add(fmt.Sprintf("successor key %s carries no cross-signature by the retiring key %s", rec.ServerKeyID, prev.ServerKeyID))
+	case !VerifyCrossSign(old.Pub, RoleServerChain, next.Pub, next.CrossSig.Sig):
+		add(fmt.Sprintf("cross-signature on %s does not verify under %s", rec.ServerKeyID, prev.ServerKeyID))
+	}
+	return defects
+}
+
+func decodeFields(text string) (map[string]any, bool) {
+	payload, err := DecodePayload([]byte(text))
+	if err != nil {
+		return nil, false
+	}
+	fields, ok := payload.(map[string]any)
+	return fields, ok
 }
 
 // VerifyReceipt checks one row in isolation. expectedPrev nil skips the link
@@ -312,13 +362,13 @@ type OriginSigned struct {
 	DeviceSig   []byte
 }
 
-// SignerLike is the minimal signing surface OriginSign needs. In controld
-// only tests sign as a device (playing the edge against the store); the
-// production caller is the countersign path in store.go, which uses *Signer
-// directly.
+// SignerLike is the signing seam: the in-process Signer, the KMS-shaped
+// KMSSigner, and the tests' device keys all sit behind it, so the chain code
+// never learns where a private key lives (10 §9.2; ADR-0004).
 type SignerLike interface {
 	Sign(domainPrefixed []byte) ([]byte, error)
 	KeyID() string
+	Public() ed25519.PublicKey
 }
 
 // OriginSign canonicalises the payload once and signs the signing input —

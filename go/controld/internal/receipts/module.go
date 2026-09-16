@@ -52,17 +52,22 @@ type ModuleDeps struct {
 	PG       PGReady
 	Verifier auth.Verifier
 	ObsCfg   obs.Config
+	// Store and IntelServiceToken serve the internal append route (append.go); an empty token verifies nothing, so the surface is absent, never open.
+	Store             *Store
+	IntelServiceToken string
 }
 
 type Module struct {
-	db       DB
-	pgReady  PGReady
-	verifier auth.Verifier
-	obsCfg   obs.Config
+	db           DB
+	pgReady      PGReady
+	verifier     auth.Verifier
+	obsCfg       obs.Config
+	store        *Store
+	serviceToken string
 }
 
 func NewModule(d ModuleDeps) *Module {
-	return &Module{db: d.DB, pgReady: d.PG, verifier: d.Verifier, obsCfg: d.ObsCfg}
+	return &Module{db: d.DB, pgReady: d.PG, verifier: d.Verifier, obsCfg: d.ObsCfg, store: d.Store, serviceToken: d.IntelServiceToken}
 }
 
 func (m *Module) Name() string { return "receipts" }
@@ -76,6 +81,7 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/receipts/export", chain(http.HandlerFunc(m.handleExport)))
 	mux.Handle("GET /api/v1/receipts/keys", chain(http.HandlerFunc(m.handleKeys)))
 	mux.Handle("GET /api/v1/receipts/witness", chain(http.HandlerFunc(m.handleWitness)))
+	mux.Handle("POST /internal/v1/receipts/append", m.obsCfg.HTTPMiddleware(nil)(http.HandlerFunc(m.handleAppend)))
 }
 
 // row is one m1_receipts read, column-shaped.
@@ -286,10 +292,15 @@ func (m *Module) handleKeys(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	type crossSig struct {
+		ByKeyID      string `json:"by_key_id"`
+		SignatureHex string `json:"signature_hex"`
+	}
 	type keyRecord struct {
-		PubkeyHex string `json:"pubkey_hex"`
-		KeyID     string `json:"key_id"`
-		TenantID  string `json:"tenant_id,omitempty"`
+		PubkeyHex string    `json:"pubkey_hex"`
+		KeyID     string    `json:"key_id"`
+		TenantID  string    `json:"tenant_id,omitempty"`
+		CrossSig  *crossSig `json:"cross_sig,omitempty"`
 	}
 	out := struct {
 		ServerChainKeys []keyRecord `json:"server_chain_keys"`
@@ -299,18 +310,23 @@ func (m *Module) handleKeys(w http.ResponseWriter, r *http.Request) {
 		// m1_server_signing_keys is global (no RLS): every tenant's verifier
 		// needs it (m1_002 §1).
 		res, err := tx.Query(r.Context(),
-			`SELECT key_id, public_key FROM m1_server_signing_keys ORDER BY created_at`)
+			`SELECT key_id, public_key, cross_signed_by, cross_signature FROM m1_server_signing_keys ORDER BY created_at`)
 		if err != nil {
 			return err
 		}
 		defer res.Close()
 		for res.Next() {
 			var id string
-			var pub []byte
-			if err := res.Scan(&id, &pub); err != nil {
+			var by *string
+			var pub, sig []byte
+			if err := res.Scan(&id, &pub, &by, &sig); err != nil {
 				return err
 			}
-			out.ServerChainKeys = append(out.ServerChainKeys, keyRecord{PubkeyHex: hex.EncodeToString(pub), KeyID: id})
+			rec := keyRecord{PubkeyHex: hex.EncodeToString(pub), KeyID: id}
+			if by != nil {
+				rec.CrossSig = &crossSig{ByKeyID: *by, SignatureHex: hex.EncodeToString(sig)}
+			}
+			out.ServerChainKeys = append(out.ServerChainKeys, rec)
 		}
 		if err := res.Err(); err != nil {
 			return err

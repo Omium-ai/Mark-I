@@ -112,15 +112,26 @@ type Appended struct {
 // server chain key (m1_002 §5).
 type Store struct {
 	db     DB
-	signer *Signer
+	signer SignerLike
+	// retiring is the predecessor chain key during a rotation window
+	// (ADR-0004): it signs exactly one more receipt per tenant, the
+	// key_rotation record naming signer, and nothing else.
+	retiring SignerLike
 }
 
-func NewStore(db DB, signer *Signer) *Store {
+func NewStore(db DB, signer SignerLike) *Store {
 	return &Store{db: db, signer: signer}
 }
 
+// WithRetiring installs the predecessor for the rotation window. Wiring it is
+// deploy-time (a second seed or KMS alias); until then no chain crosses over.
+func (s *Store) WithRetiring(prev SignerLike) *Store {
+	s.retiring = prev
+	return s
+}
+
 // Signer exposes the chain key (module routes publish its public half).
-func (s *Store) Signer() *Signer { return s.signer }
+func (s *Store) Signer() SignerLike { return s.signer }
 
 // IssuedAtString is the pinned rendering of a checkpoint payload's issued_at:
 // RFC 3339, UTC, whole seconds. One rule, one place — the device-side sealer
@@ -143,6 +154,14 @@ func IssuedAtString(t time.Time) string {
 // construction and a gap MEANS deletion (m1_002 header). This is retry
 // semantics, not an optimization — do not replace the lock with a sequence.
 func (s *Store) AppendCheckpoint(ctx context.Context, tenant querychoke.TenantID, ev CheckpointEvent, sealed func(tx pgx.Tx, r Appended) error) (Appended, error) {
+	// The rotation record commits in its OWN transaction first: a device that
+	// sealed against the pre-rotation head is refused below and re-seals, and
+	// a refusal must not roll the announcement back with it.
+	if s.retiring != nil {
+		if err := s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error { return s.crossOver(ctx, tx, tenant) }); err != nil {
+			return Appended{}, err
+		}
+	}
 	var out Appended
 	err := s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
 		// Genesis rule: the head row is created 0-with-genesis-hash on first
@@ -327,10 +346,34 @@ type Execer interface {
 // or unpublished — rotation stamps retired_at instead (m1_002 §1: a receipt
 // under an unpublished key is one nobody can verify, i.e. one we never
 // issued).
-func RegisterServerKey(ctx context.Context, db Execer, signer *Signer) error {
+func RegisterServerKey(ctx context.Context, db Execer, signer SignerLike) error {
 	_, err := db.Exec(ctx, `
 		INSERT INTO m1_server_signing_keys (key_id, public_key)
 		VALUES ($1, $2) ON CONFLICT (key_id) DO NOTHING`,
 		signer.KeyID(), []byte(signer.Public()))
+	return err
+}
+
+// RegisterSuccessorKey is the rotation ceremony's server-chain step
+// (ADR-0004): the retiring key cross-signs the successor, the successor is
+// published WITH that endorsement, and the retiring key is stamped retired.
+// Idempotent; a successor already registered bare (boot's RegisterServerKey)
+// gains its cross-signature rather than keeping none.
+func RegisterSuccessorKey(ctx context.Context, db Execer, retiring, successor SignerLike) error {
+	sig, err := CrossSign(retiring, RoleServerChain, successor.Public())
+	if err != nil {
+		return err
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO m1_server_signing_keys (key_id, public_key, cross_signed_by, cross_signature)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (key_id) DO UPDATE SET cross_signed_by = EXCLUDED.cross_signed_by,
+		                                   cross_signature = EXCLUDED.cross_signature
+		 WHERE m1_server_signing_keys.cross_signed_by IS NULL`,
+		successor.KeyID(), []byte(successor.Public()), retiring.KeyID(), sig); err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `UPDATE m1_server_signing_keys SET retired_at = now()
+		 WHERE key_id = $1 AND retired_at IS NULL`, retiring.KeyID())
 	return err
 }

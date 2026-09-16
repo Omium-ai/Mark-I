@@ -17,11 +17,14 @@ package enroll
 
 import (
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"encoding/json"
 	"net"
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
@@ -95,6 +98,11 @@ type Deps struct {
 	ServerMinEdge string
 	HTTPClient    *http.Client // nil ⇒ 10 s timeout (§8.3 tenant-IdP hop)
 	Now           func() time.Time
+	// TenantPepper is config.TenantHMACPepper: the root every tenant's HMAC
+	// root is derived from (TenantRoot). Nil ⇒ the enroll and refresh bodies
+	// omit tenant_root_hex and the edge can never key idem_key — the caller
+	// (cmd) decides whether that is a boot refusal or a dev-mode WARNING.
+	TenantPepper []byte
 }
 
 type Module struct {
@@ -109,6 +117,7 @@ type Module struct {
 	minEdge string
 	http    *http.Client
 	now     func() time.Time
+	pepper  []byte
 
 	nonces  *nonceStore
 	pollGap *pacer         // §8.2: /poll at the flow's own interval (5 s)
@@ -128,7 +137,7 @@ func New(d Deps) *Module {
 		db: d.DB, pgReady: d.PG, signer: d.Signer, verifier: d.Verifier,
 		obsCfg: d.ObsCfg, cache: d.Cache,
 		baseURL: d.PublicBaseURL, minEdge: d.ServerMinEdge,
-		http: d.HTTPClient, now: d.Now,
+		http: d.HTTPClient, now: d.Now, pepper: d.TenantPepper,
 		nonces:  newNonceStore(d.Now),
 		pollGap: newPacer(pollInterval, d.Now),
 		startIP: newBucketLimiter(10, time.Hour, d.Now),
@@ -145,6 +154,21 @@ func New(d Deps) *Module {
 }
 
 func (m *Module) Name() string { return "enroll" }
+
+// TenantRoot is 04 §2.9's per-tenant HMAC root — "delivered at enrollment,
+// custody same ladder" — derived, never stored: HKDF-SHA256(pepper, info =
+// tenant id), so the same tenant always receives the same root and no row
+// anywhere holds it (m1_001 hmac_salt_secret_ref: "storing the secret here
+// would make this table a credential vault without the vault"). It rides
+// ONLY the authenticated enroll/refresh bodies — never a list endpoint.
+// ponytail: hmac_salt_version (m1_001) is not folded into the info string;
+// fold it in when rotation/crypto-erasure (10 §9) gets a caller.
+func (m *Module) TenantRoot(tenant uuid.UUID) ([]byte, error) {
+	if len(m.pepper) == 0 {
+		return nil, errors.New("enroll: no tenant pepper configured (TENANT_HMAC_PEPPER)")
+	}
+	return hkdf.Key(sha256.New, m.pepper, nil, "mark1-tenant-root-v1:"+tenant.String(), 32)
+}
 
 func (m *Module) Ready(ctx context.Context) error { return m.pgReady.Ready(ctx) }
 
