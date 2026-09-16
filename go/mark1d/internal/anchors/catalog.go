@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,10 @@ const (
 	KindCargoCheck Kind = "cargo-check"
 	KindGoVet      Kind = "go-vet"
 	KindEslint     Kind = "eslint"
+	KindGoTest     Kind = "go-test"
+	KindCargoTest  Kind = "cargo-test"
+	KindPytest     Kind = "pytest"
+	KindNpmTest    Kind = "npm-test"
 )
 
 // Class is the scheduling cost class (04 §2.2): Fast runs on the PostToolUse
@@ -167,6 +172,62 @@ var detectors = map[Kind]detector{
 			return []string{bin, "--format", "json", "."}
 		},
 	},
+	// Test runners (06 §2.5): SideEffectTest, always Slow, derived only under the per-repo opt-in.
+	KindGoTest: {
+		rule: 1, tool: "go-test", binary: "go",
+		class: ClassSlow, sideEffect: SideEffectTest, execsRepoCode: true,
+		versionArgs: []string{"version"},
+		probe:       func(wt string) bool { return fileExists(filepath.Join(wt, "go.mod")) },
+		argv:        func(bin string) []string { return []string{bin, "test", "./..."} },
+	},
+	KindCargoTest: {
+		rule: 1, tool: "cargo-test", binary: "cargo",
+		class: ClassSlow, sideEffect: SideEffectTest, execsRepoCode: true,
+		versionArgs: []string{"--version"},
+		probe:       func(wt string) bool { return fileExists(filepath.Join(wt, "Cargo.toml")) },
+		argv:        func(bin string) []string { return []string{bin, "test", "--quiet", "--no-fail-fast"} },
+	},
+	KindPytest: {
+		rule: 1, tool: "pytest", binary: "pytest",
+		class: ClassSlow, sideEffect: SideEffectTest, execsRepoCode: true,
+		versionArgs: []string{"--version"},
+		probe: func(wt string) bool {
+			if fileExists(filepath.Join(wt, "pytest.ini")) || fileExists(filepath.Join(wt, "conftest.py")) {
+				return true
+			}
+			b, err := os.ReadFile(filepath.Join(wt, "pyproject.toml"))
+			return err == nil && bytes.Contains(b, []byte("[tool.pytest"))
+		},
+		argv: func(bin string) []string { return []string{bin, "-q", "-p", "no:cacheprovider"} },
+	},
+	KindNpmTest: {
+		rule: 1, tool: "npm-test", binary: "npm",
+		class: ClassSlow, sideEffect: SideEffectTest, execsRepoCode: true,
+		versionArgs: []string{"--version"},
+		probe: func(wt string) bool {
+			var m struct {
+				Scripts map[string]string `json:"scripts"`
+			}
+			b, err := os.ReadFile(filepath.Join(wt, "package.json"))
+			return err == nil && json.Unmarshal(b, &m) == nil && m.Scripts["test"] != ""
+		},
+		argv: func(bin string) []string { return []string{bin, "test", "--silent"} },
+	},
+}
+
+// RepoOptInPath is the FR-VERIFY-003 / 04 §2.2 per-repo opt-in: <workspace>/.mark1/anchors.json {"tests": true}.
+func RepoOptInPath(worktree string) string { return filepath.Join(worktree, ".mark1", "anchors.json") }
+
+// TestsOptedIn reads the opt-in per call, like fabric's gate opt-in.
+func TestsOptedIn(worktree string) bool {
+	raw, err := os.ReadFile(RepoOptInPath(worktree))
+	if err != nil {
+		return false
+	}
+	var a struct {
+		Tests bool `json:"tests"`
+	}
+	return json.Unmarshal(raw, &a) == nil && a.Tests
 }
 
 // init is the PROBE_HANDLERS exhaustiveness assert: handled kinds ==
@@ -223,8 +284,9 @@ func Derive(sb Sandbox, worktree string) ([]CatalogEntry, error) {
 		return nil, err
 	}
 	var out []CatalogEntry
+	tests := TestsOptedIn(abs)
 	for kind, d := range detectors {
-		if !d.probe(abs) {
+		if !d.probe(abs) || (d.sideEffect == SideEffectTest && !tests) {
 			continue
 		}
 		bin, err := exec.LookPath(d.binary)
@@ -233,6 +295,10 @@ func Derive(sb Sandbox, worktree string) ([]CatalogEntry, error) {
 		}
 		if bin, err = filepath.Abs(bin); err != nil {
 			continue
+		}
+		// Consent binds to the file that executes, not a symlink alias of it.
+		if resolved, rerr := filepath.EvalSymlinks(bin); rerr == nil {
+			bin = resolved
 		}
 		hash, err := hashFile(bin)
 		if err != nil {

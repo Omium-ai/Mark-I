@@ -43,6 +43,8 @@ type Server struct {
 	// safe because the proxy has already killed the session on its own
 	// authority.
 	contamination ContaminationHandler
+	// context answers the D-AE ContextQuery arm; nil ⇒ empty reply (context.go).
+	context ContextHandler
 
 	// HandshakeTimeout bounds how long a connected peer may say nothing before
 	// its Hello (08 §4.3). Zero uses DefaultHandshakeTimeout; set before Serve.

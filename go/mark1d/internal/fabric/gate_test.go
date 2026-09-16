@@ -5,11 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/policy"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/taskseg"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 )
@@ -48,9 +50,29 @@ func ownAll(session, want [16]byte) ([16]byte, bool) {
 	return want, true
 }
 
+// optedInDir is a state dir carrying the FR-POLICY-006 opt-in artifact
+// `mark1 enable --stop-gate` writes -- the precondition for every BLOCK below.
+func optedInDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeOptIn(t, dir, `{"stop_gate":true,"ts":"2026-09-15T00:00:00Z","user":"test"}`)
+	return dir
+}
+
+func writeOptIn(t *testing.T, stateDir, body string) {
+	t.Helper()
+	p := OptInPath(stateDir)
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func blockableGate(t *testing.T, entries stubReader) *Gate {
 	t.Helper()
-	g := NewGate(entries, verdict.NewBlocks(), t.TempDir())
+	g := NewGate(entries, verdict.NewBlocks(), optedInDir(t))
 	g.TaskFor = ownAll
 	return g
 }
@@ -155,7 +177,7 @@ func TestGateConsecutiveCapClearsOnPublish(t *testing.T) {
 		t.Fatal("the engine never published")
 	}
 
-	g := NewGate(eng.Reader(), blocks, t.TempDir())
+	g := NewGate(eng.Reader(), blocks, optedInDir(t))
 	g.TaskFor = ownAll
 	publish()
 	for i := range maxConsecutiveBlocks {
@@ -329,7 +351,7 @@ func TestGateHourlyCeilingIsPerSession(t *testing.T) {
 	g := NewGate(stubReader{
 		{1}: violatedEntry(false, false),
 		{2}: violatedEntry(false, false),
-	}, verdict.NewBlocks(), t.TempDir())
+	}, verdict.NewBlocks(), optedInDir(t))
 	// Every session owns the task it names here; the point under test is the
 	// ceiling, not D-AA's resolution.
 	g.TaskFor = func(_, want [16]byte) ([16]byte, bool) { return want, want != [16]byte{} }
@@ -423,7 +445,7 @@ func TestGateBlocksAfterAVerdictClosedTheTask(t *testing.T) {
 		t.Fatalf("the verdict closed %v, want exactly one RESOLUTION_VERDICT (the denominator must be untouched)", got)
 	}
 
-	g := NewGate(stubReader{task: violatedEntry(false, false)}, verdict.NewBlocks(), t.TempDir())
+	g := NewGate(stubReader{task: violatedEntry(false, false)}, verdict.NewBlocks(), optedInDir(t))
 	g.TaskFor = seg.TaskFor
 	// The shim's sentinel query: task_id empty, exactly as gate.rs sends it.
 	v := g.Answer(&m1pv1.GateQuery{Gate: m1pv1.GateKind_GATE_KIND_STOP, DeadlineMs: 5000}, testSession)
@@ -444,7 +466,7 @@ func TestReopenedTaskIsNotUngatedByAStaleStreak(t *testing.T) {
 	segScript(seg, testSession, "a.go")
 	task, _ := seg.TaskFor(testSession, [16]byte{})
 
-	g := NewGate(stubReader{task: violatedEntry(false, false)}, blocks, t.TempDir())
+	g := NewGate(stubReader{task: violatedEntry(false, false)}, blocks, optedInDir(t))
 	g.TaskFor = seg.TaskFor
 	sentinel := &m1pv1.GateQuery{Gate: m1pv1.GateKind_GATE_KIND_STOP, DeadlineMs: 5000}
 	for i := range maxConsecutiveBlocks {
@@ -502,5 +524,208 @@ func TestGateBlockCarriesEvidenceRef(t *testing.T) {
 	g.Evidence = nil
 	if v := g.Answer(query(1, 5000), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_BLOCK || v.GetEvidenceRef() != "" {
 		t.Fatalf("unwired seam answered %v evidence_ref %q, want BLOCK with none", v.GetDecision(), v.GetEvidenceRef())
+	}
+}
+
+// gates is a bundle gates section as the decoder hands it over.
+func gates(enabled bool, mcb uint8, hourly uint64) policy.GatesSection {
+	return policy.GatesSection{StopGateEnabled: enabled, MaxConsecutiveBlocks: mcb, HourlyBlockCeiling: hourly}
+}
+
+// blockUntilAllow answers the query until the gate stops blocking and returns
+// how many BLOCKs it gave first, plus the first ALLOW.
+func blockUntilAllow(t *testing.T, g *Gate, q *m1pv1.GateQuery) (int, *m1pv1.GateVerdict) {
+	t.Helper()
+	for n := range 10 {
+		if v := g.Answer(q, testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_BLOCK {
+			return n, v
+		}
+	}
+	t.Fatal("the gate blocked 10 times in a row -- no cap is live")
+	return 0, nil
+}
+
+// TestGatesClampNeverExceedsLocalHardCaps is FR-VERIFY-010 at the gate: a
+// bundle's gates section may lower the consecutive cap and the hourly ceiling
+// and can never raise either past the compiled defaults -- including a value
+// the decoder's own bound should already have refused.
+func TestGatesClampNeverExceedsLocalHardCaps(t *testing.T) {
+	cases := []struct {
+		name    string
+		sec     policy.GatesSection
+		wantMCB int
+		wantHC  uint32
+	}{
+		{"at the caps", gates(true, 3, 30), 3, 30},
+		{"lowered", gates(true, 2, 10), 2, 10},
+		{"decoder-bypassed raise", gates(true, 4, 31), 3, 30},
+		{"zero means built-in", gates(true, 0, 0), 3, DefaultHourlyCeiling},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := blockableGate(t, stubReader{{1}: violatedEntry(false, false)})
+			g.ApplyGates(tc.sec)
+			if g.HourlyCeiling != tc.wantHC {
+				t.Fatalf("hourly ceiling %d after %+v, want %d", g.HourlyCeiling, tc.sec, tc.wantHC)
+			}
+			// The consecutive cap is asserted by behaviour: blocks stop at it.
+			if n, v := blockUntilAllow(t, g, query(1, 5000)); n != tc.wantMCB || !strings.Contains(v.GetReason(), "consecutive") {
+				t.Fatalf("%d blocks then %v %q after %+v, want %d then the consecutive cap", n, v.GetDecision(), v.GetReason(), tc.sec, tc.wantMCB)
+			}
+		})
+	}
+}
+
+// TestStopGateDisabledByBundleAllows: stop_gate_enabled=false is the
+// closed→open move a bundle IS allowed to make (FR-POLICY-006, 11 §9's "ship a
+// bundle with gates opened"). The answer is ALLOW under M1E-5002 before any
+// counter or accounting, and a later bundle may close it again.
+func TestStopGateDisabledByBundleAllows(t *testing.T) {
+	g := blockableGate(t, stubReader{{1}: violatedEntry(false, false)})
+	g.ApplyGates(gates(false, 3, 30))
+	v := g.Answer(query(1, 5000), testSession)
+	if v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || !strings.Contains(v.GetReason(), CodeGateCap) || !strings.Contains(v.GetReason(), "opened") {
+		t.Fatalf("bundle-opened gate answered %v %q, want ALLOW %s", v.GetDecision(), v.GetReason(), CodeGateCap)
+	}
+	// The verdict still rides the ALLOW (the human sees what was found), and
+	// an opened block is not a block: no streak, no ceiling charge.
+	if v.GetVerdict() != m1pv1.Verdict_VERDICT_VIOLATED || g.blocks.Counters(testSession, verdict.TaskID{1}, time.Now()).Consecutive != 0 {
+		t.Fatalf("opened answer %v counted a block or dropped the verdict", v)
+	}
+	g.ApplyGates(gates(true, 3, 30))
+	if v := g.Answer(query(1, 5000), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_BLOCK {
+		t.Fatalf("re-closed gate answered %v %q, want BLOCK", v.GetDecision(), v.GetReason())
+	}
+}
+
+// TestStopGateRequiresLocalOptIn is FR-POLICY-006's other half: no on-disk
+// opt-in artifact ⇒ ALLOW whatever the bundle says, so the control plane can
+// never tighten an edge into blocking a developer who did not ask for it.
+func TestStopGateRequiresLocalOptIn(t *testing.T) {
+	dir := t.TempDir() // no artifact
+	g := NewGate(stubReader{{1}: violatedEntry(false, false)}, verdict.NewBlocks(), dir)
+	g.TaskFor = ownAll
+	g.ApplyGates(gates(true, 3, 30)) // the bundle asks for blocking
+	v := g.Answer(query(1, 5000), testSession)
+	if v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || !strings.Contains(v.GetReason(), CodeGateCap) || !strings.Contains(v.GetReason(), "opted in") {
+		t.Fatalf("no opt-in answered %v %q, want ALLOW %s naming the opt-in", v.GetDecision(), v.GetReason(), CodeGateCap)
+	}
+	// A malformed or negative artifact is not an opt-in either.
+	for _, body := range []string{`{"stop_gate":false}`, `not json`, ``} {
+		writeOptIn(t, dir, body)
+		if v := g.Answer(query(1, 5000), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW {
+			t.Fatalf("artifact %q armed the gate: %v %q", body, v.GetDecision(), v.GetReason())
+		}
+	}
+	// The real artifact arms the BLOCK path -- without a daemon restart.
+	writeOptIn(t, dir, `{"stop_gate":true,"ts":"2026-09-15T00:00:00Z","user":"test"}`)
+	if v := g.Answer(query(1, 5000), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_BLOCK {
+		t.Fatalf("opted-in gate answered %v %q, want BLOCK below the knee", v.GetDecision(), v.GetReason())
+	}
+}
+
+// TestExplorationEpsilonNeedsLocalOptIn — D-EF's edge half: ε>0 is 0 without a local "exploration": true; stop_gate neither grants nor loses it.
+func TestExplorationEpsilonNeedsLocalOptIn(t *testing.T) {
+	dir := t.TempDir()
+	for _, body := range []string{"", `{"stop_gate":true}`, `{"exploration":false}`, `{"exploration":"true"}`, `not json`} {
+		if body != "" {
+			writeOptIn(t, dir, body)
+		}
+		if got := ExplorationEpsilon(dir, 0.05); got != 0 {
+			t.Fatalf("artifact %q applied ε %v, want 0", body, got)
+		}
+	}
+	writeOptIn(t, dir, `{"stop_gate":false,"exploration":true}`)
+	if got := ExplorationEpsilon(dir, 0.05); got != 0.05 {
+		t.Fatalf("exploration opt-in applied ε %v, want 0.05", got)
+	}
+	if optedIn(dir).StopGate {
+		t.Fatal("exploration opt-in must not arm the stop gate")
+	}
+}
+
+// TestHourlyCeilingFromBundleIsWiredIntoTheGate: the bundle's
+// hourly_block_ceiling reaches the ceiling check through ApplyGates -- blocks
+// stop at the bundle's number, not at DefaultHourlyCeiling.
+func TestHourlyCeilingFromBundleIsWiredIntoTheGate(t *testing.T) {
+	entries := stubReader{{1}: violatedEntry(false, false), {2}: violatedEntry(false, false), {3}: violatedEntry(false, false)}
+	g := blockableGate(t, entries)
+	g.ApplyGates(gates(true, 3, 2))
+	g.Answer(query(1, 5000), testSession) // block 1
+	g.Answer(query(2, 5000), testSession) // block 2 -- the bundle's ceiling
+	v := g.Answer(query(3, 5000), testSession)
+	if v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || !strings.Contains(v.GetReason(), "hourly") {
+		t.Fatalf("third block under a bundle ceiling of 2 answered %v %q, want M1E-5002 hourly allow", v.GetDecision(), v.GetReason())
+	}
+	// Control: the same three queries under the compiled default all block.
+	g2 := blockableGate(t, entries)
+	g2.ApplyGates(gates(true, 3, 0))
+	for i := 1; i <= 3; i++ {
+		if v := g2.Answer(query(byte(i), 5000), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_BLOCK {
+			t.Fatalf("default ceiling: query %d answered %v %q, want BLOCK", i, v.GetDecision(), v.GetReason())
+		}
+	}
+}
+
+// countingReader counts every cache read the gate makes.
+type countingReader struct {
+	verdict.Reader
+	gets atomic.Int64
+}
+
+func (c *countingReader) Get(t verdict.TaskID) (verdict.Cached, bool) {
+	c.gets.Add(1)
+	return c.Reader.Get(t)
+}
+
+// TestGateReadDoesNoFusionOrAnchorWork (FR-VERIFY-007): the Engine's injected clock is the Fuser-call counter (step calls it once per Fuse); no anchor seam reaches a Gate at all.
+func TestGateReadDoesNoFusionOrAnchorWork(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var fuses atomic.Int64
+	blocks := verdict.NewBlocks()
+	eng := verdict.NewEngine(verdict.BundleMatrices{
+		Priors: verdict.DefaultPriors,
+		Verifiers: map[string]verdict.VerifierParams{"build": {Confusion: verdict.Confusion{
+			{0.98, 0.01, 0.01}, {0.02, 0.97, 0.01}, {0.10, 0.10, 0.80}, {0.34, 0.33, 0.33},
+		}}},
+		VTask: 10, CostBasis: "usd",
+	}, blocks, func() time.Time { fuses.Add(1); return time.Now() })
+	go eng.Run(ctx)
+
+	var task verdict.TaskID
+	task[0] = 1
+	eng.Recompute(task, []verdict.AnchorVote{{AnchorID: "build", Vote: m1pv1.Verdict_VERDICT_VIOLATED}}, 0)
+	for range 200 {
+		if _, ok := eng.Reader().Get(task); ok {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	before, ok := eng.Reader().Get(task)
+	if !ok || fuses.Load() != 1 {
+		t.Fatalf("priming: cached %v, fuses %d — the counter does not count", ok, fuses.Load())
+	}
+
+	reader := &countingReader{Reader: eng.Reader()}
+	g := NewGate(reader, blocks, optedInDir(t))
+	g.TaskFor = ownAll
+	const n = 50
+	for i := range n {
+		if v := g.Answer(query(1, 5000), testSession); v.GetDecision() == m1pv1.GateDecision_GATE_DECISION_UNSPECIFIED {
+			t.Fatalf("answer %d: %v", i, v)
+		}
+	}
+	// The consecutive cap trips inside the loop and short-circuits before the read, so reads ≤ n.
+	if got := reader.gets.Load(); got == 0 || got > n {
+		t.Fatalf("%d cache reads for %d answers", got, n)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if fuses.Load() != 1 {
+		t.Fatalf("%d fusion passes during %d gate answers, want 0 (FR-VERIFY-007: the gate reads, never computes)", fuses.Load()-1, n)
+	}
+	after, _ := eng.Reader().Get(task)
+	if after.Verdict != before.Verdict || !after.ComputedAt.Equal(before.ComputedAt) {
+		t.Fatal("the cache entry changed under gate reads — something published")
 	}
 }

@@ -1,5 +1,5 @@
-// D-AI's ContaminationAlert arm and the reserved-tag forward compatibility that
-// surrounds it — all decode-side, no filesystem, so no build tag (harness_test.go).
+// D-AI's ContaminationAlert arm — all decode-side, no filesystem, so no build
+// tag (harness_test.go). Tag forward-compatibility moved to context_test.go.
 package fabric
 
 import (
@@ -9,7 +9,6 @@ import (
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 	"google.golang.org/protobuf/encoding/protowire"
-	"google.golang.org/protobuf/proto"
 )
 
 type recordingHandler struct {
@@ -97,29 +96,6 @@ func TestContaminationAlertWithNoHandlerIsAccepted(t *testing.T) {
 	}
 	if f := readFrame(t, c); f.GetFlushAck() == nil {
 		t.Fatalf("connection died after an unhandled alert: %v", f)
-	}
-}
-
-// TestReservedOneofTagsStaySkippable guards the D-AI tag allocation: 8 and 9
-// are reserved for ContextQuery/ContextReply and are NOT arms yet. A frame
-// carrying one alongside a real arm must still decode to that arm — that
-// forward compatibility is what lets a newer writer talk to this daemon, and
-// a range check `1..10` would have silently claimed both tags.
-func TestReservedOneofTagsStaySkippable(t *testing.T) {
-	flush, err := proto.Marshal(&m1pv1.Flush{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := appendBytesField(nil, 8, []byte("future ContextQuery"))
-	payload = appendBytesField(payload, frameFlush, flush)
-	payload = appendBytesField(payload, 9, []byte("future ContextReply"))
-
-	field, inner, err := unwrap(payload)
-	if err != nil {
-		t.Fatalf("unwrap: %v", err)
-	}
-	if field != frameFlush || len(inner) != len(flush) {
-		t.Fatalf("field %d (%d bytes), want the Flush arm", field, len(inner))
 	}
 }
 

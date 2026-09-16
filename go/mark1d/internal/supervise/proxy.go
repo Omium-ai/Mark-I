@@ -52,12 +52,30 @@ var ErrNoProxyBinary = errors.New("supervise: " + proxyBinary + " not found")
 // MCP has nothing to serve — an un-installed machine, named as such.
 var ErrNoCortexdBinary = errors.New("supervise: " + cortexdBinary + " not found")
 
+// GatewayFlags is 04 §3.4's gateway arm passed through verbatim (main.rs config() validates; its stderr is ours); nil ⇒ `--mode sidecar`.
+type GatewayFlags struct {
+	Bind     string // host:port the mTLS listener binds
+	TLSCert  string // PEM server certificate
+	TLSKey   string // PEM server key
+	ClientCA string // PEM CA every client certificate must chain to
+	CredDir  string // gateway::FileSource: one credential per 0600 file, named by M1-Cred-Ref
+}
+
+func (g *GatewayFlags) args() []string {
+	if g == nil {
+		return []string{"--mode", "sidecar"}
+	}
+	return []string{"--mode", "gateway", "--bind", g.Bind, "--tls-cert", g.TLSCert, "--tls-key", g.TLSKey, "--client-ca", g.ClientCA, "--cred-dir", g.CredDir}
+}
+
 type ProxyConfig struct {
 	// StateDir is mark1d's --state-dir. See proxyHome for why it is load-bearing.
 	StateDir string
 	Log      *slog.Logger
 	// Binary overrides the lookup (test seam and packaging escape hatch).
 	Binary string
+	// Gateway selects `--mode gateway` with its flags; nil is the sidecar.
+	Gateway *GatewayFlags
 	// Coverage receipts the bypass window a FAILED proxy opens (04 §2.7,
 	// 04 :81 "revert base-URL fragment + coverage.Transition"). Left nil,
 	// proxyFailed still reverts and still logs — but it logs that the window
@@ -104,7 +122,7 @@ func ProxyChild(cfg ProxyConfig) (Child, error) {
 			if err := removePort(port); err != nil {
 				return nil, err
 			}
-			cmd := exec.CommandContext(ctx, bin, "--mode", "sidecar") //nolint:gosec // G204: bin is FindProxy() or an operator-set MARK1_PROXY; args are a fixed slice, no shell
+			cmd := exec.CommandContext(ctx, bin, cfg.Gateway.args()...) //nolint:gosec // G204: bin is FindProxy() or an operator-set MARK1_PROXY; args are a fixed slice, no shell
 			cmd.Env = env
 			// The proxy's own diagnostics go where the daemon's do. Dropping
 			// them would make a proxy that refuses to start at all (hardening

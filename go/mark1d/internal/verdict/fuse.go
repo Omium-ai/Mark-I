@@ -63,6 +63,7 @@ type BundleMatrices struct {
 	Priors    [4]float64
 	Verifiers map[string]VerifierParams // keyed by anchor_id
 	Knee      []KneeRow                 // ascending n; lookup clamps to the last row
+	Ladders   []Ladder                  // bundle order; LadderStep takes the first naming a model
 	VTask     float64                   // V(task): bundle v_default (06 §8.1)
 	CostBasis string                    // "usd" | "quota" (06 §8.4)
 	// Stale is the M1E-3006 posture: past max_age or built-in defaults.

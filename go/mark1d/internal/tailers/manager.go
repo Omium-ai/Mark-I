@@ -33,10 +33,26 @@ type Config struct {
 	// tenant HMAC root arrives with enrollment (04 §2.9) — a config seam
 	// here, custody there.
 	UsageIdemKey []byte
+	// Observe runs on every Usage BEFORE Emit — the segmenter's task_id stamp (ADR-0002), so Emit's decorators see it. nil is legal.
+	Observe      func(*m1pv1.Event)
 	Emit         func(context.Context, *m1pv1.Event) error
 	Log          *slog.Logger
 	PollInterval time.Duration    // discovery/quiesce tick; default 500 ms
 	Now          func() time.Time // injectable clock for the quiesce debounce
+	// Format is the vendor stream layout; the zero value is claudecode's.
+	Format Format
+}
+
+// Format is one vendor's stream format: how streams are found under Dir, where
+// a line carries its cwd, and how a usage line parses. Each nil field is
+// claudecode's (08 §5.1) — an adapter overrides only what differs.
+type Format struct {
+	// Discover calls open for every candidate stream under dir.
+	Discover func(dir string, open func(path string, role Role, session uuid.UUID))
+	// Cwd returns the cwd a line attributes itself to, "" when it carries none.
+	Cwd func(line []byte) string
+	// NewParser returns a per-stream line parser (a stream may keep state).
+	NewParser func() func(line []byte) (Line, bool)
 }
 
 // Manager discovers and follows every stream under one transcript dir:
@@ -191,6 +207,9 @@ func (m *Manager) CloseFlush(ctx context.Context) error {
 func (m *Manager) emitAll(ctx context.Context) func([]*m1pv1.Event) error {
 	return func(evs []*m1pv1.Event) error {
 		for _, ev := range evs {
+			if m.cfg.Observe != nil {
+				m.cfg.Observe(ev)
+			}
 			if err := m.cfg.Emit(ctx, ev); err != nil {
 				return err
 			}
@@ -203,6 +222,10 @@ func (m *Manager) emitAll(ctx context.Context) func([]*m1pv1.Event) error {
 // <dir>/<session-uuid>.jsonl and subagent streams at
 // <dir>/<session-uuid>/subagents/agent-<id>.jsonl.
 func (m *Manager) discover() {
+	if m.cfg.Format.Discover != nil {
+		m.cfg.Format.Discover(m.cfg.Dir, m.open)
+		return
+	}
 	entries, err := os.ReadDir(m.cfg.Dir)
 	if err != nil {
 		return // dir not there yet — the tick retries
@@ -245,7 +268,7 @@ func (m *Manager) open(path string, role Role, session uuid.UUID) {
 	// yet (empty/torn head) means unattributable: not tailed, re-peeked next
 	// sweep. Denial is final per path: a transcript's cwd provenance is fixed
 	// at its head, so there is nothing to re-ask.
-	cwd, ok := peekCwd(path)
+	cwd, ok := peekCwd(path, m.cfg.Format.Cwd)
 	if !ok {
 		return
 	}
@@ -255,11 +278,11 @@ func (m *Manager) open(path string, role Role, session uuid.UUID) {
 			"path", path, "cwd", cwd)
 		return
 	}
-	t, err := newTailer(path, m.cfg.StateDir, stream{
-		role:    role,
-		session: session,
-		idemKey: m.cfg.UsageIdemKey,
-	})
+	str := stream{role: role, session: session, idemKey: m.cfg.UsageIdemKey}
+	if m.cfg.Format.NewParser != nil {
+		str.parse = m.cfg.Format.NewParser()
+	}
+	t, err := newTailer(path, m.cfg.StateDir, str)
 	if err != nil {
 		m.cfg.Log.Error("tailers: open failed", "path", path, "err", err)
 		return
@@ -279,7 +302,10 @@ const (
 // peekCwd reads the head of a candidate stream for its first non-empty cwd —
 // the containment evidence 04 §2.1 keys discovery on. Returns ok=false when
 // none is readable yet (empty file, torn head): unattributable, so not tailed.
-func peekCwd(path string) (string, bool) {
+func peekCwd(path string, cwdOf func([]byte) string) (string, bool) {
+	if cwdOf == nil {
+		cwdOf = topLevelCwd
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", false
@@ -288,14 +314,21 @@ func peekCwd(path string) (string, bool) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64<<10), peekMaxLineSize)
 	for n := 0; sc.Scan() && n < peekMaxLines; n++ {
-		var l struct {
-			Cwd string `json:"cwd"`
-		}
-		if json.Unmarshal(sc.Bytes(), &l) == nil && l.Cwd != "" {
-			return l.Cwd, true
+		if cwd := cwdOf(sc.Bytes()); cwd != "" {
+			return cwd, true
 		}
 	}
 	return "", false
+}
+
+func topLevelCwd(line []byte) string {
+	var l struct {
+		Cwd string `json:"cwd"`
+	}
+	if json.Unmarshal(line, &l) != nil {
+		return ""
+	}
+	return l.Cwd
 }
 
 func sessionFromName(name string) (uuid.UUID, bool) {

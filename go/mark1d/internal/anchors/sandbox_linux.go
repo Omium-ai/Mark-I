@@ -382,9 +382,10 @@ func MaybeRunHelper() {
 	rl(unix.RLIMIT_DATA, spec.MemoryBytes)
 	rl(unix.RLIMIT_NOFILE, spec.NoFile)
 	rl(unix.RLIMIT_FSIZE, spec.FSizeBytes)
-	// Anchors must never dump core: 04 §11.6 posture, and a core file is a
-	// worktree-content disclosure channel.
-	rl(unix.RLIMIT_CORE, 1) // 0 means "unset" in rl; 1 byte is below any core header
+	// {0,0} not rl(…,1): the hardened parent's hard limit is 0 and cannot be raised.
+	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
+		helperDie(fmt.Sprintf("setrlimit(RLIMIT_CORE): %v", err))
+	}
 
 	if spec.LandlockMask != 0 {
 		if err := applyLandlock(spec.LandlockMask, spec.Writable); err != nil {

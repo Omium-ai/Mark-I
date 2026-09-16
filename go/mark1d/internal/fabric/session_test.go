@@ -218,7 +218,7 @@ func TestFlushAckFollowsTheSpoolFsync(t *testing.T) {
 // GateVerdict out, on a connection that also streams events.
 func TestGateQueryOverFabric(t *testing.T) {
 	entry := violatedEntry(false, false)
-	g := NewGate(stubReader{{1}: entry}, verdict.NewBlocks(), t.TempDir())
+	g := NewGate(stubReader{{1}: entry}, verdict.NewBlocks(), optedInDir(t))
 	g.TaskFor = ownAll
 	addr, _ := startStub(t, g)
 	c := dial(t, addr)

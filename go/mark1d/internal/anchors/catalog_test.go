@@ -318,3 +318,88 @@ func testSandbox(t *testing.T) Sandbox {
 	t.Helper()
 	return NewSandbox(t.TempDir())
 }
+
+// optInTests writes the FR-VERIFY-003 per-repo opt-in into wt.
+func optInTests(t *testing.T, wt string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(RepoOptInPath(wt)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(RepoOptInPath(wt), []byte(`{"tests": true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDeriveTestRunnersNeedRepoOptIn: test anchors derive only under <workspace>/.mark1/anchors.json {"tests": true}.
+func TestDeriveTestRunnersNeedRepoOptIn(t *testing.T) {
+	wt, bin := fixtureWorkspace(t)
+	writeFixture(t, wt, "pytest.ini", "[pytest]\n")
+	writeFixture(t, wt, "package.json", `{"scripts":{"test":"jest"}}`)
+	fakeBin(t, bin, "pytest", "pytest 8.3.2")
+	fakeBin(t, bin, "npm", "10.8.1")
+	sb := testSandbox(t)
+
+	got, err := Derive(sb, wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range got {
+		if e.SideEffect == SideEffectTest {
+			t.Fatalf("%s derived without the per-repo opt-in", e.ID)
+		}
+	}
+
+	optInTests(t, wt)
+	got, err = Derive(sb, wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"cargo-test@cat-1": true, "go-test@cat-1": true, "npm-test@cat-1": true, "pytest@cat-1": true}
+	for _, e := range got {
+		if e.SideEffect != SideEffectTest {
+			continue
+		}
+		if !want[e.ID] {
+			t.Errorf("unexpected test anchor %s", e.ID)
+		}
+		delete(want, e.ID)
+		if e.Class != ClassSlow || !e.ExecsRepoCode {
+			t.Errorf("%s: class %q repoCode %v — test anchors are Slow and execute repo code", e.ID, e.Class, e.ExecsRepoCode)
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("test runners not derived: %v", want)
+	}
+	if TestsOptedIn(t.TempDir()) {
+		t.Error("absent opt-in read as opted in")
+	}
+}
+
+// TestExecHashSymlinkIndependent: a symlinked PATH derives the real file's BinaryPath and exec hash.
+func TestExecHashSymlinkIndependent(t *testing.T) {
+	wt := t.TempDir()
+	writeFixture(t, wt, "pyproject.toml", "[tool.ruff]\n")
+	real := t.TempDir()
+	target := fakeBin(t, real, "ruff", "ruff 0.6.2")
+	links := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(links, "ruff")); err != nil {
+		t.Fatal(err)
+	}
+	sb := testSandbox(t)
+	derive := func(path string) CatalogEntry {
+		t.Helper()
+		t.Setenv("PATH", path)
+		got, err := Derive(sb, wt)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("derived %v, %v", got, err)
+		}
+		return got[0]
+	}
+	direct, viaLink := derive(real), derive(links)
+	if viaLink.BinaryPath != target || viaLink.Argv[0] != target {
+		t.Fatalf("symlinked PATH kept the alias: %q / %q, want %q", viaLink.BinaryPath, viaLink.Argv[0], target)
+	}
+	if !bytes.Equal(ExecHash(direct), ExecHash(viaLink)) {
+		t.Fatal("exec hash depends on the PATH alias, not the file that executes")
+	}
+}

@@ -39,3 +39,17 @@ func SocketDir(t testing.TB) string {
 	}
 	return dir
 }
+
+// OptedInStateDir is a fresh state dir carrying the gates opt-in artifact (04 §9.4).
+func OptedInStateDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "gates", "opt-in.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(`{"stop_gate":true,"ts":"2026-09-16T00:00:00Z","user":"test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}

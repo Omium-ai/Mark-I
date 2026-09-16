@@ -72,6 +72,14 @@ func FromBundle(b *policy.Bundle) (*BundleMatrices, error) {
 	// to emit them sorted, so sort rather than trust.
 	slices.SortFunc(m.Knee, func(a, b KneeRow) int { return a.N - b.N })
 
+	for _, l := range b.Route.Ladders {
+		rungs := make([]Rung, len(l.Rungs))
+		for i, r := range l.Rungs {
+			rungs[i] = Rung(r)
+		}
+		m.Ladders = append(m.Ladders, Ladder{ID: l.LadderID, Rungs: rungs})
+	}
+
 	if len(m.Verifiers) == 0 || !isDistribution(m.Priors) {
 		// Fail-static: no matrices to fuse with. Built-in priors keep Fuse
 		// answering (a coverage-1 vote still yields a posterior), Stale keeps

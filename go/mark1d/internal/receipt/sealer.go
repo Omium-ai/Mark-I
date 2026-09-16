@@ -22,6 +22,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
@@ -54,6 +56,11 @@ type Config struct {
 	HeadURL string
 	Token   func(context.Context) (string, error)
 	Admit   func(context.Context, *m1pv1.Event) error
+	// StateDir is mark1d's state root; `last` is persisted under it (see
+	// Sealer.lastPath) so the head race Seal reconciles does not re-open across
+	// a restart with a pre-restart checkpoint still in the spool. Empty ⇒
+	// process-lifetime only, with a warning: sealing fails SOFT throughout.
+	StateDir string
 
 	// Test seams; nil ⇒ production defaults.
 	HTTPClient *http.Client
@@ -78,12 +85,16 @@ type Sealer struct {
 	log    *slog.Logger
 	now    func() time.Time
 
-	// last is the head the newest checkpoint THIS process admitted will leave
+	// last is the head the newest checkpoint this DEVICE admitted will leave
 	// behind once controld applies it: its seq, its receipt hash (= the server's
 	// head_hash, store.go "hash := sha256.Sum256(signingInput)"), its
-	// checkpoint_seq. Zero until the first admit. See Seal for why it can
-	// outrank a freshly fetched head.
-	last chainHead
+	// checkpoint_seq. Zero until the first admit ever. See Seal for why it can
+	// outrank a freshly fetched head. Persisted at lastPath after every admit
+	// and loaded by New: a checkpoint admitted just before a restart is still
+	// in the spool, still ahead of the server, and still the head the first
+	// post-restart seal must chain to.
+	last     chainHead
+	lastPath string
 
 	// pending holds leaves whose seal was refused by an I/O path that can clear.
 	// See retain. Capped at maxPendingLeaves.
@@ -113,12 +124,19 @@ func New(cfg Config) (*Sealer, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Sealer{
+	s := &Sealer{
 		key: cfg.Key, keyID: cfg.Key.KeyID(),
 		tenantID: cfg.TenantID, deviceID: cfg.DeviceID,
 		headURL: cfg.HeadURL, token: cfg.Token, admit: cfg.Admit,
 		client: cfg.HTTPClient, log: cfg.Log, now: cfg.Now,
-	}, nil
+	}
+	if cfg.StateDir == "" {
+		s.log.Warn("receipt: StateDir unset — the last-sealed head is process-lifetime only; a restart with a checkpoint still in the spool may re-mint its checkpoint_seq")
+		return s, nil
+	}
+	s.lastPath = filepath.Join(cfg.StateDir, "receipt", "last-head")
+	s.last = s.loadLast()
+	return s, nil
 }
 
 // OpenKey loads the enrolled device key, and only loads it.
@@ -248,6 +266,11 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 	}
 	s.pending = nil
 	s.last = chainHead{seq: cp.Seq, hash: signed.ReceiptHash, checkpointSeq: cp.CheckpointSeq}
+	if err := s.saveLast(); err != nil {
+		// The seal already happened; this only narrows what a restart knows.
+		s.log.Warn("receipt: last-sealed head not persisted — a restart before the server applies it may re-mint its checkpoint_seq",
+			"path", s.lastPath, "err", err)
+	}
 	s.log.Info("receipt: batch sealed",
 		"checkpoint_seq", cp.CheckpointSeq, "seq", cp.Seq, "leaves", len(leaves),
 		"merkle_root", hex.EncodeToString(root[:]))
@@ -292,6 +315,89 @@ type chainHead struct {
 	seq           int64
 	hash          [32]byte
 	checkpointSeq int64
+}
+
+// lastHeadFile is chainHead on disk: one JSON object, hash as the same hex
+// controld's chain_head.hash uses, so the file reads like the GET it stands in
+// for.
+type lastHeadFile struct {
+	Seq           int64  `json:"seq"`
+	Hash          string `json:"hash"`
+	CheckpointSeq int64  `json:"checkpoint_seq"`
+}
+
+// loadLast reads lastPath. Absent ⇒ zero, silently (first boot). Unreadable or
+// unparseable ⇒ zero WITH a warning, never a boot refusal: the worst outcome
+// is the head race being open for one seal, which is where every device was
+// before the file existed — a refusal to boot would cost capture to protect a
+// receipt.
+func (s *Sealer) loadLast() chainHead {
+	b, err := os.ReadFile(s.lastPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return chainHead{}
+	}
+	var f lastHeadFile
+	if err == nil {
+		err = json.Unmarshal(b, &f)
+	}
+	var raw []byte
+	if err == nil {
+		raw, err = hex.DecodeString(f.Hash)
+		if err == nil && len(raw) != 32 {
+			err = fmt.Errorf("hash %q is not a 32-byte hex hash", f.Hash)
+		}
+	}
+	if err != nil {
+		s.log.Warn("receipt: last-sealed head unreadable, ignored — the first seal chains to the server's head as before",
+			"path", s.lastPath, "err", err)
+		return chainHead{}
+	}
+	return chainHead{seq: f.Seq, hash: [32]byte(raw), checkpointSeq: f.CheckpointSeq}
+}
+
+// saveLast persists `last` the way capture persists session_epoch: write-tmp,
+// fsync, rename, fsync-dir. The spool's A/B slot exists for a value republished
+// on every fsync tick through one open fd; this is written once per seal, so
+// a rename per write is free and the idiom is the ~20 lines the tree already
+// uses for its other small state files. Mode 0600 like the rest of the state
+// dir — the hash is public, but the file is still a chain fact.
+func (s *Sealer) saveLast() error {
+	if s.lastPath == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(s.lastPath), 0o700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(lastHeadFile{
+		Seq: s.last.seq, Hash: hex.EncodeToString(s.last.hash[:]), CheckpointSeq: s.last.checkpointSeq,
+	})
+	if err != nil {
+		return err
+	}
+	tmp := s.lastPath + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.lastPath); err != nil {
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(s.lastPath)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // head fetches the CURRENT chain head, fresh, before every seal — never cached.

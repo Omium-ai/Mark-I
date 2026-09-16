@@ -6,6 +6,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -13,6 +16,8 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/evidence"
 )
 
 // enabledAll derives + consents the whole fixture catalog, so the wire audit
@@ -274,5 +279,89 @@ func TestRunOneOutputHMACIsTenantScoped(t *testing.T) {
 	}
 	if bytes.Equal(first, other) {
 		t.Error("two tenant roots produced the SAME digest for identical tool output — the value is a global join key, which is the correlation NFR-PRIVACY-002 forbids")
+	}
+}
+
+// TestEvidenceStoreNeverReachesTheWire (NFR-PRIVACY-005): no line of <state>/evidence/ appears in any emitted event's bytes.
+func TestEvidenceStoreNeverReachesTheWire(t *testing.T) {
+	entries, wt := enabledAll(t)
+	fakeBin(t, filepath.Dir(entries[0].BinaryPath), "git", "git version 2.46.0")
+	state := t.TempDir()
+	store, err := evidence.Open(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := DeriveOutputHMACKey(bytes.Repeat([]byte{0x5A}, 32))
+	em := &fakeEmitter{}
+	diff := "--- a/src/billing/secret_module.py\n+++ b/src/billing/secret_module.py\n@@ -1 +1,2 @@\n" +
+		"+STRIPE_KEY = 'sk_live_4eC39HqLyjWDarjtT1zdp7dc'  # noqa: E501\n+def charge_customer(acct): ...\n"
+	for _, c := range adversarialRuns {
+		var e CatalogEntry
+		for _, x := range entries {
+			if x.Kind == c.kind {
+				e = x
+			}
+		}
+		r := NewRunner(&fakeSandbox{run: gitFake(" M src/billing/secret_module.py\x00", diff, c.res)}, em, key, false)
+		r.Evidence = store
+		if err := r.RunOne(context.Background(), e, testSession, testTask, wt); err != nil {
+			t.Fatalf("%s: %v", c.kind, err)
+		}
+	}
+	evs := em.all()
+	if len(evs) != len(adversarialRuns) {
+		t.Fatalf("emitted %d events, want %d", len(evs), len(adversarialRuns))
+	}
+	var wire [][]byte
+	for _, ev := range evs {
+		raw, err := proto.Marshal(ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire = append(wire, raw)
+	}
+
+	if st, _ := os.Stat(evidence.Dir(state)); st == nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("evidence dir %v, want 0700", st)
+	}
+	files, lines := 0, 0
+	err = filepath.WalkDir(evidence.Dir(state), func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		files++
+		if st, _ := d.Info(); st.Mode().Perm() != 0o600 {
+			t.Errorf("%s: mode %v, want 0600", p, st.Mode().Perm())
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		for _, l := range bytes.Split(b, []byte("\n")) {
+			if l = bytes.TrimSpace(l); len(l) < 8 {
+				continue
+			}
+			lines++
+			for i, raw := range wire {
+				if bytes.Contains(raw, l) {
+					t.Errorf("event %d carries evidence line %q from %s", i, l, p)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Positive control: the walk had something to catch.
+	if files < 2*len(adversarialRuns) || lines == 0 {
+		t.Fatalf("evidence store holds %d files / %d lines — nothing was soaked", files, lines)
+	}
+	for _, leak := range []string{"sk_live_4eC39", "charge_customer", "secret_module"} {
+		for i, raw := range wire {
+			if bytes.Contains(raw, []byte(leak)) {
+				t.Errorf("event %d: marshaled bytes leak %q", i, leak)
+			}
+		}
 	}
 }

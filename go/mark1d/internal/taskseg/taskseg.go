@@ -80,10 +80,12 @@ type Segmenter struct {
 	// ends leaks one small struct until the daemon restarts. An idle sweep when
 	// long-lived daemons show it mattering.
 	sessions map[[16]byte]*session
+	// ended keeps the task open at SessionEnd, 32 bytes per session, so a Usage the tailer flushes after the session ended (2 s quiesce vs a Stop→SessionEnd within ms) still names the task that spent it.
+	ended map[[16]byte]TaskID
 }
 
 func New(pathKey []byte) *Segmenter {
-	return &Segmenter{pathKey: pathKey, sessions: map[[16]byte]*session{}}
+	return &Segmenter{pathKey: pathKey, sessions: map[[16]byte]*session{}, ended: map[[16]byte]TaskID{}}
 }
 
 // DeriveKey is the one derivation between the tenant HMAC root (04 §2.9) and
@@ -119,6 +121,12 @@ func (s *Segmenter) Observe(ev *m1pv1.Event, files []string) []*m1pv1.Event {
 	defer s.mu.Unlock()
 	ss := s.sessions[sid]
 	if ss == nil {
+		if ev.GetUsage() != nil {
+			if id, ok := s.ended[sid]; ok && len(ev.TaskId) == 0 {
+				ev.TaskId = id[:]
+			}
+			return nil // a Usage opens nothing (R1): no session state for it
+		}
 		ss = &session{}
 		s.sessions[sid] = ss
 	}
@@ -136,6 +144,13 @@ func (s *Segmenter) Observe(ev *m1pv1.Event, files []string) []*m1pv1.Event {
 		return nil
 	case *m1pv1.Event_ToolUse:
 		return s.tool(sid, ss, files)
+	case *m1pv1.Event_Usage:
+		// The numerator meets the denominator here: an unaddressed Usage takes the currently open task (D-AA's zero-sentinel resolution), so tvo_task has rows.
+		if len(ev.TaskId) == 0 && ss.cur != nil {
+			id := ss.cur.id
+			ev.TaskId = id[:]
+		}
+		return nil
 	case *m1pv1.Event_VerdictEvent:
 		// 04 §9.2: a PROVISIONAL verdict is an ACTIVE→ACTIVE recompute; it resolves
 		// the denominator at CLOSE instead (D-AS). REVISED is the one adjudicated
@@ -289,6 +304,9 @@ func (s *Segmenter) flush(sid [16]byte, ss *session) []*m1pv1.Event {
 // holds one for it (D-AS) — rather than being dropped.
 func (s *Segmenter) end(sid [16]byte, ss *session) []*m1pv1.Event {
 	out := s.flush(sid, ss)
+	if ss.cur != nil {
+		s.ended[sid] = ss.cur.id
+	}
 	for _, t := range slices.Clone(ss.tasks) {
 		if t.verdicted {
 			continue // already closed by R3; kept only for reopen

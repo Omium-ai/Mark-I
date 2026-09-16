@@ -3,17 +3,23 @@
 // reach. Check order is normative: off-check first (invariant 2), then D-AA's
 // task resolution (nothing downstream may be keyed by the all-zero sentinel),
 // then the ≤3-consecutive-blocks-per-task cap, then the hourly ceiling
-// (M1E-5002 ⇒ allow), then the deadline, THEN the cache read.
+// (M1E-5002 ⇒ allow), then the deadline, THEN the cache read -- and a BLOCK
+// only if blocking is armed (FR-POLICY-006: the operator's on-disk opt-in AND
+// a policy that has not opened the gate).
 package fabric
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/policy"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 )
 
@@ -44,9 +50,16 @@ type Gate struct {
 	reader   verdict.Reader
 	blocks   *verdict.Blocks
 	stateDir string
-	// HourlyCeiling may be LOWERED by the wiring pass from the bundle's
-	// gates-section; zero means DefaultHourlyCeiling.
+	// HourlyCeiling is LOWERED from the bundle's gates section by ApplyGates;
+	// zero means DefaultHourlyCeiling.
 	HourlyCeiling uint32
+	// consecutiveCap is the same for max_consecutive_blocks; zero means
+	// maxConsecutiveBlocks. Unexported: only ApplyGates' clamp writes it.
+	consecutiveCap uint32
+	// opened: the applied policy set stop_gate_enabled=false. The zero value
+	// is the compiled default (armed, subject to the local opt-in), so a gate
+	// that never saw a bundle behaves as it always did.
+	opened bool
 	// TaskFor is D-AA parts 2 and 3: the daemon's segmenter resolves the
 	// connection's session plus the query's (possibly empty) task_id to a real
 	// task, or misses. nil means no segmenter is wired, so every query misses —
@@ -72,6 +85,59 @@ type Gate struct {
 
 func NewGate(r verdict.Reader, blocks *verdict.Blocks, stateDir string) *Gate {
 	return &Gate{reader: r, blocks: blocks, stateDir: stateDir}
+}
+
+// ApplyGates is FR-POLICY-006's clamp: a bundle's gates section can move this
+// gate from closed toward open and never past the local hard caps
+// (FR-VERIFY-010, "regardless of bundle content"). max_consecutive_blocks and
+// hourly_block_ceiling take min(bundle, built-in) -- the decoder already
+// refuses a raise, this is the edge-side floor if it ever does not -- and 0
+// means the built-in, as controld and the decoder read it. stop_gate_enabled
+// false opens the gate; true does NOT arm it, because arming also needs the
+// operator's local opt-in artifact, which no bundle can supply. Boot-time,
+// before Serve: the fields are plain, like the rest of the wiring.
+func (g *Gate) ApplyGates(sec policy.GatesSection) {
+	g.opened = !sec.StopGateEnabled
+	g.consecutiveCap = min(uint32(sec.MaxConsecutiveBlocks), maxConsecutiveBlocks)
+	g.HourlyCeiling = DefaultHourlyCeiling
+	if h := sec.HourlyBlockCeiling; h > 0 && h < DefaultHourlyCeiling {
+		g.HourlyCeiling = uint32(h)
+	}
+}
+
+// OptInPath is the local on-disk tenant opt-in artifact FR-POLICY-006 names
+// and no document places: `mark1 enable --stop-gate` writes it (0600,
+// {"stop_gate": true, "ts": <RFC 3339>, "user": <OS account>}), `mark1 off`
+// and a future `--no-stop-gate` remove it. Without it the stop gate answers
+// ALLOW whatever the bundle says.
+func OptInPath(stateDir string) string { return filepath.Join(stateDir, "gates", "opt-in.json") }
+
+// optIn is the artifact's shape: stop_gate arms the gate; exploration is D-EF's local half of ε>0 consent.
+type optIn struct {
+	StopGate    bool `json:"stop_gate"`
+	Exploration bool `json:"exploration"`
+}
+
+// optedIn reads the artifact per query, like the off-marker stat: an opt-in
+// written while the daemon runs takes effect on the next Stop. Anything but a
+// well-formed {"stop_gate": true} -- absent, unreadable, garbage, false -- is
+// "not opted in", the fail-open direction — per field.
+// ponytail: one ReadFile+Unmarshal of a <100-byte file per query, inside the
+// 5 ms budget TestGateLatency asserts; mtime-cache it if that ever slips.
+func optedIn(stateDir string) (a optIn) {
+	raw, err := os.ReadFile(OptInPath(stateDir))
+	if err != nil || json.Unmarshal(raw, &a) != nil {
+		return optIn{}
+	}
+	return a
+}
+
+// ExplorationEpsilon is D-EF's edge half: a bundle's ε applies only under a local "exploration": true, else 0 (propensity 1.0).
+func ExplorationEpsilon(stateDir string, eps float64) float64 {
+	if optedIn(stateDir).Exploration {
+		return eps
+	}
+	return 0
 }
 
 func (g *Gate) now() time.Time {
@@ -158,8 +224,12 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 	}
 	ctr := g.blocks.Counters(session, task, received)
 
-	// 3. ≤3 consecutive blocks per task.
-	if ctr.Consecutive >= maxConsecutiveBlocks {
+	// 3. ≤3 consecutive blocks per task (or fewer, if the bundle lowered it).
+	capN := g.consecutiveCap
+	if capN == 0 {
+		capN = maxConsecutiveBlocks
+	}
+	if ctr.Consecutive >= capN {
 		return allow(CodeGateCap + " consecutive block cap")
 	}
 	// 4. hourly block ceiling.
@@ -201,6 +271,23 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 	// economical (p̂_LCB(n)·V(task) > c(n)). At the knee — or any other verdict
 	// — the agent is allowed to stop, with verdict + evidence as the reason.
 	if e.Verdict.GetVerdict() == m1pv1.Verdict_VERDICT_VIOLATED && !e.Knee.Stop {
+		// 7. FR-POLICY-006: the one closed answer opens unless the operator
+		// opted in on disk AND the applied policy left the gate closed. Sits
+		// here, not before the cache read, so every other posture keeps its
+		// own reason (M1E-5001 is still a cache miss on an unarmed daemon)
+		// and the artifact is read only when a BLOCK is otherwise due. No
+		// counter moves: an opened block is not a block. M1E-5002 is 08 §9's
+		// only local, fail-open, stop-allowed row; there is no dedicated code
+		// for the normal open posture, and M1E-3006 would misreport a fresh
+		// bundle as stale.
+		if g.opened {
+			v.Reason = CodeGateCap + " stop gate opened by policy"
+			return note(v, e.UnknownVoters)
+		}
+		if !optedIn(g.stateDir).StopGate {
+			v.Reason = CodeGateCap + " stop gate not opted in locally"
+			return note(v, e.UnknownVoters)
+		}
 		g.blocks.RecordBlock(session, task, received)
 		v.Decision = m1pv1.GateDecision_GATE_DECISION_BLOCK
 		// FR-VERIFY-011: below the knee the failure evidence IS the

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -40,9 +41,21 @@ const (
 
 type harness struct {
 	sealer *Sealer
+	cfg    Config // as wired; restart re-runs New over it
 	sp     *spool.Spool
 	pub    ed25519.PublicKey
 	heads  int // chain-head GETs served
+}
+
+// restart is a daemon restart from the sealer's point of view: a NEW Sealer
+// over the same state dir, spool and server, with no process memory.
+func (h *harness) restart(t *testing.T) {
+	t.Helper()
+	s, err := New(h.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.sealer = s
 }
 
 // newHarness wires a sealer over a real spool + admitter. headBody, when
@@ -96,13 +109,15 @@ func newHarness(t *testing.T, headBody func(w http.ResponseWriter)) *harness {
 	}))
 	t.Cleanup(srv.Close)
 
-	h.sealer, err = New(Config{
+	h.cfg = Config{
 		Key: key, TenantID: testTenant, DeviceID: testDevice,
-		HeadURL: srv.URL + "/api/v1/receipts",
-		Token:   func(context.Context) (string, error) { return "tok", nil },
-		Admit:   adm.Admit,
-		Now:     func() time.Time { return time.Unix(1767225600, 123456789) },
-	})
+		HeadURL:  srv.URL + "/api/v1/receipts",
+		Token:    func(context.Context) (string, error) { return "tok", nil },
+		Admit:    adm.Admit,
+		StateDir: dir,
+		Now:      func() time.Time { return time.Unix(1767225600, 123456789) },
+	}
+	h.sealer, err = New(h.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,36 +277,8 @@ func TestSealerDoesNotReMintACheckpointSeqAfterAStaleHead(t *testing.T) {
 			second.GetCheckpointSeq(), headCkpt+2)
 	}
 
-	// --- the server's reconstruction of the SECOND seal, after the first landed:
-	// head = (headSeq+1, receipt_hash(first), headCkpt+1). receipt_hash is
-	// sha256 over the signing input, prefix included (store.go, vectors README).
-	headHash, err := hex.DecodeString(headHashHex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rebuild := func(ev *m1pv1.Event, seq int64, prev [32]byte) identity.Checkpoint {
-		cp := ev.GetReceiptCheckpoint()
-		var root [32]byte
-		copy(root[:], cp.GetMerkleRoot())
-		return identity.Checkpoint{
-			TenantID: testTenant, DeviceID: testDevice,
-			Seq: seq, PrevReceiptHash: prev,
-			IssuedAt:      ev.GetOccurredAt().AsTime().UTC().Truncate(time.Second).Format(time.RFC3339),
-			CheckpointSeq: int64(cp.GetCheckpointSeq()),
-			MerkleRoot:    root, LeafCount: int(cp.GetLeafCount()),
-		}
-	}
-	firstHash, err := identity.ReceiptHash(rebuild(cps[0], headSeq+1, [32]byte(headHash)).Payload(first.GetKeyId()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	signingInput, err := identity.CanonicalBytes(rebuild(cps[1], headSeq+2, firstHash).Payload(second.GetKeyId()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !identity.Verify(h.pub, second.GetOriginSignature(), signingInput) {
-		t.Fatal("second seal does not verify over (seq+1, receipt_hash(first), checkpoint_seq+1) — controld would refuse bad_signature")
-	}
+	// --- the server's reconstruction of the SECOND seal, after the first landed.
+	h.verifySecondChainedToFirst(t, cps[0], cps[1])
 
 	// A head at or past our own is the server's newer truth (our checkpoint
 	// applied, or another device's seal outran it) and wins outright.
@@ -300,6 +287,99 @@ func TestSealerDoesNotReMintACheckpointSeqAfterAStaleHead(t *testing.T) {
 	cps = h.checkpoints(t)
 	if got := cps[2].GetReceiptCheckpoint().GetCheckpointSeq(); got != uint64(headCkpt+1) {
 		t.Errorf("third checkpoint_seq %d, want %d — a fresh head that is not stale must be followed", got, headCkpt+1)
+	}
+}
+
+// rebuild is the server's reconstruction of one checkpoint's signed payload
+// at a head it holds: (seq, prev) are the head's, the rest is read off the
+// event as sidefx.EffectsFromBatch does.
+func rebuild(ev *m1pv1.Event, seq int64, prev [32]byte) identity.Checkpoint {
+	cp := ev.GetReceiptCheckpoint()
+	var root [32]byte
+	copy(root[:], cp.GetMerkleRoot())
+	return identity.Checkpoint{
+		TenantID: testTenant, DeviceID: testDevice,
+		Seq: seq, PrevReceiptHash: prev,
+		IssuedAt:      ev.GetOccurredAt().AsTime().UTC().Truncate(time.Second).Format(time.RFC3339),
+		CheckpointSeq: int64(cp.GetCheckpointSeq()),
+		MerkleRoot:    root, LeafCount: int(cp.GetLeafCount()),
+	}
+}
+
+// verifySecondChainedToFirst is the server's check of the SECOND seal after
+// the first landed on the frozen fake head: head = (headSeq+1,
+// receipt_hash(first), headCkpt+1), so second must verify over (headSeq+2,
+// receipt_hash(first), headCkpt+2). receipt_hash is sha256 over the signing
+// input, prefix included (store.go, vectors README).
+func (h *harness) verifySecondChainedToFirst(t *testing.T, first, second *m1pv1.Event) {
+	t.Helper()
+	headHash, err := hex.DecodeString(headHashHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstHash, err := identity.ReceiptHash(rebuild(first, headSeq+1, [32]byte(headHash)).Payload(first.GetReceiptCheckpoint().GetKeyId()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingInput, err := identity.CanonicalBytes(rebuild(second, headSeq+2, firstHash).Payload(second.GetReceiptCheckpoint().GetKeyId()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !identity.Verify(h.pub, second.GetReceiptCheckpoint().GetOriginSignature(), signingInput) {
+		t.Fatal("second seal does not verify over (seq+1, receipt_hash(first), checkpoint_seq+1) — controld would refuse bad_signature")
+	}
+}
+
+// TestSealerLastHeadSurvivesRestart: the stale-head reconciliation above lived
+// in process memory, so a restart with a pre-restart checkpoint still in the
+// spool re-opened the race for the first post-restart seal — it read the
+// frozen head, re-minted checkpoint_seq, and was refused broken_link once the
+// spooled one landed. `last` is now on disk: a NEW sealer over the same state
+// dir must chain to the checkpoint the old one admitted.
+func TestSealerLastHeadSurvivesRestart(t *testing.T) {
+	h := newHarness(t, nil)
+	ctx := context.Background()
+
+	h.sealer.Seal(ctx, [][]byte{leaf(1)})
+	if fi, err := os.Stat(h.sealer.lastPath); err != nil {
+		t.Fatalf("last-head not written after the first seal: %v", err)
+	} else if got := fi.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
+		t.Errorf("last-head mode %04o, want 0600 (NFR-SECURITY-007: state files owner-only)", got)
+	}
+	h.restart(t)
+	h.sealer.Seal(ctx, [][]byte{leaf(2)})
+
+	cps := h.checkpoints(t)
+	if len(cps) != 2 {
+		t.Fatalf("sealed %d checkpoints, want 2", len(cps))
+	}
+	if got := cps[1].GetReceiptCheckpoint().GetCheckpointSeq(); got != uint64(headCkpt+2) {
+		t.Fatalf("first post-restart checkpoint_seq %d, want %d — the stale head re-minted the counter across the restart",
+			got, headCkpt+2)
+	}
+	h.verifySecondChainedToFirst(t, cps[0], cps[1])
+}
+
+// TestSealerIgnoresACorruptLastHead: the file is an optimisation over the
+// server's head, not a source of truth. Garbage in it costs one warning and
+// puts the device back where it was before the file existed — never a boot
+// refusal, because that would cost capture to protect a receipt.
+func TestSealerIgnoresACorruptLastHead(t *testing.T) {
+	h := newHarness(t, nil)
+	if err := os.MkdirAll(filepath.Dir(h.sealer.lastPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.sealer.lastPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(t)
+	h.sealer.Seal(context.Background(), [][]byte{leaf(1)})
+	cps := h.checkpoints(t)
+	if len(cps) != 1 {
+		t.Fatalf("sealed %d checkpoints, want 1", len(cps))
+	}
+	if got := cps[0].GetReceiptCheckpoint().GetCheckpointSeq(); got != uint64(headCkpt+1) {
+		t.Errorf("checkpoint_seq %d, want %d — a corrupt last-head must yield to the server's head", got, headCkpt+1)
 	}
 }
 

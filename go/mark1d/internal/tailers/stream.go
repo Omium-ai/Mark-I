@@ -69,10 +69,25 @@ type stream struct {
 	// ponytail: grows one Usage per key for the stream's lifetime; an
 	// eviction sweep if transcripts ever hold enough messages to matter.
 	emitted map[pendingKey]*m1pv1.Usage
+
+	// parse is the vendor line parser (Format.NewParser); nil is claudecode's.
+	parse func(line []byte) (Line, bool)
 }
 
-// txLine is the minimal vendor shape (08 §5.1): the tailer reads ONLY lines
-// whose message carries usage, and must tolerate every unknown sibling field.
+// Line is one vendor usage line reduced to the fields every adapter's dedupe
+// and Usage event need — the seam a Format's parser fills.
+type Line struct {
+	Sidechain            bool
+	MessageID, RequestID string
+	Model, Timestamp     string
+	ServiceTier          string
+	InputTokens          uint64
+	OutputTokens         uint64
+	CacheCreationTokens  uint64
+	CacheReadTokens      uint64
+}
+
+// txLine is claudecode's minimal vendor shape (08 §5.1).
 type txLine struct {
 	IsSidechain bool   `json:"isSidechain"`
 	RequestID   string `json:"requestId"`
@@ -96,19 +111,19 @@ type txLine struct {
 // replays release nothing and are never themselves emitted.
 func (s *stream) consume(line []byte, now time.Time) []*m1pv1.Event {
 	s.lastLineAt = now
-	var l txLine
-	if json.Unmarshal(line, &l) != nil {
-		return nil // transcript noise; usage lines are the only contract here
+	if s.parse == nil {
+		s.parse = parseClaudeCode
 	}
-	if l.Message == nil || l.Message.Usage == nil || l.Message.ID == "" || l.RequestID == "" {
-		return nil
+	l, ok := s.parse(line)
+	if !ok || l.MessageID == "" || l.RequestID == "" {
+		return nil // transcript noise; usage lines are the only contract here
 	}
 	// PROTOCOL INVARIANT (07 §7 layer 1): sidechain lines in the parent
 	// transcript never emit — the subagent's own stream owns this key.
-	if s.role == RoleParent && l.IsSidechain {
+	if s.role == RoleParent && l.Sidechain {
 		return nil
 	}
-	key := pendingKey{l.Message.ID, l.RequestID}
+	key := pendingKey{l.MessageID, l.RequestID}
 	ev := s.buildUsage(&l)
 	for i := range s.pending {
 		if s.pending[i].key == key {
@@ -158,20 +173,35 @@ func (s *stream) quiet(now time.Time) []*m1pv1.Event {
 	return s.flush()
 }
 
-func (s *stream) buildUsage(l *txLine) *m1pv1.Event {
+// parseClaudeCode reads 08 §5.1's assistant line: the tailer reads ONLY lines
+// whose message carries usage, and must tolerate every unknown sibling field.
+func parseClaudeCode(line []byte) (Line, bool) {
+	var l txLine
+	if json.Unmarshal(line, &l) != nil || l.Message == nil || l.Message.Usage == nil {
+		return Line{}, false
+	}
 	u := l.Message.Usage
+	return Line{
+		Sidechain: l.IsSidechain, MessageID: l.Message.ID, RequestID: l.RequestID,
+		Model: l.Message.Model, Timestamp: l.Timestamp, ServiceTier: u.ServiceTier,
+		InputTokens: u.InputTokens, OutputTokens: u.OutputTokens,
+		CacheCreationTokens: u.CacheCreationInputTokens, CacheReadTokens: u.CacheReadInputTokens,
+	}, true
+}
+
+func (s *stream) buildUsage(l *Line) *m1pv1.Event {
 	ev := &m1pv1.Event{
 		SessionId: s.session[:],
 		Body: &m1pv1.Event_Usage{Usage: &m1pv1.Usage{
-			IdemKey:                  IdemKey(s.idemKey, s.session, l.Message.ID, l.RequestID),
-			MessageId:                l.Message.ID,
+			IdemKey:                  IdemKey(s.idemKey, s.session, l.MessageID, l.RequestID),
+			MessageId:                l.MessageID,
 			RequestId:                l.RequestID,
-			Model:                    l.Message.Model,
-			InputTokens:              u.InputTokens,
-			OutputTokens:             u.OutputTokens,
-			CacheCreationInputTokens: u.CacheCreationInputTokens,
-			CacheReadInputTokens:     u.CacheReadInputTokens,
-			ServiceTier:              u.ServiceTier,
+			Model:                    l.Model,
+			InputTokens:              l.InputTokens,
+			OutputTokens:             l.OutputTokens,
+			CacheCreationInputTokens: l.CacheCreationTokens,
+			CacheReadInputTokens:     l.CacheReadTokens,
+			ServiceTier:              l.ServiceTier,
 			Source:                   m1pv1.UsageSource_USAGE_SOURCE_TRANSCRIPT,
 		}},
 	}

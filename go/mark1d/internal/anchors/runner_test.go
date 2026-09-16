@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -21,14 +22,19 @@ type fakeSandbox struct {
 	res      RunResult
 	err      error
 	confined bool
-	mu       sync.Mutex
-	specs    []RunSpec
+	// run, when set, answers per spec.
+	run   func(RunSpec) (RunResult, error)
+	mu    sync.Mutex
+	specs []RunSpec
 }
 
 func (f *fakeSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	f.mu.Lock()
 	f.specs = append(f.specs, spec)
 	f.mu.Unlock()
+	if f.run != nil {
+		return f.run(spec)
+	}
 	res := f.res
 	if len(res.EffectiveEnv) == 0 {
 		for k, v := range spec.Env {
@@ -537,5 +543,176 @@ func TestSchedulerDeferSlowSeam(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	if len(em.all()) != 0 {
 		t.Fatal("DeferSlow=true still ran a slow anchor")
+	}
+}
+
+// enabledTest derives + consents the fixture go-test entry under the repo opt-in.
+func enabledTest(t *testing.T) (CatalogEntry, string) {
+	t.Helper()
+	wt, _ := fixtureWorkspace(t)
+	optInTests(t, wt)
+	derived, err := Derive(testSandbox(t), wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := Reconcile(derived, mustLoad(t, consentFor(t, derived...)))
+	for _, e := range rep.Enabled {
+		if e.Kind == KindGoTest {
+			return e, wt
+		}
+	}
+	t.Fatal("no enabled go-test entry")
+	return CatalogEntry{}, ""
+}
+
+func mustLoad(t *testing.T, path string) []ConsentRecord {
+	t.Helper()
+	c, err := LoadConsent(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// TestRunOneTestAnchorRepoOptIn (FR-VERIFY-003): refused without the repo opt-in, RequireFSConfined with it.
+func TestRunOneTestAnchorRepoOptIn(t *testing.T) {
+	e, wt := enabledTest(t)
+	em := &fakeEmitter{}
+	sb := &fakeSandbox{res: RunResult{ExitCode: 1, Stdout: []byte("--- FAIL: TestX (0.00s)\n--- FAIL: TestY (0.00s)\nFAIL\n")}}
+	r := NewRunner(sb, em, nil, false)
+
+	if err := os.Remove(RepoOptInPath(wt)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RunOne(context.Background(), e, testSession, testTask, wt); !errors.Is(err, ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused without %s", err, RepoOptInPath(wt))
+	}
+	if len(em.all()) != 0 || len(sb.specs) != 0 {
+		t.Fatal("refusal ran or emitted something")
+	}
+
+	optInTests(t, wt)
+	if err := r.RunOne(context.Background(), e, testSession, testTask, wt); err != nil {
+		t.Fatal(err)
+	}
+	if !sb.specs[0].RequireFSConfined || sb.specs[0].Argv[1] != "test" {
+		t.Fatalf("test anchor spec %+v lacks RequireFSConfined", sb.specs[0])
+	}
+	ev := em.all()[0].GetAnchorVote()
+	if ev.GetVote() != m1pv1.Verdict_VERDICT_VIOLATED || ev.GetEvidence().GetCounts().GetErrors() != 2 ||
+		ev.GetEvidence().GetCategory() != m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_TEST {
+		t.Fatalf("vote %v evidence %v, want VIOLATED with 2 TEST errors", ev.GetVote(), ev.GetEvidence())
+	}
+}
+
+// gitFake answers the runner's sandboxed git calls with planted output, everything else with res.
+func gitFake(status, diff string, res RunResult) func(RunSpec) (RunResult, error) {
+	return func(spec RunSpec) (RunResult, error) {
+		switch {
+		case len(spec.Argv) > 4 && spec.Argv[4] == "status":
+			return RunResult{Stdout: []byte(status)}, nil
+		case len(spec.Argv) > 4 && spec.Argv[4] == "diff":
+			return RunResult{Stdout: []byte(diff)}, nil
+		}
+		return res, nil
+	}
+}
+
+func TestDiffTaxonomy(t *testing.T) {
+	for name, c := range map[string]struct {
+		paths []string
+		delta int32
+		want  m1pv1.DiffClassification
+	}{
+		"none":            {nil, 0, m1pv1.DiffClassification_DIFF_CLASSIFICATION_NONE},
+		"src":             {[]string{"src/app.py", "lib/x.go"}, 0, m1pv1.DiffClassification_DIFF_CLASSIFICATION_SRC_ONLY},
+		"test dir":        {[]string{"src/app.py", "tests/test_app.py"}, 0, m1pv1.DiffClassification_DIFF_CLASSIFICATION_TEST_TOUCHED},
+		"go test file":    {[]string{"pkg/x_test.go"}, 0, m1pv1.DiffClassification_DIFF_CLASSIFICATION_TEST_TOUCHED},
+		"jest spec":       {[]string{"src/a.spec.tsx"}, 0, m1pv1.DiffClassification_DIFF_CLASSIFICATION_TEST_TOUCHED},
+		"config wins":     {[]string{"tests/test_app.py", "ruff.toml"}, 3, m1pv1.DiffClassification_DIFF_CLASSIFICATION_CONFIG_TOUCHED},
+		"eslintrc":        {[]string{".eslintrc.json"}, 0, m1pv1.DiffClassification_DIFF_CLASSIFICATION_CONFIG_TOUCHED},
+		"suppression":     {[]string{"src/app.py"}, 1, m1pv1.DiffClassification_DIFF_CLASSIFICATION_SUPPRESSION_TOUCHED},
+		"test beats supp": {[]string{"tests/x.py"}, 1, m1pv1.DiffClassification_DIFF_CLASSIFICATION_TEST_TOUCHED},
+	} {
+		if got := classifyDiff(c.paths, c.delta); got != c.want {
+			t.Errorf("%s: %v, want %v", name, got, c.want)
+		}
+	}
+	diff := "--- a/x.py\n+++ b/x.py\n@@ -1 +1,3 @@\n-import os  # noqa\n+import os  # noqa: F401\n+x = 1  # type: ignore\n+// nolint:gosec\n+#[allow(dead_code)]\n+/* eslint-disable */ // @ts-ignore\n # noqa in context is not counted\n"
+	if got := suppressionDelta([]byte(diff)); got != 5 {
+		t.Errorf("suppression delta %d, want 5 (6 added − 1 removed)", got)
+	}
+}
+
+// TestRunOneDiffReachesTheEnvelope (FR-VERIFY-004): the sandboxed git read lands both diff fields on the vote.
+func TestRunOneDiffReachesTheEnvelope(t *testing.T) {
+	e, wt := enabledRuff(t)
+	fakeBin(t, filepath.Dir(e.BinaryPath), "git", "git version 2.46.0")
+	em := &fakeEmitter{}
+	sb := &fakeSandbox{run: gitFake(
+		" M src/app.py\x00?? tests/test_new.py\x00",
+		"--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n+import os  # noqa\n",
+		RunResult{ExitCode: 0})}
+	if err := NewRunner(sb, em, nil, false).RunOne(context.Background(), e, testSession, testTask, wt); err != nil {
+		t.Fatal(err)
+	}
+	in := em.all()[0].GetAnchorVote().GetIntegrity()
+	if in.GetDiffClassification() != m1pv1.DiffClassification_DIFF_CLASSIFICATION_TEST_TOUCHED || in.GetSuppressionDirectiveDelta() != 1 {
+		t.Fatalf("integrity %v, want TEST_TOUCHED with delta 1", in)
+	}
+	if len(sb.specs) != 3 || sb.specs[0].Argv[0] != e.BinaryPath {
+		t.Fatalf("%d sandbox runs, want anchor then two git reads", len(sb.specs))
+	}
+	for _, s := range sb.specs[1:] {
+		if !s.RequireFSConfined || filepath.Base(s.Argv[0]) != "git" || s.WorktreeRO != wt {
+			t.Fatalf("git read %+v is not confined to the worktree", s.Argv)
+		}
+	}
+	// No git on PATH ⇒ UNSPECIFIED, never a guess.
+	t.Setenv("PATH", t.TempDir())
+	em2 := &fakeEmitter{}
+	if err := NewRunner(&fakeSandbox{res: RunResult{ExitCode: 0}}, em2, nil, false).RunOne(context.Background(), e, testSession, testTask, wt); err != nil {
+		t.Fatal(err)
+	}
+	if c := em2.all()[0].GetAnchorVote().GetIntegrity().GetDiffClassification(); c != m1pv1.DiffClassification_DIFF_CLASSIFICATION_UNSPECIFIED {
+		t.Fatalf("without git: %v, want UNSPECIFIED", c)
+	}
+}
+
+// TestEmitExcerptRefusals (FR-VERIFY-016): E1 needs a receipt, E2 a vpc|selfhost profile, E0 has no excerpt.
+func TestEmitExcerptRefusals(t *testing.T) {
+	em := &fakeEmitter{}
+	r := NewRunner(&fakeSandbox{}, em, nil, false)
+	emit := func(x *m1pv1.EvidenceExcerpt) error {
+		return r.EmitExcerpt(context.Background(), testSession, testTask, x)
+	}
+	e1 := &m1pv1.EvidenceExcerpt{Tier: m1pv1.EvidenceTier_EVIDENCE_TIER_E1, AttachmentName: "hunks"}
+	e2 := &m1pv1.EvidenceExcerpt{Tier: m1pv1.EvidenceTier_EVIDENCE_TIER_E2, AttachmentName: "diff"}
+	t.Setenv("MARK1_PROFILE", "")
+	for name, x := range map[string]*m1pv1.EvidenceExcerpt{
+		"E1 without receipt": e1, "E2 on the cloud path": e2,
+		"E0": {Tier: m1pv1.EvidenceTier_EVIDENCE_TIER_E0}, "unspecified": {},
+	} {
+		if err := emit(x); !errors.Is(err, ErrRefused) {
+			t.Errorf("%s: err = %v, want ErrRefused", name, err)
+		}
+	}
+	t.Setenv("MARK1_PROFILE", "cloud")
+	if err := emit(e2); !errors.Is(err, ErrRefused) {
+		t.Errorf("E2 under an unknown profile: err = %v, want ErrRefused", err)
+	}
+	if len(em.all()) != 0 {
+		t.Fatal("a refused excerpt was emitted")
+	}
+	e1.RedactionReceiptId = []byte{1, 2, 3}
+	if err := emit(e1); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MARK1_PROFILE", "vpc")
+	if err := emit(e2); err != nil {
+		t.Fatal(err)
+	}
+	if evs := em.all(); len(evs) != 2 || evs[0].GetEvidenceExcerpt().GetTier() != m1pv1.EvidenceTier_EVIDENCE_TIER_E1 {
+		t.Fatalf("emitted %v", evs)
 	}
 }

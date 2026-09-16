@@ -421,3 +421,32 @@ func TestProxyChildRefusesLegibly(t *testing.T) {
 		}
 	})
 }
+
+// TestGatewayFlagsPassThroughVerbatim: the daemon's only gateway duty is to
+// hand the proxy exactly the flags main.rs parses, in sidecar mode exactly
+// `--mode sidecar` and nothing else.
+func TestGatewayFlagsPassThroughVerbatim(t *testing.T) {
+	var nilFlags *GatewayFlags
+	if got := strings.Join(nilFlags.args(), " "); got != "--mode sidecar" {
+		t.Fatalf("sidecar args = %q", got)
+	}
+	g := &GatewayFlags{Bind: "0.0.0.0:8443", TLSCert: "/etc/mark1/gw.pem", TLSKey: "/etc/mark1/gw.key", ClientCA: "/etc/mark1/clients.pem", CredDir: "/run/mark1/creds"}
+	want := "--mode gateway --bind 0.0.0.0:8443 --tls-cert /etc/mark1/gw.pem --tls-key /etc/mark1/gw.key --client-ca /etc/mark1/clients.pem --cred-dir /run/mark1/creds"
+	if got := strings.Join(g.args(), " "); got != want {
+		t.Fatalf("gateway args =\n%s\nwant\n%s", got, want)
+	}
+	// And the child actually runs with them.
+	home := t.TempDir()
+	state := filepath.Join(home, ".omium", "mark1")
+	child, err := ProxyChild(ProxyConfig{StateDir: state, Binary: os.Args[0], Gateway: g})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := child.Start(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cmd.Args[1:], " "); got != want {
+		t.Fatalf("child argv = %q", got)
+	}
+}

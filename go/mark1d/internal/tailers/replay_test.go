@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/taskseg"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 	"github.com/google/uuid"
 )
@@ -306,5 +307,104 @@ func TestQuiesceDebounce(t *testing.T) {
 	}
 	if evs := s.quiet(now.Add(quiesce)); len(evs) != 1 {
 		t.Fatalf("quiesce at 2 s must emit the pending entry, got %d", len(evs))
+	}
+}
+
+// TestReplayUsageCarriesTaskID is the TVO denominator join (ADR-0002): the
+// corpus' nine hook bodies drive a real segmenter in the order rig.py fires
+// them around the transcripts, and every Usage the manager emits through the
+// Observe seam names the one task those hooks open. Hand-derived for this
+// corpus: one UserPromptSubmit ⇒ R1 opens exactly one task; no second prompt
+// ⇒ R2/R3 never fire; SessionEnd ⇒ R4 closes it UNRESOLVED_SESSION_END.
+// Both flush orders are the product: mid-session (a long session), and AFTER
+// SessionEnd — the rig's own order, since Stop→SessionEnd lands within ms of
+// the transcript line while the tailer's quiesce is 2 s.
+func TestReplayUsageCarriesTaskID(t *testing.T) {
+	exp := loadExpectations(t)
+	set, err := NewWorkspaceSet(exp.WorkspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := uuid.MustParse(exp.Streams[0].UsageEvents[0].IdemInputs.SessionID)
+	for _, late := range []bool{false, true} {
+		t.Run(map[bool]string{false: "flush-mid-session", true: "flush-after-session-end"}[late], func(t *testing.T) {
+			seg := taskseg.New([]byte("tenant-path-salt"))
+			var transitions []*m1pv1.Event
+			hook := func(ev *m1pv1.Event) {
+				ev.SessionId = session[:]
+				transitions = append(transitions, seg.Observe(ev, nil)...)
+			}
+			turn := func(i m1pv1.Initiator) *m1pv1.Event {
+				return &m1pv1.Event{Body: &m1pv1.Event_Turn{Turn: &m1pv1.Turn{Initiator: i}}}
+			}
+			var got []*m1pv1.Event
+			mgr, err := NewManager(Config{
+				Dir:          filepath.Join(fixtureRoot, "transcripts", "-home-devuser-workspace-acme-app"),
+				StateDir:     t.TempDir(),
+				Allowed:      set.Allowed,
+				UsageIdemKey: testIdemKey,
+				Observe:      func(ev *m1pv1.Event) { seg.Observe(ev, nil) },
+				Emit: func(_ context.Context, ev *m1pv1.Event) error {
+					got = append(got, ev)
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			flush := func() {
+				mgr.Sweep(ctx)
+				if err := mgr.CloseFlush(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// rig.py HOOKS_BEFORE_TRANSCRIPTS, as maps/claudecode.json maps them.
+			hook(&m1pv1.Event{Body: &m1pv1.Event_SessionStart{SessionStart: &m1pv1.SessionStart{}}})
+			hook(turn(m1pv1.Initiator_INITIATOR_HUMAN))
+			for range 3 {
+				hook(&m1pv1.Event{Body: &m1pv1.Event_ToolUse{ToolUse: &m1pv1.ToolUse{ToolName: "Edit"}}})
+			}
+			if !late {
+				flush()
+			}
+			// rig.py HOOKS_AFTER_TRANSCRIPTS (PreCompact maps to nothing).
+			hook(turn(m1pv1.Initiator_INITIATOR_AGENT))
+			hook(turn(m1pv1.Initiator_INITIATOR_AGENT))
+			hook(&m1pv1.Event{Body: &m1pv1.Event_SessionEnd{SessionEnd: &m1pv1.SessionEnd{}}})
+			if late {
+				flush()
+			}
+
+			var opens, closes []*m1pv1.Event
+			for _, ev := range transitions {
+				switch ev.Body.(type) {
+				case *m1pv1.Event_TaskOpen:
+					opens = append(opens, ev)
+				case *m1pv1.Event_TaskClose:
+					closes = append(closes, ev)
+				}
+			}
+			if len(opens) != 1 {
+				t.Fatalf("corpus opened %d tasks, ADR-0002 R1 over one prompt says exactly 1", len(opens))
+			}
+			if len(closes) != 1 || closes[0].GetTaskClose().GetResolution() != m1pv1.Resolution_RESOLUTION_UNRESOLVED_SESSION_END {
+				t.Fatalf("corpus closes = %v, ADR-0002 R4 says one UNRESOLVED_SESSION_END", closes)
+			}
+			task := opens[0].GetTaskId()
+			if len(task) != 16 || bytes.Equal(task, make([]byte, 16)) {
+				t.Fatalf("TaskOpen task_id %x is not a minted id", task)
+			}
+			if len(got) != 7 {
+				t.Fatalf("manager emitted %d Usage events, corpus fixes 7", len(got))
+			}
+			for _, ev := range got {
+				if !bytes.Equal(ev.GetTaskId(), task) {
+					t.Fatalf("Usage %s carries task_id %x, want the open task %x — tvo_task would hold nothing for it",
+						ev.GetUsage().GetMessageId(), ev.GetTaskId(), task)
+				}
+			}
+		})
 	}
 }

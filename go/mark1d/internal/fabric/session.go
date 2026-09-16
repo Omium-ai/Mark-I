@@ -28,12 +28,9 @@ const (
 )
 
 // isOneofArm reports whether a field number is one of FabricFrame's oneof
-// arms. The set is NOT a range: 8 and 9 are reserved by D-AI for
-// ContextQuery/ContextReply and are deliberately not arms yet, so a frame
-// carrying one is skipped as unknown rather than mistaken for a control
-// message this daemon knows how to act on.
+// arms: 1-7, the D-AE context pair 8/9 (context.go), and 10.
 func isOneofArm(num protowire.Number) bool {
-	return (num >= frameEvent && num <= frameFlushAck) || num == frameContaminationAlert
+	return num >= frameEvent && num <= frameContaminationAlert
 }
 
 // UnwrapEvent returns the INNER Event bytes of one encoded FabricFrame, for
@@ -193,6 +190,16 @@ func (ss *session) frame(ctx context.Context, payload []byte) error {
 			v = &m1pv1.GateVerdict{Decision: m1pv1.GateDecision_GATE_DECISION_ALLOW, Reason: "M1E-5001 no verdict subsystem"}
 		}
 		return ss.reply(&m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_GateVerdict{GateVerdict: v}})
+	case frameContextQuery:
+		q, err := decodeContextQuery(inner)
+		if err != nil {
+			return fmt.Errorf("fabric: undecodable ContextQuery: %w", err)
+		}
+		var text string
+		if h := ss.s.context; h != nil {
+			text = h.Context(ctx, q, ss.id)
+		}
+		return WriteFrame(ss.c, encodeContextReply(text))
 	case frameFlush:
 		// Drain before ack (NFR-DURABILITY-004): the shim sends Flush after
 		// SessionEnd on the same connection and treats the ack as its only

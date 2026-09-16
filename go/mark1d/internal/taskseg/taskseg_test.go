@@ -452,3 +452,29 @@ func TestOnCloseFiresOnEveryClosePath(t *testing.T) {
 		})
 	}
 }
+
+func TestUsageStampTakesTheOpenTaskAndKeepsAPriorStamp(t *testing.T) {
+	s, id := newSeg(), sid(t)
+	for _, st := range []step{prompt(), tool("a.go")} {
+		s.Observe(st.event(id), nil)
+	}
+	usage := func(pre []byte) *m1pv1.Event {
+		return &m1pv1.Event{SessionId: id[:], TaskId: pre, Body: &m1pv1.Event_Usage{Usage: &m1pv1.Usage{}}}
+	}
+	live := usage(nil)
+	s.Observe(live, nil)
+	if len(live.TaskId) != 16 {
+		t.Fatalf("live Usage unstamped: task_id=%x", live.TaskId)
+	}
+	pre := usage([]byte("hook-stamped-task"))
+	s.Observe(pre, nil)
+	if string(pre.TaskId) != "hook-stamped-task" {
+		t.Fatalf("pre-stamped Usage overwritten: %q", pre.TaskId)
+	}
+	s.Observe(end().event(id), nil)
+	late := usage(nil)
+	s.Observe(late, nil)
+	if string(late.TaskId) != string(live.TaskId) {
+		t.Fatalf("post-SessionEnd Usage lost its task: %x vs %x", late.TaskId, live.TaskId)
+	}
+}

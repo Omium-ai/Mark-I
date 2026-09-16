@@ -19,6 +19,8 @@ import (
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"lukechampine.com/blake3"
+
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/evidence"
 )
 
 // ErrRefused means the runner declined to execute at all — unimplemented kind,
@@ -44,6 +46,10 @@ var defaultHandlers = map[Kind]Handler{
 	KindCargoCheck: lineHandler("cargo-check", m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_BUILD, cargoLine),
 	KindGoVet:      lineHandler("go-vet", m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_LINT, goVetLine),
 	KindEslint:     eslintHandler,
+	KindGoTest:     lineHandler("go-test", m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_TEST, failLine(goTestFailRe)),
+	KindCargoTest:  lineHandler("cargo-test", m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_TEST, failLine(cargoTestFailRe)),
+	KindPytest:     lineHandler("pytest", m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_TEST, failLine(pytestFailRe)),
+	KindNpmTest:    lineHandler("npm-test", m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_TEST, failLine(npmTestFailRe)),
 }
 
 // diag is one parsed diagnostic line: the file token is used ONLY to count
@@ -72,7 +78,16 @@ var (
 	// safe to carry literally"; this grammar (plus the length cap below) is
 	// what makes that true here, the same job the bounded regexes above do.
 	eslintRuleRe = regexp.MustCompile(`^(@[a-z0-9-]+/)?([a-z0-9-]+/)?[a-z0-9-]+$`)
+	// Test runners: one failed test per matching line; no file, no per-test code.
+	goTestFailRe    = regexp.MustCompile(`^--- FAIL: `)
+	cargoTestFailRe = regexp.MustCompile(`^test \S+ \.\.\. FAILED$`)
+	pytestFailRe    = regexp.MustCompile(`^FAILED \S`)
+	npmTestFailRe   = regexp.MustCompile(`^(not ok \d+|[✕✗×] )`)
 )
+
+func failLine(re *regexp.Regexp) func(string) (diag, bool) {
+	return func(l string) (diag, bool) { return diag{code: "test_failed"}, re.MatchString(l) }
+}
 
 // eslintRuleCodeMax bounds the emitted rule id; real ids are well under it and
 // ingest applies its own length validation (artifacts.proto).
@@ -137,7 +152,9 @@ func lineHandler(tool string, cat m1pv1.EvidenceCategory, parse func(string) (di
 			if !ok {
 				continue
 			}
-			files[d.file] = true
+			if d.file != "" {
+				files[d.file] = true
+			}
 			if d.warning {
 				warns++
 				continue
@@ -233,10 +250,11 @@ type Runner struct {
 	// Empty ⇒ the field is omitted (enrollment not landed; P1 fields degrade
 	// to absent, never to an unkeyed hash).
 	outputHMACKey []byte
-	// testOptIn is the FR-VERIFY-003 per-repo opt-in: test-class anchors are
-	// refused unless BOTH this and the sandbox write-confinement precondition
-	// hold. Default false — the default catalog is static-analysis-only.
+	// testOptIn overrides the per-repo opt-in (TestsOptedIn, read per run); the daemon passes false.
 	testOptIn bool
+
+	// Evidence is the raw local store (NFR-PRIVACY-005); nil stores nothing.
+	Evidence *evidence.Store
 
 	mu     sync.Mutex
 	l0root []byte // latest cortexd L0 root; nil ⇒ integrity incomplete
@@ -282,8 +300,8 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 	if e.ConsentedAt.IsZero() || len(e.BinaryHash) == 0 {
 		return fmt.Errorf("%w: entry %s is not consented (04 §2.2: nothing runs without consent)", ErrRefused, e.ID)
 	}
-	if e.SideEffect == SideEffectTest && !r.testOptIn {
-		return fmt.Errorf("%w: test-class anchor %s without per-repo opt-in (FR-VERIFY-003)", ErrRefused, e.ID)
+	if e.SideEffect == SideEffectTest && !r.testOptIn && !TestsOptedIn(worktree) {
+		return fmt.Errorf("%w: test-class anchor %s without per-repo opt-in %s (FR-VERIFY-003)", ErrRefused, e.ID, RepoOptInPath(worktree))
 	}
 
 	// Env allow-list (04 §2.2): PATH = the resolved catalog dir only, LANG/TZ
@@ -320,6 +338,7 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 	var verdict m1pv1.Verdict
 	var evidence *m1pv1.EvidenceRecord
 	var integrity *m1pv1.AnchorIntegrity
+	var stdout, stderr []byte
 	if preHash, preErr := hashFile(e.BinaryPath); preErr != nil || !bytes.Equal(preHash, e.BinaryHash) {
 		integrity = &m1pv1.AnchorIntegrity{
 			WorktreeMerkleRoot:   r.currentL0Root(), // empty ⇒ incomplete, never certifies
@@ -349,9 +368,7 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 			EnvScrubAttestation:  envAttestation(res, env),
 			Tamper:               hashErr != nil || !bytes.Equal(runHash, e.BinaryHash),
 		}
-		// ponytail: diff_classification and suppression_directive_delta stay
-		// zero-valued — they need the per-attempt touched-file set the verdict
-		// plane collects; wired when fusion lands (04 §2.3).
+		stdout, stderr = res.Stdout, res.Stderr
 
 		switch {
 		case runErr != nil || res.TimedOut || res.Signal != "":
@@ -369,6 +386,11 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 			}
 		}
 	}
+	// Read after the anchor ran, so the classification describes the tree it saw.
+	d := r.diff(ctx, worktree)
+	integrity.DiffClassification, integrity.SuppressionDirectiveDelta = d.class, d.delta
+	// Raw evidence stays on this device; a failed local write never fails the vote.
+	_, _ = r.Evidence.Put(task, e.ID, stdout, stderr, d.raw)
 
 	ev := &m1pv1.Event{
 		SessionId:  session[:],
@@ -391,6 +413,28 @@ func (r *Runner) currentL0Root() []byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]byte(nil), r.l0root...)
+}
+
+// EmitExcerpt is the only door for opt-in tiers (FR-VERIFY-016, 07 §4): E1 needs redaction_receipt_id, E2 needs MARK1_PROFILE=vpc|selfhost (04 §3 gateway mode).
+func (r *Runner) EmitExcerpt(ctx context.Context, session, task [16]byte, x *m1pv1.EvidenceExcerpt) error {
+	switch x.GetTier() {
+	case m1pv1.EvidenceTier_EVIDENCE_TIER_E1:
+		if len(x.GetRedactionReceiptId()) == 0 {
+			return fmt.Errorf("%w: E1 excerpt without redaction_receipt_id (FR-VERIFY-016)", ErrRefused)
+		}
+	case m1pv1.EvidenceTier_EVIDENCE_TIER_E2:
+		if p := os.Getenv("MARK1_PROFILE"); p != "vpc" && p != "selfhost" {
+			return fmt.Errorf("%w: E2 excerpt outside a vpc|selfhost profile, MARK1_PROFILE=%q (FR-VERIFY-016)", ErrRefused, p)
+		}
+	default:
+		return fmt.Errorf("%w: tier %v carries no excerpt", ErrRefused, x.GetTier())
+	}
+	return r.emit.Admit(ctx, &m1pv1.Event{
+		SessionId:  session[:],
+		TaskId:     task[:],
+		OccurredAt: timestamppb.Now(),
+		Body:       &m1pv1.Event_EvidenceExcerpt{EvidenceExcerpt: x},
+	})
 }
 
 // failureCode names the infra-failure category with a finite vocabulary —
@@ -417,6 +461,8 @@ func categoryOf(k Kind) m1pv1.EvidenceCategory {
 		return m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_TYPE
 	case KindCargoCheck:
 		return m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_BUILD
+	case KindGoTest, KindCargoTest, KindPytest, KindNpmTest:
+		return m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_TEST
 	default:
 		return m1pv1.EvidenceCategory_EVIDENCE_CATEGORY_LINT
 	}
