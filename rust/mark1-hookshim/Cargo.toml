@@ -16,6 +16,7 @@ workspace = true            # unwrap/expect/panic denied crate-wide; tests exemp
 
 [dependencies]
 m1p-wire = { workspace = true }
+mark1-harden = { workspace = true }   # RLIMIT_CORE=0 + PR_SET_DUMPABLE=0 before the hook body is read (04 §11.6)
 mark1-redact = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -9,15 +9,42 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-/// The shipped default: the claudecode map, pinned to the fixture corpus at
-/// `conformance/hooks/claudecode@2.1.251` (08 §5 rule 3: the fixture
-/// produces the field map; nothing is authored from memory).
+/// The shipped defaults, one per pinned fixture corpus (08 §5 rule 3: the
+/// fixture produces the field map; nothing is authored from memory) —
+/// `conformance/hooks/claudecode@2.1.251`, `conformance/hooks/codex@0.154.0`,
+/// `conformance/hooks/gemini@0.59.0`, `conformance/hooks/opencode@1.18.31`,
+/// `conformance/hooks/copilot@1.0.85` and `conformance/hooks/cursor@2026.09.10-fd3934a`.
 const BUILTIN_CLAUDECODE: &str = include_str!("../maps/claudecode.json");
+const BUILTIN_CODEX: &str = include_str!("../maps/codex.json");
+const BUILTIN_GEMINI: &str = include_str!("../maps/gemini.json");
+const BUILTIN_OPENCODE: &str = include_str!("../maps/opencode.json");
+const BUILTIN_COPILOT: &str = include_str!("../maps/copilot.json");
+const BUILTIN_CURSOR: &str = include_str!("../maps/cursor.json");
 
-/// ponytail: claudecode is the only Phase-1 agent, so agent selection is a
-/// constant; the daemon-materialized cache path is keyed by it so the
-/// multi-agent selection lands as data when more maps exist (04 §2.10).
-const AGENT: &str = "claudecode";
+/// Which agent exec'd us: `MARK1_AGENT`, set by that agent's registered
+/// command line (codex's and cursor's fragments write `env MARK1_AGENT=<agent>
+/// <shim>`, gemini's and copilot's hook entries carry it in `env`, opencode's
+/// plugin sets it on spawn); unset is claudecode, whose fragment predates the
+/// variable. The payloads are otherwise indistinguishable — all carry
+/// `hook_event_name` and `session_id` — so nothing here sniffs shape, which is
+/// also why Cursor running a claudecode entry (it loads ~/.claude/settings.json
+/// too) maps to nothing: its `stop` is not claudecode's `Stop`. An unknown name
+/// selects no builtin: emit nothing, never guess (08 §5 rule 2).
+fn agent() -> String {
+    std::env::var("MARK1_AGENT").unwrap_or_else(|_| "claudecode".to_owned())
+}
+
+fn builtin(agent: &str) -> Option<&'static str> {
+    match agent {
+        "claudecode" => Some(BUILTIN_CLAUDECODE),
+        "codex" => Some(BUILTIN_CODEX),
+        "gemini" => Some(BUILTIN_GEMINI),
+        "opencode" => Some(BUILTIN_OPENCODE),
+        "copilot" => Some(BUILTIN_COPILOT),
+        "cursor" => Some(BUILTIN_CURSOR),
+        _ => None,
+    }
+}
 
 #[derive(Deserialize)]
 pub struct FieldMap {
@@ -76,12 +103,13 @@ impl FieldMap {
 /// updates behavior with no binary change (FR-AGENT-001); any read or parse
 /// failure falls back to the shipped map rather than guessing.
 pub fn load(home: Option<&Path>) -> FieldMap {
+    let agent = agent();
     if let Some(h) = home {
         // 04 §5: ~/.omium/mark1/maps/<agent>.bin, pre-compiled by mark1d.
         // ponytail: "pre-compiled" is JSON bytes in v1 — parse cost on a
         // ~1 KiB map is microseconds; a binary format buys nothing until a
         // map is large enough to measure.
-        let cached = h.join(".omium/mark1/maps").join(format!("{AGENT}.bin"));
+        let cached = h.join(".omium/mark1/maps").join(format!("{agent}.bin"));
         if let Ok(bytes) = std::fs::read(cached) {
             if let Ok(map) = serde_json::from_slice::<FieldMap>(&bytes) {
                 return map;
@@ -91,11 +119,487 @@ pub fn load(home: Option<&Path>) -> FieldMap {
     // The builtin is compiled from a committed fixture-derived file; if it
     // ever failed to parse the binary itself is broken, and emitting nothing
     // (empty map) is the only honest fallback — never a panic (04 §5).
-    serde_json::from_str(BUILTIN_CLAUDECODE).unwrap_or(FieldMap {
-        agent: AGENT.to_owned(),
-        agent_version: String::new(),
-        event_field: String::new(),
-        session_id_field: String::new(),
-        events: HashMap::new(),
-    })
+    builtin(&agent)
+        .and_then(|b| serde_json::from_str(b).ok())
+        .unwrap_or(FieldMap {
+            agent,
+            agent_version: String::new(),
+            event_field: String::new(),
+            session_id_field: String::new(),
+            events: HashMap::new(),
+        })
+}
+
+/// `conf_hooks_codex_0.154.0_replay`, hook half: every committed codex
+/// fixture body through the builtin codex map, asserting the body kind.
+#[cfg(test)]
+mod codex_map {
+    use super::*;
+    use m1p_wire::pb::event::Body;
+
+    fn fixture(name: &str) -> serde_json::Value {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/hooks/codex/v0.154.0/hooks")
+            .join(format!("{name}.json"));
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn builtin_codex_map_parses_and_covers_every_fixture() {
+        let map: FieldMap = serde_json::from_str(BUILTIN_CODEX).unwrap();
+        assert_eq!(map.agent, "codex");
+        assert_eq!(map.agent_version, "0.154.0");
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/hooks/codex/v0.154.0/hooks");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| {
+                e.unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .trim_end_matches(".json")
+                    .to_owned()
+            })
+            .collect();
+        on_disk.sort();
+        let mut mapped: Vec<String> = map.events.keys().cloned().collect();
+        mapped.sort();
+        assert_eq!(
+            mapped, on_disk,
+            "map events must equal the pinned fixture bodies"
+        );
+        for (event, rule) in &map.events {
+            let payload = fixture(event);
+            assert!(map.rule(&payload).is_some(), "{event}: unmapped");
+            for vendor in rule.fields.values() {
+                assert!(
+                    payload.get(vendor).is_some(),
+                    "{event}: field {vendor} absent from the vendor schema body"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn codex_fixture_replay() {
+        let map: FieldMap = serde_json::from_str(BUILTIN_CODEX).unwrap();
+        let expect = |name: &str, f: &dyn Fn(&Body) -> bool| {
+            let ev = crate::emit::build(&map, &fixture(name))
+                .unwrap_or_else(|| panic!("{name}: no event"));
+            assert!(f(ev.body.as_ref().unwrap()), "{name}: wrong body");
+            assert_eq!(
+                ev.session_id,
+                uuid::Uuid::parse_str("019965a0-0000-7000-8000-00000000aa01")
+                    .unwrap()
+                    .as_bytes()
+            );
+        };
+        expect(
+            "SessionStart",
+            &|b| matches!(b, Body::SessionStart(s) if s.agent == "codex" && s.agent_version == "0.154.0"),
+        );
+        expect("SessionEnd", &|b| matches!(b, Body::SessionEnd(_)));
+        expect(
+            "UserPromptSubmit",
+            &|b| matches!(b, Body::Turn(t) if t.initiator == m1p_wire::pb::Initiator::Human as i32),
+        );
+        expect(
+            "PreToolUse",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "shell" && t.tool_use_id == "call_SynthFixtureTTTTTTTT" && t.status == m1p_wire::pb::ToolStatus::Unspecified as i32),
+        );
+        expect(
+            "PostToolUse",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "shell" && t.status == m1p_wire::pb::ToolStatus::Ok as i32),
+        );
+        expect(
+            "Stop",
+            &|b| matches!(b, Body::Turn(t) if t.initiator == m1p_wire::pb::Initiator::Agent as i32),
+        );
+        expect("SubagentStop", &|b| matches!(b, Body::Turn(_)));
+        let stop = map.rule(&fixture("Stop")).unwrap();
+        assert_eq!(
+            stop.gate.as_ref().map(|g| (g.kind.as_str(), g.budget_ms)),
+            Some(("stop", 250))
+        );
+        for none in ["SubagentStart", "PreCompact", "PostCompact", "Interrupt"] {
+            assert!(map.rule(&fixture(none)).is_some_and(|r| r.gate.is_none()));
+            assert!(
+                crate::emit::build(&map, &fixture(none)).is_none(),
+                "{none}: mapped-to-nothing must emit nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_agent_selects_no_builtin() {
+        assert!(builtin("crush").is_none());
+        assert!(builtin("").is_none());
+        for agent in [
+            "claudecode",
+            "codex",
+            "gemini",
+            "opencode",
+            "copilot",
+            "cursor",
+        ] {
+            assert!(builtin(agent).is_some(), "{agent}");
+        }
+    }
+}
+
+/// One fixture-corpus check shared by the gemini and opencode maps: the map's
+/// events equal the committed hook bodies and every mapped vendor field is on
+/// the body it names.
+#[cfg(test)]
+fn assert_map_covers_corpus(map: &FieldMap, fixtures: &str) {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(fixtures);
+    let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .trim_end_matches(".json")
+                .to_owned()
+        })
+        .collect();
+    on_disk.sort();
+    let mut mapped: Vec<String> = map.events.keys().cloned().collect();
+    mapped.sort();
+    assert_eq!(
+        mapped, on_disk,
+        "map events must equal the pinned fixture bodies"
+    );
+    for (event, rule) in &map.events {
+        let payload: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(format!("{event}.json"))).unwrap())
+                .unwrap();
+        assert!(map.rule(&payload).is_some(), "{event}: unmapped");
+        for vendor in rule.fields.values() {
+            assert!(
+                payload.get(vendor).is_some(),
+                "{event}: field {vendor} absent from the vendor body"
+            );
+        }
+    }
+}
+
+/// `conf_hooks_gemini_0.59.0_replay`, hook half.
+#[cfg(test)]
+mod gemini_map {
+    use super::*;
+    use m1p_wire::pb::event::Body;
+
+    const FIXTURES: &str = "../../conformance/hooks/gemini/v0.59.0/hooks";
+
+    fn fixture(name: &str) -> serde_json::Value {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(FIXTURES)
+            .join(format!("{name}.json"));
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn builtin_gemini_map_parses_and_covers_every_fixture() {
+        let map: FieldMap = serde_json::from_str(BUILTIN_GEMINI).unwrap();
+        assert_eq!(map.agent, "gemini");
+        assert_eq!(map.agent_version, "0.59.0");
+        assert_map_covers_corpus(&map, FIXTURES);
+    }
+
+    #[test]
+    fn gemini_fixture_replay() {
+        let map: FieldMap = serde_json::from_str(BUILTIN_GEMINI).unwrap();
+        let session = uuid::Uuid::parse_str("6f1e2d3c-0000-4000-8000-00000000aa01").unwrap();
+        let expect = |name: &str, f: &dyn Fn(&Body) -> bool| {
+            let ev = crate::emit::build(&map, &fixture(name))
+                .unwrap_or_else(|| panic!("{name}: no event"));
+            assert!(f(ev.body.as_ref().unwrap()), "{name}: wrong body");
+            assert_eq!(ev.session_id, session.as_bytes());
+        };
+        expect(
+            "SessionStart",
+            &|b| matches!(b, Body::SessionStart(s) if s.agent == "gemini" && s.agent_version == "0.59.0"),
+        );
+        expect("SessionEnd", &|b| matches!(b, Body::SessionEnd(_)));
+        expect(
+            "BeforeAgent",
+            &|b| matches!(b, Body::Turn(t) if t.initiator == m1p_wire::pb::Initiator::Human as i32),
+        );
+        // No tool-call id exists on this surface (BeforeToolInput): tool_use_id is empty, not guessed.
+        expect(
+            "BeforeTool",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "run_shell_command" && t.tool_use_id.is_empty() && t.status == m1p_wire::pb::ToolStatus::Unspecified as i32),
+        );
+        expect(
+            "AfterTool",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "run_shell_command" && t.status == m1p_wire::pb::ToolStatus::Ok as i32),
+        );
+        expect(
+            "AfterAgent",
+            &|b| matches!(b, Body::Turn(t) if t.initiator == m1p_wire::pb::Initiator::Agent as i32),
+        );
+        let stop = map.rule(&fixture("AfterAgent")).unwrap();
+        assert_eq!(
+            stop.gate.as_ref().map(|g| (g.kind.as_str(), g.budget_ms)),
+            Some(("stop", 250))
+        );
+        assert_eq!(
+            stop.fields.get("stop_hook_active").map(String::as_str),
+            Some("stop_hook_active")
+        );
+        assert!(map
+            .rule(&fixture("PreCompress"))
+            .is_some_and(|r| r.gate.is_none()));
+        assert!(
+            crate::emit::build(&map, &fixture("PreCompress")).is_none(),
+            "PreCompress: mapped-to-nothing must emit nothing"
+        );
+    }
+}
+
+/// `conf_hooks_opencode_1.18.31_replay`, hook half: the bodies mark1.js
+/// composes, through the builtin opencode map.
+#[cfg(test)]
+mod opencode_map {
+    use super::*;
+    use m1p_wire::pb::event::Body;
+
+    const FIXTURES: &str = "../../conformance/hooks/opencode/v1.18.31/hooks";
+
+    fn fixture(name: &str) -> serde_json::Value {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(FIXTURES)
+            .join(format!("{name}.json"));
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn builtin_opencode_map_parses_and_covers_every_fixture() {
+        let map: FieldMap = serde_json::from_str(BUILTIN_OPENCODE).unwrap();
+        assert_eq!(map.agent, "opencode");
+        assert_eq!(map.agent_version, "1.18.31");
+        assert_map_covers_corpus(&map, FIXTURES);
+    }
+
+    #[test]
+    fn opencode_fixture_replay() {
+        let map: FieldMap = serde_json::from_str(BUILTIN_OPENCODE).unwrap();
+        // UUIDv5(NameSpaceURL, "opencode:ses_0199a1b2c3d4SynthFixtuAA01") — the
+        // plugin's recipe; opencode.SessionUUID and selfcheck.py derive the same value.
+        let session = uuid::Uuid::parse_str("27777fa2-d57a-5838-b8bd-bf4c0f358055").unwrap();
+        let expect = |name: &str, f: &dyn Fn(&Body) -> bool| {
+            let ev = crate::emit::build(&map, &fixture(name))
+                .unwrap_or_else(|| panic!("{name}: no event"));
+            assert!(f(ev.body.as_ref().unwrap()), "{name}: wrong body");
+            assert_eq!(
+                ev.session_id,
+                session.as_bytes(),
+                "{name}: session_id is not the derived UUIDv5"
+            );
+        };
+        expect(
+            "session.created",
+            &|b| matches!(b, Body::SessionStart(s) if s.agent == "opencode" && s.agent_version == "1.18.31"),
+        );
+        expect(
+            "chat.message",
+            &|b| matches!(b, Body::Turn(t) if t.initiator == m1p_wire::pb::Initiator::Human as i32),
+        );
+        expect(
+            "tool.execute.before",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "bash" && t.tool_use_id == "call_SynthFixtureTTTTTTTT" && t.status == m1p_wire::pb::ToolStatus::Unspecified as i32),
+        );
+        expect(
+            "tool.execute.after",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "bash" && t.tool_use_id == "call_SynthFixtureTTTTTTTT" && t.status == m1p_wire::pb::ToolStatus::Ok as i32),
+        );
+        expect(
+            "session.idle",
+            &|b| matches!(b, Body::Turn(t) if t.initiator == m1p_wire::pb::Initiator::Agent as i32),
+        );
+        for rule in map.events.values() {
+            assert!(
+                rule.gate.is_none(),
+                "opencode has no gate hook on this surface"
+            );
+        }
+    }
+}
+
+/// `conf_hooks_copilot_1.0.85_replay`, hook half: the PascalCase bodies the
+/// CLI recorded, through the builtin copilot map.
+#[cfg(test)]
+mod copilot_map {
+    use super::*;
+    use m1p_wire::pb::event::Body;
+
+    const FIXTURES: &str = "../../conformance/hooks/copilot/v1.0.85/hooks";
+
+    fn fixture(name: &str) -> serde_json::Value {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(FIXTURES)
+            .join(format!("{name}.json"));
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn builtin_copilot_map_parses_and_covers_every_fixture() {
+        let map: FieldMap = serde_json::from_str(BUILTIN_COPILOT).unwrap();
+        assert_eq!(map.agent, "copilot");
+        assert_eq!(map.agent_version, "1.0.85");
+        assert_map_covers_corpus(&map, FIXTURES);
+    }
+
+    #[test]
+    fn copilot_fixture_replay() {
+        let map: FieldMap = serde_json::from_str(BUILTIN_COPILOT).unwrap();
+        // Every body is from recording aa01 except PostToolUseFailure, which only the
+        // failing-view recording aa02 produced (README).
+        let expect = |name: &str, f: &dyn Fn(&Body) -> bool| {
+            let ev = crate::emit::build(&map, &fixture(name))
+                .unwrap_or_else(|| panic!("{name}: no event"));
+            assert!(f(ev.body.as_ref().unwrap()), "{name}: wrong body");
+            let recording = if name == "PostToolUseFailure" {
+                "aa02"
+            } else {
+                "aa01"
+            };
+            let session =
+                uuid::Uuid::parse_str(&format!("c0910000-0000-4000-8000-00000000{recording}"))
+                    .unwrap();
+            assert_eq!(ev.session_id, session.as_bytes(), "{name}");
+        };
+        expect(
+            "SessionStart",
+            &|b| matches!(b, Body::SessionStart(s) if s.agent == "copilot" && s.agent_version == "1.0.85"),
+        );
+        expect("SessionEnd", &|b| matches!(b, Body::SessionEnd(_)));
+        expect(
+            "UserPromptSubmit",
+            &|b| matches!(b, Body::Turn(t) if t.initiator == m1p_wire::pb::Initiator::Human as i32),
+        );
+        // The PascalCase body names the tool by its Claude name and carries no call id (README).
+        expect(
+            "PreToolUse",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "Bash" && t.tool_use_id.is_empty() && t.status == m1p_wire::pb::ToolStatus::Unspecified as i32),
+        );
+        expect(
+            "PostToolUse",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "Bash" && t.status == m1p_wire::pb::ToolStatus::Ok as i32),
+        );
+        expect(
+            "PostToolUseFailure",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "Read" && t.status == m1p_wire::pb::ToolStatus::Error as i32),
+        );
+        expect(
+            "Stop",
+            &|b| matches!(b, Body::Turn(t) if t.initiator == m1p_wire::pb::Initiator::Agent as i32),
+        );
+        let stop = map.rule(&fixture("Stop")).unwrap();
+        assert_eq!(
+            stop.gate.as_ref().map(|g| (g.kind.as_str(), g.budget_ms)),
+            Some(("stop", 250))
+        );
+        assert_eq!(
+            stop.fields.get("stop_hook_active").map(String::as_str),
+            Some("stop_hook_active")
+        );
+        let pitfall = crate::context::plan(
+            map.rule(&fixture("PostToolUseFailure")).unwrap(),
+            &fixture("PostToolUseFailure"),
+        )
+        .unwrap();
+        assert_eq!(pitfall.tool_name, "Read");
+        assert_eq!(pitfall.error, "Path does not exist");
+        for (name, rule) in &map.events {
+            assert!(
+                name == "Stop" || rule.gate.is_none(),
+                "{name}: only Stop gates on this surface"
+            );
+        }
+    }
+}
+
+/// `conf_hooks_cursor_2026.09.10_replay`, hook half: the bodies composed from
+/// the CLI's payload builders, through the builtin cursor map.
+#[cfg(test)]
+mod cursor_map {
+    use super::*;
+    use m1p_wire::pb::event::Body;
+
+    const FIXTURES: &str = "../../conformance/hooks/cursor/v2026.09.10-fd3934a/hooks";
+
+    fn fixture(name: &str) -> serde_json::Value {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(FIXTURES)
+            .join(format!("{name}.json"));
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn builtin_cursor_map_parses_and_covers_every_fixture() {
+        let map: FieldMap = serde_json::from_str(BUILTIN_CURSOR).unwrap();
+        assert_eq!(map.agent, "cursor");
+        assert_eq!(map.agent_version, "2026.09.10-fd3934a");
+        assert_map_covers_corpus(&map, FIXTURES);
+    }
+
+    #[test]
+    fn cursor_fixture_replay() {
+        let map: FieldMap = serde_json::from_str(BUILTIN_CURSOR).unwrap();
+        // session_id is the conversation id (runner: session_id ?? conversation_id).
+        let session = uuid::Uuid::parse_str("cc0e0000-0000-4000-8000-00000000aa01").unwrap();
+        let expect = |name: &str, f: &dyn Fn(&Body) -> bool| {
+            let ev = crate::emit::build(&map, &fixture(name))
+                .unwrap_or_else(|| panic!("{name}: no event"));
+            assert!(f(ev.body.as_ref().unwrap()), "{name}: wrong body");
+            assert_eq!(ev.session_id, session.as_bytes());
+        };
+        expect(
+            "sessionStart",
+            &|b| matches!(b, Body::SessionStart(s) if s.agent == "cursor" && s.agent_version == "2026.09.10-fd3934a"),
+        );
+        expect("sessionEnd", &|b| matches!(b, Body::SessionEnd(_)));
+        expect(
+            "beforeSubmitPrompt",
+            &|b| matches!(b, Body::Turn(t) if t.initiator == m1p_wire::pb::Initiator::Human as i32),
+        );
+        expect(
+            "preToolUse",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "Shell" && t.tool_use_id == "call_SynthFixtureTTTTTTTT" && t.status == m1p_wire::pb::ToolStatus::Unspecified as i32),
+        );
+        // `duration`, not `duration_ms`, on the tool steps (cli-hook-dispatch.js).
+        expect(
+            "postToolUse",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "Shell" && t.duration_ms == 42 && t.status == m1p_wire::pb::ToolStatus::Ok as i32),
+        );
+        expect(
+            "postToolUseFailure",
+            &|b| matches!(b, Body::ToolUse(t) if t.tool_name == "Read" && t.tool_use_id == "call_SynthFixtureTTTTTTT2" && t.duration_ms == 7 && t.status == m1p_wire::pb::ToolStatus::Error as i32),
+        );
+        expect(
+            "stop",
+            &|b| matches!(b, Body::Turn(t) if t.initiator == m1p_wire::pb::Initiator::Agent as i32),
+        );
+        expect("subagentStop", &|b| matches!(b, Body::Turn(_)));
+        let stop = map.rule(&fixture("stop")).unwrap();
+        assert_eq!(
+            stop.gate.as_ref().map(|g| (g.kind.as_str(), g.budget_ms)),
+            Some(("stop", 250))
+        );
+        // No stop_hook_active on this surface: the vendor's loop_limit is the cap, and the
+        // shim must not read a field the payload never carries.
+        assert!(!stop.fields.contains_key("stop_hook_active"));
+        assert!(map
+            .rule(&fixture("subagentStop"))
+            .is_some_and(|r| r.gate.is_none()));
+        let pitfall = crate::context::plan(
+            map.rule(&fixture("postToolUseFailure")).unwrap(),
+            &fixture("postToolUseFailure"),
+        )
+        .unwrap();
+        assert_eq!(pitfall.error, "Path does not exist");
+        assert!(!pitfall.is_interrupt);
+    }
 }

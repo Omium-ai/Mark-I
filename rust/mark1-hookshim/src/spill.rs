@@ -130,6 +130,11 @@ pub fn count_handshake_refused(home: Option<&Path>) {
     count(home, "hookshim.handshake_refused");
 }
 
+/// One context pull the daemon never answered (D-AE property 3): correct, and countable.
+pub fn count_context_timeout(home: Option<&Path>) {
+    count(home, "hookshim.context_timeout");
+}
+
 fn count(home: Option<&Path>, name: &str) {
     let Some(home) = home else { return };
     let dir = home.join(".omium/mark1/spill");

@@ -1,0 +1,30 @@
+{
+  "map_version": 1,
+  "agent": "codex",
+  "agent_version": "0.154.0",
+  "event_field": "hook_event_name",
+  "session_id_field": "session_id",
+  "events": {
+    "SessionStart": { "kind": "session_start", "fields": {} },
+    "UserPromptSubmit": { "kind": "turn_human", "fields": {} },
+    "PreToolUse": {
+      "kind": "tool_open",
+      "fields": { "tool_name": "tool_name", "tool_use_id": "tool_use_id" }
+    },
+    "PostToolUse": {
+      "kind": "tool_close_ok",
+      "fields": { "tool_name": "tool_name", "tool_use_id": "tool_use_id" }
+    },
+    "Stop": {
+      "kind": "turn_agent",
+      "gate": { "kind": "stop", "budget_ms": 250 },
+      "fields": { "stop_hook_active": "stop_hook_active" }
+    },
+    "SubagentStop": { "kind": "turn_agent", "fields": {} },
+    "SubagentStart": { "kind": "none", "fields": {} },
+    "PreCompact": { "kind": "none", "fields": {} },
+    "PostCompact": { "kind": "none", "fields": {} },
+    "Interrupt": { "kind": "none", "fields": {} },
+    "SessionEnd": { "kind": "session_end", "fields": {} }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "map_version": 1,
+  "agent": "copilot",
+  "agent_version": "1.0.85",
+  "event_field": "hook_event_name",
+  "session_id_field": "session_id",
+  "events": {
+    "SessionStart": { "kind": "session_start", "fields": {} },
+    "UserPromptSubmit": { "kind": "turn_human", "fields": {} },
+    "PreToolUse": {
+      "kind": "tool_open",
+      "fields": { "tool_name": "tool_name" }
+    },
+    "PostToolUse": {
+      "kind": "tool_close_ok",
+      "fields": { "tool_name": "tool_name" }
+    },
+    "PostToolUseFailure": {
+      "kind": "tool_close_error",
+      "fields": { "tool_name": "tool_name", "error": "error" }
+    },
+    "Stop": {
+      "kind": "turn_agent",
+      "gate": { "kind": "stop", "budget_ms": 250 },
+      "fields": { "stop_hook_active": "stop_hook_active" }
+    },
+    "SessionEnd": { "kind": "session_end", "fields": {} }
+  }
+}

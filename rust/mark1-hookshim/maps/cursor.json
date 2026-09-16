@@ -1,0 +1,40 @@
+{
+  "map_version": 1,
+  "agent": "cursor",
+  "agent_version": "2026.09.10-fd3934a",
+  "event_field": "hook_event_name",
+  "session_id_field": "session_id",
+  "events": {
+    "sessionStart": { "kind": "session_start", "fields": {} },
+    "beforeSubmitPrompt": { "kind": "turn_human", "fields": {} },
+    "preToolUse": {
+      "kind": "tool_open",
+      "fields": { "tool_name": "tool_name", "tool_use_id": "tool_use_id" }
+    },
+    "postToolUse": {
+      "kind": "tool_close_ok",
+      "fields": {
+        "tool_name": "tool_name",
+        "tool_use_id": "tool_use_id",
+        "duration_ms": "duration"
+      }
+    },
+    "postToolUseFailure": {
+      "kind": "tool_close_error",
+      "fields": {
+        "tool_name": "tool_name",
+        "tool_use_id": "tool_use_id",
+        "duration_ms": "duration",
+        "error": "error_message",
+        "is_interrupt": "is_interrupt"
+      }
+    },
+    "stop": {
+      "kind": "turn_agent",
+      "gate": { "kind": "stop", "budget_ms": 250 },
+      "fields": {}
+    },
+    "subagentStop": { "kind": "turn_agent", "fields": {} },
+    "sessionEnd": { "kind": "session_end", "fields": {} }
+  }
+}

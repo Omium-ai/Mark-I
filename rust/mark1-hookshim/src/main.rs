@@ -16,6 +16,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+mod context;
 mod emit;
 mod fabric;
 mod gate;
@@ -44,6 +45,14 @@ fn main() {
     // Off-check BEFORE everything — before stdin, maps, or any fabric I/O
     // (invariant 2, 08 §7.6): no output, no I/O beyond the marker stat.
     if off() {
+        return;
+    }
+    // Before stdin: the hook body is the only thing in this process worth a
+    // core (04 §11.6, NFR-SECURITY-002). Two syscalls, no I/O, inside the
+    // cold-start budget; `harden_order::shim_harden_precedes_stdin` pins it.
+    // Cannot harden ⇒ capture nothing, the same fail-closed shape as off():
+    // exit 0, no output.
+    if mark1_harden::apply().is_err() {
         return;
     }
     // Every failure path is a deliberate no-op exit 0: an error the agent
@@ -125,6 +134,15 @@ fn run(started: Instant) {
         );
         return;
     }
+    // 08 §5.1's additionalContext rows pull their injection on the observer event's connection (D-AE).
+    if let Some(q) = map.rule(&payload).and_then(|r| context::plan(r, &payload)) {
+        let name = payload
+            .get(&map.event_field)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        context::run(home().as_deref(), &q, frame, &event.session_id, name);
+        return;
+    }
     // SessionEnd forces the drain (NFR-DURABILITY-004): the Flush rides the
     // same connection AFTER the event, so the daemon's drain covers it.
     if matches!(event.body, Some(m1p_wire::pb::event::Body::SessionEnd(_))) {
@@ -171,5 +189,27 @@ fn flush(home: Option<&Path>, frame: Vec<u8>, session_id: &[u8]) {
     if fabric::flush(&frame, session_id, budget).is_err() {
         spill::append(home, frame);
         spill::count_flush_timeout(home);
+    }
+}
+
+/// NFR-SECURITY-002's ordering clause for the shim, which has no runtime: the harden call
+/// precedes the stdin read that brings the hook body into memory. Comment lines are dropped
+/// first so prose mentioning either cannot satisfy it.
+#[cfg(test)]
+mod harden_order {
+    #[test]
+    fn shim_harden_precedes_stdin() {
+        let src: String = include_str!("main.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Only the text above this module: its own string literals are not evidence.
+        let src = &src[..src.find("mod harden_order").unwrap()];
+        let harden = src
+            .find("mark1_harden::apply()")
+            .expect("main calls mark1_harden::apply()");
+        let stdin = src.find("std::io::stdin()").expect("run reads stdin");
+        assert!(harden < stdin, "harden at {harden}, stdin at {stdin}");
     }
 }

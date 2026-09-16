@@ -24,7 +24,9 @@
       "fields": {
         "tool_name": "tool_name",
         "tool_use_id": "tool_use_id",
-        "duration_ms": "duration_ms"
+        "duration_ms": "duration_ms",
+        "error": "error",
+        "is_interrupt": "is_interrupt"
       }
     },
     "Stop": {

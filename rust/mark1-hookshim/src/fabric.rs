@@ -16,6 +16,7 @@
 //! only delivery evidence this fire-and-forget fabric has (there is no
 //! per-event ack, 08 §4.3 step 4), so it is what makes loss observable.
 
+#[cfg(unix)] // only endpoints() names it, and that is unix-gated
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -69,6 +70,20 @@ pub fn gate_query(
         // answers are the verdict and fail-open allow.
         _ => Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
     }
+}
+
+/// The D-AE context pull, the gate's shape on one connection; raw payloads both ways because the committed gen has no arms 8/9 yet (context.rs).
+pub fn context_query(
+    event_frame: &[u8],
+    query_payload: &[u8],
+    session_id: &[u8],
+    budget: Duration,
+) -> Result<Vec<u8>, std::io::Error> {
+    let deadline = Instant::now() + budget;
+    let mut conn = Conn::open(session_id, deadline)?;
+    conn.write_frame(event_frame)?;
+    conn.write_payload(query_payload)?;
+    conn.read_payload(deadline)
 }
 
 /// The SessionEnd drain barrier (08 §4.2's `Flush` row) on ONE connection:
@@ -187,6 +202,20 @@ mod imp {
             self.stream.write_all(frame)
         }
 
+        /// One M1PL frame (07 §5 header) around a raw FabricFrame payload.
+        pub fn write_payload(&mut self, payload: &[u8]) -> Result<(), std::io::Error> {
+            let len = u32::try_from(payload.len())
+                .ok()
+                .filter(|n| *n > 0 && *n <= m1p_wire::M1PL_MAX_FRAME)
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+            let mut out = Vec::with_capacity(m1p_wire::framing::HEADER_LEN + payload.len());
+            out.extend_from_slice(&m1p_wire::framing::MAGIC);
+            out.push(m1p_wire::framing::VERSION);
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(payload);
+            self.write_frame(&out)
+        }
+
         pub fn write_control(
             &mut self,
             kind: &pb::fabric_frame::Kind,
@@ -206,14 +235,17 @@ mod imp {
         /// recomputed each pass so a peer dripping one byte at a time cannot
         /// extend the total past the deadline. Never a busy-wait.
         pub fn read_frame(&mut self, deadline: Instant) -> Result<pb::FabricFrame, std::io::Error> {
+            let payload = self.read_payload(deadline)?;
+            m1p_wire::decode_payload(&payload)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+        }
+
+        /// One raw M1PL payload under the same wall deadline as `read_frame`.
+        pub fn read_payload(&mut self, deadline: Instant) -> Result<Vec<u8>, std::io::Error> {
             let mut buf = [0u8; 4096];
             loop {
                 match self.dec.next_frame() {
-                    m1p_wire::Outcome::Accept { payload, .. } => {
-                        return m1p_wire::decode_payload(&payload).map_err(|e| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-                        })
-                    }
+                    m1p_wire::Outcome::Accept { payload, .. } => return Ok(payload),
                     m1p_wire::Outcome::Incomplete { .. } => {}
                     m1p_wire::Outcome::Reject(e) => {
                         return Err(std::io::Error::new(
@@ -267,10 +299,16 @@ mod imp {
         ) -> Result<(), std::io::Error> {
             Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
+        pub fn write_payload(&mut self, _payload: &[u8]) -> Result<(), std::io::Error> {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        }
         pub fn read_frame(
             &mut self,
             _deadline: Instant,
         ) -> Result<pb::FabricFrame, std::io::Error> {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        }
+        pub fn read_payload(&mut self, _deadline: Instant) -> Result<Vec<u8>, std::io::Error> {
             Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
         }
     }
