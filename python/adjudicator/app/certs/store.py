@@ -6,15 +6,21 @@ module never works around them (a raised asyncpg.CheckViolationError is the corr
 outcome of a dishonest write attempt)."""
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
+from mark1_receipts import ReceiptRef
 
 from app.certs.compute import CertComputation
 from app.db import set_local_tenant
+
+RECEIPT_TYPE = "noise_certificate"
+# partial(append_server_record, http, controld_base_url, service_token); called keyword-only.
+ReceiptAppend = Callable[..., Awaitable[ReceiptRef]]
 
 
 @dataclass(frozen=True)
@@ -92,6 +98,10 @@ def _f(x: Any) -> float | None:
     return float(x) if x is not None else None  # numeric(7,6) arrives as Decimal
 
 
+def _micro(x: float | None) -> int | None:
+    return None if x is None else round(x * 1_000_000)  # integers-only receipt contract
+
+
 async def insert_cert(
     pool: asyncpg.Pool,
     tenant_id: str,
@@ -101,21 +111,43 @@ async def insert_cert(
     gold_set_id: UUID | None,
     identifiable: bool = False,  # Phase 2 truth: no spectral run has ever passed §4.3
     diagnostics: dict[str, Any] | None = None,
+    *,
+    append: ReceiptAppend,
 ) -> UUID:
     """One recompute → one NEW row (certificates are immutable; supersession is by
     validity window, 06 §5.2). Rates land exactly as measured — None stays NULL,
-    never a fabricated 0.0."""
+    never a fabricated 0.0. controld appends the noise_certificate receipt first (m1_002
+    §5: one writer), then the row commits carrying its id: a receipt naming a cert that
+    never landed is a harmless orphan, a cert without a receipt is the defect."""
+    cert_id = uuid4()
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant_id)
-        row = await conn.fetchrow(
+        ref = await append(
+            tenant_id=tenant_id,
+            record_type=RECEIPT_TYPE,
+            subject_id=cert_id,
+            idempotency_key=f"certs.recompute:{cert_id}",
+            payload={
+                "status": status,
+                "verifier_id": str(verifier_id),
+                "gold_set_id": None if gold_set_id is None else str(gold_set_id),
+                "gold_n": computation.gold_n,
+                "rho_plus_micro": _micro(computation.rho_plus),
+                "rho_minus_micro": _micro(computation.rho_minus),
+                "natarajan_lcb_micro": _micro(computation.natarajan_lcb),
+                "identifiable": identifiable,
+            },
+        )
+        await conn.execute(
             """
             INSERT INTO noise_certificates
-              (tenant_id, verifier_id, gold_set_id, status, rho_plus, rho_minus,
-               natarajan_lcb, gold_n, identifiable, diagnostics, issued_at, expires_at)
-            VALUES ($1, $2, $3, $4::cert_status, $5, $6, $7, $8, $9, $10::jsonb,
-                    now(), now() + $11::interval)
-            RETURNING id
+              (id, tenant_id, verifier_id, gold_set_id, status, rho_plus, rho_minus,
+               natarajan_lcb, gold_n, identifiable, diagnostics, issued_at, expires_at,
+               receipt_id)
+            VALUES ($1, $2, $3, $4, $5::cert_status, $6, $7, $8, $9, $10, $11::jsonb,
+                    now(), now() + $12::interval, $13)
             """,
+            cert_id,
             UUID(tenant_id),
             verifier_id,
             gold_set_id,
@@ -127,5 +159,6 @@ async def insert_cert(
             identifiable,
             json.dumps(diagnostics or {}),
             _VALIDITY,
+            ref.receipt_id,
         )
-        return row["id"]
+    return cert_id

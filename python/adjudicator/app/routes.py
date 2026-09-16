@@ -144,6 +144,7 @@ async def adjudicate_preview(req: PreviewRequest) -> dict:
         "classes": list(CLASSES),
         "noise_cert_id": event.noise_cert_id,
         "vote_count": event.vote_count,
+        "consistency_excluded": event.consistency_excluded,
         "reason": event.reason,
         "provenance": event.provenance,
         "groups": sorted(set(KIND_TO_GROUP.values())),

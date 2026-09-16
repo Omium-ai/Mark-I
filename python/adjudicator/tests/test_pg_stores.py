@@ -6,6 +6,7 @@ What this suite proves that the unit suites cannot: the tenant-GUC discipline ag
 live RLS policies, m1_021's frozen-set refusal on the producer side, and that the DB's
 certified_is_earned CHECK refuses a dishonest 'certified' row from THIS code path."""
 
+import functools
 import json
 import os
 import random
@@ -15,13 +16,16 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import asyncpg
+import httpx
 import pytest
 from app.certs.compute import compute_certificate
-from app.certs.store import current_cert, insert_cert
+from app.certs.store import RECEIPT_TYPE, ReceiptAppend, current_cert, insert_cert
 from app.db import _tenant_guc_reset, set_local_tenant
 from app.gold.score import score_agreement
 from app.gold.select import add_members, create_gold_set, freeze_gold_set
+from app.judges.cloud_path import Consent, pg_consent_reader
 from app.registry.catalog import list_verifiers
+from mark1_receipts import ReceiptAppendError, append_server_record
 
 DSN = os.environ.get("M1_TEST_PG_DSN", "")
 # The justfile's zero-skip inversion (its head; conformance/tenancy/conftest.py is the
@@ -110,6 +114,43 @@ async def _mk_judge_verifier(pool: asyncpg.Pool) -> UUID:
         )
 
 
+class FakeControld:
+    """controld's exact append wire (receipts/append.go handleAppend, fixture-locked in
+    go/controld/internal/receipts/testdata/receipt_append_body.json): body field set, the
+    service bearer, the {receipt_id, seq, receipt_hash, payload} ack, idempotent per key."""
+
+    FIELDS = frozenset({"tenant_id", "record_type", "subject_id", "idempotency_key", "payload"})
+
+    def __init__(self, record_type: str | set[str] = RECEIPT_TYPE) -> None:
+        self.record_types = {record_type} if isinstance(record_type, str) else set(record_type)
+        self.appended: list[dict] = []
+        self.acks: dict[tuple[str, str, str], dict] = {}
+        self.fail_with: tuple[int, str, str] | None = None
+
+    def handler(self, req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/internal/v1/receipts/append", req.url.path
+        assert req.headers.get("authorization") == "Bearer svc"
+        body = json.loads(req.content)
+        assert set(body) == self.FIELDS and body["record_type"] in self.record_types, body
+        if self.fail_with:
+            status, code, message = self.fail_with
+            return httpx.Response(status, json={"error": {"code": code, "message": message}})
+        key = (body["tenant_id"], body["record_type"], body["idempotency_key"])
+        if key not in self.acks:
+            self.appended.append(body)
+            self.acks[key] = {
+                "receipt_id": str(uuid4()),
+                "seq": len(self.acks) + 1,
+                "receipt_hash": "ab" * 32,
+                "payload": json.dumps({**body["payload"], "subject_id": body["subject_id"]}),
+            }
+        return httpx.Response(200, json=self.acks[key])
+
+    def append(self) -> ReceiptAppend:
+        http = httpx.AsyncClient(transport=httpx.MockTransport(self.handler), base_url="http://c")
+        return functools.partial(append_server_record, http, "http://controld", "svc")
+
+
 async def test_gold_and_cert_round_trip(pool):
     tenant = await _mk_tenant(pool)
     verifier = await _mk_judge_verifier(pool)
@@ -128,12 +169,40 @@ async def test_gold_and_cert_round_trip(pool):
     comp = compute_certificate(
         score_agreement([("satisfied", "satisfied")] * 3 + [("violated", "violated")])
     )
+    controld = FakeControld()
     cert_id = await insert_cert(
-        pool, tenant, verifier, "bootstrapping", comp, gold_set, diagnostics={"phase": 2}
+        pool,
+        tenant,
+        verifier,
+        "bootstrapping",
+        comp,
+        gold_set,
+        diagnostics={"phase": 2},
+        append=controld.append(),
     )
     got = await current_cert(pool, tenant)
     assert got.id == cert_id
     assert got.status == "bootstrapping"
+    # FR-VERIFY-013: issuance is receipted through controld, and the row carries the id.
+    (body,) = controld.appended
+    assert (body["tenant_id"], UUID(body["subject_id"])) == (tenant, cert_id)
+    assert body["idempotency_key"] == f"certs.recompute:{cert_id}"
+    assert body["payload"] == {
+        "status": "bootstrapping",
+        "verifier_id": str(verifier),
+        "gold_set_id": str(gold_set),
+        "gold_n": comp.gold_n,
+        "rho_plus_micro": round(comp.rho_plus * 1_000_000),
+        "rho_minus_micro": round(comp.rho_minus * 1_000_000),
+        "natarajan_lcb_micro": round(comp.natarajan_lcb * 1_000_000),
+        "identifiable": False,
+    }
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant)
+        receipt_id = await conn.fetchval(
+            "SELECT receipt_id FROM noise_certificates WHERE id = $1", cert_id
+        )
+    assert str(receipt_id) == next(iter(controld.acks.values()))["receipt_id"]
 
     # A registry read sees the global catalog row (no tenant GUC on m1_verifiers).
     keys = {e.id for e in await list_verifiers(pool)}
@@ -150,8 +219,40 @@ async def test_certified_is_earned_refused_by_the_db(pool):
     comp = compute_certificate(
         score_agreement([("satisfied", "satisfied")] * 3 + [("violated", "violated")])
     )
+    controld = FakeControld()
     with pytest.raises(asyncpg.CheckViolationError):
-        await insert_cert(pool, tenant, verifier, "certified", comp, gold_set)
+        await insert_cert(
+            pool, tenant, verifier, "certified", comp, gold_set, append=controld.append()
+        )
+    # The receipt landed first and the row never did: a harmless orphan, never an unearned cert.
+    assert [b["payload"]["status"] for b in controld.appended] == ["certified"]
+    assert (await current_cert(pool, tenant)).id is None
+
+
+async def test_unreceipted_cert_is_never_issued(pool):
+    """controld refuses or fails the append ⇒ no noise_certificates row at all (fail-closed);
+    the same call succeeds once the chain answers."""
+    tenant = await _mk_tenant(pool)
+    verifier = await _mk_judge_verifier(pool)
+    comp = compute_certificate(score_agreement([]))
+    controld = FakeControld()
+    for failure, code in (
+        ((500, "M1E-9500", "chain append failed"), "M1E-9500"),
+        ((403, "M1E-1001", "service credential rejected"), "M1E-1001"),
+    ):
+        controld.fail_with = failure
+        with pytest.raises(ReceiptAppendError) as e:
+            await insert_cert(
+                pool, tenant, verifier, "bootstrapping", comp, None, append=controld.append()
+            )
+        assert e.value.code == code and controld.appended == []
+        assert (await current_cert(pool, tenant)).id is None
+    controld.fail_with = None
+    cert_id = await insert_cert(
+        pool, tenant, verifier, "bootstrapping", comp, None, append=controld.append()
+    )
+    assert (await current_cert(pool, tenant)).id == cert_id
+    assert [UUID(b["subject_id"]) for b in controld.appended] == [cert_id]
 
 
 def _run_leg(target: str, **env_overrides: str) -> subprocess.CompletedProcess:
@@ -199,9 +300,12 @@ async def test_tenant_predicate_holds_under_bypass_role(pool):
     tenant_b = await _mk_tenant(pool)
     verifier = await _mk_judge_verifier(pool)
     comp = compute_certificate(score_agreement([]))
-    await insert_cert(pool, tenant_a, verifier, "bootstrapping", comp, None)
-    b_first = await insert_cert(pool, tenant_b, verifier, "uncertified", comp, None)
-    b_second = await insert_cert(pool, tenant_b, verifier, "bootstrapping", comp, None)
+    append = FakeControld().append()
+    await insert_cert(pool, tenant_a, verifier, "bootstrapping", comp, None, append=append)
+    b_first = await insert_cert(pool, tenant_b, verifier, "uncertified", comp, None, append=append)
+    b_second = await insert_cert(
+        pool, tenant_b, verifier, "bootstrapping", comp, None, append=append
+    )
 
     # A tenant with no certs reads the honest floor, never someone else's row.
     tenant_c = await _mk_tenant(pool)
@@ -238,7 +342,9 @@ async def test_rls_isolation_between_tenants(pool):
     tenant_b = await _mk_tenant(pool)
     verifier = await _mk_judge_verifier(pool)
     comp = compute_certificate(score_agreement([]))
-    a_cert = await insert_cert(pool, tenant_a, verifier, "bootstrapping", comp, None)
+    a_cert = await insert_cert(
+        pool, tenant_a, verifier, "bootstrapping", comp, None, append=FakeControld().append()
+    )
     # Tenant B's read must see NOTHING of tenant A's certificate: absence reads as
     # uncertified — the honest floor, not an error.
     got = await current_cert(pool, tenant_b)
@@ -255,3 +361,42 @@ async def test_rls_isolation_between_tenants(pool):
             await set_local_tenant(conn, tenant_b)
             visible = await conn.fetch("SELECT id FROM noise_certificates")
     assert a_cert not in {r["id"] for r in visible}
+
+
+async def test_cloud_judge_consent_read_is_tenant_scoped_revocable_and_never_e2(pool):
+    """m1_065 as the cloud path reads it (06 §6.5 preconditions 1-4 at the DB layer)."""
+    tenant_a, tenant_b = UUID(await _mk_tenant(pool)), UUID(await _mk_tenant(pool))
+    jid = "judge:grounded-rubric@1"
+    read = pg_consent_reader(pool)
+
+    async def insert(tenant: UUID, max_tier: str):
+        async with pool.acquire() as conn, conn.transaction():
+            await set_local_tenant(conn, str(tenant))
+            await conn.execute(
+                """
+                INSERT INTO m1_cloud_judge_consents
+                  (tenant_id, judge_id, subprocessor, region, max_tier, consented_by)
+                VALUES ($1, $2, 'anthropic', 'us', $3, 'test')
+                """,
+                tenant,
+                jid,
+                max_tier,
+            )
+
+    assert await read(tenant_a, jid) is None  # absence is the default, not an error
+    await insert(tenant_a, "E0")
+    assert await read(tenant_a, jid) == Consent("anthropic", "us", "E0")
+    assert await read(tenant_b, jid) is None  # tenant B sees nothing of A's consent
+    # E2 never reaches the cloud path: the CHECK refuses the row, not just the read.
+    with pytest.raises(asyncpg.CheckViolationError):
+        await insert(tenant_b, "E2")
+    # Revocation is an UPDATE the read honours; the history row stays.
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, str(tenant_a))
+        await conn.execute(
+            "UPDATE m1_cloud_judge_consents SET revoked_at = now(), revoked_reason = 'test' "
+            "WHERE judge_id = $1",
+            jid,
+        )
+        assert await conn.fetchval("SELECT count(*) FROM m1_cloud_judge_consents") == 1
+    assert await read(tenant_a, jid) is None

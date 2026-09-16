@@ -144,7 +144,7 @@ def test_bootstrapping_to_certified_needs_every_gate():
         )
         == BOOTSTRAPPING
     )
-    # §4.3 identifiability gate — the Phase 2 permanent state (spectral is Phase 4)
+    # §4.3 identifiability gate (the real run is test_spectral::test_cert_state_machine_transitions)
     assert (
         next_status(BOOTSTRAPPING, ev(gold_n=250, fresh_frac=0.9, natarajan_ok=True))
         == BOOTSTRAPPING

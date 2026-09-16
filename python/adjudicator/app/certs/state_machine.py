@@ -8,9 +8,9 @@ Two structural properties, both tested:
   violated, drift alarm, tamper event) demote to the FLOOR from any state. The status
   is a claim about what may be asserted, so it degrades faster than it upgrades.
 
-Phase 2 honesty: `identifiability_passed` is False until the Phase 4 spectral
-estimator exists, so `certified` is structurally unreachable — the ladder still
-encodes it because the ladder IS the contract, not the current capability."""
+`identifiability_passed` is `spectral.identifiability.Diagnostics.passed` from the
+window's SPECTRAL_DS run (06 §4.3, G1–G6) — the nightly `cert_recompute` copies it
+verbatim; nothing else may set it True."""
 
 from dataclasses import dataclass
 
@@ -35,7 +35,7 @@ class CertEvidence:
     gold_n: int  # labels in the D17-filtered scoring window
     fresh_frac: float  # fraction within the D16 30-day window
     estimator_ran: bool  # "estimator running (any mode)" — weighted-majority counts
-    identifiability_passed: bool  # §4.3 gate (Phase 4); False until spectral exists
+    identifiability_passed: bool  # §4.3 gate: spectral Diagnostics.passed, never defaulted
     natarajan_ok: bool | None  # None ⇒ not yet measurable (compute.py, never defaulted)
     drift_alarm: bool = False  # label-free CUSUM (Paper II)
     tamper_event: bool = False

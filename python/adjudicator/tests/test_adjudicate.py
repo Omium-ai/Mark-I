@@ -506,3 +506,97 @@ def test_empty_group_is_its_own_clique_not_a_shared_bucket():
     one = adjudicate([vote(a, "reject")], bundle)
     two = adjudicate([vote(a, "reject"), vote(b, "reject")], bundle)
     assert two.posterior != one.posterior
+
+
+CONSISTENCY = VerifierParams(
+    "consistency:t3-rerun@1",
+    "consistency",
+    confusion=(
+        (0.60, 0.25, 0.15),
+        (0.40, 0.45, 0.15),
+        (0.30, 0.30, 0.40),
+        (0.30, 0.30, 0.40),
+    ),
+    group="consistency",
+    provenance="prior",
+)
+SCOPED_BUNDLE = Bundle(
+    priors=PRIORS, verifiers={**BUNDLE.verifiers, CONSISTENCY.verifier_id: CONSISTENCY}
+)
+
+
+def test_consistency_vote_outside_escalation_is_excluded_not_averaged():
+    """FR-VERIFY-017 / C1.16, the negative: in the provisional/T1 fusion (the default
+    stage) a ConsistencyVote contributes no likelihood, no coverage and no vote_count
+    — and the exclusion is on the event, never a silent drop."""
+    base = adjudicate([vote(CARGO, "accept"), vote(JUDGE, "reject")], SCOPED_BUNDLE)
+    with_cv = adjudicate(
+        [vote(CARGO, "accept"), vote(JUDGE, "reject"), vote(CONSISTENCY, "reject")],
+        SCOPED_BUNDLE,
+    )
+    assert base.consistency_excluded == 0
+    assert with_cv.posterior == base.posterior
+    assert with_cv.verdict == base.verdict == "refused"
+    assert with_cv.vote_count == base.vote_count == 2
+    assert with_cv.consistency_excluded == 1
+    assert with_cv.unknown_voters == 0
+    # A consistency vote alone at the wrong stage is not evidence of anything.
+    alone = adjudicate([vote(CONSISTENCY, "reject")], SCOPED_BUNDLE)
+    assert alone.reason == "insufficient_evidence"
+    assert alone.verdict == "refused"
+    assert alone.vote_count == 0
+    assert alone.consistency_excluded == 1
+
+
+def test_consistency_vote_fuses_on_escalation_but_is_never_an_ensemble_member():
+    """FR-VERIFY-017 / C1.16, the positive control through the same entrypoint: on an
+    escalation/T3 run the ConsistencyVote enters the likelihood as its own clique —
+    and STILL supplies no coverage, no vote_count and no infra-denominator seat."""
+    base = adjudicate([vote(CARGO, "accept"), vote(JUDGE, "reject")], SCOPED_BUNDLE)
+    fused = adjudicate(
+        [vote(CARGO, "accept"), vote(JUDGE, "reject"), vote(CONSISTENCY, "reject")],
+        SCOPED_BUNDLE,
+        escalation=True,
+    )
+    assert fused.consistency_excluded == 0
+    assert fused.posterior != base.posterior
+    # priors × cargo accept × judge reject × consistency reject, by hand.
+    u = [
+        0.55 * 0.98 * 0.15 * 0.25,
+        0.30 * 0.60 * 0.70 * 0.45,
+        0.10 * 0.50 * 0.40 * 0.30,
+        0.05 * 0.50 * 0.40 * 0.30,
+    ]
+    assert fused.posterior == pytest.approx(tuple(x / (u[0] + u[1] + u[2] + u[3]) for x in u))
+    assert fused.verdict == "violated"
+    assert fused.vote_count == 2  # "ensemble members fused" never counts it
+    # No coverage: a consistency vote alone cannot unlock a verdict even at T3.
+    alone = adjudicate([vote(CONSISTENCY, "reject")], SCOPED_BUNDLE, escalation=True)
+    assert alone.reason == "insufficient_evidence"
+    assert alone.vote_count == 0
+    assert alone.consistency_excluded == 0
+    # An infra-failed consistency vote at T3 is as uninformative as any other.
+    dead = adjudicate(
+        [
+            vote(CARGO, "accept"),
+            vote(JUDGE, "reject"),
+            vote(CONSISTENCY, "abstain", infra_failed=True),
+        ],
+        SCOPED_BUNDLE,
+        escalation=True,
+    )
+    assert dead.posterior == base.posterior
+
+
+def test_consistency_vote_has_no_seat_in_the_infra_denominator():
+    """Two infra-failed anchors and one live judge are infra-dominant (2/3 > 0.5). A
+    fused consistency vote must not widen the denominator to 2/4 and launder the
+    outage into a verdict about the code (Thm 5.2)."""
+    votes = [
+        vote(CARGO, "abstain", infra_failed=True),
+        vote(RUFF, "abstain", infra_failed=True),
+        vote(JUDGE, "accept"),
+        vote(CONSISTENCY, "accept"),
+    ]
+    assert adjudicate(votes, SCOPED_BUNDLE, escalation=True).verdict == "error"
+    assert adjudicate(votes, SCOPED_BUNDLE).verdict == "error"

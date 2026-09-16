@@ -25,6 +25,7 @@ from mark1_receipts.checkpoint import (
     verify_inclusion,
     verify_merkle_root,
 )
+from mark1_receipts.client import ReceiptAppendError, ReceiptRef, append_server_record
 from mark1_receipts.keys import (
     ROLE_DEVICE_ORIGIN,
     ROLE_SERVER_CHAIN,
@@ -47,8 +48,11 @@ __all__ = [
     "Ed25519Signer",
     "NonCanonicalNumberError",
     "PublishedKey",
+    "ReceiptAppendError",
     "ReceiptKeyError",
+    "ReceiptRef",
     "Signer",
+    "append_server_record",
     "build_checkpoint",
     "canonical_bytes",
     "canonical_json",

@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     pg_pool_min: int = 2
     pg_pool_max: int = 10
     http_timeout_s: float = 30.0
+    # controld's query choke — this service's ONLY ledger read path (05 §6). Empty ⇒
+    # spectral.estimate refuses at run time rather than the whole service at boot.
+    querychoke_base_url: str = ""
+    querychoke_token: SecretStr = SecretStr("")
+    tenant_hmac_pepper: str = ""  # hex; the pepper controld enroll.TenantRoot derives from
 
     @property
     def pg_dsn_app(self) -> str:

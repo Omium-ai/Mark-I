@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 from app.adjudicate.chow import Costs, chow_verdict
 from app.adjudicate.likelihoods import Bundle, VerifierParams, likelihood
-from app.registry.handlers import NormalizedVote
+from app.registry.handlers import KIND_CONSISTENCY, NormalizedVote
 
 # D1 (06 §3.1 step 0): fewer than 1 non-abstaining verifier ⇒ insufficient evidence.
 MIN_EVIDENCE = 1
@@ -65,6 +65,8 @@ class VerdictEvent:
     # D-X accounting (the edge's Cached.UnknownVoters): votes whose verifier the
     # bundle does not list. They contribute no likelihood, and are not lost either.
     unknown_voters: int = 0
+    # C1.16: consistency votes offered outside an escalation/T3 run — excluded, never averaged
+    consistency_excluded: int = 0
 
 
 # 06 §1.3 vocabulary, weakest first: a fusion's provenance claim is only as strong as
@@ -156,11 +158,19 @@ def adjudicate(
     bundle: Bundle,
     costs: Costs | None = None,
     noise_cert_id: str = "",
+    escalation: bool = False,
 ) -> VerdictEvent:
     """06 §3.1's pseudocode, step for step. The certificate is STAMPED, never
     consulted: the math does not change with its status, the claims permitted about
-    the math do (06 §3)."""
+    the math do (06 §3). `escalation` is True only on an escalation event or a T3
+    certified run — the sole stage at which a consistency vote may fuse (C1.16)."""
     costs = costs or Costs()
+
+    # FR-VERIFY-017: never an ensemble member (no coverage/vote_count/infra denominator)
+    consistency = [v for v in votes if v.kind == KIND_CONSISTENCY]
+    votes = [v for v in votes if v.kind != KIND_CONSISTENCY]
+    fused_consistency = consistency if escalation else []
+    consistency_excluded = len(consistency) - len(fused_consistency)
 
     # Step 0 — integrity partition (Thm 5.2: infra failure ≠ violated).
     tampered = [v for v in votes if v.integrity.tamper]
@@ -168,6 +178,9 @@ def adjudicate(
     # infra-failed votes are uninformative on E (λ ⊥ Y | E): they contribute no
     # likelihood term below, only the infra_dominant signal at step 3.
     informative = [v for v in votes if not v.integrity.infra_failed]
+    informative += [
+        v for v in fused_consistency if not (v.integrity.tamper or v.integrity.infra_failed)
+    ]
 
     # D-AB: membership gates COVERAGE, not only likelihood — so the bundle filter runs
     # BEFORE D1, not after. Counted first, an unlisted (or quarantined) verifier lifts
@@ -183,7 +196,7 @@ def adjudicate(
         if p is None:  # D-X: unlisted verifier — no likelihood, but counted
             unknown += 1
             continue
-        if v.vote != "abstain":
+        if v.vote != "abstain" and v.kind != KIND_CONSISTENCY:
             coverage += 1
         # An empty group is "independent", its own clique — never a shared bucket
         # named "" that silently collapses every ungrouped verifier into one.
@@ -207,6 +220,7 @@ def adjudicate(
             reason="insufficient_evidence",
             provenance=provenance,
             unknown_voters=unknown,
+            consistency_excluded=consistency_excluded,
         )
 
     # Step 1 — anchor step (Thm 4.2): no branch; the clamp is the likelihood (module
@@ -258,6 +272,7 @@ def adjudicate(
             vote_count=len(votes),
             provenance=provenance,
             unknown_voters=unknown,
+            consistency_excluded=consistency_excluded,
         )
 
     # Step 4 — Chow band (Thm 5.1), on the UNNORMALISED mass: η = u[S]/total, compared
@@ -276,4 +291,5 @@ def adjudicate(
         vote_count=len(votes),
         provenance=provenance,
         unknown_voters=unknown,
+        consistency_excluded=consistency_excluded,
     )
