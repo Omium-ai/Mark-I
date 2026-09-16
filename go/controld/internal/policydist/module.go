@@ -3,6 +3,7 @@
 //	GET  /api/v1/policy/bundle?channel=stable   ETag-conditional, application/cbor
 //	GET  /api/v1/policy/stream?channel=stable   SSE hints
 //	POST /api/v1/policy/ack                     the ACK ledger's intake
+//	POST /internal/v1/judge-requests            service-token: fan a JudgeRequest out (judge.go)
 //
 // Publication has no route here on purpose: 05 §4.1 places it on "policydist's
 // internal publication path (in-repo, not a public route)". Module.Publish is
@@ -44,21 +45,24 @@ type ModuleDeps struct {
 	PG       PGReady
 	Verifier auth.Verifier
 	ObsCfg   obs.Config
+	// IntelServiceToken guards the internal judge-request route (judge.go), the same credential as receipts' append route; empty verifies nothing, so the surface is absent, never open.
+	IntelServiceToken string
 }
 
 type Module struct {
-	store    *Store
-	pgReady  PGReady
-	verifier auth.Verifier
-	obsCfg   obs.Config
-	hub      *Hub
-	limiter  *limiter
+	store        *Store
+	pgReady      PGReady
+	verifier     auth.Verifier
+	obsCfg       obs.Config
+	hub          *Hub
+	limiter      *limiter
+	serviceToken string
 }
 
 func NewModule(d ModuleDeps) *Module {
 	return &Module{
 		store: d.Store, pgReady: d.PG, verifier: d.Verifier, obsCfg: d.ObsCfg,
-		hub: NewHub(), limiter: newLimiter(),
+		hub: NewHub(), limiter: newLimiter(), serviceToken: d.IntelServiceToken,
 	}
 }
 
@@ -81,6 +85,7 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/policy/bundle", chain(http.HandlerFunc(m.handleBundle)))
 	mux.Handle("GET /api/v1/policy/stream", chain(http.HandlerFunc(m.handleStream)))
 	mux.Handle("POST /api/v1/policy/ack", chain(http.HandlerFunc(m.handleAck)))
+	mux.Handle("POST /internal/v1/judge-requests", m.obsCfg.HTTPMiddleware(nil)(http.HandlerFunc(m.handleJudgeRequest)))
 }
 
 // Publish is the internal publication path. The SSE hint fires only after the

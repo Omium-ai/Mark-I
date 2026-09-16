@@ -97,8 +97,11 @@ const (
 	// between polls, and the poll re-evaluates too.
 	freshEvery = 30 * time.Second
 	// sseLineMax bounds one SSE line. Hints are two integers; anything larger
-	// is a broken or hostile stream, not a bigger hint.
+	// is a broken or hostile stream, not a bigger hint. A judge_request rides
+	// one line too (protojson, rubric ≤ 16 KiB escaped).
 	sseLineMax = 1 << 16
+	// sseDataLinesMax bounds the data lines one block may accumulate.
+	sseDataLinesMax = 4
 )
 
 // Config wires one Client. Every field is optional except StateDir: a Client
@@ -168,6 +171,11 @@ type Client struct {
 	// ApplyRanker publishes the applied bundle's cortex learned_ranker (nil
 	// when absent or stale) under the same rules as Apply; cortex.Plane.SetRanker.
 	ApplyRanker func(*policy.LearnedRanker)
+	// OnJudgeRequest receives the data of every `event: judge_request` block
+	// (ADR-0008, 06 §6.2 step 2: a protojson m1p.v1.JudgeRequest) under the
+	// same set-before-Run rule as Apply; internal/judge.Runner.Handle. It must
+	// not block: the stream's server closes a slow consumer (05 §8.2).
+	OnJudgeRequest func(data []byte)
 
 	lkg  *applied
 	boot verdict.BundleMatrices

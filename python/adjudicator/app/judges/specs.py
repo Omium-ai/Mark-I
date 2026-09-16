@@ -1,9 +1,10 @@
 """Judge registry + the client-side-default runner (06 §6, contract C4).
 
 This module orchestrates WHICH judge runs on WHICH evidence tier; in the default path
-it executes nothing. `ClientSideJudge.run` emits a `JudgeRequest` the edge (mark1d)
-consumes: evidence is assembled locally, the model is called through the CUSTOMER'S
-OWN key, and only the resulting `JudgeVote` (proto/m1p/v1/verify.proto) comes back.
+it executes nothing. `ClientSideJudge.run` posts a `JudgeRequest` (proto/m1p/v1/verify.proto)
+to controld's internal fan-out route; it rides the tenant's policy SSE stream as
+`event: judge_request`, the owning edge (mark1d internal/judge) assembles evidence locally,
+calls the model through the CUSTOMER'S OWN key, and only the `JudgeVote` comes back.
 
 Registry discipline is probes.py's, imported whole (06 §2.2): the spec dict and the
 registered set are the same fact stated twice, asserted at import; a judge_id outside
@@ -12,9 +13,11 @@ the set is REFUSED with a typed error, never faked into a vote."""
 from collections import Counter
 from dataclasses import dataclass
 from typing import Literal, Protocol
-from uuid import UUID
+from uuid import UUID, uuid5
 
-from m1p.v1 import JudgeLocus, JudgeVote
+import betterproto
+import httpx
+from m1p.v1 import EvidenceTier, JudgeLocus, JudgeRequest, JudgeVote
 
 from app.adjudicate.likelihoods import CALIBRATED_CONFUSION, Confusion
 
@@ -95,49 +98,70 @@ def spec_for(judge_id: str, profile: str) -> JudgeSpec:
     return spec
 
 
-@dataclass(frozen=True)
-class JudgeRequest:
-    """What crosses to the edge on the client-side path (06 §6.2 step 2). Rubric text
-    rides as prompt DATA; no command, no evidence, no key ever crosses. Go side owed:
-    mark1d consumes this and emits the JudgeVote."""
-
-    judge_id: str
-    task_id: UUID
-    attempt_id: UUID
-    rubric: str
-    evidence_tier: Tier
-    model: str
-    token_budget: int
-    locus: JudgeLocus = JudgeLocus.CLIENT_SIDE
+JUDGE_REQUESTS_PATH = "/internal/v1/judge-requests"
+WIRE_TIER = {"E0": EvidenceTier.E0, "E1": EvidenceTier.E1, "E2": EvidenceTier.E2}
 
 
 class JudgeRunner(Protocol):
     locus: JudgeLocus
 
     async def run(
-        self, tenant_id: UUID, judge_id: str, task_id: UUID, attempt_id: UUID
+        self, tenant_id: UUID, judge_id: str, task_id: UUID, attempt_id: UUID, session_id: UUID
     ) -> JudgeRequest | JudgeVote: ...
 
 
+def request_id_for(judge_id: str, task_id: UUID, attempt_id: UUID) -> str:
+    """Deterministic per (task, judge, attempt): the edge keeps one vote per request_id, so a
+    repost after a missed delivery is safe and a re-run cannot mint a second vote."""
+    return str(uuid5(task_id, f"{judge_id}/{attempt_id}"))
+
+
+def protojson(req: JudgeRequest) -> dict[str, object]:
+    d = req.to_dict(casing=betterproto.Casing.CAMEL)
+    # betterproto strips the enum prefix ("E0"); protojson wants the full name or the integer.
+    d["tier"], d["locus"] = req.tier.value, req.locus.value
+    return d
+
+
 class ClientSideJudge:
-    """The default. Emits the request; the adjudicator only ever sees the vote come back
-    through the ledger. Zero network here by construction — there is no client."""
+    """The default. Posts the request to controld's fan-out route and returns it; the
+    adjudicator only ever sees the vote come back through the ledger. No model client
+    exists here by construction, so no evidence and no key can leave through it."""
 
     locus = JudgeLocus.CLIENT_SIDE
 
-    def __init__(self, profile: str = "saas") -> None:
-        self._profile = profile
+    def __init__(
+        self, http: httpx.AsyncClient, base_url: str, service_token: str, profile: str = "saas"
+    ) -> None:
+        self._http, self._base_url, self._token, self._profile = (
+            http,
+            base_url,
+            service_token,
+            profile,
+        )
 
     async def run(
-        self, tenant_id: UUID, judge_id: str, task_id: UUID, attempt_id: UUID
+        self, tenant_id: UUID, judge_id: str, task_id: UUID, attempt_id: UUID, session_id: UUID
     ) -> JudgeRequest:
         spec = spec_for(judge_id, self._profile)
-        return JudgeRequest(
+        if not self._base_url or not self._token:
+            raise refuse("refused_no_controld", "controld base URL or service token unset")
+        req = JudgeRequest(
+            request_id=request_id_for(spec.judge_id, task_id, attempt_id),
             judge_id=spec.judge_id,
-            task_id=task_id,
-            attempt_id=attempt_id,
+            task_id=task_id.bytes,
+            session_id=session_id.bytes,
             rubric=spec.rubric,
-            evidence_tier=spec.evidence_tier,
+            tier=WIRE_TIER[spec.evidence_tier],
             model=spec.model,
             token_budget=spec.token_budget,
+            locus=JudgeLocus.CLIENT_SIDE,
         )
+        resp = await self._http.post(
+            f"{self._base_url.rstrip('/')}{JUDGE_REQUESTS_PATH}",
+            json={"tenant_id": str(tenant_id), "request": protojson(req)},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        if resp.status_code // 100 != 2:
+            raise refuse(f"refused_dispatch_failed:{resp.status_code}", resp.text[:200])
+        return req

@@ -239,21 +239,33 @@ func (c *Client) streamOnce(ctx context.Context) bool {
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 4096), sseLineMax)
 	event, got := "", false
+	var data []string
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), "\r")
 		switch {
 		case strings.HasPrefix(line, "event:"):
 			event = strings.TrimSpace(line[len("event:"):])
+		case strings.HasPrefix(line, "data:"):
+			// Only a judge_request reads its data; a block whose data outgrows one line's bound is not one this edge speaks.
+			if len(data) < sseDataLinesMax {
+				data = append(data, strings.TrimPrefix(line[len("data:"):], " "))
+			}
 		case line == "":
 			// End of one SSE block. `revocation` is deliberately ignored here:
 			// re-checking the fail-closed classes is enrollment's (08 §3.4),
 			// and a policy client that acted on it would be acting outside its
 			// own contract.
-			if event == "bundle" {
+			switch event {
+			case "bundle":
 				got = true
 				c.nudge()
+			case "judge_request":
+				got = true
+				if c.OnJudgeRequest != nil && len(data) < sseDataLinesMax {
+					c.OnJudgeRequest([]byte(strings.Join(data, "\n")))
+				}
 			}
-			event = ""
+			event, data = "", data[:0]
 		}
 	}
 	return got

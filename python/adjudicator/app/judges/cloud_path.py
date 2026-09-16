@@ -105,7 +105,7 @@ class CloudJudge:
         self._profile = profile
 
     async def run(
-        self, tenant_id: UUID, judge_id: str, task_id: UUID, attempt_id: UUID
+        self, tenant_id: UUID, judge_id: str, task_id: UUID, attempt_id: UUID, session_id: UUID
     ) -> JudgeVote:
         spec = spec_for(judge_id, self._profile)
         admit(spec, await self._consent_for(tenant_id, judge_id))

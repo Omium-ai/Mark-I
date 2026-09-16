@@ -1,0 +1,24 @@
+{
+  "_why": "The EXACT bytes adjudicator-svc POSTs to /internal/v1/judge-requests (python/adjudicator/app/judges/specs.py ClientSideJudge.run), locked THREE ways per the wave-5 lesson (RECONCILIATION.md: stub-tested halves of one contract drift unless one side's tests speak the other side's exact wire bytes). Go controld: judge_test.go TestJudgeRouteAcceptsPythonExactBody replays `body` through the real handler and reads `request` back off a live stream. Go mark1d: internal/judge judge_test.go TestJudgeDecodesTheCloudsExactRequest decodes `body.request` with the edge's real decoder. Python: test_judges.py test_client_side_default_posts_the_locked_body_and_makes_no_cloud_call re-derives `body` from `inputs` through the real client and compares dict-equal.",
+  "inputs": {
+    "tenant_id": "6b9f0f2e-4c1d-4a4e-8f0a-9d2b7c5e3a10",
+    "judge_id": "judge:grounded-rubric@1",
+    "task_id": "189d8bb1-cba6-5f57-9312-46b0b6cb8154",
+    "attempt_id": "00000000-0000-0000-0000-000000000000",
+    "session_id": "0ea6592a-9ed8-415c-b0aa-382dd0227d90"
+  },
+  "body": {
+    "tenant_id": "6b9f0f2e-4c1d-4a4e-8f0a-9d2b7c5e3a10",
+    "request": {
+      "requestId": "c8174949-94d6-52c9-85da-9c7fa304b757",
+      "judgeId": "judge:grounded-rubric@1",
+      "taskId": "GJ2LscumX1eTEkawtsuBVA==",
+      "sessionId": "DqZZKp7YQVywqjgt0CJ9kA==",
+      "rubric": "You are a grounded code-change judge. Judge ONLY from the typed evidence supplied: anchor outputs, diagnostic codes, diff structure and the task's acceptance criteria. Do not speculate beyond it. Reply with exactly one word from: satisfied|violated|refused|error. Use `refused` when the evidence is insufficient to judge honestly, `error` only when the evidence itself is malformed.",
+      "tier": 1,
+      "model": "claude-sonnet-5",
+      "tokenBudget": 2048,
+      "locus": 1
+    }
+  }
+}

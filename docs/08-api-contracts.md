@@ -263,6 +263,11 @@ GET /api/v1/policy/stream?channel=stable                 auth: device token
   event: bundle        data: {"seq":483,"etag":"t7-stable-000483"}     # a hint; edge then GETs §above
   event: revocation    data: {"revocation_epoch":91}                   # fail-closed class: re-check now
   event: ping          data: {}                                        # every 30 s
+  event: judge_request data: <protojson m1p.v1.JudgeRequest>            # ADR-0008 edge half (D-EI): adjudicator-svc posts it to
+                                                                        # POST /internal/v1/judge-requests (service token); the daemon
+                                                                        # runs the judge with the customer's own key for a task it owns
+                                                                        # and answers with JudgeVote{locus: CLIENT_SIDE} in its next batch;
+                                                                        # no replay — the adjudicator reposts under the same request_id
 The stream is advisory push; the poll (with jittered 5-min interval) is the correctness
 path. A dead stream degrades latency, never correctness.
 
@@ -534,7 +539,7 @@ Rules common to all seven adapters:
 2. **Version sniffing, typed drops.** Every adapter sniffs the agent version at session start; an unmapped version emits `Dropped{reason: unsupported_agent_version}` and captures nothing speculative. Adapters never guess a field.
 3. **Spike gating.** An adapter slot opens only when its go/no-go spike artifact lands in `conformance/` (recorded fixtures per pinned agent version). Where a payload below is marked `UNVERIFIED — spike gates this adapter slot`, that is the contract: the spike produces the fixture; the fixture produces the field map; nothing is authored from memory.
 4. **Hook payloads carry no token usage on any surface verified so far.** Usage comes from transcripts or the wire (API-key regime), never from hook JSON.
-5. **Timing.** The shim's observer budget is 50 ms fire-and-forget (frame the event, hand off or spill, exit 0). Gate hooks carry a bounded deadline and fail-open to *allow* on timeout — Mark 1's absence must never block a developer.
+5. **Timing.** The shim's observer budget is 50 ms fire-and-forget (frame the event, hand off or spill, exit 0). Gate hooks — and the two context pulls, `UserPromptSubmit` (the pack) and, since D-EI, `PostToolUse` (the next-turn `CORRECTION`) — carry a bounded deadline (the 250 ms pack budget minus the 10 ms margin) and fail-open to *allow* / print nothing on timeout — Mark 1's absence must never block a developer.
 
 ### 5.1 claudecode (Claude Code) — verified 2026-08-28 against vendor docs and on-disk transcripts
 
@@ -1113,6 +1118,7 @@ Normative. Later documents (04, 05, 11, 12) cite these codes; they do not invent
 | ingest | `M1E-2007` | `M1P-Schema` out of accepted window | 426 | no — quarantine + upgrade hint | yes (doctor) | fail-open |
 | query | `M1E-2008` | unknown query template | 400 | no | yes | fail-closed (chokepoint refuses, never improvises) |
 | receipts | `M1E-2009` | event not yet checkpointed | 404 | yes, after checkpoint interval | no | — |
+| ingest | `M1E-2010` | an `AnchorVote` carrying a non-empty `signature` that does not verify under the device's live enrolled key (FR-VERIFY-004, D-EI); a batch whose only violations are of this kind | 422 | remainder once; named events quarantine | via status | fail-closed (a forged vote never lands) |
 | policy | `M1E-3001` | bundle signature invalid | local | next poll | doctor | **fail-static** (keep last-known-good) |
 | policy | `M1E-3002` | bundle seq non-monotonic | local | next poll | doctor | fail-static |
 | policy | `M1E-3003` | transparency-log inclusion proof missing/invalid | local | next poll | doctor | fail-static |

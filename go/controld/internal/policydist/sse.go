@@ -44,7 +44,7 @@ var ErrHubFull = fmt.Errorf("policydist: stream capacity reached")
 
 // Event is one SSE frame.
 type Event struct {
-	Name string // "bundle" | "revocation" | "ping"
+	Name string // "bundle" | "revocation" | "judge_request" | "ping"
 	Data string // JSON, already rendered
 }
 
@@ -146,7 +146,15 @@ func (h *Hub) Revoke(tenant uuid.UUID, epoch int64) {
 	h.fanout(tenant, nil, Event{Name: "revocation", Data: fmt.Sprintf(`{"revocation_epoch":%d}`, epoch)})
 }
 
-func (h *Hub) fanout(tenant uuid.UUID, channel *string, ev Event) {
+// Judge pushes one client-side judge request (06 §6.2 step 2, ADR-0008) to
+// every live stream for the tenant, on every channel: the owning device is
+// whichever one holds the task, and only it answers. Returns how many streams
+// took it; zero means no device was connected and the caller may repost.
+func (h *Hub) Judge(tenant uuid.UUID, data string) int {
+	return h.fanout(tenant, nil, Event{Name: "judge_request", Data: data})
+}
+
+func (h *Hub) fanout(tenant uuid.UUID, channel *string, ev Event) int {
 	h.mu.Lock()
 	targets := make([]*stream, 0, 8)
 	for s := range h.streams {
@@ -157,11 +165,15 @@ func (h *Hub) fanout(tenant uuid.UUID, channel *string, ev Event) {
 	}
 	h.mu.Unlock()
 
+	n := 0
 	for _, s := range targets {
 		if !h.send(s, ev) {
 			h.unsubscribe(s) // slow consumer; it will re-arrive on the poll
+			continue
 		}
+		n++
 	}
+	return n
 }
 
 // Drain is 05 §1.5 step 2: a final `event: ping`, then close. The ping is not

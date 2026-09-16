@@ -744,6 +744,78 @@ func TestClientSSEHintTriggersFetch(t *testing.T) {
 	}
 }
 
+// TestClientSSEJudgeRequestReachesTheHandler: the `judge_request` arm hands the
+// block's data bytes to OnJudgeRequest (ADR-0008 edge half) and nothing else
+// changes -- it is not a bundle hint, and a block without a handler is inert.
+func TestClientSSEJudgeRequestReachesTheHandler(t *testing.T) {
+	h := newHarness(t)
+	mux := http.NewServeMux()
+	mux.Handle("/", h.cp.handler())
+	mux.HandleFunc(pathStream, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: ping\ndata: {}\n\n"+
+			"event: judge_request\ndata: {\"requestId\":\"r1\",\"rubric\":\"a: b\"}\n\n"+
+			"event: judge_request\ndata: {\"requestId\":\n"+"data: \"r2\"}\n\n"+
+			"event: bundle\ndata: {\"seq\":\"1\"}\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := h.client()
+	c.baseURL = srv.URL
+	c.http = srv.Client()
+	got := make(chan string, 4)
+	c.OnJudgeRequest = func(data []byte) { got <- string(data) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.stream(ctx)
+
+	for _, want := range []string{`{"requestId":"r1","rubric":"a: b"}`, "{\"requestId\":\n\"r2\"}"} {
+		select {
+		case data := <-got:
+			if data != want {
+				t.Fatalf("handler got %q, want %q", data, want)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the judge_request block never reached the handler")
+		}
+	}
+	select {
+	case <-c.hint:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the bundle hint after the judge blocks did not wake the poll loop")
+	}
+	if len(got) != 0 {
+		t.Fatal("a ping or bundle block reached the judge handler")
+	}
+}
+
+// TestClientSSEJudgeRequestWithoutAHandlerIsInert: a daemon that wires no judge
+// runner keeps streaming; the block counts as delivery (backoff reset) and no more.
+func TestClientSSEJudgeRequestWithoutAHandlerIsInert(t *testing.T) {
+	h := newHarness(t)
+	mux := http.NewServeMux()
+	mux.Handle("/", h.cp.handler())
+	mux.HandleFunc(pathStream, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: judge_request\ndata: {\"requestId\":\"r1\"}\n\n")
+		w.(http.Flusher).Flush()
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := h.client()
+	c.baseURL = srv.URL
+	c.http = srv.Client()
+	if !c.streamOnce(context.Background()) {
+		t.Fatal("a delivered judge_request block must count as the stream delivering")
+	}
+	if len(c.hint) != 0 {
+		t.Fatal("a judge_request is not a bundle hint")
+	}
+}
+
 // TestClientRunDoesNotBlockStartup: whatever the control plane is doing, Run is
 // a goroutine that returns on cancellation and nothing more.
 func TestClientRunDoesNotBlockStartup(t *testing.T) {
