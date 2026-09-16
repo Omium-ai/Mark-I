@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/route_bundle.json",
+  "title": "GET /api/v1/route/bundle",
+  "description": "The head bundle on the channel (default stable), summarized from the catalog row's route section: ladders and rungs, the knee table under the tenant's cost basis, exploration epsilon (0 unless opted in) and the price-table version the knee was priced under (desktop spec §5.6).",
+  "type": "object",
+  "required": ["channel", "seq", "issued_at", "published_at", "max_age_s", "signing_key_id", "ladders", "knee", "epsilon", "exploration_opt_in", "price_table_version", "cpvs"],
+  "additionalProperties": false,
+  "properties": {
+    "channel": { "type": "string" },
+    "seq": { "type": "integer", "minimum": 1 },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "published_at": { "type": "string", "format": "date-time" },
+    "max_age_s": { "type": "integer", "minimum": 1 },
+    "signing_key_id": { "type": "string" },
+    "ladders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ladder_id", "rungs"],
+        "additionalProperties": false,
+        "properties": {
+          "ladder_id": { "type": "string" },
+          "rungs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["model_id", "keep_prefix"],
+              "additionalProperties": false,
+              "properties": {
+                "model_id": { "type": "string" },
+                "keep_prefix": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "knee": {
+      "type": "object",
+      "required": ["cost_basis", "v_default", "rows"],
+      "additionalProperties": false,
+      "properties": {
+        "cost_basis": { "type": "string", "enum": ["usd", "quota"] },
+        "v_default": { "type": "number" },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["n", "c_n", "p_lcb"],
+            "additionalProperties": false,
+            "properties": {
+              "n": { "type": "integer", "minimum": 0 },
+              "c_n": { "type": "number" },
+              "p_lcb": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "null = the knee is not evaluable at this n (D-Z): never a stop" }
+            }
+          }
+        }
+      }
+    },
+    "epsilon": { "type": "number", "minimum": 0, "maximum": 1 },
+    "exploration_opt_in": { "type": "boolean" },
+    "price_table_version": { "type": ["string", "null"], "description": "usd only; null when the compiler stamped none" },
+    "cpvs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["task_class", "model_id", "p_pass", "tokens_est"],
+        "additionalProperties": false,
+        "properties": {
+          "task_class": { "type": "string" },
+          "model_id": { "type": "string" },
+          "p_pass": { "type": "number", "minimum": 0, "maximum": 1 },
+          "tokens_est": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

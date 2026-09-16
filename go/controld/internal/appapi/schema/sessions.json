@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/sessions.json",
+  "title": "GET /api/v1/sessions",
+  "description": "Sessions in the window, newest first (session ids are UUIDv7), keyset-paged by next_cursor (desktop spec §5.2).",
+  "type": "object",
+  "required": ["window", "sessions", "next_cursor", "honesty"],
+  "additionalProperties": false,
+  "properties": {
+    "window": { "$ref": "#/$defs/window" },
+    "sessions": { "type": "array", "items": { "$ref": "#/$defs/session" } },
+    "next_cursor": { "type": ["string", "null"], "description": "pass back as ?cursor= for the next page; null on the last page" },
+    "honesty": { "$ref": "honesty.json" }
+  },
+  "$defs": {
+    "window": {
+      "type": "object",
+      "required": ["from", "to"],
+      "additionalProperties": false,
+      "properties": {
+        "from": { "type": "string", "format": "date" },
+        "to": { "type": "string", "format": "date" }
+      }
+    },
+    "session": {
+      "type": "object",
+      "required": ["session_id", "agent", "project", "started_at", "ended_at", "tokens", "tasks", "verified_outcomes", "arrests", "injections", "route_decisions", "coverage", "checkpoint_seq"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": "string", "format": "uuid" },
+        "agent": { "type": "string" },
+        "project": { "type": "string", "description": "hex of HMAC_tenant(workspace root); empty when no SessionStart landed. Never a path.", "pattern": "^([0-9a-f]{64})?$" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "ended_at": { "type": "string", "format": "date-time" },
+        "tokens": {
+          "type": "object",
+          "required": ["input", "output", "cache_read", "cache_create"],
+          "additionalProperties": false,
+          "properties": {
+            "input": { "type": "integer", "minimum": 0 },
+            "output": { "type": "integer", "minimum": 0 },
+            "cache_read": { "type": "integer", "minimum": 0 },
+            "cache_create": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "tasks": { "type": "integer", "minimum": 0 },
+        "verified_outcomes": { "type": "integer", "minimum": 0, "description": "tasks whose stage-final verdict is satisfied" },
+        "arrests": { "type": "integer", "minimum": 0 },
+        "injections": { "type": "integer", "minimum": 0 },
+        "route_decisions": { "type": "integer", "minimum": 0 },
+        "coverage": {
+          "type": "object",
+          "required": ["capture_paths", "proxy_in_path", "transcript_tailed", "dropped_billing"],
+          "additionalProperties": false,
+          "properties": {
+            "capture_paths": { "type": "array", "items": { "type": "string", "enum": ["hooks", "transcript", "proxy", "unspecified"] } },
+            "proxy_in_path": { "type": "boolean" },
+            "transcript_tailed": { "type": "boolean" },
+            "dropped_billing": { "type": "integer", "minimum": 0, "description": "billing-grade Dropped{} quantity attributed to this session" }
+          }
+        },
+        "checkpoint_seq": { "type": "integer", "minimum": 0, "description": "the newest receipt checkpoint covering this session; 0 = not yet checkpointed" }
+      }
+    }
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/session_detail.json",
+  "title": "GET /api/v1/sessions/{id}",
+  "description": "One session: its row, the per-task attempt timeline, the verdict trail, typed evidence (never paths or excerpts), injections and arrests (desktop spec §5.2).",
+  "type": "object",
+  "required": ["window", "session", "tasks", "checkpoint_seq", "honesty"],
+  "additionalProperties": false,
+  "properties": {
+    "window": { "$ref": "sessions.json#/$defs/window" },
+    "session": { "$ref": "sessions.json#/$defs/session" },
+    "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } },
+    "checkpoint_seq": { "type": "integer", "minimum": 0 },
+    "honesty": { "$ref": "honesty.json" }
+  },
+  "$defs": {
+    "verdict": { "type": "string", "enum": ["", "satisfied", "violated", "refused", "error"] },
+    "stage": { "type": "string", "enum": ["", "provisional", "certified", "revised"] },
+    "task": {
+      "type": "object",
+      "required": ["task_id", "task_seg_version", "task_class", "opened_at", "closed_at", "resolution", "attempts", "verdict_trail", "evidence", "injections", "arrests"],
+      "additionalProperties": false,
+      "properties": {
+        "task_id": { "type": "string", "format": "uuid" },
+        "task_seg_version": { "type": "string" },
+        "task_class": { "type": "string" },
+        "opened_at": { "type": ["string", "null"], "format": "date-time" },
+        "closed_at": { "type": ["string", "null"], "format": "date-time" },
+        "resolution": { "type": "string", "enum": ["", "unspecified", "verdict", "unresolved_session_end", "merged_forward"] },
+        "attempts": {
+          "type": "array",
+          "description": "attempt n closes on a stage-final verdict; the tail folds into the last attempt (tvo_task_window rule)",
+          "items": {
+            "type": "object",
+            "required": ["n", "tokens", "cost_usd", "verdict", "verdict_stage"],
+            "additionalProperties": false,
+            "properties": {
+              "n": { "type": "integer", "minimum": 1 },
+              "tokens": { "type": "integer", "minimum": 0, "description": "c(n): generation tokens spent in the attempt" },
+              "cost_usd": { "type": "number", "minimum": 0 },
+              "verdict": { "$ref": "#/$defs/verdict" },
+              "verdict_stage": { "$ref": "#/$defs/stage" }
+            }
+          }
+        },
+        "verdict_trail": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["at", "event_id", "stage", "verdict", "certification", "certificate_id", "bundle_seq"],
+            "additionalProperties": false,
+            "properties": {
+              "at": { "type": "string", "format": "date-time" },
+              "event_id": { "type": "string", "format": "uuid" },
+              "stage": { "$ref": "#/$defs/stage" },
+              "verdict": { "$ref": "#/$defs/verdict" },
+              "certification": { "type": "string", "enum": ["", "unspecified", "uncertified", "bootstrapping", "certified"] },
+              "certificate_id": { "type": ["string", "null"], "format": "uuid" },
+              "bundle_seq": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "description": "EvidenceRecord typed fields only (07 §4): no path, no excerpt, no digest",
+          "items": {
+            "type": "object",
+            "required": ["at", "event_id", "anchor_id", "vote", "tool", "diagnostic_code", "category", "counts", "path_role", "tamper"],
+            "additionalProperties": false,
+            "properties": {
+              "at": { "type": "string", "format": "date-time" },
+              "event_id": { "type": "string", "format": "uuid" },
+              "anchor_id": { "type": "string" },
+              "vote": { "$ref": "#/$defs/verdict" },
+              "tool": { "type": "string" },
+              "diagnostic_code": { "type": "string" },
+              "category": { "type": "string", "enum": ["", "unspecified", "lint", "type", "build", "test", "security"] },
+              "counts": {
+                "type": "object",
+                "required": ["errors", "warnings", "files_affected"],
+                "additionalProperties": false,
+                "properties": {
+                  "errors": { "type": "integer", "minimum": 0 },
+                  "warnings": { "type": "integer", "minimum": 0 },
+                  "files_affected": { "type": "integer", "minimum": 0 }
+                }
+              },
+              "path_role": { "type": "string", "enum": ["", "unspecified", "test", "src", "config", "vendor"] },
+              "tamper": { "type": "boolean" }
+            }
+          }
+        },
+        "injections": { "type": "array", "items": { "$ref": "moments.json#/$defs/injection" } },
+        "arrests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["at", "event_id", "bundle_seq", "tokens_saved_estimate"],
+            "additionalProperties": false,
+            "properties": {
+              "at": { "type": "string", "format": "date-time" },
+              "event_id": { "type": "string", "format": "uuid" },
+              "bundle_seq": { "type": "integer", "minimum": 0 },
+              "tokens_saved_estimate": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

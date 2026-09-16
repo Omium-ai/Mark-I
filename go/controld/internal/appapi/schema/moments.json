@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/moments.json",
+  "title": "GET /api/v1/moments",
+  "description": "Arrests, injections and route decisions after ?since, newest first, as one feed keyed by kind (desktop spec §5.1). Exactly the object named by kind is present.",
+  "type": "object",
+  "required": ["since", "moments", "next_since", "honesty"],
+  "additionalProperties": false,
+  "properties": {
+    "since": { "type": "string", "format": "date-time" },
+    "moments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "at", "event_id", "session_id", "task_id", "agent"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "type": "string", "enum": ["arrest", "injection", "route"] },
+          "at": { "type": "string", "format": "date-time" },
+          "event_id": { "type": "string", "format": "uuid" },
+          "session_id": { "type": "string", "format": "uuid" },
+          "task_id": { "type": ["string", "null"], "format": "uuid" },
+          "agent": { "type": "string" },
+          "arrest": {
+            "type": "object",
+            "required": ["bundle_seq", "tokens_saved_estimate"],
+            "additionalProperties": false,
+            "properties": {
+              "bundle_seq": { "type": "integer", "minimum": 0 },
+              "tokens_saved_estimate": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "injection": { "$ref": "#/$defs/injection" },
+          "route": {
+            "type": "object",
+            "required": ["action", "candidates", "propensity", "fidelity", "bundle_seq"],
+            "additionalProperties": false,
+            "properties": {
+              "action": { "type": "string" },
+              "candidates": { "type": "array", "items": { "type": "string" } },
+              "propensity": { "type": "number", "minimum": 0, "maximum": 1 },
+              "fidelity": { "type": "string", "enum": ["", "wire_enforced", "config_steered", "advisory"] },
+              "bundle_seq": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "next_since": { "type": ["string", "null"], "format": "date-time", "description": "the newest moment's time; pass back as ?since= to poll forward" },
+    "honesty": { "$ref": "honesty.json" }
+  },
+  "$defs": {
+    "injection": {
+      "type": "object",
+      "required": ["at", "event_id", "channel", "tokens_used", "artifact_count"],
+      "additionalProperties": false,
+      "properties": {
+        "at": { "type": "string", "format": "date-time" },
+        "event_id": { "type": "string", "format": "uuid" },
+        "channel": { "type": "string", "enum": ["", "unspecified", "session_start", "hook_context", "mcp_pull", "reactive_pitfall", "correction"] },
+        "tokens_used": { "type": "integer", "minimum": 0 },
+        "artifact_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

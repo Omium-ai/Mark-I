@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/honesty.json",
+  "title": "Honesty fields",
+  "description": "Lifted verbatim from GET /api/v1/reports/tvo for the same window (08 §3.3, 06 §8.5): the band, the basis and the grade every figure in the response is shown under. guarantee_grade false always carries refusal.",
+  "type": "object",
+  "required": ["coverage_band", "cost_basis", "guarantee_grade", "task_seg_version"],
+  "additionalProperties": false,
+  "properties": {
+    "coverage_band": {
+      "type": "object",
+      "required": ["observed_fraction", "coverage_lower", "floor"],
+      "additionalProperties": false,
+      "properties": {
+        "observed_fraction": { "type": "number", "minimum": 0, "maximum": 1 },
+        "coverage_lower": { "type": "number", "minimum": 0, "maximum": 1 },
+        "floor": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "cost_basis": { "type": "string", "enum": ["usd", "quota"] },
+    "guarantee_grade": { "type": "boolean" },
+    "task_seg_version": { "type": "string" },
+    "price_table_version": { "type": "string", "description": "usd only: the pinned price table the figures were priced under" },
+    "refusal": { "type": "string", "description": "present iff guarantee_grade is false; M1E-5004 and the other stated refusals, joined by '; '" }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/route_decisions.json",
+  "title": "GET /api/v1/route/decisions",
+  "description": "Route decisions in the window in causal order (the ope_route_decisions template): the served model is the first later Usage in the task, verdict/label_confidence the task's stage-final verdict (desktop spec §5.6).",
+  "type": "object",
+  "required": ["window", "decisions", "honesty"],
+  "additionalProperties": false,
+  "properties": {
+    "window": { "$ref": "sessions.json#/$defs/window" },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["decision_id", "at", "task_id", "session_id", "agent", "action", "candidates", "propensity", "fidelity", "bundle_seq", "served_model", "verdict", "verdict_stage", "label_confidence"],
+        "additionalProperties": false,
+        "properties": {
+          "decision_id": { "type": "string", "format": "uuid" },
+          "at": { "type": ["string", "null"], "format": "date-time", "description": "from the UUIDv7 decision id; null for a non-v7 id" },
+          "task_id": { "type": "string", "format": "uuid" },
+          "session_id": { "type": "string", "format": "uuid" },
+          "agent": { "type": "string" },
+          "action": { "type": "string" },
+          "candidates": { "type": "array", "items": { "type": "string" } },
+          "propensity": { "type": "number", "minimum": 0, "maximum": 1 },
+          "fidelity": { "type": "string", "enum": ["", "wire_enforced", "config_steered", "advisory"] },
+          "bundle_seq": { "type": "integer", "minimum": 0 },
+          "served_model": { "type": "string", "description": "empty = no later Usage observed" },
+          "verdict": { "$ref": "session_detail.json#/$defs/verdict" },
+          "verdict_stage": { "$ref": "session_detail.json#/$defs/stage" },
+          "label_confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "null = uncertified" }
+        }
+      }
+    },
+    "honesty": { "$ref": "honesty.json" }
+  }
+}

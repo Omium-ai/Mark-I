@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/me.json",
+  "title": "GET /api/v1/me",
+  "description": "The principal, its tenant, the plan placeholder, the m1_075 regime and the region pin (desktop spec §7.2).",
+  "type": "object",
+  "required": ["user", "tenant", "plan", "regime", "region"],
+  "additionalProperties": false,
+  "properties": {
+    "user": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "kind": { "type": "string", "enum": ["device", "user"], "description": "device until the Omium-hosted user session lands (lane B3)" }
+      }
+    },
+    "tenant": {
+      "type": "object",
+      "required": ["id", "name", "region", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "name": { "type": "string" },
+        "region": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "suspended", "closed"] }
+      }
+    },
+    "plan": { "type": "null", "description": "placeholder: null until billing lands" },
+    "regime": {
+      "type": ["object", "null"],
+      "description": "null when the tenant has no m1_075 row (reports then issue indicative)",
+      "required": ["cost_basis", "price_model_id"],
+      "additionalProperties": false,
+      "properties": {
+        "cost_basis": { "type": "string", "enum": ["usd", "quota"] },
+        "price_model_id": { "type": ["string", "null"] }
+      }
+    },
+    "region": { "type": "string" }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/error.json",
+  "title": "Error envelope",
+  "description": "08 §9: every non-2xx body. code is a taxonomy row (M1E-nnnn).",
+  "type": "object",
+  "required": ["error"],
+  "additionalProperties": false,
+  "properties": {
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string", "pattern": "^M1E-[0-9]{4}$" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

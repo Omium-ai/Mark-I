@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/certificates.json",
+  "title": "GET /api/v1/verify/certificates",
+  "description": "The tenant's noise certificates (m1_021), newest issued first. status is earned by the row's own CHECK; active is the read-time rule mark1_assert_certified applies (certified and unexpired).",
+  "type": "object",
+  "required": ["certificates"],
+  "additionalProperties": false,
+  "properties": {
+    "certificates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "verifier", "status", "rho_plus", "rho_minus", "natarajan_lcb", "gold_n", "identifiable", "issued_at", "expires_at", "receipt_id", "active"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "verifier": {
+            "type": "object",
+            "required": ["id", "key", "kind", "version", "display_name"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "format": "uuid" },
+              "key": { "type": "string" },
+              "kind": { "type": "string", "enum": ["anchor", "judge", "reward_model", "consistency"] },
+              "version": { "type": "integer", "minimum": 1 },
+              "display_name": { "type": "string" }
+            }
+          },
+          "status": { "type": "string", "enum": ["uncertified", "bootstrapping", "certified"] },
+          "rho_plus": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+          "rho_minus": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+          "natarajan_lcb": { "type": ["number", "null"], "minimum": -1, "maximum": 1 },
+          "gold_n": { "type": ["integer", "null"], "minimum": 0 },
+          "identifiable": { "type": "boolean" },
+          "issued_at": { "type": ["string", "null"], "format": "date-time" },
+          "expires_at": { "type": ["string", "null"], "format": "date-time" },
+          "receipt_id": { "type": ["string", "null"], "format": "uuid" },
+          "active": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
