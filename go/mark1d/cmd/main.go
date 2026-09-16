@@ -43,11 +43,13 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/bundle"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/capture"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/control"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/cortex"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/evidence"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/harden"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/judge"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/memory"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
@@ -354,6 +356,18 @@ func run(ctx context.Context, log *slog.Logger, cfg config) error {
 		cfg.offPoll = time.Second
 	}
 
+	ctl, err := control.Listen(control.Config{StateDir: cfg.stateDir, SpoolDir: cfg.spoolDir, SpoolCap: cfg.spoolCap, Version: version, Log: log})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = ctl.Close() }()
+	go func() {
+		if err := ctl.Serve(); err != nil {
+			log.Error("control API", "err", err)
+		}
+	}()
+	log.Info("mark1d control API up", "addr", ctl.Addr(), "discovery", control.Path(cfg.stateDir))
+
 	for {
 		if off.Off(cfg.stateDir) {
 			log.Info("mark1d off (08 §7.6): parked — no spool, no fabric, no tailers")
@@ -361,7 +375,7 @@ func run(ctx context.Context, log *slog.Logger, cfg config) error {
 		if err := off.Wait(ctx, cfg.stateDir, cfg.offPoll); err != nil {
 			return nil // signal while parked: clean exit
 		}
-		if err := session(ctx, log, cfg); err != nil {
+		if err := session(ctx, log, cfg, ctl); err != nil {
 			return err
 		}
 		if ctx.Err() != nil {
@@ -375,7 +389,7 @@ func run(ctx context.Context, log *slog.Logger, cfg config) error {
 
 // session runs one on-window of capture: from off-marker clear to off-marker
 // set (or signal), ending in the full 07 §6 shutdown drain either way.
-func session(parent context.Context, log *slog.Logger, cfg config) error {
+func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.Server) error {
 	// off-watch wraps everything the session owns, so `mark1 off` tears the
 	// listener, tailers, and drain down through the one cancellation path.
 	ctx, cancel := off.WatchCtx(parent, cfg.stateDir, cfg.offPoll)
@@ -426,6 +440,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		_ = sp.Close()
 		return err
 	}
+	adm.Tap = ctl.Hub().Publish
 
 	// Self-monitoring is an EdgeHealth event through the one admission door,
 	// not a metrics port (11 §0.4). Every consumer below takes it as a nilable
@@ -518,6 +533,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	}
 	seg := taskseg.New(segKey)
 	votes.TaskFor = seg.TaskFor
+	eng.SessionFor = func(t verdict.TaskID) ([16]byte, bool) { return seg.SessionFor(t) }
 
 	// 04 §2.7's single door, on the same admission path and the same tenant
 	// path key as the segmenter — so a workspace has ONE digest across the
@@ -529,6 +545,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	// file it as bypass_end rather than a second bypass_start.
 	var hardStopAt atomic.Int64
 	sp.SetHardStopHook(func(entered bool) {
+		ctl.SetHardStop(entered)
 		var window time.Duration
 		if entered {
 			hardStopAt.Store(time.Now().UnixNano())
@@ -619,6 +636,15 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		bc.Apply = func(m verdict.BundleMatrices) { routeSeq.Store(m.Seq); routeMatrices.Store(&m); eng.SetBundle(m) }
 	}
 	bc.ApplyRanker = cx.SetRanker
+	jr, err := judge.New(judge.Config{
+		StateDir: cfg.stateDir, TenantRoot: tenantRoot, Log: log,
+		TaskFor: seg.TaskFor, Verdict: seg.Verdict, Evidence: votes.Evidence, Admit: adm.Admit,
+	})
+	if err != nil {
+		_ = sp.Close()
+		return err
+	}
+	bc.OnJudgeRequest = jr.Handle
 	router := &route.Emitter{Next: adm.Admit, Seq: routeSeq.Load, Matrices: routeMatrices.Load, Verdicts: eng.Reader()}
 	bundleDone := make(chan struct{})
 	go func() {
@@ -661,11 +687,14 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	// the first ToolUse the fabric can deliver; watchAnchors re-runs it on
 	// workspaces.json / approvals.jsonl change and on the tick.
 	anchorStep := reconcileAnchors(log, cfg, sb, sched, votes)
-	anchorStep()
+	var stepMu sync.Mutex
+	step := func() { stepMu.Lock(); defer stepMu.Unlock(); anchorStep() }
+	step()
+	ctl.SetReconcile(step)
 	anchorsDone := make(chan struct{})
 	go func() {
 		defer close(anchorsDone)
-		watchAnchors(ctx, log, cfg.stateDir, anchorStep)
+		watchAnchors(ctx, log, cfg.stateDir, step)
 	}()
 
 	// Spill keypair + drain (04 §5.4): the daemon mints the device X25519
@@ -738,6 +767,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	// the only verdict surface with no method that computes (04 §2.3).
 	gate := fabric.NewGate(eng.Reader(), blocks, cfg.stateDir)
 	gate.Evidence = votes.Evidence // FR-VERIFY-011: evidence_ref on BLOCK
+	gate.Corrections = eng.TakeCorrections
 	if cfg.matrices == nil {
 		gate.ApplyGates(bc.Gates())
 	}
@@ -747,7 +777,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	srv.Health = health
 	srv.Sync = sp.Sync // FlushAck attests to fsynced records (NFR-DURABILITY-004)
 	srv.SetGate(gate)
-	srv.SetContextHandler(mem)
+	srv.SetContextHandler(fabric.ContextChain{gate, mem})
 	srv.SetContaminationHandler(contaminationRollback{log: log, stateDir: cfg.stateDir, adm: adm})
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- srv.Serve(ctx, l) }()
@@ -796,6 +826,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		// honored fails the boot, exactly as --workspace does above.
 		keyPath := filepath.Join(cfg.stateDir, "device.key")
 		var checkpoint func(context.Context, [][]byte)
+		var origin *uplink.Origin
 		switch key, kerr := receipt.OpenKey(keyPath); {
 		case cfg.tenantID == "" || cfg.deviceID == "":
 			log.Warn("mark1d: receipts NOT sealed — no tenant_id/device_id (enrollment.json or --tenant-id/--device-id); uploads land but carry no chain evidence (08 §3.1)")
@@ -828,6 +859,8 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 				return fail(serr)
 			}
 			checkpoint = sealer.Seal
+			origin = &uplink.Origin{Key: key, TenantID: tid.String(), DeviceID: did.String()}
+			runner.SetSigner(key)
 			log.Info("mark1d: receipt sealing armed", "key_id", key.KeyID(), "head", headURL)
 		}
 
@@ -835,6 +868,8 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		up, err = uplink.New(uplink.Config{
 			Store:         sp,
 			Checkpoint:    checkpoint,
+			Origin:        origin,
+			Admit:         adm.Admit, // the QuarantineDeletion record rides the ledger (NFR-OPERABILITY-003)
 			Drops:         []uplink.DropSource{sp, adm},
 			NetworkChange: uplink.WakeSignal(ctx, 30*time.Second, time.Now, func() time.Duration { return time.Since(bootMono) }, time.After),
 			Tokens:        tokens,
@@ -915,6 +950,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	<-bundleDone // same: the policy client owns only its own HTTP client
 	<-memDone
 	<-anchorsDone // same: the consent reconcile owns a watcher and files, no spool
+	ctl.SetReconcile(nil)
 	// Joined before the spool closes, and joined at all because the join is what
 	// makes the proxy's stop ORDERED: Supervisor.Run returns only once the child
 	// has been signalled, reaped, and its proxy.port removed. A daemon that
@@ -1463,6 +1499,9 @@ type contaminationRollback struct {
 func (c contaminationRollback) OnContamination(session [16]byte, credRef, reasonCode string) {
 	rollback := "reverted: the agent will not point at the proxy once relaunched"
 	res, err := claudecode.RevertBaseURL(c.stateDir)
+	if _, cerr := copilot.RevertEnvPointer(c.stateDir); cerr != nil && err == nil {
+		err = cerr
+	}
 	switch {
 	case err != nil:
 		rollback = "FAILED: " + err.Error()

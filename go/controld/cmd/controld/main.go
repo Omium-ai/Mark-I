@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/appapi"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/config"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/enroll"
@@ -39,6 +40,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke/chconn"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/receipts"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/server"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/userauth"
 )
 
 func main() {
@@ -64,11 +66,14 @@ func main() {
 	if cfg.S3DisableSSEKMS {
 		log.Printf("WARNING: S3_DISABLE_SSEKMS=1 — landing objects are NOT SSE-KMS encrypted; dev MinIO only, NEVER production (05 §2.2)")
 	}
+	tenantDB := pg.NewTenantDB(pgApp)
 	store := s3land.MustOpen(ctx, s3land.Options{ // 5. HeadBucket + per-tenant-KMS deny probe (R6)
-		Bucket:         cfg.IngestBucket,
-		Endpoint:       cfg.S3Endpoint,
-		KMSAliasPrefix: cfg.KMSTenantKeyAliasPrefix,
-		DisableSSEKMS:  cfg.S3DisableSSEKMS,
+		Bucket:           cfg.IngestBucket,
+		Endpoint:         cfg.S3Endpoint,
+		KMSAliasPrefix:   cfg.KMSTenantKeyAliasPrefix,
+		PersonalKMSAlias: cfg.KMSPersonalAlias,        // ADR-0011: kind='personal' shares one pooled key
+		TenantKind:       enroll.TenantKind(tenantDB), // selected from the enrollment row, never the request
+		DisableSSEKMS:    cfg.S3DisableSSEKMS,
 	})
 
 	// 6. (KMS DescribeKey R5) still deferred: policydist derives its six
@@ -105,12 +110,11 @@ func main() {
 			log.Fatalf("chconn: boot refusal (05 §1.2): %v", err)
 		}
 	}
-	if cfg.RollupWriteEnabled {
-		log.Printf("WARNING: QUERYCHOKE_ROLLUP_WRITE=1 — the internal tvo_rollup_tenant_day write route is ARMED; ADR-0010 is unsigned, test/dev lanes only, NEVER production")
+	if !cfg.RollupWriteEnabled {
+		log.Printf("tvo_rollup_tenant_day write route is dark (no INTEL_SERVICE_TOKEN or QUERYCHOKE_ROLLUP_WRITE=0); the nightly rollup will 403 here")
 	}
 
-	tenantDB := pg.NewTenantDB(pgApp)
-	proj := chproj.New(ch, 16, 1000) // 05 §8.1: projection pool
+	proj := chproj.New(chproj.Stamped(ch, querychoke.PGRegimes{DB: tenantDB}.CostBasis), 16, 1000) // 05 §8.1: projection pool; cost_basis per tenant (m1_075)
 
 	// The server CHAIN key (m1_002; distinct from the device-token signer —
 	// the 05 §4.5 key-class split). Same dev-mode-only ephemeral escape hatch
@@ -177,6 +181,13 @@ func main() {
 		}
 		log.Printf("WARNING: TENANT_HMAC_PEPPER unset — EPHEMERAL tenant HMAC pepper; every enrolled device's tenant root goes stale at restart (dev mode only)")
 	}
+	var users *userauth.Verifier // the Omium-hosted user token (B3, D-EI); nil ⇒ /enroll/device/approve answers 503
+	if cfg.OmiumUserIssuer != "" {
+		var err error
+		if users, err = userauth.New(cfg.OmiumUserIssuer, cfg.OmiumUserJWKSPinned); err != nil {
+			log.Fatalf("userauth: boot refusal (05 §1.2 R1): %v", err)
+		}
+	}
 	if cfg.AuthDevMode {
 		log.Printf("WARNING: AUTH_DEV_MODE=1 — dev HMAC token verifier ACTIVE alongside the production verifier; NEVER run production traffic with this flag")
 		// The dev leg shares the SAME revocation cache as the production leg:
@@ -206,10 +217,11 @@ func main() {
 	// class. Domain prefixes keep a receipt countersignature and a log-head
 	// signature non-interchangeable.
 	policy := policydist.NewModule(policydist.ModuleDeps{
-		Store:    policydist.NewStore(tenantDB, chainStore, bundleRing, chainSigner),
-		PG:       tenantDB,
-		Verifier: verifier,
-		ObsCfg:   obsCfg,
+		Store:             policydist.NewStore(tenantDB, chainStore, bundleRing, chainSigner),
+		PG:                tenantDB,
+		Verifier:          verifier,
+		ObsCfg:            obsCfg,
+		IntelServiceToken: cfg.IntelServiceToken, // guards POST /internal/v1/judge-requests (ADR-0008 edge half)
 	})
 
 	tenants := make([]uuid.UUID, 0, len(cfg.WitnessTenants))
@@ -230,26 +242,10 @@ func main() {
 		PublicBaseURL: cfg.PublicBaseURL,
 		ServerMinEdge: cfg.ServerMinEdge,
 		TenantPepper:  tenantPepper,
+		Users:         users,
 	})
 	chRunner := querychoke.NewRunner(chQuery, ch, chOffboard)
-
-	srv := server.New(cfg.Port, cfg.DrainTimeout)
-	srv.Register(ingest.New(ingest.Deps{ // 8. each module contributes routes + readiness
-		Verifier: verifier,
-		ObsCfg:   obsCfg,
-		PG:       tenantDB,
-		Store:    store,
-		Proj:     proj,
-		Sidefx:   sfx,
-		Registry: registry.NewPG(tenantDB), // m1_063 schema windows (FR-SPINE-023)
-	}), enrollMod, receipts.NewModule(receipts.ModuleDeps{ // 08 §3.4 retrieval + verifier food
-		DB:                tenantDB,
-		PG:                tenantDB,
-		Verifier:          verifier,
-		ObsCfg:            obsCfg,
-		Store:             chainStore,
-		IntelServiceToken: cfg.IntelServiceToken,
-	}), policy, querychoke.New(querychoke.Deps{ // 08 §3.3 report/query chokepoint
+	qc := querychoke.New(querychoke.Deps{ // 08 §3.3 report/query chokepoint
 		Registry:           tmpl,
 		Runner:             chRunner,
 		Verifier:           verifier,
@@ -257,11 +253,40 @@ func main() {
 		RollupWriteEnabled: cfg.RollupWriteEnabled,
 		IntelServiceToken:  cfg.IntelServiceToken,
 		Regimes:            querychoke.PGRegimes{DB: tenantDB},
-	}), memory.New(memory.Deps{ // 08 §3.7 memory delivery: device-token verified, tenant from claims, proxied to intel
+	})
+
+	srv := server.New(cfg.Port, cfg.DrainTimeout)
+	srv.Register(ingest.New(ingest.Deps{ // 8. each module contributes routes + readiness
+		Verifier:          verifier,
+		ObsCfg:            obsCfg,
+		PG:                tenantDB,
+		Store:             store,
+		Proj:              proj,
+		Sidefx:            sfx,
+		Registry:          registry.NewPG(tenantDB),         // m1_063 schema windows (FR-SPINE-023)
+		IntelServiceToken: cfg.IntelServiceToken,            // service ingest route (06 §1.2 REVISED seam)
+		DeviceKeys:        ingest.NewPGDeviceKeys(tenantDB), // per-vote signature verification (FR-VERIFY-004)
+		DB:                tenantDB,                         // m1_quarantined_batches tombstone at quarantine landing (m1_080)
+	}), enrollMod, receipts.NewModule(receipts.ModuleDeps{ // 08 §3.4 retrieval + verifier food
+		DB:                tenantDB,
+		PG:                tenantDB,
+		Verifier:          verifier,
+		ObsCfg:            obsCfg,
+		Store:             chainStore,
+		IntelServiceToken: cfg.IntelServiceToken,
+	}), policy, qc, memory.New(memory.Deps{ // 08 §3.7 memory delivery: device-token verified, tenant from claims, proxied to intel
 		Verifier:          verifier,
 		ObsCfg:            obsCfg,
 		IntelBaseURL:      cfg.IntelBaseURL,
 		IntelServiceToken: cfg.IntelServiceToken,
+	}), appapi.New(appapi.Deps{ // desktop app read surface (mark1-desktop-app-spec §5, §7.2)
+		Verifier: verifier,
+		ObsCfg:   obsCfg,
+		Registry: tmpl,
+		Runner:   chRunner,
+		Reports:  qc,
+		PG:       tenantDB,
+		Regimes:  querychoke.PGRegimes{DB: tenantDB},
 	}))
 
 	// The hourly witness-head job (m1_003; 05 §4.4). Runs only when a
@@ -289,6 +314,11 @@ func main() {
 		go policydist.NewDraftPublisher(rollout).Run(witnessCtx)
 	} else {
 		log.Printf("policydist: WITNESS_TENANTS unset — canary rollout controller and draft publisher NOT running (05 §4.1, §4.3)")
+	}
+	if len(tenants) > 0 {
+		go ingest.NewQuarantineSweep(tenantDB, store, chainStore, receipts.StaticTenants(tenants)).Run(witnessCtx)
+	} else {
+		log.Printf("ingest: WITNESS_TENANTS unset — daily quarantine sweep NOT running; the S3 lifecycle at 32 d is the only deletion (m1_080)")
 	}
 
 	// 9. /metrics /healthz on MetricsPort (pod-annotation scrape, 05 §1.7);
