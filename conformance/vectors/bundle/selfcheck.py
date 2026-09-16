@@ -39,7 +39,11 @@ def main() -> None:
         if not expired.get(field):
             fail(f"expired_key.{field} missing — outside_validity is undrivable")
 
-    listed = {v["file"] for v in vectors}
+    rotation = manifest.get("rotation", {})
+    rot_vectors = rotation.get("vectors", [])
+    if not rot_vectors or "bundle" not in rotation:
+        fail("rotation family missing — the ADR-0004 cross-sign chain is undrivable")
+    listed = {v["file"] for v in vectors} | {rotation["bundle"]["file"]}
     on_disk = {p.name for p in HERE.glob("*.cbor")}
     if listed != on_disk:
         fail(
@@ -63,7 +67,17 @@ def main() -> None:
         else:
             fail(f"{v['name']}: unknown expect {v['expect']!r}")
 
-    print(f"selfcheck OK: {len(vectors)} vectors consistent")
+    rot_files = [rotation["bundle"]] + rot_vectors
+    if {v["file"] for v in rot_vectors} != {p.name for p in HERE.glob("rotation_*.json")}:
+        fail("rotation manifest/disk drift")
+    for v in rot_files:
+        raw = (HERE / v["file"]).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != v["file_sha256_hex"]:
+            fail(f"{v['file']}: bytes drifted from the frozen manifest digest")
+        if "expect" in v and v["expect"] == "reject" and not v.get("kind"):
+            fail(f"{v['name']}: rotation reject without its kind")
+
+    print(f"selfcheck OK: {len(vectors)} vectors + {len(rot_vectors)} rotation manifests consistent")
 
 
 if __name__ == "__main__":

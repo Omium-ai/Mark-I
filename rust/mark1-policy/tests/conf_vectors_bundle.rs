@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use mark1_policy::{verify_and_decode, Section, SectionKeys, TlogHead};
+use mark1_policy::{verify_and_decode, LearnedRanker, RankerStage, Section, SectionKeys, TlogHead};
 use mark1_receipt::{hex, Ed25519Signer, KeyEntry, KeyRole, Signer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -96,12 +96,18 @@ fn conf_vectors_bundle_disk_matches_manifest() {
     // Manifest/disk drift — a vector added without a contract line, or a
     // frozen file deleted — is a failure of the family, not of one test.
     let m = manifest();
-    let listed: BTreeSet<String> = m["vectors"]
+    let mut listed: BTreeSet<String> = m["vectors"]
         .as_array()
         .unwrap()
         .iter()
         .map(|v| v["file"].as_str().unwrap().to_string())
         .collect();
+    listed.insert(
+        m["rotation"]["bundle"]["file"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    );
     let on_disk: BTreeSet<String> = fs::read_dir(dir())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -236,6 +242,28 @@ fn conf_vectors_bundle_knee_p_lcb() {
     assert_eq!(rows[0].p_lcb, None, "absent must never become 0.0");
     assert_eq!(rows[1].p_lcb, Some(0.0));
     assert_eq!(rows[2].p_lcb, Some(0.75));
+}
+
+#[test]
+fn conf_vectors_bundle_cortex_learned_ranker() {
+    // Same argument as knee_p_lcb: assert the values that reach cortexd, not
+    // just the accept.
+    let m = manifest();
+    let keys = key_set(&m);
+    let raw = fs::read(dir().join("cortex_learned_ranker.cbor")).unwrap();
+    let bundle = verify_and_decode(&raw, &keys, None, None).unwrap();
+    assert_eq!(
+        bundle.cortex.learned_ranker,
+        Some(LearnedRanker {
+            stage: RankerStage::Shadow,
+            weight: 0.5,
+            bias: 0.05,
+            coefficients: [0.6, 0.25, -0.1, 0.15],
+        })
+    );
+    let raw = fs::read(dir().join("bundle_zero.cbor")).unwrap();
+    let bundle = verify_and_decode(&raw, &keys, None, None).unwrap();
+    assert_eq!(bundle.cortex.learned_ranker, None);
 }
 
 #[test]

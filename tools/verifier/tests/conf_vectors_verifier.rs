@@ -18,8 +18,8 @@ use mark1_verifier::receipt::{
     dual_sign, hex, CheckpointPayload, Ed25519Signer, Signer, GENESIS_HASH,
 };
 use mark1_verifier::{
-    load_keys, verify, ExportRow, InclusionClaim, Options, WitnessFile, WitnessHead,
-    WITNESS_MISMATCH,
+    cross_sign_input, load_keys, verify, ExportRow, InclusionClaim, Options, WitnessFile,
+    WitnessHead, CROSS_SIGN_DOMAIN, WITNESS_MISMATCH,
 };
 use serde_json::{json, Value};
 
@@ -118,8 +118,16 @@ fn ring_from_files(m: &Value) -> mark1_verifier::receipt::KeyRing {
 /// the library is a defect kind never proven against the artifact a customer
 /// actually runs.
 fn verify_via_binary(m: &Value, rows: &[Value], args: &[String]) -> (Option<i32>, Value) {
+    verify_via_binary_with_keys(&keys_file(m), rows, args)
+}
+
+fn verify_via_binary_with_keys(
+    keys: &Value,
+    rows: &[Value],
+    args: &[String],
+) -> (Option<i32>, Value) {
     let dir = scratch_dir("neg");
-    fs::write(dir.join("keys.json"), keys_file(m).to_string()).unwrap();
+    fs::write(dir.join("keys.json"), keys.to_string()).unwrap();
     let lines: Vec<String> = rows.iter().map(Value::to_string).collect();
     fs::write(dir.join("chain.jsonl"), lines.join("\n")).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_mark1-verifier"))
@@ -277,16 +285,95 @@ fn conf_vectors_verifier_accepts_frozen_chain() {
     );
 }
 
+/// A rotation case's keys file: the device key as frozen, the server chain
+/// list exactly as the case publishes it (cross_sig present or not).
+fn rotation_keys_file(m: &Value, case: &Value) -> Value {
+    json!({
+        "server_chain_keys": case["server_chain_keys"],
+        "device_keys": [{
+            "pubkey_hex": m["keys"]["device"]["public_hex"],
+            "key_id": m["keys"]["device"]["key_id"],
+        }],
+    })
+}
+
+fn rotation_rows(case: &Value) -> Vec<Value> {
+    case["chain"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(export_row)
+        .collect()
+}
+
+#[test]
+fn conf_vectors_verifier_follows_rotation() {
+    let m = manifest();
+    let rot = &m["rotation"];
+    assert_eq!(
+        hex::encode(CROSS_SIGN_DOMAIN),
+        rot["cross_sign_domain_hex"].as_str().unwrap()
+    );
+    // The byte contract itself: the frozen cross-signature re-derives from
+    // the frozen seed through THIS crate's cross_sign_input.
+    let old = Ed25519Signer::from_seed(
+        hex::decode_array(m["keys"]["server"]["seed_hex"].as_str().unwrap()).unwrap(),
+    );
+    let successor: [u8; 32] =
+        hex::decode_array(rot["successor"]["public_hex"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        hex::encode(&old.sign(&cross_sign_input("server_chain", &successor))),
+        rot["successor"]["cross_sig_hex"].as_str().unwrap()
+    );
+
+    let case = &rot["accept"];
+    let (code, report) =
+        verify_via_binary_with_keys(&rotation_keys_file(&m, case), &rotation_rows(case), &[]);
+    assert_eq!(code, Some(0), "{}: {report}", case["name"]);
+    assert_eq!(report["ok"], json!(true), "{report}");
+    assert_eq!(
+        report["intact_prefix_seq"],
+        case["chain"].as_array().unwrap().last().unwrap()["seq"]
+    );
+}
+
 #[test]
 fn conf_vectors_verifier_names_the_tampered_byte() {
     let m = manifest();
-    let vocabulary: BTreeSet<&str> = m["defect_vocabulary"]
+    let mut vocabulary: BTreeSet<&str> = m["defect_vocabulary"]
         .as_array()
         .unwrap()
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
     let mut exercised: BTreeSet<&str> = BTreeSet::new();
+
+    // The rotation family's negatives ride the same loop: a manifest-level
+    // kind the chain walk cannot emit, so it is proven through the binary
+    // exactly like the frozen eight.
+    let rot = &m["rotation"];
+    vocabulary.extend(
+        rot["defect_vocabulary"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap()),
+    );
+    for neg in rot["negatives"].as_array().unwrap() {
+        let name = neg["name"].as_str().unwrap();
+        let expect = neg["expect_defect"].as_str().unwrap();
+        let (code, report) =
+            verify_via_binary_with_keys(&rotation_keys_file(&m, neg), &rotation_rows(neg), &[]);
+        assert_eq!(code, Some(5), "{name}: {report}");
+        let kinds: Vec<&str> = report["defects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec![expect], "{name}: {report}");
+        exercised.insert(expect);
+    }
 
     for neg in m["negatives"].as_array().unwrap() {
         let name = neg["name"].as_str().unwrap();

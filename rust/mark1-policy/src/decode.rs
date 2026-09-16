@@ -22,8 +22,8 @@ use ciborium::value::Value;
 
 use crate::types::{
     AgentMap, AgentMaps, AnchorEnable, CorrelationGroup, CortexChannel, CortexSection, CostBasis,
-    CpvsRow, GatesSection, InjectionRule, KneeRow, KneeTable, Ladder, MemorySection, Posterior4,
-    RouteSection, Rung, Signal3, VerifierModel, VerifySection,
+    CpvsRow, GatesSection, InjectionRule, KneeRow, KneeTable, Ladder, LearnedRanker, MemorySection,
+    Posterior4, RankerStage, RouteSection, Rung, Signal3, VerifierModel, VerifySection,
 };
 use crate::Reject;
 
@@ -396,7 +396,12 @@ pub(crate) fn decode_verify(v: &Value) -> Result<VerifySection, Reject> {
 pub(crate) fn decode_route(v: &Value) -> Result<RouteSection, Reject> {
     let p = "sections.route";
     let m = map_of(v, p)?;
-    strict_keys(&m, &["cpvs", "ladders", "knee"], &["exploration"], p)?;
+    strict_keys(
+        &m,
+        &["cpvs", "ladders", "knee"],
+        &["exploration", "exploration_opt_in"],
+        p,
+    )?;
 
     let mut cpvs = Vec::new();
     for (i, rv) in array(m["cpvs"], p)?.iter().enumerate() {
@@ -489,6 +494,13 @@ pub(crate) fn decode_route(v: &Value) -> Result<RouteSection, Reject> {
             exploration_epsilon = prob(e, &ep)?;
         }
     }
+    // D-EF: ε>0 needs the publisher-signed opt-in; ponytail: absent ⇒ pre-ruling grammar until the re-freeze fixes `full` (ε 0.05, no opt-in).
+    if let Some(o) = m.get("exploration_opt_in") {
+        let op = format!("{p}.exploration_opt_in");
+        if !boolean(o, &op)? && exploration_epsilon > 0.0 {
+            return Err(schema(&op, "exploration.epsilon > 0 without opt-in"));
+        }
+    }
 
     Ok(RouteSection {
         cpvs,
@@ -528,7 +540,12 @@ pub(crate) fn decode_memory(v: &Value) -> Result<MemorySection, Reject> {
 pub(crate) fn decode_cortex(v: &Value) -> Result<CortexSection, Reject> {
     let p = "sections.cortex";
     let m = map_of(v, p)?;
-    strict_keys(&m, &["map_budget_tokens", "channels"], &[], p)?;
+    strict_keys(
+        &m,
+        &["map_budget_tokens", "channels"],
+        &["learned_ranker"],
+        p,
+    )?;
     let bp = format!("{p}.map_budget_tokens");
     let bm = map_of(m["map_budget_tokens"], &bp)?;
     strict_keys(&bm, &["min", "max"], &[], &bp)?;
@@ -553,10 +570,43 @@ pub(crate) fn decode_cortex(v: &Value) -> Result<CortexSection, Reject> {
             }
         });
     }
+    let learned_ranker = m
+        .get("learned_ranker")
+        .map(|v| decode_ranker(v, &format!("{p}.learned_ranker")))
+        .transpose()?;
     Ok(CortexSection {
         map_budget_tokens_min: min,
         map_budget_tokens_max: max,
         channels,
+        learned_ranker,
+    })
+}
+
+fn decode_ranker(v: &Value, p: &str) -> Result<LearnedRanker, Reject> {
+    let m = map_of(v, p)?;
+    strict_keys(&m, &["stage", "weight", "bias", "coefficients"], &[], p)?;
+    let sp = format!("{p}.stage");
+    let stage = match text(m["stage"], &sp)? {
+        "probation" => RankerStage::Probation,
+        "shadow" => RankerStage::Shadow,
+        "active" => RankerStage::Active,
+        other => return Err(schema(&sp, format!("not a ranker stage: {other}"))),
+    };
+    let cp = format!("{p}.coefficients");
+    let c = array(m["coefficients"], &cp)?;
+    if c.len() != 4 {
+        return Err(schema(&cp, "coefficients must have exactly 4 entries"));
+    }
+    Ok(LearnedRanker {
+        stage,
+        weight: prob(m["weight"], &format!("{p}.weight"))?,
+        bias: finite(m["bias"], &format!("{p}.bias"))?,
+        coefficients: [
+            finite(&c[0], &cp)?,
+            finite(&c[1], &cp)?,
+            finite(&c[2], &cp)?,
+            finite(&c[3], &cp)?,
+        ],
     })
 }
 
@@ -578,12 +628,24 @@ pub(crate) fn decode_gates(v: &Value) -> Result<GatesSection, Reject> {
         // CDDL `.le 3`: a bundle may LOWER the local hard cap, never raise it.
         return Err(schema(p, "max_consecutive_blocks > 3"));
     }
+    let hbc = uint(m["hourly_block_ceiling"], p)?;
+    if hbc > MAX_HOURLY_BLOCK_CEILING {
+        // Same direction as mcb (FR-VERIFY-010): lower only; 0 = edge default.
+        return Err(schema(p, "hourly_block_ceiling > 30"));
+    }
     Ok(GatesSection {
         stop_gate_enabled: boolean(m["stop_gate_enabled"], p)?,
         max_consecutive_blocks: mcb as u8,
-        hourly_block_ceiling: uint(m["hourly_block_ceiling"], p)?,
+        hourly_block_ceiling: hbc,
     })
 }
+
+/// ponytail: 30 mirrors mark1d `fabric/gate.go:27 DefaultHourlyCeiling` (and
+/// controld `policydist/bundle.go maxHourlyBlockCeiling`) — 07's CDDL types
+/// `hourly_block_ceiling` as a bare `uint` and no doc names a number, so the
+/// edge built-in is the only ceiling a bundle can lower. Hand-copied const:
+/// bump all three or none.
+const MAX_HOURLY_BLOCK_CEILING: u64 = 30;
 
 pub(crate) fn decode_agent_maps(v: &Value) -> Result<AgentMaps, Reject> {
     let p = "sections.agent_maps";
@@ -675,6 +737,19 @@ mod tests {
             ),
         ]);
         assert!(matches!(decode_gates(&gates), Err(Reject::Schema { .. })));
+        // Same direction for hourly_block_ceiling: 31 > the edge built-in 30.
+        let hourly = Value::Map(vec![
+            (Value::Text("stop_gate_enabled".into()), Value::Bool(true)),
+            (
+                Value::Text("max_consecutive_blocks".into()),
+                Value::Integer(3.into()),
+            ),
+            (
+                Value::Text("hourly_block_ceiling".into()),
+                Value::Integer(31.into()),
+            ),
+        ]);
+        assert!(matches!(decode_gates(&hourly), Err(Reject::Schema { .. })));
         // Rule 3/4: a stray key — the exact shape a future `wasm_module`
         // would take — fails decode, it is never tolerated.
         let stray = Value::Map(vec![(Value::Text("wasm_module".into()), Value::Bool(true))]);
@@ -839,6 +914,128 @@ mod tests {
                 decode_route(&route(with(bad))),
                 Err(Reject::Schema { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn d_ef_epsilon_needs_the_signed_opt_in_when_the_key_is_present() {
+        let txt = |s: &str| Value::Text(s.into());
+        let route = |eps: f64, opt_in: Option<Value>| {
+            let mut m = vec![
+                (txt("cpvs"), Value::Array(vec![])),
+                (txt("ladders"), Value::Array(vec![])),
+                (
+                    txt("knee"),
+                    Value::Map(vec![
+                        (txt("cost_basis"), txt("usd")),
+                        (
+                            txt("rows"),
+                            Value::Array(vec![Value::Map(vec![
+                                (txt("n"), Value::Integer(1.into())),
+                                (txt("c_n"), Value::Float(0.5)),
+                            ])]),
+                        ),
+                        (txt("v_default"), Value::Float(1.0)),
+                    ]),
+                ),
+                (
+                    txt("exploration"),
+                    Value::Map(vec![(txt("epsilon"), Value::Float(eps))]),
+                ),
+            ];
+            if let Some(o) = opt_in {
+                m.push((txt("exploration_opt_in"), o));
+            }
+            Value::Map(m)
+        };
+        let eps = |v: &Value| decode_route(v).unwrap().exploration_epsilon;
+        // Present-false + ε>0 is the M1E-3001 refusal; present-true accepts.
+        assert!(matches!(
+            decode_route(&route(0.05, Some(Value::Bool(false)))),
+            Err(Reject::Schema { .. })
+        ));
+        assert_eq!(eps(&route(0.05, Some(Value::Bool(true)))), 0.05);
+        assert_eq!(eps(&route(0.0, Some(Value::Bool(false)))), 0.0);
+        assert!(matches!(
+            decode_route(&route(0.05, Some(Value::Integer(1.into())))),
+            Err(Reject::Schema { .. })
+        ));
+        // Absent ⇒ pre-ruling grammar: the frozen `full` (ε 0.05, no key) decodes until the re-freeze (vector owed).
+        assert_eq!(eps(&route(0.05, None)), 0.05);
+    }
+
+    #[test]
+    fn learned_ranker_is_optional_closed_enum_and_bounded() {
+        let txt = |s: &str| Value::Text(s.into());
+        let fl = |x: f64| Value::Float(x);
+        let cortex = |ranker: Option<Value>| {
+            let mut m = vec![
+                (
+                    txt("map_budget_tokens"),
+                    Value::Map(vec![
+                        (txt("min"), Value::Integer(1.into())),
+                        (txt("max"), Value::Integer(2.into())),
+                    ]),
+                ),
+                (txt("channels"), Value::Array(vec![txt("session_start")])),
+            ];
+            if let Some(r) = ranker {
+                m.push((txt("learned_ranker"), r));
+            }
+            Value::Map(m)
+        };
+        let ranker = |stage: &str, weight: f64, bias: f64, coef: Vec<Value>| {
+            Value::Map(vec![
+                (txt("stage"), txt(stage)),
+                (txt("weight"), fl(weight)),
+                (txt("bias"), fl(bias)),
+                (txt("coefficients"), Value::Array(coef)),
+            ])
+        };
+        let four = || vec![fl(0.5), fl(0.25), fl(-0.1), fl(0.0)];
+        // Absent ⇒ None, never a zeroed ranker.
+        assert_eq!(decode_cortex(&cortex(None)).unwrap().learned_ranker, None);
+        let ok = decode_cortex(&cortex(Some(ranker("shadow", 0.5, 0.1, four()))))
+            .unwrap()
+            .learned_ranker
+            .unwrap();
+        assert_eq!(ok.stage, RankerStage::Shadow);
+        assert_eq!((ok.weight, ok.bias), (0.5, 0.1));
+        assert_eq!(ok.coefficients, [0.5, 0.25, -0.1, 0.0]);
+        for stage in ["probation", "active"] {
+            assert!(decode_cortex(&cortex(Some(ranker(stage, 1.0, 0.0, four())))).is_ok());
+        }
+        assert!(decode_cortex(&cortex(Some(ranker("shadow", 0.0, 0.0, four())))).is_ok());
+        // Every refusal is M1E-3001 schema: a closed-enum miss, weight outside
+        // [0,1], non-finite anywhere, a wrong-arity vector, a stray key.
+        let bad = [
+            ranker("canary", 0.5, 0.0, four()),
+            ranker("shadow", 1.5, 0.0, four()),
+            ranker("shadow", -0.1, 0.0, four()),
+            ranker("shadow", f64::NAN, 0.0, four()),
+            ranker("shadow", 0.5, f64::INFINITY, four()),
+            ranker(
+                "shadow",
+                0.5,
+                0.0,
+                vec![fl(0.0), fl(0.0), fl(f64::NAN), fl(0.0)],
+            ),
+            ranker("shadow", 0.5, 0.0, vec![fl(0.0); 3]),
+            ranker("shadow", 0.5, 0.0, vec![fl(0.0); 5]),
+            Value::Map(vec![(txt("stage"), txt("shadow"))]),
+            Value::Map(vec![
+                (txt("stage"), txt("shadow")),
+                (txt("weight"), fl(0.5)),
+                (txt("bias"), fl(0.0)),
+                (txt("coefficients"), Value::Array(four())),
+                (txt("model"), txt("x")),
+            ]),
+        ];
+        for (i, r) in bad.into_iter().enumerate() {
+            assert!(
+                matches!(decode_cortex(&cortex(Some(r))), Err(Reject::Schema { .. })),
+                "bad ranker #{i} accepted"
+            );
         }
     }
 

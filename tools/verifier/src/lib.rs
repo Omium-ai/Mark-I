@@ -158,6 +158,24 @@ pub struct WitnessHead {
 /// chain defect — it is the chain and the world disagreeing.
 pub const WITNESS_MISMATCH: &str = "witness_mismatch";
 
+/// The server key changed between two links without ADR-0004's hand-over:
+/// the retiring key's receipt naming the successor AND a cross-signature by
+/// the retiring key on the successor's manifest entry. Not a chain defect of
+/// the frozen eight — it is the key manifest and the chain disagreeing.
+pub const ROTATION_UNCHAINED: &str = "rotation_unchained";
+
+/// The cross-signature input (ADR-0004; receipts.CrossSignInput in Go):
+/// `"mark1-key-rotation-v1\0" || role || 0x00 || successor public key`.
+pub const CROSS_SIGN_DOMAIN: &[u8] = b"mark1-key-rotation-v1\0";
+
+pub fn cross_sign_input(role: &str, public_key: &[u8; 32]) -> Vec<u8> {
+    let mut out = CROSS_SIGN_DOMAIN.to_vec();
+    out.extend_from_slice(role.as_bytes());
+    out.push(0);
+    out.extend_from_slice(public_key);
+    out
+}
+
 #[derive(Debug, Serialize)]
 pub struct ReportDefect {
     pub seq: u64,
@@ -354,6 +372,11 @@ pub fn verify(
             detail: d.detail.clone(),
         })
         .collect();
+    for pair in rows.windows(2) {
+        if pair[0].server_key_id != pair[1].server_key_id {
+            check_rotation(&pair[0], &pair[1], ring, &mut defects);
+        }
+    }
 
     let mut checkpoints = 0usize;
     let mut inclusion_proofs = 0usize;
@@ -525,6 +548,58 @@ fn inclusion_claim_holds(claim: &InclusionClaim, root: &[u8; 32], leaf_count: us
         return false;
     };
     checkpoint::verify_inclusion(&leaf, index, &path, root, leaf_count)
+}
+
+/// ADR-0004's rotation rule, applied where the countersigning key changes:
+/// the retiring key's LAST receipt must name the successor in its signed
+/// payload, and the successor's manifest entry must be cross-signed by the
+/// retiring key. A key that simply appears is a chain anyone holding any
+/// published key could continue.
+fn check_rotation(
+    prev: &ReceiptRow,
+    next: &ReceiptRow,
+    ring: &KeyRing,
+    defects: &mut Vec<ReportDefect>,
+) {
+    let mut fail = |detail: String| {
+        defects.push(ReportDefect {
+            seq: next.seq,
+            kind: ROTATION_UNCHAINED.into(),
+            detail,
+        })
+    };
+    let named = serde_json::from_str::<Value>(&prev.payload)
+        .ok()
+        .and_then(|p| {
+            p.get("successor_key_id")
+                .and_then(Value::as_str)
+                .map(String::from)
+        });
+    if named.as_deref() != Some(next.server_key_id.as_str()) {
+        fail(format!(
+            "server key changed {} -> {} but the retiring key's receipt (seq {}) names successor {:?}",
+            prev.server_key_id, next.server_key_id, prev.seq, named
+        ));
+    }
+    let (Some(old), Some(new)) = (ring.get(&prev.server_key_id), ring.get(&next.server_key_id))
+    else {
+        return; // the chain walk already named the unknown key
+    };
+    match &new.cross_sig {
+        Some(cs) if cs.by_key_id == prev.server_key_id => {
+            let msg = cross_sign_input("server_chain", &new.public_key);
+            if !mark1_receipt::verify(&old.public_key, &cs.signature, &msg) {
+                fail(format!(
+                    "cross-signature on {} does not verify under {}",
+                    next.server_key_id, prev.server_key_id
+                ));
+            }
+        }
+        _ => fail(format!(
+            "successor key {} carries no cross-signature by the retiring key {}",
+            next.server_key_id, prev.server_key_id
+        )),
+    }
 }
 
 /// The witness holds (seq, hash) pairs Omium cannot edit (m1_003 header). A

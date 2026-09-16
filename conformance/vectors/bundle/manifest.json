@@ -41,6 +41,71 @@
       "seed_hex": "3131313131313131313131313131313131313131313131313131313131313131"
     }
   },
+  "rotation": {
+    "bundle": {
+      "before": "M1E-3001/unknown_key against the pinned ring; accept after rotation_accepted is applied",
+      "body_sha256_hex": "be3370ce87a86a8a24e951ce7d266f5f31ed28d625dd22359e2b5738b7161617",
+      "file": "rotation_accepted.cbor",
+      "file_sha256_hex": "b3e2f54b3276a231c89c463f91ada8183fd619a165c0a892d9adb968003b67fc",
+      "last_applied_seq": 2,
+      "tlog_head": {
+        "root_hex": "c8af0dc5cb4d4b719c8f2b0dabc19d2508d335a0c74d0819f43c66045347e37c",
+        "tree_size": 1
+      }
+    },
+    "cross_sign_domain_hex": "6d61726b312d6b65792d726f746174696f6e2d763100",
+    "cross_sign_input": "domain || role || 0x00 || successor public key (32 bytes); role = \"bundle:<section>\"",
+    "successor": {
+      "key_id": "ed25519:e480c364999500b7",
+      "public_hex": "76d81b33ba721df89b8e0b0ef26c34eb72e978951044798cd608a4f6dbf2e6d6",
+      "section": "verify",
+      "seed_hex": "3838383838383838383838383838383838383838383838383838383838383838"
+    },
+    "update_key": {
+      "key_id": "ed25519:0429a26ab56dacbe",
+      "public_hex": "2f0a7b29f53652005cd4720a3fe7acd08c85a4e29cd6f48d1905e276dac6ffef",
+      "seed_hex": "3939393939393939393939393939393939393939393939393939393939393939"
+    },
+    "vectors": [
+      {
+        "admitted": [
+          "ed25519:e480c364999500b7"
+        ],
+        "expect": "accept",
+        "file": "rotation_accepted.json",
+        "file_sha256_hex": "c3836c11c490b07e291ac8213d9c7dad56ffeedd14a59167aac5ed0e979c21b7",
+        "name": "rotation_accepted"
+      },
+      {
+        "expect": "reject",
+        "file": "rotation_self_signed.json",
+        "file_sha256_hex": "0dab1b7fa66d227003dfd7fd57e6ab9e439583d56bc40a919f28681a4b889985",
+        "kind": "self_signed",
+        "name": "rotation_self_signed"
+      },
+      {
+        "expect": "reject",
+        "file": "rotation_bad_cross_sig.json",
+        "file_sha256_hex": "cab4a65216bb4fa9102ff2be1ad18112cdb7fc924423c1f0d4b894570bfb0c41",
+        "kind": "bad_cross_signature",
+        "name": "rotation_bad_cross_sig"
+      },
+      {
+        "expect": "reject",
+        "file": "rotation_cross_section_signer.json",
+        "file_sha256_hex": "aa1c690ebbcd4079e857a82396f74ed5a15439a0b1f6764e050baebf50dfd102",
+        "kind": "unknown_signer",
+        "name": "rotation_cross_section_signer"
+      },
+      {
+        "expect": "reject",
+        "file": "rotation_update_equals_bundle.json",
+        "file_sha256_hex": "46378a6e4611c956fbd5245111ae3427d209114341337d0f9aa5016000e400af",
+        "kind": "update_equals_bundle",
+        "name": "rotation_update_equals_bundle"
+      }
+    ]
+  },
   "schema": "policy_bundle.v1",
   "signing_input": "D-Q: \"mark1-bundle-v1\\0\" || canonical_cbor({schema, section_name, tenant_id: bstr16, channel, seq, issued_at: tag1(uint), max_age, prev_hash: bstr32, section: bstr(canonical section bytes)}) — covers the whole envelope except `inclusion`",
   "tenant_id_hex": "0192aa7e000070008000000000000001",
@@ -361,6 +426,113 @@
         "stop_gate_enabled": true,
         "verifiers": 3
       },
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3003",
+      "expect": "reject",
+      "file": "forged_inclusion_root_seq2.cbor",
+      "file_sha256_hex": "6f42ce59d4247719a607c2dbcaf32cb9bf31c2ab5c5da0661f80480a2b5f1385",
+      "kind": "inclusion_invalid",
+      "last_applied_seq": 1,
+      "name": "forged_inclusion_root_seq2",
+      "tlog_head": {
+        "root_hex": "53fbdbc9c40a0f63f2d8ca423cfa8a82d95c48689fd4a450b333f8e018f8e05b",
+        "tree_size": 3
+      }
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "missing_max_age.cbor",
+      "file_sha256_hex": "b2eb6c6fb31b4ee74505e69cfa268bb5627652a7882a5baa2566e340c53d0698",
+      "kind": "schema",
+      "last_applied_seq": null,
+      "name": "missing_max_age",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "missing_prev_hash.cbor",
+      "file_sha256_hex": "83b9a1d193d248f8a033d12453831d3b6139f220f3319ee58c90e077831d3082",
+      "kind": "schema",
+      "last_applied_seq": null,
+      "name": "missing_prev_hash",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "unknown_section.cbor",
+      "file_sha256_hex": "a8cd4b55fbca1756f7f64909e2bb38abf1e1e25ed3766913c0ace0d185b65d2f",
+      "kind": "schema",
+      "last_applied_seq": null,
+      "name": "unknown_section",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "mcb_over_cap.cbor",
+      "file_sha256_hex": "ea6750f83f821747167e8d6da47a0d30f320ec3ee95e66f9b5d3bab4d7e08582",
+      "kind": "schema",
+      "last_applied_seq": null,
+      "name": "mcb_over_cap",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "hourly_over_ceiling.cbor",
+      "file_sha256_hex": "1f9870082f234d52ed981ec3b219a85f5cc1fcfaa48655b398994492cc9c20df",
+      "kind": "schema",
+      "last_applied_seq": null,
+      "name": "hourly_over_ceiling",
+      "tlog_head": null
+    },
+    {
+      "body_sha256_hex": "3c1b9526f162baac55428835d29456d1831310eaeb76befb1288f9adccff4eda",
+      "expect": "accept",
+      "file": "cortex_learned_ranker.cbor",
+      "file_sha256_hex": "5bf398dec854893a3352521483e1a0e3c3127fabb72a843271357c8d84ce5f87",
+      "last_applied_seq": null,
+      "name": "cortex_learned_ranker",
+      "summary": {
+        "agents": 1,
+        "anchors": 2,
+        "channel": "local",
+        "correlation_groups": 1,
+        "exploration_epsilon": 0.0,
+        "issued_at_epoch_s": 1787961600,
+        "knee_rows": 3,
+        "max_age_s": 31536000,
+        "max_consecutive_blocks": 3,
+        "quarantined": 0,
+        "seq": 0,
+        "stop_gate_enabled": true,
+        "verifiers": 3
+      },
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "cortex_ranker_weight_out_of_range.cbor",
+      "file_sha256_hex": "554fc2a321537d38f3e8e6b02509133c9aa6da2a55717a5377d30a328ac4a7e7",
+      "kind": "schema",
+      "last_applied_seq": null,
+      "name": "cortex_ranker_weight_out_of_range",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "cortex_ranker_bad_stage.cbor",
+      "file_sha256_hex": "5d30515bacc550a8040ca49f516716101a62c9ddf2d4794fd842167f9422f47f",
+      "kind": "schema",
+      "last_applied_seq": null,
+      "name": "cortex_ranker_bad_stage",
       "tlog_head": null
     }
   ]

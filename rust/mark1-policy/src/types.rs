@@ -169,6 +169,7 @@ pub struct RouteSection {
     pub knee: KneeTable,
     /// `exploration.epsilon`, defaulted to 0.0 when the map is absent —
     /// ε>0 is per-tenant contractual opt-in (07 CDDL comment).
+    /// D-EF: refused at decode under a signed `exploration_opt_in: false`; the edge applies ε>0 only with the local opt-in artifact.
     pub exploration_epsilon: f64,
 }
 
@@ -245,6 +246,35 @@ pub struct CortexSection {
     pub map_budget_tokens_min: u64,
     pub map_budget_tokens_max: u64,
     pub channels: Vec<CortexChannel>,
+    /// Absent ⇒ no learned ranker: cortexd serves PPR order (06 §12.4).
+    pub learned_ranker: Option<LearnedRanker>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RankerStage {
+    Probation,
+    Shadow,
+    Active,
+}
+
+impl RankerStage {
+    pub fn name(self) -> &'static str {
+        match self {
+            RankerStage::Probation => "probation",
+            RankerStage::Shadow => "shadow",
+            RankerStage::Active => "active",
+        }
+    }
+}
+
+/// The 4 coefficients are cortexd's file features `[fan_in, recency, path_depth, tag_count]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LearnedRanker {
+    pub stage: RankerStage,
+    /// Blend weight in [0,1]; decode refuses outside it (M1E-3001).
+    pub weight: f64,
+    pub bias: f64,
+    pub coefficients: [f64; 4],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

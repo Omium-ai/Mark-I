@@ -93,8 +93,71 @@ Each entry carries `tlog_head` (D-S): the pinned log head the driving caller hol
 | `schema_stray_key` | M1E-3001 / schema | a SIGNED bundle with a stray `wasm_module` key in a section: strict maps (07 rule 3) are structural, and a stray key is schema, never a paged M1E-3005 |
 | `too_large` | M1E-3001 / too_large | a buffer past MAX_BUNDLE_LEN dies on length before any parse |
 | `command_string` | M1E-3005 / command_string | a properly SIGNED bundle whose catalog_id is a shell command; the structural grammar (07 rule 1) rejects the whole bundle |
+| `forged_inclusion_root_seq2` | M1E-3003 / inclusion_invalid | `minimal`'s exact body (seq 2, chained to `full`, validly signed) under a self-consistent single-leaf proof whose root is not the pinned 3-leaf head's, offered with seq 1 applied: the ONLY M1E-3003 vector at seq > 1, so the inclusion leg is proven to refuse UNDER a standing last-known-good (FR-POLICY-004) instead of hiding behind the seq check |
+| `missing_max_age` | M1E-3001 / schema | bundle_zero with the `max_age` envelope key dropped: the envelope strict map fires before any signature is consulted |
+| `missing_prev_hash` | M1E-3001 / schema | bundle_zero with the `prev_hash` envelope key dropped: same layer, the chain link is mandatory |
+| `unknown_section` | M1E-3001 / schema | bundle_zero with a seventh section (`exec`) in `sections`: the six-name strict map refuses a section no key class is accountable for, before signatures are split |
+| `mcb_over_cap` | M1E-3001 / schema | a properly SIGNED seq-0 bundle with `max_consecutive_blocks = 4` (CDDL `.le 3`): a bundle may lower a local cap, never raise it (FR-VERIFY-010) |
+| `hourly_over_ceiling` | M1E-3001 / schema | a properly SIGNED seq-0 bundle with `hourly_block_ceiling = 31`: same direction, against the edge built-in of 30 (`fabric/gate.go DefaultHourlyCeiling`; no doc names a number) |
+| `cortex_learned_ranker` | accept | 07's OPTIONAL cortex `learned_ranker` (06 §12.4) populated: stage `shadow`, weight 0.5, bias 0.05, 4 coefficients. Both decoders once had the key out of their optional set, so no bundle could carry ranker weights to cortexd; the dedicated drivers assert the decoded values, since an accept alone would not catch a decoder that swallowed the key |
+| `cortex_ranker_weight_out_of_range` | M1E-3001 / schema | a properly SIGNED seq-0 bundle whose `learned_ranker.weight` is 1.5: the blend weight is bounded to [0,1] at decode, never clamped at cortexd |
+| `cortex_ranker_bad_stage` | M1E-3001 / schema | a properly SIGNED seq-0 bundle whose `learned_ranker.stage` is `canary`: the stage is a closed enum (07 rule 1c), and an enum miss is schema, never the paged M1E-3005 |
 
 Every implementation MUST drive every manifest entry, positives and negatives, and for
 accepts assert `body_sha256_hex` plus the `summary` fields against its own decode.
 Test-name filters are load-bearing (`tools/ci/conformance_crosslang.sh`): Rust
 `conf_vectors_*` (`conf_vectors_bundle_*` here), Go `TestConfVectors*`.
+
+## Rotation family (ADR-0004) — `manifest.json["rotation"]`
+
+The key-manifest intake at the edge, frozen beside the bundle vectors. A section key
+not yet pinned is admitted ONLY through `cross_sig` by a key already pinned for that
+same section; the update key must differ from every bundle key (R5, 10 §8.3). Cross-sign
+input: `"mark1-key-rotation-v1\0" || "bundle:<section>" || 0x00 || successor pub (32 bytes)`,
+Ed25519 by the retiring key. Test seeds: `'8'`×32 (the verify successor), `'9'`×32 (a
+distinct update key).
+
+`rotation.bundle` (`rotation_accepted.cbor`): seq 3 on `stable`, chained to `minimal`,
+verify section signed by the SUCCESSOR — `M1E-3001/unknown_key` against the pinned ring,
+accept after `rotation_accepted.json` is applied (`last_applied_seq` 2, its own `tlog_head`).
+
+| manifest | expect | proves |
+|---|---|---|
+| `rotation_accepted` | accept, admits the successor | the retiring verify key's cross-signature is the one path into the ring |
+| `rotation_self_signed` | reject / self_signed | a key endorsing itself is a new root, not a rotation |
+| `rotation_bad_cross_sig` | reject / bad_cross_signature | right signer, one flipped byte |
+| `rotation_cross_section_signer` | reject / unknown_signer | the pinned route key endorses a verify successor: a signer pinned for another section is not a signer for this one (section-split signing, 05 §4.5) |
+| `rotation_update_equals_bundle` | reject / update_equals_bundle | R5: the manifest names the route key as the update key; refused whole, nothing admitted |
+
+Every refusal leaves the ring unchanged (the rotated bundle stays unknown_key). Drivers:
+Rust `conf_vectors_bundle_rotation_*` (mark1-policy, reference), Go
+`TestConfVectorsBundleRotationAtEdge` (mark1d client) and
+`TestConfVectorsBundleRotationManifests` (controld publish-side validator).
+
+## Changelog
+
+- **2026-09-16 — 30 → 33 vectors (5 accepts / 28 rejects; no new kind), additive.** Three
+  appended for the cortex section's new OPTIONAL `learned_ranker` key (`cortex_learned_ranker`,
+  `cortex_ranker_weight_out_of_range`, `cortex_ranker_bad_stage`). Every one of the 31
+  pre-existing `.cbor` files (the 30 `vectors` entries plus `rotation_accepted.cbor`) and the
+  five `rotation_*.json` manifests are byte-identical to the previous freeze (sha256 diffed
+  before/after regeneration); `manifest.json` differs ONLY by the three appended entries.
+
+- **2026-09-16 — rotation family added (additive).** `manifest.json` gains a top-level
+  `rotation` object, four `rotation_*.json` manifests and `rotation_accepted.cbor`; the 30
+  `vectors` entries and their `.cbor` files are byte-identical to the previous freeze
+  (regeneration was byte-stable before the generator change, and `manifest.json` differs
+  ONLY by the appended key). `selfcheck.py` audits the new files.
+
+- **2026-09-15 — 24 → 30 vectors (4 accepts / 26 rejects; no new kind).** Six negatives
+  appended (`forged_inclusion_root_seq2`, `missing_max_age`, `missing_prev_hash`,
+  `unknown_section`, `mcb_over_cap`, `hourly_over_ceiling`) after the Phase-3 ledger
+  mapping found the decoders implemented these rejections with no vector driving them.
+  `hourly_over_ceiling` required a NEW edge bound (`hourly_block_ceiling > 30` ⇒
+  M1E-3001/schema in both `decode.rs` and `decode.go`, mirroring controld's
+  publisher-side bound) — the generator `bail!`s on an accepted negative, so the vector's
+  existence is the proof the bound is live. Regeneration was run against the unchanged
+  generator first and was byte-stable; the 24 pre-existing `.cbor` files are
+  byte-identical to the previous freeze (same `file_sha256_hex`), and `manifest.json`'s
+  digest changed ONLY by the six appended entries. This is an additive re-freeze, not a
+  re-freeze of any existing byte.

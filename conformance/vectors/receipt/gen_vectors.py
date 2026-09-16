@@ -32,6 +32,13 @@ GENESIS_HASH = b"\x00" * 32
 
 DEVICE_SEED = bytes([0x11]) * 32
 SERVER_SEED = bytes([0x22]) * 32
+# ADR-0004 rotation: the successor server chain key, cross-signed by SERVER_SEED's key.
+SUCCESSOR_SEED = bytes([0x33]) * 32
+CROSS_SIGN_DOMAIN = b"mark1-key-rotation-v1\x00"
+
+
+def cross_sign_input(role: str, pub: bytes) -> bytes:
+    return CROSS_SIGN_DOMAIN + role.encode() + b"\x00" + pub
 
 
 def canonical_json(payload) -> str:
@@ -310,6 +317,82 @@ def main() -> None:
         {"name": "stripped_device_signature", "receipt": n10, "expect_defect": n10_defect},
     ]
 
+    # ---- rotation family (ADR-0004): the server chain key rotates after seq 4.
+    # Row 5 is the retiring key's LAST receipt, a key_rotation record naming the
+    # successor inside the signed payload; row 6 is the successor's first. The
+    # keys file carries the successor cross-signed by the retiring key. Both
+    # legs are required: a manifest without the cross-signature, or a chain
+    # whose last old-key receipt does not name the successor, is one defect.
+    suc_priv, suc_pub, suc_kid = key_of(SUCCESSOR_SEED)
+    cross_sig = srv_priv.sign(cross_sign_input("server_chain", suc_pub))
+
+    def server_row(payload, priv, kid):
+        return {
+            "seq": payload["seq"],
+            "payload": payload,
+            "canonical_json": canonical_json(payload),
+            "receipt_hash_hex": receipt_hash(payload).hex(),
+            "device_key_id": None,
+            "device_signature_hex": None,
+            "server_key_id": kid,
+            "server_signature_hex": priv.sign(canonical_bytes(payload)).hex(),
+        }
+
+    rotation_payload = {
+        "v": 1,
+        "type": "key_rotation",
+        "tenant_id": tenant,
+        "seq": 5,
+        "prev_receipt_hash": chain[3]["receipt_hash_hex"],
+        "issued_at": "2026-08-29T00:00:05Z",
+        "subject_id": "66666666-6666-6666-6666-666666666666",
+        "successor_key_id": suc_kid,
+    }
+    row5 = server_row(rotation_payload, srv_priv, srv_kid)
+    after_payload = {
+        "v": 1,
+        "type": "noise_certificate",
+        "tenant_id": tenant,
+        "seq": 6,
+        "prev_receipt_hash": row5["receipt_hash_hex"],
+        "issued_at": "2026-08-29T00:00:06Z",
+        "subject_id": "77777777-7777-7777-7777-777777777777",
+    }
+    row6 = server_row(after_payload, suc_priv, suc_kid)
+    rotated_chain = chain + [row5, row6]
+    keys_with_cross = [
+        {"pubkey_hex": srv_pub.hex(), "key_id": srv_kid},
+        {"pubkey_hex": suc_pub.hex(), "key_id": suc_kid,
+         "cross_sig": {"by_key_id": srv_kid, "signature_hex": cross_sig.hex()}},
+    ]
+
+    # Negative 1: the manifest publishes the successor bare (no cross-signature).
+    keys_bare = [dict(k) for k in keys_with_cross]
+    del keys_bare[1]["cross_sig"]
+    # Negative 2: the retiring key's last receipt does not name the successor
+    # (re-signed so hash and signature hold; ONLY the announcement is missing).
+    unannounced = dict(rotation_payload)
+    del unannounced["successor_key_id"]
+    row5_un = server_row(unannounced, srv_priv, srv_kid)
+    after_un = dict(after_payload)
+    after_un["prev_receipt_hash"] = row5_un["receipt_hash_hex"]
+    row6_un = server_row(after_un, suc_priv, suc_kid)
+
+    rotation = {
+        "cross_sign_domain_hex": CROSS_SIGN_DOMAIN.hex(),
+        "cross_sign_input": "domain || role || 0x00 || successor public key (32 bytes); role = 'server_chain'",
+        "successor": {"seed_hex": SUCCESSOR_SEED.hex(), "public_hex": suc_pub.hex(), "key_id": suc_kid,
+                      "cross_sig_hex": cross_sig.hex()},
+        "accept": {"name": "chain_across_rotation", "chain": rotated_chain, "server_chain_keys": keys_with_cross},
+        "negatives": [
+            {"name": "rotation_without_cross_sign", "chain": rotated_chain, "server_chain_keys": keys_bare,
+             "expect_defect": "rotation_unchained"},
+            {"name": "rotation_unannounced", "chain": chain + [row5_un, row6_un], "server_chain_keys": keys_with_cross,
+             "expect_defect": "rotation_unchained"},
+        ],
+        "defect_vocabulary": ["rotation_unchained"],
+    }
+
     manifest = {
         "_readme": "Frozen receipt-family conformance contract. README.md is normative; this file is the referee.",
         "domain_prefix_hex": DOMAIN_PREFIX.hex(),
@@ -327,12 +410,14 @@ def main() -> None:
             "non_canonical_payload",
             "bad_countersignature", "merkle_mismatch", "inclusion_path_invalid",
         ],
+        "rotation": rotation,
     }
     with open("manifest.json", "w") as f:
         json.dump(manifest, f, indent=1, sort_keys=False)
         f.write("\n")
     print(f"manifest.json written: {len(canonical_vectors)} canonical, "
-          f"{len(merkle_vectors['cases'])} merkle, {len(chain)} chain, {len(negatives)} negative")
+          f"{len(merkle_vectors['cases'])} merkle, {len(chain)} chain, {len(negatives)} negative, "
+          f"rotation: 1 accept + {len(rotation['negatives'])} negative")
 
 
 if __name__ == "__main__":

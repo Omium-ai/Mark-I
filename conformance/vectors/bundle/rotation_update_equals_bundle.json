@@ -1,0 +1,51 @@
+{
+  "bundle_section_keys": [
+    {
+      "key_id": "ed25519:24aa2a5589edcb57",
+      "pubkey_hex": "48075a597e721a156e2e0799de5cc0c5324dc6e7eaf1cdd46250868ec53215dd",
+      "section": "verify"
+    },
+    {
+      "key_id": "ed25519:eeec86207f875ff6",
+      "pubkey_hex": "5e212c0980e4b39fc09721134aa02109374edfd260c0d3d03cb501c8d65457a9",
+      "section": "route"
+    },
+    {
+      "key_id": "ed25519:6c8f8607dbe87077",
+      "pubkey_hex": "17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+      "section": "memory"
+    },
+    {
+      "key_id": "ed25519:0cc42263abfb7546",
+      "pubkey_hex": "eb2cf13bf7ae3a5f614168a1fb09272d39771ec4b8523727815e466caf8ee163",
+      "section": "cortex"
+    },
+    {
+      "key_id": "ed25519:d90357debe6235c4",
+      "pubkey_hex": "a6d2455ea3a5771aba9fcb037924114c92f9f325049f6b4269e739d9048bb869",
+      "section": "gates"
+    },
+    {
+      "key_id": "ed25519:1c861707fb1ffd76",
+      "pubkey_hex": "68f4b6017d0f876a55c80a82b8388a54aad264d367269e2de8be079c935b5f96",
+      "section": "agent_maps"
+    },
+    {
+      "cross_sig": {
+        "by_key_id": "ed25519:24aa2a5589edcb57",
+        "signature_hex": "88435d10d5c53e1fb6c2f071da75b51d6065d84423c326805f5892668561ed76d1436e4365a008c508b8fbd116ee41a04af6750bcdafee23dc693513282d770d"
+      },
+      "key_id": "ed25519:e480c364999500b7",
+      "pubkey_hex": "76d81b33ba721df89b8e0b0ef26c34eb72e978951044798cd608a4f6dbf2e6d6",
+      "section": "verify"
+    }
+  ],
+  "schema": "mark1-keys.v1",
+  "server_chain_keys": [],
+  "update_keys": [
+    {
+      "key_id": "ed25519:eeec86207f875ff6",
+      "pubkey_hex": "5e212c0980e4b39fc09721134aa02109374edfd260c0d3d03cb501c8d65457a9"
+    }
+  ]
+}

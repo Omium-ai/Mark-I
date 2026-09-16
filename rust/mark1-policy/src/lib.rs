@@ -21,6 +21,7 @@
 
 pub mod canon;
 mod decode;
+mod rotation;
 mod types;
 
 use std::time::Duration;
@@ -30,11 +31,14 @@ use mark1_receipt::{keys, KeyEntry, KeyRing};
 use sha2::{Digest, Sha256};
 
 pub use canon::{encode_canonical, CanonError, MAX_DEPTH};
+pub use rotation::{
+    apply_rotation, cross_sign_input, RotationEntry, RotationReject, CROSS_SIGN_DOMAIN,
+};
 pub use types::{
     AgentMap, AgentMaps, AnchorEnable, Bundle, CorrelationGroup, CortexChannel, CortexSection,
-    CostBasis, CpvsRow, GatesSection, InjectionRule, KneeRow, KneeTable, Ladder, MemorySection,
-    Posterior4, RouteSection, Rung, Section, Signal3, TlogHead, TlogInclusion, VerifierModel,
-    VerifySection,
+    CostBasis, CpvsRow, GatesSection, InjectionRule, KneeRow, KneeTable, Ladder, LearnedRanker,
+    MemorySection, Posterior4, RankerStage, RouteSection, Rung, Section, Signal3, TlogHead,
+    TlogInclusion, VerifierModel, VerifySection,
 };
 
 /// The closed `schema` value — anything else is a different contract
@@ -146,6 +150,7 @@ impl Reject {
 /// the six bundle classes live here as six rings of the SAME KeyRing type —
 /// ring membership IS the role, and the receipt discipline (derived key_id,
 /// validity windows, RFC 8032 verify) is reused unchanged.
+#[derive(Clone)]
 pub struct SectionKeys {
     rings: [KeyRing; 6],
 }

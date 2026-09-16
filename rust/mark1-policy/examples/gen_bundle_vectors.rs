@@ -18,10 +18,11 @@ use std::path::PathBuf;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use ciborium::value::Value;
 use mark1_policy::{
-    body_sha256, encode_canonical, section_signing_input, verify_and_decode, Bundle, Section,
-    SectionKeys, SigInput, TlogHead, GENESIS_PREV_HASH, MAX_BUNDLE_LEN,
+    apply_rotation, body_sha256, cross_sign_input, encode_canonical, section_signing_input,
+    verify_and_decode, Bundle, RotationEntry, Section, SectionKeys, SigInput, TlogHead,
+    CROSS_SIGN_DOMAIN, GENESIS_PREV_HASH, MAX_BUNDLE_LEN,
 };
-use mark1_receipt::{hex, Ed25519Signer, Signer};
+use mark1_receipt::{hex, CrossSig, Ed25519Signer, Signer};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -340,11 +341,27 @@ fn map_add(v: &mut Value, key: &str, new_val: Value) -> Result<()> {
     Ok(())
 }
 
+/// Drops the map entry `key` (must exist) — the missing-envelope-field
+/// negatives' constructor.
+fn map_remove(v: &mut Value, key: &str) -> Result<()> {
+    let Value::Map(entries) = v else {
+        bail!("expected map")
+    };
+    let before = entries.len();
+    entries.retain(|(k, _)| !matches!(k, Value::Text(s) if s == key));
+    ensure!(entries.len() == before - 1, "key {key} missing");
+    Ok(())
+}
+
 /// The expired verify-class key's window end: long before ISSUED_AT, so any
 /// bundle issued "now" is outside it (the pre-D-Q probe backdated issued_at
 /// to sneak inside such a window; outside_validity pins the window check).
 const EXPIRED_NOT_AFTER: &str = "2020-01-01T00:00:00Z";
 const EXPIRED_SEED: u8 = b'7';
+/// ADR-0004 rotation fixtures: the verify section's successor key, and an
+/// update/log key distinct from every section key (R5).
+const SUCCESSOR_SEED: u8 = b'8';
+const UPDATE_SEED: u8 = b'9';
 
 struct Signers {
     sections: [Ed25519Signer; 6],
@@ -726,7 +743,7 @@ fn build_vectors(signers: &Signers) -> Result<Vec<Vector>> {
     );
     let min_body = body_sha256(&canon(&min_no_proof)?).map_err(|e| anyhow!("{e}"))?;
     let (min_proof, min_head) = three_leaf_proof(min_body);
-    let mut minimal = min_no_proof;
+    let mut minimal = min_no_proof.clone();
     map_set(&mut minimal, "inclusion", min_proof)?;
     out.push(Vector {
         name: "minimal",
@@ -1075,7 +1092,323 @@ fn build_vectors(signers: &Signers) -> Result<Vec<Vector>> {
         expect: None,
     });
 
+    // forged_inclusion_root_seq2 — the D-S kill shot UNDER a standing
+    // last-known-good. Every other M1E-3003 vector is seq 1, so with any LKG
+    // applied the seq check (`<= last`) fires first and the inclusion leg is
+    // never the thing refusing. This one is minimal's exact body (seq 2,
+    // prev_hash chained to full, validly signed) carrying a self-consistent
+    // single-leaf proof whose root is not the pinned 3-leaf head's, offered
+    // with seq 1 applied: seq passes, inclusion must refuse, LKG stays.
+    let mut forged_seq2 = min_no_proof.clone();
+    map_set(&mut forged_seq2, "inclusion", single_leaf_proof(min_body).0)?;
+    out.push(Vector {
+        name: "forged_inclusion_root_seq2",
+        raw: canon(&forged_seq2)?,
+        last_applied_seq: Some(1),
+        tlog_head: Some(min_head),
+        expect: Some(("M1E-3003", "inclusion_invalid")),
+    });
+
+    // missing_max_age / missing_prev_hash — bundle zero with one REQUIRED
+    // envelope key dropped. The envelope strict-map check precedes the
+    // signature step, so a bundle that cannot state its fail-static floor or
+    // its chain link dies as `schema` before any key is consulted; the
+    // signatures left in place are valid for the envelope that WAS signed,
+    // which is exactly why strict keys, not signatures, must catch this.
+    for (name, key) in [
+        ("missing_max_age", "max_age"),
+        ("missing_prev_hash", "prev_hash"),
+    ] {
+        let mut dropped = bundle_zero.clone();
+        map_remove(&mut dropped, key)?;
+        out.push(Vector {
+            name,
+            raw: canon(&dropped)?,
+            last_applied_seq: None,
+            tlog_head: None,
+            expect: Some(("M1E-3001", "schema")),
+        });
+    }
+
+    // unknown_section — bundle zero with a SEVENTH section (`exec`) added to
+    // `sections`. The six-name strict map on `bundle.sections` (07 rule 3)
+    // must refuse before signatures are even split: a section nobody has a
+    // key class for is a section nobody can be accountable for.
+    let mut seventh = bundle_zero.clone();
+    let mut seven_sections = bz_sections.clone();
+    map_add(
+        &mut seven_sections,
+        "exec",
+        m(&[("enabled", Value::Bool(true))]),
+    )?;
+    map_set(&mut seventh, "sections", seven_sections)?;
+    out.push(Vector {
+        name: "unknown_section",
+        raw: canon(&seventh)?,
+        last_applied_seq: None,
+        tlog_head: None,
+        expect: Some(("M1E-3001", "schema")),
+    });
+
+    // mcb_over_cap / hourly_over_ceiling — properly SIGNED seq-0 bundles
+    // whose gates section raises a local cap by one: max_consecutive_blocks
+    // 4 (CDDL `.le 3`) and hourly_block_ceiling 31 (the edge built-in is 30:
+    // mark1d fabric/gate.go DefaultHourlyCeiling; no doc names a number).
+    // Signatures pass; the typed decode (FR-VERIFY-010: a bundle may LOWER a
+    // cap, never raise it) is the layer that must refuse, as `schema`.
+    for (name, mcb, hourly) in [("mcb_over_cap", 4, 20), ("hourly_over_ceiling", 3, 31)] {
+        let mut raised = sections_full(false);
+        map_set(
+            &mut raised,
+            "gates",
+            m(&[
+                ("stop_gate_enabled", Value::Bool(true)),
+                ("max_consecutive_blocks", u(mcb)),
+                ("hourly_block_ceiling", u(hourly)),
+            ]),
+        )?;
+        let raised_sigs = signatures(signers, &raised, &env_local0)?;
+        out.push(Vector {
+            name,
+            raw: canon(&bundle_value(
+                env_local0.seq,
+                env_local0.channel,
+                env_local0.prev_hash,
+                env_local0.max_age,
+                raised,
+                raised_sigs,
+                Value::Null,
+            ))?,
+            last_applied_seq: None,
+            tlog_head: None,
+            expect: Some(("M1E-3001", "schema")),
+        });
+    }
+
+    // cortex_learned_ranker / cortex_ranker_weight_out_of_range /
+    // cortex_ranker_bad_stage — bundle zero's shape with the cortex section's
+    // OPTIONAL `learned_ranker` (06 §12.4) populated. The accept is shadow
+    // stage with in-range weights; the negatives are properly SIGNED, so the
+    // typed decode is the layer that must refuse: weight outside [0,1] and a
+    // stage outside the closed enum are both `schema` (M1E-3001).
+    let ranker = |stage: &str, weight: f64| {
+        m(&[
+            ("stage", t(stage)),
+            ("weight", f(weight)),
+            ("bias", f(0.05)),
+            ("coefficients", a(&[f(0.6), f(0.25), f(-0.1), f(0.15)])),
+        ])
+    };
+    for (name, stage, weight, expect) in [
+        ("cortex_learned_ranker", "shadow", 0.5, None),
+        (
+            "cortex_ranker_weight_out_of_range",
+            "shadow",
+            1.5,
+            Some(("M1E-3001", "schema")),
+        ),
+        (
+            "cortex_ranker_bad_stage",
+            "canary",
+            0.5,
+            Some(("M1E-3001", "schema")),
+        ),
+    ] {
+        let mut sections = sections_full(false);
+        let mut cortex = section_of(&sections, "cortex")?.clone();
+        map_add(&mut cortex, "learned_ranker", ranker(stage, weight))?;
+        map_set(&mut sections, "cortex", cortex)?;
+        let sigs = signatures(signers, &sections, &env_local0)?;
+        out.push(Vector {
+            name,
+            raw: canon(&bundle_value(
+                env_local0.seq,
+                env_local0.channel,
+                env_local0.prev_hash,
+                env_local0.max_age,
+                sections,
+                sigs,
+                Value::Null,
+            ))?,
+            last_applied_seq: None,
+            tlog_head: None,
+            expect,
+        });
+    }
+
     Ok(out)
+}
+
+// ── rotation vectors (ADR-0004; the key-manifest intake at the edge) ────
+
+struct RotationVector {
+    name: &'static str,
+    manifest: serde_json::Value,
+    /// None = accept; Some(kind) = the NAMED refusal.
+    expect: Option<&'static str>,
+}
+
+fn manifest_key(
+    section: &str,
+    signer: &Ed25519Signer,
+    cross: Option<(&Ed25519Signer, &[u8; 64])>,
+) -> serde_json::Value {
+    let mut k = json!({
+        "section": section,
+        "key_id": signer.key_id(),
+        "pubkey_hex": hex::encode(&signer.public_key()),
+    });
+    if let Some((by, sig)) = cross {
+        k["cross_sig"] = json!({ "by_key_id": by.key_id(), "signature_hex": hex::encode(sig) });
+    }
+    if section.is_empty() {
+        k.as_object_mut().map(|o| o.remove("section"));
+    }
+    k
+}
+
+/// The four manifests: the verify successor cross-signed by the pinned
+/// verify key (accept); cross-signed by itself; cross-signed by the right
+/// key with one flipped byte; and R5 — the update key IS a bundle key.
+fn build_rotation(
+    signers: &Signers,
+) -> Result<(Ed25519Signer, Ed25519Signer, Vec<RotationVector>)> {
+    let successor = Ed25519Signer::from_seed([SUCCESSOR_SEED; 32]);
+    let update = Ed25519Signer::from_seed([UPDATE_SEED; 32]);
+    let old_verify = signers.for_section(Section::Verify);
+    let good = old_verify.sign(&cross_sign_input("bundle:verify", &successor.public_key()));
+    let selfsig = successor.sign(&cross_sign_input("bundle:verify", &successor.public_key()));
+    let mut bad = good;
+    bad[0] ^= 0x01;
+    let old_route = signers.for_section(Section::Route);
+    let foreign = old_route.sign(&cross_sign_input("bundle:verify", &successor.public_key()));
+
+    let manifest =
+        |cross: (&Ed25519Signer, &[u8; 64]), update_key: &Ed25519Signer| -> serde_json::Value {
+            let mut section_keys: Vec<serde_json::Value> = Section::ALL
+                .iter()
+                .map(|s| manifest_key(s.name(), signers.for_section(*s), None))
+                .collect();
+            section_keys.push(manifest_key("verify", &successor, Some(cross)));
+            json!({
+                "schema": "mark1-keys.v1",
+                "server_chain_keys": [],
+                "bundle_section_keys": section_keys,
+                "update_keys": [manifest_key("", update_key, None)],
+            })
+        };
+    let vectors = vec![
+        RotationVector {
+            name: "rotation_accepted",
+            manifest: manifest((old_verify, &good), &update),
+            expect: None,
+        },
+        RotationVector {
+            name: "rotation_self_signed",
+            manifest: manifest((&successor, &selfsig), &update),
+            expect: Some("self_signed"),
+        },
+        RotationVector {
+            name: "rotation_bad_cross_sig",
+            manifest: manifest((old_verify, &bad), &update),
+            expect: Some("bad_cross_signature"),
+        },
+        RotationVector {
+            name: "rotation_cross_section_signer",
+            manifest: manifest((old_route, &foreign), &update),
+            expect: Some("unknown_signer"),
+        },
+        RotationVector {
+            name: "rotation_update_equals_bundle",
+            manifest: manifest((old_verify, &good), signers.for_section(Section::Route)),
+            expect: Some("update_equals_bundle"),
+        },
+    ];
+    Ok((successor, update, vectors))
+}
+
+/// The manifest as the edge parses it: only the two lists apply_rotation
+/// consumes.
+fn parse_rotation(v: &serde_json::Value) -> Result<(Vec<RotationEntry>, Vec<[u8; 32]>)> {
+    let mut entries = Vec::new();
+    for k in v["bundle_section_keys"]
+        .as_array()
+        .context("bundle_section_keys")?
+    {
+        let name = k["section"].as_str().context("section")?;
+        let section = *Section::ALL
+            .iter()
+            .find(|s| s.name() == name)
+            .context("unknown section")?;
+        let public_key: [u8; 32] =
+            hex::decode_array(k["pubkey_hex"].as_str().context("pubkey_hex")?).context("pubkey")?;
+        let cross_sig = match &k["cross_sig"] {
+            serde_json::Value::Null => None,
+            cs => Some(CrossSig {
+                by_key_id: cs["by_key_id"].as_str().context("by_key_id")?.to_string(),
+                signature: hex::decode_array(
+                    cs["signature_hex"].as_str().context("signature_hex")?,
+                )
+                .context("sig")?,
+            }),
+        };
+        entries.push(RotationEntry {
+            section,
+            public_key,
+            not_before: None,
+            not_after: None,
+            cross_sig,
+        });
+    }
+    let mut updates = Vec::new();
+    for k in v["update_keys"].as_array().context("update_keys")? {
+        updates.push(
+            hex::decode_array(k["pubkey_hex"].as_str().context("pubkey_hex")?).context("pubkey")?,
+        );
+    }
+    Ok((entries, updates))
+}
+
+/// A seq-3 bundle on `stable`, chained to minimal, with the verify section
+/// signed by the SUCCESSOR key: unknown_key against the pinned ring, accepted
+/// once the cross-signed rotation is applied.
+fn rotated_bundle(
+    signers: &Signers,
+    successor: &Ed25519Signer,
+    prev_hash: [u8; 32],
+) -> Result<(Vec<u8>, TlogHead)> {
+    let env = Env {
+        channel: "stable",
+        seq: 3,
+        prev_hash,
+        max_age: 3_600,
+    };
+    let sections = sections_minimal();
+    let mut sigs = signatures(signers, &sections, &env)?;
+    map_set(
+        &mut sigs,
+        "verify",
+        sign_one(
+            successor,
+            Section::Verify,
+            section_of(&sections, "verify")?,
+            &env,
+        )?,
+    )?;
+    let no_proof = bundle_value(
+        env.seq,
+        env.channel,
+        env.prev_hash,
+        env.max_age,
+        sections,
+        sigs,
+        Value::Null,
+    );
+    let body = body_sha256(&canon(&no_proof)?).map_err(|e| anyhow!("{e}"))?;
+    let (proof, head) = single_leaf_proof(body);
+    let mut bundle = no_proof;
+    map_set(&mut bundle, "inclusion", proof)?;
+    Ok((canon(&bundle)?, head))
 }
 
 fn main() -> Result<()> {
@@ -1138,6 +1471,99 @@ fn main() -> Result<()> {
         );
     }
 
+    // Rotation family: every manifest is driven through apply_rotation and
+    // the rotated bundle through verify_and_decode before either is frozen.
+    let (successor, update, rotation_vectors) = build_rotation(&signers)?;
+    let minimal = vectors
+        .iter()
+        .find(|v| v.name == "minimal")
+        .context("minimal vector")?;
+    let (rot_raw, rot_head) = rotated_bundle(
+        &signers,
+        &successor,
+        body_sha256(&minimal.raw).map_err(|e| anyhow!("{e}"))?,
+    )?;
+    let rot_body = match verify_and_decode(&rot_raw, &keys, Some(2), Some(&rot_head)) {
+        Err(e) if e.kind() == "unknown_key" => body_sha256(&rot_raw).map_err(|e| anyhow!("{e}"))?,
+        other => {
+            bail!("rotated bundle against the pinned ring: expected unknown_key, got {other:?}")
+        }
+    };
+    let mut rotation_entries = Vec::new();
+    for rv in &rotation_vectors {
+        let (entries, updates) = parse_rotation(&rv.manifest)?;
+        let mut ring = signers.key_set();
+        let outcome = apply_rotation(&mut ring, &entries, &updates);
+        let file = format!("{}.json", rv.name);
+        let raw = format!("{:#}\n", rv.manifest);
+        let mut entry = json!({
+            "name": rv.name,
+            "file": file,
+            "file_sha256_hex": hex::encode(&sha256(&[raw.as_bytes()])),
+        });
+        match (rv.expect, outcome) {
+            (None, Ok(admitted)) => {
+                ensure!(
+                    admitted == vec![successor.key_id()],
+                    "{}: admitted {admitted:?}",
+                    rv.name
+                );
+                let bundle =
+                    verify_and_decode(&rot_raw, &ring, Some(2), Some(&rot_head)).map_err(|e| {
+                        anyhow!("{}: rotated bundle rejected after admission: {e}", rv.name)
+                    })?;
+                ensure!(bundle.body_sha256 == rot_body);
+                entry["expect"] = json!("accept");
+                entry["admitted"] = json!(admitted);
+            }
+            (Some(kind), Err(reject)) => {
+                ensure!(
+                    reject.kind() == kind,
+                    "{}: expected {kind}, got {} ({reject})",
+                    rv.name,
+                    reject.kind()
+                );
+                ensure!(
+                    verify_and_decode(&rot_raw, &ring, Some(2), Some(&rot_head))
+                        .is_err_and(|e| e.kind() == "unknown_key"),
+                    "{}: a refused manifest admitted a key",
+                    rv.name
+                );
+                entry["expect"] = json!("reject");
+                entry["kind"] = json!(kind);
+            }
+            (None, Err(reject)) => bail!("{}: accept manifest refused: {reject}", rv.name),
+            (Some(_), Ok(_)) => bail!("{}: negative manifest accepted", rv.name),
+        }
+        fs::write(dir.join(&file), raw)?;
+        rotation_entries.push(entry);
+    }
+    fs::write(dir.join("rotation_accepted.cbor"), &rot_raw)?;
+    let rotation = json!({
+        "cross_sign_domain_hex": hex::encode(CROSS_SIGN_DOMAIN),
+        "cross_sign_input": "domain || role || 0x00 || successor public key (32 bytes); role = \"bundle:<section>\"",
+        "successor": {
+            "section": "verify",
+            "seed_hex": hex::encode(&[SUCCESSOR_SEED; 32]),
+            "public_hex": hex::encode(&successor.public_key()),
+            "key_id": successor.key_id(),
+        },
+        "update_key": {
+            "seed_hex": hex::encode(&[UPDATE_SEED; 32]),
+            "public_hex": hex::encode(&update.public_key()),
+            "key_id": update.key_id(),
+        },
+        "bundle": {
+            "file": "rotation_accepted.cbor",
+            "file_sha256_hex": hex::encode(&sha256(&[&rot_raw])),
+            "body_sha256_hex": hex::encode(&rot_body),
+            "last_applied_seq": 2,
+            "tlog_head": { "tree_size": rot_head.tree_size, "root_hex": hex::encode(&rot_head.root) },
+            "before": "M1E-3001/unknown_key against the pinned ring; accept after rotation_accepted is applied",
+        },
+        "vectors": rotation_entries,
+    });
+
     let manifest = json!({
         "_readme": "Frozen bundle-family conformance contract. README.md is normative; this file is the referee; generated once by gen_bundle_vectors.rs (Rust reference implementation).",
         "schema": "policy_bundle.v1",
@@ -1157,6 +1583,7 @@ fn main() -> Result<()> {
         "tlog": "RFC 6962 shape, SHA-256: leaf entry = body_sha256 (bundle map minus `inclusion`, canonical bytes); leaf_hash = sha256(0x00 || entry); node = sha256(0x01 || left || right); waived structurally at seq == 0 (D-P). D-S: at seq > 0 the driver MUST hold the per-vector `tlog_head` (null = no head pinned, an M1E-3003 refusal) and the proof root must equal the head's",
         "keys": key_json,
         "vectors": manifest_vectors,
+        "rotation": rotation,
     });
     fs::write(dir.join("manifest.json"), format!("{:#}\n", manifest))?;
     eprintln!(
