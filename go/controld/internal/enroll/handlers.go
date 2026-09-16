@@ -25,9 +25,9 @@ import (
 	"strconv"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/userauth"
 )
 
 // ---------------------------------------------------------------------------
@@ -211,8 +211,7 @@ func (m *Module) handlePoll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "M1E-1004", "unknown or expired device_code")
 		return
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	if isUniqueViolation(err) {
 		// uq_m1_dkeys_key_id: this device key already backs an identity —
 		// re-enrollment mints a NEW key by contract (05 §3.4: no un-revoke).
 		writeErr(w, http.StatusBadRequest, "M1E-2001", "device key already enrolled; generate a new key")
@@ -247,6 +246,87 @@ func (m *Module) addTenantRoot(body map[string]any, tenant uuid.UUID) {
 	if root, err := m.TenantRoot(tenant); err == nil {
 		body["tenant_root_hex"] = hex.EncodeToString(root)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/enroll/device/approve — one-shot approval by a Mark 1 user token
+// ---------------------------------------------------------------------------
+
+// handleApprove is /start + /poll in one request: the verified user token IS the approval; the body is /poll's ACTIVE body.
+func (m *Module) handleApprove(w http.ResponseWriter, r *http.Request) {
+	boundBody(w, r)
+	claims, ok := userauth.ClaimsFrom(r.Context())
+	if !ok {
+		m.serverErr(w, "approve: no verified user claims", errors.New("user auth middleware missing"))
+		return
+	}
+	if !m.approveIP.Allow(clientIP(r)) { // debited after auth: only a token holder spends the bucket
+		writeErr(w, http.StatusTooManyRequests, "M1E-9001", "enrollment approve rate limit")
+		return
+	}
+	var req startRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", "malformed enrollment request")
+		return
+	}
+	pubkey, err := parseDevicePubkey(req.DevicePubkey)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", err.Error())
+		return
+	}
+	hostnameHMAC, err := parseHostnameHash(req.HostnameHash)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", err.Error())
+		return
+	}
+	if req.Platform == "" {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", "platform is required")
+		return
+	}
+	tenant, subject := claims.TenantID, "omium:"+claims.Sub
+	status, err := m.ensurePersonalTenant(r.Context(), tenant, subject)
+	if err != nil {
+		m.serverErr(w, "approve: ensure personal tenant", err)
+		return
+	}
+	if status != "active" {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", "tenant not active")
+		return
+	}
+	codeHash := approveCodeHash(tenant, pubkey)
+	if err := m.upsertUserEnrollment(r.Context(), tenant, codeHash, pubkey); err != nil {
+		m.serverErr(w, "approve: enrollment upsert", err)
+		return
+	}
+	device, token, expiresIn, err := m.approveEnrollment(r.Context(), tenant, codeHash, req.Platform, hostnameHMAC, subject)
+	if errors.Is(err, errCodeConsumed) {
+		device, token, expiresIn, err = m.reissueUserDevice(r.Context(), tenant, codeHash, subject)
+	}
+	if errors.Is(err, errCodeConsumed) || isUniqueViolation(err) {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", "device key already enrolled; generate a new key")
+		return
+	}
+	if err != nil {
+		m.serverErr(w, "approve: approval", err)
+		return
+	}
+	transitionsTotal.WithLabelValues("active").Inc()
+	body := map[string]any{
+		"status":          "active",
+		"device_id":       device.String(),
+		"tenant_id":       tenant.String(),
+		"device_token":    token,
+		"expires_in":      expiresIn,
+		"server_min_edge": m.minEdge,
+		"endpoints": map[string]string{
+			"ingest":        m.baseURL + "/m1p/v1/ingest",
+			"attach":        m.baseURL + "/api/v1/attach",
+			"policy_stream": m.baseURL + "/api/v1/policy/stream",
+		},
+		"key_manifest_uri": "/.well-known/mark1-keys",
+	}
+	m.addTenantRoot(body, tenant)
+	writeJSON(w, http.StatusOK, body)
 }
 
 // ---------------------------------------------------------------------------
@@ -396,12 +476,28 @@ func (m *Module) operatorAuth(w http.ResponseWriter, r *http.Request) (uuid.UUID
 		writeErr(w, http.StatusForbidden, "M1E-1001", "not a tenant admin")
 		return uuid.Nil, "", false
 	}
+	bearer := authz[len(prefix):]
+	// Second leg: a verified user token is final here — it never also verifies as a tenant-IdP token.
+	if m.users != nil {
+		if uc, err := m.users.Verify(r.Context(), bearer); err == nil {
+			admin := uc.HasRole(userauth.TenantAdminRole)
+			if admin && uc.TenantID == tenant {
+				return tenant, "omium:" + uc.Sub, true
+			}
+			if admin {
+				operatorTenantMismatches.Inc()
+				log.Printf("SECURITY enroll: cross-tenant operator attempt on %s %s: omium user token for tenant %s, verifying tenant %s", r.Method, r.URL.Path, uc.TenantID, tenant)
+			}
+			writeErr(w, http.StatusForbidden, "M1E-1001", "not a tenant admin")
+			return uuid.Nil, "", false
+		}
+	}
 	idp, err := loadTenantIdP(r.Context(), m.db, tenant)
 	if err != nil {
 		writeErr(w, http.StatusForbidden, "M1E-1001", "not a tenant admin")
 		return uuid.Nil, "", false
 	}
-	subject, err := idp.verifyOperatorToken(r.Context(), authz[len(prefix):])
+	subject, err := idp.verifyOperatorToken(r.Context(), bearer)
 	if err != nil {
 		if errors.Is(err, errOperatorTenantMismatch) {
 			operatorTenantMismatches.Inc()

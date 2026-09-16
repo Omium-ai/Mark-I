@@ -40,6 +40,7 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
@@ -47,7 +48,11 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/pg"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/userauth"
 )
+
+// omiumIssuer is the Mark 1 user token's iss (B2 memo §3.2), pinned in setup.
+const omiumIssuer = "https://api.omium.ai"
 
 // The privileged DSN: this harness creates its own scratch database and applies
 // the full migration tree, and m1_060 mints a BYPASSRLS role — which PG16 permits
@@ -200,6 +205,8 @@ type harness struct {
 	mod     *enroll.Module
 	tenantA uuid.UUID
 	tenantB uuid.UUID
+	userKey *ecdsa.PrivateKey // the platform's ES256 Mark 1 user-token key
+	deps    enroll.Deps
 }
 
 func setup(t *testing.T) *harness {
@@ -314,13 +321,29 @@ func setup(t *testing.T) *harness {
 	cache := enroll.NewRevocationCache(db, 60*time.Second)
 	verify := auth.NewEd25519Verifier(signer.Public(), cache)
 
+	userKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userJWKS, err := json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+		{Key: userKey.Public(), KeyID: "omium-1", Algorithm: "ES256", Use: "sig"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	users, err := userauth.New(omiumIssuer, string(userJWKS))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	pepper := bytes.Repeat([]byte{0x5a}, 32)
-	mod := enroll.New(enroll.Deps{
+	deps := enroll.Deps{
 		DB: db, PG: db, Signer: signer, Verifier: verify,
-		ObsCfg: obs.Config{ServiceName: "controld-test"}, Cache: cache,
+		ObsCfg: obs.Config{ServiceName: "controld-test"}, Cache: cache, Users: users,
 		PublicBaseURL: "https://api.test.example", ServerMinEdge: "1.0.0",
 		Now: clk.Now, TenantPepper: pepper,
-	})
+	}
+	mod := enroll.New(deps)
 	mux := http.NewServeMux()
 	mod.RegisterRoutes(mux)
 	api := httptest.NewServer(mux)
@@ -329,8 +352,41 @@ func setup(t *testing.T) *harness {
 	return &harness{
 		t: t, admin: admin, db: db, idp: idp, clk: clk, mod: mod,
 		signer: signer, cache: cache, verify: verify, api: api,
-		tenantA: tenantA, tenantB: tenantB,
+		tenantA: tenantA, tenantB: tenantB, userKey: userKey, deps: deps,
 	}
+}
+
+// userToken mints the platform's Mark 1 user token shape: ES256, iss api.omium.ai, aud mark1, 1 h.
+func (h *harness) userToken(sub string, tenant uuid.UUID, roles ...string) string {
+	h.t.Helper()
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: h.userKey},
+		(&jose.SignerOptions{}).WithType("JWT"))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	now := time.Now()
+	payload, _ := json.Marshal(map[string]any{
+		"iss": omiumIssuer, "aud": "mark1", "sub": sub, "email": sub + "@example.com",
+		"tenant_id": tenant.String(), "rol": roles,
+		"iat": now.Unix(), "exp": now.Add(time.Hour).Unix(), "jti": uuid.NewString(),
+	})
+	jws, err := signer.Sign(payload)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	raw, err := jws.CompactSerialize()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return raw
+}
+
+func sqlState(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
 }
 
 func (h *harness) post(path string, body any, hdr map[string]string) (int, map[string]any) {
@@ -940,4 +996,262 @@ func TestEnrollResponseCarriesTenantRoot(t *testing.T) {
 	if raw, _ := json.Marshal(list); bytes.Contains(raw, []byte(got)) || bytes.Contains(raw, []byte("tenant_root")) {
 		t.Fatalf("operator list leaks the tenant root: %s", raw)
 	}
+}
+
+// TestIntegrationPersonalTenantApprove: one-shot user-token approval (m1_078) through the production verifier, plus the frozen negatives.
+func TestIntegrationPersonalTenantApprove(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	personal, other := uuid.New(), uuid.New()
+	alice := h.userToken("u-alice", personal, "tenant_admin")
+	bearer := func(tok string) map[string]string { return map[string]string{"Authorization": "Bearer " + tok} }
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approveBody := func(pub ed25519.PublicKey) map[string]any {
+		return map[string]any{
+			"client": "mark1-app", "client_version": "0.1.0",
+			"device_pubkey": "ed25519:" + base64.StdEncoding.EncodeToString(pub),
+			"platform":      "darwin-arm64",
+			"hostname_hash": "hmac-sha256:" + strings.Repeat("ab", 32),
+		}
+	}
+	var deviceID uuid.UUID
+	var firstToken string
+
+	t.Run("user_token_required", func(t *testing.T) {
+		st, body := h.post("/api/v1/enroll/device/approve", approveBody(pub), nil)
+		if st != http.StatusUnauthorized || errCode(body) != "M1E-1002" {
+			t.Fatalf("no token: %d %v", st, body)
+		}
+		st, body = h.post("/api/v1/enroll/device/approve", approveBody(pub), bearer(h.operatorToken("m1-admin")))
+		if st != http.StatusUnauthorized || errCode(body) != "M1E-1002" {
+			t.Fatalf("tenant-IdP token on /approve: %d %v", st, body)
+		}
+		var n int64
+		if err := h.admin.QueryRow(ctx, `SELECT count(*) FROM m1_tenants WHERE kind = 'personal'`).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("refused requests minted a tenant: %d %v", n, err)
+		}
+	})
+
+	t.Run("first_approve_mints_tenant_and_device", func(t *testing.T) {
+		st, body := h.post("/api/v1/enroll/device/approve", approveBody(pub), bearer(alice))
+		if st != http.StatusOK || body["status"] != "active" || body["tenant_id"] != personal.String() {
+			t.Fatalf("approve: %d %v", st, body)
+		}
+		firstToken = body["device_token"].(string)
+		deviceID = uuid.MustParse(body["device_id"].(string))
+		if body["server_min_edge"] != "1.0.0" || body["key_manifest_uri"] != "/.well-known/mark1-keys" {
+			t.Fatalf("handshake fields: %v", body)
+		}
+		if exp := body["expires_in"].(float64); exp <= 0 || exp > 86400 {
+			t.Fatalf("expires_in outside the ≤24h ceiling: %v", exp)
+		}
+		want, _ := h.mod.TenantRoot(personal)
+		if body["tenant_root_hex"] != hex.EncodeToString(want) {
+			t.Fatalf("tenant_root_hex = %v, want %x", body["tenant_root_hex"], want)
+		}
+		claims, err := h.verify.Verify(ctx, firstToken)
+		if err != nil || claims.TenantID != personal || claims.DeviceID != deviceID {
+			t.Fatalf("issued token: %+v %v", claims, err)
+		}
+		var kind, owner, status, approval, subject string
+		var orgID *uuid.UUID
+		if err := h.admin.QueryRow(ctx, `
+			SELECT t.kind, t.owner_subject, t.status, t.org_id, e.approval_kind, e.oidc_subject
+			  FROM m1_tenants t JOIN m1_device_enrollments e ON e.tenant_id = t.id
+			 WHERE t.id = $1`, personal).Scan(&kind, &owner, &status, &orgID, &approval, &subject); err != nil {
+			t.Fatal(err)
+		}
+		if kind != "personal" || owner != "omium:u-alice" || status != "active" || orgID != nil ||
+			approval != "omium_user" || subject != "omium:u-alice" {
+			t.Fatalf("rows: kind=%s owner=%s status=%s org=%v approval=%s subject=%s", kind, owner, status, orgID, approval, subject)
+		}
+		var regimes int64
+		if err := h.admin.QueryRow(ctx, `SELECT count(*) FROM m1_tenant_regimes WHERE tenant_id = $1`, personal).Scan(&regimes); err != nil || regimes != 0 {
+			t.Fatalf("regime seeded: %d %v", regimes, err)
+		}
+	})
+
+	t.Run("retry_is_idempotent", func(t *testing.T) {
+		st, body := h.post("/api/v1/enroll/device/approve", approveBody(pub), bearer(alice))
+		if st != http.StatusOK || body["device_id"] != deviceID.String() {
+			t.Fatalf("retry: %d %v (want 200, same device)", st, body)
+		}
+		if claims, err := h.verify.Verify(ctx, body["device_token"].(string)); err != nil || claims.DeviceID != deviceID {
+			t.Fatalf("retry token: %+v %v", claims, err)
+		}
+		var tenants, devices, keys, enrollments int64
+		if err := h.admin.QueryRow(ctx, `
+			SELECT (SELECT count(*) FROM m1_tenants WHERE id = $1),
+			       (SELECT count(*) FROM m1_devices WHERE tenant_id = $1),
+			       (SELECT count(*) FROM m1_device_keys WHERE tenant_id = $1),
+			       (SELECT count(*) FROM m1_device_enrollments WHERE tenant_id = $1)`, personal).
+			Scan(&tenants, &devices, &keys, &enrollments); err != nil {
+			t.Fatal(err)
+		}
+		if tenants != 1 || devices != 1 || keys != 1 || enrollments != 1 {
+			t.Fatalf("retry duplicated rows: tenants=%d devices=%d keys=%d enrollments=%d", tenants, devices, keys, enrollments)
+		}
+		// The same key presented by ANOTHER Omium user is not a retry.
+		st, body = h.post("/api/v1/enroll/device/approve", approveBody(pub), bearer(h.userToken("u-mallory", personal)))
+		if st != http.StatusBadRequest || errCode(body) != "M1E-2001" {
+			t.Fatalf("other user's retry: %d %v (want 400 M1E-2001)", st, body)
+		}
+	})
+
+	t.Run("schema_negatives", func(t *testing.T) {
+		var orgID uuid.UUID
+		if err := h.admin.QueryRow(ctx, `SELECT org_id FROM m1_tenants WHERE id = $1`, h.tenantA).Scan(&orgID); err != nil {
+			t.Fatal(err)
+		}
+		for name, q := range map[string]string{
+			"personal_with_org": `INSERT INTO m1_tenants (org_id, kind, owner_subject, name) VALUES ($1, 'personal', 'omium:x', 'p')`,
+			"org_without_org":   `INSERT INTO m1_tenants (kind, name) VALUES ('org', 'o')`,
+			"personal_unowned":  `INSERT INTO m1_tenants (kind, name) VALUES ('personal', 'p')`,
+			"unknown_kind":      `INSERT INTO m1_tenants (org_id, kind, name) VALUES ($1, 'team', 'x')`,
+			"unknown_approval":  `INSERT INTO m1_device_enrollments (tenant_id, device_code_hash, device_pubkey, approval_kind) VALUES ($1, sha256('x'), sha256('y'), 'password')`,
+			"short_user_code":   `INSERT INTO m1_device_enrollments (tenant_id, device_code_hash, device_pubkey, user_code_hash) VALUES ($1, sha256('x'), sha256('y'), '\x00')`,
+		} {
+			args := []any{orgID}
+			if strings.HasPrefix(name, "unknown_approval") || name == "short_user_code" {
+				args = []any{h.tenantA}
+			}
+			if !strings.Contains(q, "$1") {
+				args = nil
+			}
+			if _, err := h.admin.Exec(ctx, q, args...); sqlState(err) != "23514" {
+				t.Fatalf("%s: want CHECK violation 23514, got %v", name, err)
+			}
+		}
+	})
+
+	t.Run("rls_seams", func(t *testing.T) {
+		ta, err := querychoke.FromClaims(auth.Claims{TenantID: h.tenantA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for table, pred := range map[string]string{
+			"m1_tenants":            "kind = 'personal'",
+			"m1_device_enrollments": "approval_kind = 'omium_user'",
+		} {
+			var n int64
+			if err := h.db.WithTenant(ctx, ta, func(tx pgx.Tx) error {
+				return tx.QueryRow(ctx, "SELECT count(*) FROM "+table+" WHERE "+pred).Scan(&n)
+			}); err != nil || n != 0 {
+				t.Fatalf("tenant A read %d personal rows of %s: %v", n, table, err)
+			}
+			if err := h.admin.QueryRow(ctx, "SELECT count(*) FROM "+table+" WHERE "+pred).Scan(&n); err != nil || n == 0 {
+				t.Fatalf("%s unexpectedly empty as admin: %d %v", table, n, err)
+			}
+		}
+		// WITH CHECK (id = GUC) is what makes ensurePersonalTenant sound: the id comes from the verified claim.
+		err = h.db.WithTenant(ctx, ta, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO m1_tenants (id, kind, owner_subject, name) VALUES ($1, 'personal', 'omium:x', 'p')`, uuid.New())
+			return err
+		})
+		if sqlState(err) != "42501" {
+			t.Fatalf("cross-tenant personal mint: want RLS 42501, got %v", err)
+		}
+	})
+
+	t.Run("operator_leg", func(t *testing.T) {
+		hdr := map[string]string{"Authorization": "Bearer " + alice, "X-M1-Tenant": personal.String()}
+		st, body := h.get("/api/v1/enroll/devices", hdr)
+		if st != http.StatusOK || len(body["devices"].([]any)) != 1 {
+			t.Fatalf("devices with user token: %d %v", st, body)
+		}
+		// A user token WITHOUT tenant_admin is not an operator.
+		st, body = h.get("/api/v1/enroll/devices", map[string]string{
+			"Authorization": "Bearer " + h.userToken("u-alice", personal, "member"), "X-M1-Tenant": personal.String(),
+		})
+		if st != http.StatusForbidden || errCode(body) != "M1E-1001" {
+			t.Fatalf("non-admin user token: %d %v", st, body)
+		}
+		// A tenant_admin of ANOTHER tenant aimed at this one: refused, security event.
+		before := operatorMismatchCount(t)
+		st, body = h.post("/api/v1/enroll/revoke",
+			map[string]string{"device_id": deviceID.String(), "reason": "cross-tenant"},
+			map[string]string{"Authorization": "Bearer " + h.userToken("u-bob", other, "tenant_admin"), "X-M1-Tenant": personal.String()})
+		if st != http.StatusForbidden || errCode(body) != "M1E-1001" {
+			t.Fatalf("cross-tenant user revoke: %d %v", st, body)
+		}
+		if got := operatorMismatchCount(t); got != before+1 {
+			t.Fatalf("cross-tenant user attempt must be a security event: %v -> %v", before, got)
+		}
+		var revoked bool
+		if err := h.admin.QueryRow(ctx, `SELECT revoked_at IS NOT NULL FROM m1_devices WHERE id = $1`, deviceID).Scan(&revoked); err != nil || revoked {
+			t.Fatalf("cross-tenant attempt revoked the device: %v %v", revoked, err)
+		}
+		st, body = h.get("/api/v1/enroll/devices", map[string]string{
+			"Authorization": "Bearer " + h.operatorToken("m1-admin"), "X-M1-Tenant": personal.String(),
+		})
+		if st != http.StatusForbidden || errCode(body) != "M1E-1001" {
+			t.Fatalf("tenant-IdP token on personal tenant: %d %v", st, body)
+		}
+		st, body = h.post("/api/v1/enroll/revoke", map[string]string{"device_id": deviceID.String(), "reason": "lost laptop"}, hdr)
+		if st != http.StatusOK || body["state"] != "revoked" {
+			t.Fatalf("owner revoke: %d %v", st, body)
+		}
+		var epoch int64
+		var revokedBy string
+		if err := h.admin.QueryRow(ctx, `
+			SELECT t.revocation_epoch, d.revoked_by FROM m1_tenants t JOIN m1_devices d ON d.tenant_id = t.id
+			 WHERE d.id = $1`, deviceID).Scan(&epoch, &revokedBy); err != nil || epoch != 1 || revokedBy != "omium:u-alice" {
+			t.Fatalf("epoch/attribution: %d %q %v", epoch, revokedBy, err)
+		}
+		if _, err := h.verify.Verify(ctx, firstToken); !errors.Is(err, auth.ErrRevoked) {
+			t.Fatalf("want ErrRevoked, got %v", err)
+		}
+		st, body = h.post("/api/v1/enroll/device/approve", approveBody(pub), bearer(alice))
+		if st != http.StatusBadRequest || errCode(body) != "M1E-2001" {
+			t.Fatalf("approve after revoke must demand a new key: %d %v", st, body)
+		}
+		_ = priv
+	})
+
+	t.Run("suspended_tenant_refused_and_rate_limited", func(t *testing.T) {
+		if _, err := h.admin.Exec(ctx, `UPDATE m1_tenants SET status = 'suspended' WHERE id = $1`, personal); err != nil {
+			t.Fatal(err)
+		}
+		pub2, _, _ := ed25519.GenerateKey(rand.Reader)
+		st, body := h.post("/api/v1/enroll/device/approve", approveBody(pub2), bearer(alice))
+		if st != http.StatusBadRequest || errCode(body) != "M1E-2001" {
+			t.Fatalf("suspended tenant: %d %v", st, body)
+		}
+		// The 10/hour per-IP bucket is debited on authenticated calls only.
+		limited := false
+		for range 12 {
+			if st, body := h.post("/api/v1/enroll/device/approve", approveBody(pub2), bearer(alice)); st == http.StatusTooManyRequests && errCode(body) == "M1E-9001" {
+				limited = true
+				break
+			}
+		}
+		if !limited {
+			t.Fatal("no M1E-9001 within the /approve bucket capacity")
+		}
+	})
+
+	t.Run("unconfigured_anchor_is_503", func(t *testing.T) {
+		deps := h.deps
+		deps.Users = nil
+		mux := http.NewServeMux()
+		enroll.New(deps).RegisterRoutes(mux)
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		raw, _ := json.Marshal(approveBody(pub))
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/enroll/device/approve", bytes.NewReader(raw))
+		req.Header.Set("Authorization", "Bearer "+alice)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var body map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if resp.StatusCode != http.StatusServiceUnavailable || errCode(body) != "M1E-9500" {
+			t.Fatalf("unconfigured: %d %v", resp.StatusCode, body)
+		}
+	})
 }

@@ -33,6 +33,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/pg"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/server"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/userauth"
 
 	"errors"
 
@@ -93,6 +94,7 @@ type Deps struct {
 	// Cache, when set, gets local invalidation on revoke so THIS pod cuts a
 	// revoked device off immediately; other pods ride the ≤60 s ceiling.
 	Cache *RevocationCache
+	Users *userauth.Verifier // nil ⇒ /approve answers 503 and the operator surface takes tenant-IdP tokens only
 
 	PublicBaseURL string
 	ServerMinEdge string
@@ -112,6 +114,7 @@ type Module struct {
 	verifier auth.Verifier
 	obsCfg   obs.Config
 	cache    *RevocationCache
+	users    *userauth.Verifier
 
 	baseURL string
 	minEdge string
@@ -119,11 +122,12 @@ type Module struct {
 	now     func() time.Time
 	pepper  []byte
 
-	nonces  *nonceStore
-	pollGap *pacer         // §8.2: /poll at the flow's own interval (5 s)
-	startIP *bucketLimiter // §8.2: /start per IP, 10/hour
-	refresh *bucketLimiter // §8.2: token refresh per device, 12/day
-	nonceIP *bucketLimiter // /nonce per IP — see New for the budget's WHY
+	nonces    *nonceStore
+	pollGap   *pacer         // §8.2: /poll at the flow's own interval (5 s)
+	startIP   *bucketLimiter // §8.2: /start per IP, 10/hour
+	approveIP *bucketLimiter // /approve per IP, same budget as /start
+	refresh   *bucketLimiter // §8.2: token refresh per device, 12/day
+	nonceIP   *bucketLimiter // /nonce per IP — see New for the budget's WHY
 }
 
 func New(d Deps) *Module {
@@ -135,13 +139,14 @@ func New(d Deps) *Module {
 	}
 	return &Module{
 		db: d.DB, pgReady: d.PG, signer: d.Signer, verifier: d.Verifier,
-		obsCfg: d.ObsCfg, cache: d.Cache,
+		obsCfg: d.ObsCfg, cache: d.Cache, users: d.Users,
 		baseURL: d.PublicBaseURL, minEdge: d.ServerMinEdge,
 		http: d.HTTPClient, now: d.Now, pepper: d.TenantPepper,
-		nonces:  newNonceStore(d.Now),
-		pollGap: newPacer(pollInterval, d.Now),
-		startIP: newBucketLimiter(10, time.Hour, d.Now),
-		refresh: newBucketLimiter(12, 24*time.Hour, d.Now),
+		nonces:    newNonceStore(d.Now),
+		pollGap:   newPacer(pollInterval, d.Now),
+		startIP:   newBucketLimiter(10, time.Hour, d.Now),
+		approveIP: newBucketLimiter(10, time.Hour, d.Now),
+		refresh:   newBucketLimiter(12, 24*time.Hour, d.Now),
 		// /nonce is unauthenticated and was the cheap path to saturating the
 		// 65536-entry store (a saturated store 503s EVERY device's PoP refresh
 		// within 24 h). 120/hour per IP: a device needs ~1 nonce per refresh at
@@ -179,7 +184,15 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/enroll/device/poll", m.handlePoll)
 	mux.HandleFunc("POST /api/v1/enroll/nonce", m.handleNonce)
 	mux.HandleFunc("POST /api/v1/enroll/token", m.handleToken)
-	// Operator-token surface; admission is verifyOperatorToken per request.
+	if m.users != nil { // unconfigured is a loud 503, never an absent route (the INTEL_BASE_URL precedent)
+		userChain := userauth.Middleware(m.users, m.obsCfg, "")
+		mux.Handle("POST /api/v1/enroll/device/approve", userChain(http.HandlerFunc(m.handleApprove)))
+	} else {
+		mux.HandleFunc("POST /api/v1/enroll/device/approve", func(w http.ResponseWriter, _ *http.Request) {
+			writeErr(w, http.StatusServiceUnavailable, "M1E-9500", "omium user sign-in not configured (OMIUM_USER_ISSUER)")
+		})
+	}
+	// Operator-token surface; admission is operatorAuth per request.
 	mux.HandleFunc("POST /api/v1/enroll/revoke", m.handleRevoke)
 	mux.HandleFunc("GET /api/v1/enroll/devices", m.handleDevices)
 	// Device-token surface (§3.6) through the shared auth middleware.

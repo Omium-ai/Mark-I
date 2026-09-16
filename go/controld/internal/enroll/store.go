@@ -15,6 +15,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 )
 
 type enrollmentRow struct {
@@ -38,6 +41,93 @@ func (m *Module) insertEnrollment(ctx context.Context, tenant uuid.UUID, codeHas
 			VALUES ($1, $2, $3)`, tenant, codeHash, pubkey)
 		return err
 	})
+}
+
+// upsertUserEnrollment re-arms a still-pending row (crash between insert and approval) so its token pins to a fresh started_at.
+func (m *Module) upsertUserEnrollment(ctx context.Context, tenant uuid.UUID, codeHash, pubkey []byte) error {
+	tid, err := tenantIDFor(tenant)
+	if err != nil {
+		return err
+	}
+	return m.db.WithTenant(ctx, tid, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO m1_device_enrollments (tenant_id, device_code_hash, device_pubkey, approval_kind)
+			VALUES ($1, $2, $3, 'omium_user')
+			ON CONFLICT (device_code_hash) DO UPDATE SET started_at = now()
+			 WHERE m1_device_enrollments.status = 'pending'`, tenant, codeHash, pubkey)
+		return err
+	})
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// ensurePersonalTenant seeds no m1_tenant_regimes row: a cost basis is a founder-visible fact, not a default.
+func (m *Module) ensurePersonalTenant(ctx context.Context, tenant uuid.UUID, owner string) (string, error) {
+	tid, err := tenantIDFor(tenant)
+	if err != nil {
+		return "", err
+	}
+	var status string
+	err = m.db.WithTenant(ctx, tid, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO m1_tenants (id, kind, owner_subject, name)
+			VALUES ($1, 'personal', $2, 'personal')
+			ON CONFLICT (id) DO NOTHING`, tenant, owner); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT status FROM m1_tenants WHERE id = $1`, tenant).Scan(&status)
+	})
+	return status, err
+}
+
+// approveCodeHash keys a one-shot approval on the device key itself, so a retried /approve lands on the same row.
+func approveCodeHash(tenant uuid.UUID, pubkey []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte("omium_user:" + tenant.String() + ":"))
+	h.Write(pubkey)
+	return h.Sum(nil)
+}
+
+// reissueUserDevice re-issues for the same approving subject only; like the PoP refresh, token_hash stays the first grant's audit.
+func (m *Module) reissueUserDevice(ctx context.Context, tenant uuid.UUID, codeHash []byte, subject string) (device uuid.UUID, token string, expiresIn int, err error) {
+	tid, err := tenantIDFor(tenant)
+	if err != nil {
+		return uuid.Nil, "", 0, err
+	}
+	err = m.db.WithTenant(ctx, tid, func(tx pgx.Tx) error {
+		var keyID string
+		scanErr := tx.QueryRow(ctx, `
+			SELECT d.id, k.key_id
+			  FROM m1_device_enrollments e
+			  JOIN m1_devices d ON d.id = e.device_id
+			  JOIN m1_device_keys k ON k.device_id = d.id
+			   AND k.superseded_at IS NULL AND k.revoked_at IS NULL
+			 WHERE e.device_code_hash = $1 AND e.status = 'approved'
+			   AND e.approval_kind = 'omium_user' AND e.oidc_subject = $2`, codeHash, subject).
+			Scan(&device, &keyID)
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return errCodeConsumed
+		}
+		if scanErr != nil {
+			return scanErr
+		}
+		now := m.now()
+		exp := now.Add(auth.TokenTTLCeiling)
+		tok, mintErr := m.signer.Mint(tenant, device, keyID, now, exp)
+		if mintErr != nil {
+			return mintErr
+		}
+		token = tok
+		expiresIn = int(exp.Sub(now).Seconds())
+		return nil
+	})
+	if err != nil {
+		return uuid.Nil, "", 0, err
+	}
+	return device, token, expiresIn, nil
 }
 
 // readEnrollment returns nil when the code is unknown (⇒ M1E-1004).
@@ -126,6 +216,9 @@ func (m *Module) approveEnrollment(ctx context.Context, tenant uuid.UUID, codeHa
 		// and a poll inside the 15-min window loses at most 15 min of life.
 		now := m.now()
 		exp := startedAt.Add(24 * time.Hour)
+		if startedAt.After(now) { // DB clock ahead of ours (one-shot /approve has no poll-interval slack): honour both ceilings
+			exp = now.Add(24 * time.Hour)
+		}
 		tok, mintErr := m.signer.Mint(tenant, device, keyID, now, exp)
 		if mintErr != nil {
 			return mintErr

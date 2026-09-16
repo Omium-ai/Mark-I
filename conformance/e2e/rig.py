@@ -493,9 +493,10 @@ class Rig:
                             "Resource": f"arn:aws:s3:::{self.bucket}/t/*",
                             "Condition": {
                                 "StringNotLike": {
-                                    "s3:x-amz-server-side-encryption-aws-kms-key-id": (
-                                        "*alias/mark1-tenant-*"
-                                    )
+                                    "s3:x-amz-server-side-encryption-aws-kms-key-id": [
+                                        "*alias/mark1-tenant-*",
+                                        "*alias/mark1-personal",  # ADR-0011 pooled key (MinIO form)
+                                    ]
                                 }
                             },
                         }
