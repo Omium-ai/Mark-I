@@ -13,8 +13,10 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -22,6 +24,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -33,16 +36,24 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/copilot"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/bundle"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/capture"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/cortex"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/evidence"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/harden"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/memory"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/receipt"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/redact"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/route"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spill"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/supervise"
@@ -99,16 +110,20 @@ type config struct {
 	spoolCap  int64
 	socket    string
 	workspace string
-	saltHex   string
-	// ingestURL/deviceToken switch the uplink drain on. The token flag is a
-	// DEV SEAM exactly like --tenant-salt: enrollment (08 §3.1) delivers real
-	// ≤24 h device tokens into identity custody when it lands (04 §2.9).
+	// saltHex, deviceToken, tenantID, deviceID and ingestURL are the identity
+	// `mark1 enroll` persists in <state>/enrollment.json (08 §7.1, 04 §2.9);
+	// applyEnrollment fills them from the document at boot. The flags of the
+	// same names are DEV SEAM overrides — set, a flag wins over the document
+	// (tests drive identity that way); with neither, boot is refused naming
+	// `mark1 enroll`.
+	saltHex string
+	// ingestURL/deviceToken switch the uplink drain on.
 	ingestURL   string
 	deviceToken string
-	// tenantID/deviceID switch receipt sealing on. Same DEV SEAM as
-	// --device-token: both ride INSIDE the signed checkpoint payload and must be
-	// the canonical UUIDs the server stamps from verified claims (07 §2), so
-	// enrollment (08 §3.1) is what delivers them for real.
+	// tenantID/deviceID switch receipt sealing on: both ride INSIDE the signed
+	// checkpoint payload and must be the canonical UUIDs the server stamps
+	// from verified claims (07 §2) — which is why the document, not the
+	// operator, is their source.
 	tenantID string
 	deviceID string
 	// policyURL/policyChannel drive the 08 §3.2 bundle client. An empty URL
@@ -134,6 +149,8 @@ type config struct {
 	// the fail-static posture (gates allow, verdicts flagged stale_cert
 	// M1E-3006) and not an error state.
 	matrices *verdict.BundleMatrices
+	// gateway is `--fleet` (04 §3.4): the proxy runs `--mode gateway` behind mTLS and the local Detect()==apikey precondition does not apply.
+	gateway *supervise.GatewayFlags
 }
 
 func main() {
@@ -143,6 +160,10 @@ func main() {
 	// carries its spec in one env var and must touch no daemon state.
 	anchors.MaybeRunHelper()
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if err := harden.Apply(); err != nil {
+		log.Error("mark1d refusing to start: core-dump suppression", "err", err)
+		os.Exit(1)
+	}
 	stateDefault := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		stateDefault = filepath.Join(home, ".omium", "mark1")
@@ -153,15 +174,36 @@ func main() {
 	flag.Int64Var(&cfg.spoolCap, "spool-cap", spool.DefaultCap, "spool byte cap (07 §6): past it diagnostics shed, accounted, and billing-grade blocks; below one 64 MiB segment the spool can never free space")
 	flag.StringVar(&cfg.socket, "socket", "", "fabric UDS path (default per 07 §5: $XDG_RUNTIME_DIR/omium-mark1/m1p.sock, else ~/.omium/mark1/m1p.sock)")
 	flag.StringVar(&cfg.workspace, "workspace", "", "additive workspace root to tail besides <state-dir>/workspaces.json (mark1 enable writes the file)")
-	flag.StringVar(&cfg.saltHex, "tenant-salt", "", "hex tenant HMAC root for Usage idem_key derivation; DEV SEAM — enrollment delivers the real root into identity custody (04 §2.9)")
-	flag.StringVar(&cfg.ingestURL, "ingest-url", "", "full URL of POST /m1p/v1/ingest; empty leaves the uplink off (capture-local-only)")
-	flag.StringVar(&cfg.deviceToken, "device-token", "", "bearer device token for ingest and policy; DEV SEAM — enrollment issues the real one (08 §3.1)")
-	flag.StringVar(&cfg.tenantID, "tenant-id", "", "tenant UUID for receipt checkpoints; DEV SEAM — enrollment delivers it (08 §3.1). Unset leaves sealing off")
-	flag.StringVar(&cfg.deviceID, "device-id", "", "device UUID for receipt checkpoints; DEV SEAM — enrollment delivers it (08 §3.1). Unset leaves sealing off")
+	flag.StringVar(&cfg.saltHex, "tenant-salt", "", "hex tenant HMAC root for Usage idem_key derivation; DEV SEAM — overrides enrollment.json's tenant_root_hex (04 §2.9)")
+	flag.StringVar(&cfg.ingestURL, "ingest-url", "", "full URL of POST /m1p/v1/ingest; overrides enrollment.json's endpoints.ingest; empty with no document leaves the uplink off (capture-local-only)")
+	flag.StringVar(&cfg.deviceToken, "device-token", "", "bearer device token for ingest and policy; DEV SEAM — overrides enrollment.json's device_token (08 §3.1)")
+	flag.StringVar(&cfg.tenantID, "tenant-id", "", "tenant UUID for receipt checkpoints; DEV SEAM — overrides enrollment.json's tenant_id (08 §3.1)")
+	flag.StringVar(&cfg.deviceID, "device-id", "", "device UUID for receipt checkpoints; DEV SEAM — overrides enrollment.json's device_id (08 §3.1)")
+	var gw supervise.GatewayFlags
+	fleet := flag.Bool("fleet", false, "VPC gateway profile (04 §3.4): supervise mark1-proxy --mode gateway with the --gateway-* flags")
+	flag.StringVar(&gw.Bind, "gateway-bind", "", "--fleet: host:port the mTLS gateway listener binds")
+	flag.StringVar(&gw.TLSCert, "gateway-tls-cert", "", "--fleet: PEM server certificate")
+	flag.StringVar(&gw.TLSKey, "gateway-tls-key", "", "--fleet: PEM server key")
+	flag.StringVar(&gw.ClientCA, "gateway-client-ca", "", "--fleet: PEM CA every client certificate must chain to")
+	flag.StringVar(&gw.CredDir, "gateway-cred-dir", "", "--fleet: credential directory for M1-Cred-Ref resolution (one 0600 file per ref)")
 	flag.StringVar(&cfg.policyURL, "policy-url", "", "control-plane ORIGIN for policy distribution (08 §3.2/§3.5 hang /api/v1/policy/{bundle,stream,ack} and /.well-known/mark1-keys off it); empty leaves fetching off, last-known-good still runs")
 	flag.StringVar(&cfg.policyChannel, "policy-channel", "stable", "policy rollout channel (08 §3.2)")
 	flag.Parse()
 	cfg.offPoll = time.Second
+	if *fleet {
+		if gw.Bind == "" || gw.TLSCert == "" || gw.TLSKey == "" || gw.ClientCA == "" || gw.CredDir == "" {
+			log.Error("mark1d exiting: --fleet needs all of --gateway-bind, --gateway-tls-cert, --gateway-tls-key, --gateway-client-ca, --gateway-cred-dir")
+			os.Exit(1)
+		}
+		cfg.gateway = &gw
+	}
+	// Identity comes from the enrollment document `mark1 enroll` wrote, with
+	// the flags above as overrides. Here and not in run(): tests drive run()
+	// with flag-shaped configs and must not be refused for lacking a document.
+	if err := applyEnrollment(&cfg, log); err != nil {
+		log.Error("mark1d exiting", "err", err)
+		os.Exit(1)
+	}
 
 	// The signal set lives here, not in run(): a test that drives the daemon
 	// needs a stopper that is not a process-wide SIGTERM.
@@ -171,6 +213,122 @@ func main() {
 		log.Error("mark1d exiting", "err", err)
 		os.Exit(1)
 	}
+}
+
+// enrollment is the slice of <state>/enrollment.json the daemon boots identity
+// from. go/mark1/internal/cli.Enrollment DEFINES the format (the CLI writes it
+// 0600, 08 §7.1); this mirrors the consumed keys byte-compatibly, because that
+// module's internal/ tree is out of reach and the file, not the type, is the
+// contract — exactly as workspaces.json is handled by tailers.
+type enrollment struct {
+	State         string `json:"state"`
+	DeviceID      string `json:"device_id"`
+	TenantID      string `json:"tenant_id"`
+	DeviceToken   string `json:"device_token"`
+	TenantRootHex string `json:"tenant_root_hex"` // 04 §2.9 root, delivered at enrollment
+	Endpoints     struct {
+		Ingest string `json:"ingest"`
+	} `json:"endpoints"`
+}
+
+func enrollmentPath(stateDir string) string { return filepath.Join(stateDir, "enrollment.json") }
+
+// readEnrollment loads the document, refusing a group/world-readable one the
+// same way the CLI (cli.readPrivate) and identity.FileCustody refuse theirs:
+// it carries the bearer token and the tenant root. os.ErrNotExist passes
+// through unwrapped so the caller can tell "never enrolled" from "broken".
+func readEnrollment(stateDir string) (*enrollment, error) {
+	path := enrollmentPath(stateDir)
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%s has mode %o; must be 0600 — refusing to read it", path, fi.Mode().Perm())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc enrollment
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("%s is corrupt: %w", path, err)
+	}
+	return &doc, nil
+}
+
+// applyEnrollment is the boot identity rule: a DEV SEAM flag wins where set,
+// the document fills whatever is unset, and a device with neither is refused
+// legibly — 04 §9.3 starts mark1d AFTER `mark1 enroll` persists the document,
+// so a daemon with no identity is a mis-install, not a mode. A REVOKED
+// document (stamped by the CLI on M1E-1003) boots capture-local-only: egress
+// closed, identity kept, re-enrollment surfaced (04 §9.3 REVOKED_LOCAL).
+func applyEnrollment(cfg *config, log *slog.Logger) error {
+	if cfg.stateDir == "" {
+		return nil // run() refuses this with the message that names --state-dir
+	}
+	flagged := cfg.saltHex != "" || cfg.deviceToken != "" || cfg.tenantID != "" || cfg.deviceID != ""
+	doc, err := readEnrollment(cfg.stateDir)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if flagged {
+			return nil
+		}
+		return fmt.Errorf("mark1d: no enrollment at %s — run `mark1 enroll` first (08 §7.1, 04 §9.3), or pass the DEV SEAM identity flags", enrollmentPath(cfg.stateDir))
+	case err != nil:
+		return fmt.Errorf("mark1d: enrollment: %w", err)
+	}
+	if doc.State == "revoked" {
+		log.Warn("mark1d: enrollment is REVOKED — uplink off, capture local-only; re-enroll with `mark1 enroll` (04 §9.3)")
+		doc.DeviceToken, doc.Endpoints.Ingest = "", ""
+	}
+	fill := func(dst *string, v string) {
+		if *dst == "" {
+			*dst = v
+		}
+	}
+	fill(&cfg.deviceToken, doc.DeviceToken)
+	fill(&cfg.tenantID, doc.TenantID)
+	fill(&cfg.deviceID, doc.DeviceID)
+	fill(&cfg.saltHex, doc.TenantRootHex)
+	fill(&cfg.ingestURL, doc.Endpoints.Ingest)
+	log.Info("mark1d: identity from enrollment document", "path", enrollmentPath(cfg.stateDir),
+		"tenant_id", cfg.tenantID, "device_id", cfg.deviceID, "tenant_root", cfg.saltHex != "", "flag_overrides", flagged)
+	return nil
+}
+
+// docTokens is the uplink's and the sealer's TokenSource over the enrollment
+// document. Token serves the bearer boot adopted; Refresh — the 401 row of
+// 08 §2.4 — re-reads the document and adopts a NEWER token a refresh wrote
+// there, so a refreshed document is the source without a daemon restart, and
+// is ErrNoRefresh (the batch parks) when nothing changed: flag-only identity,
+// a revoked document, or no refresher having run. The PoP refresh itself
+// (04 §2.9: 80 % of expires_in, nonce + device-key signature) is not here yet
+// — today nothing rewrites the token, so Refresh always parks, as before.
+type docTokens struct {
+	stateDir string
+	mu       sync.Mutex
+	current  string
+}
+
+func (d *docTokens) Token(context.Context) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.current, nil
+}
+
+func (d *docTokens) Refresh(context.Context) error {
+	doc, err := readEnrollment(d.stateDir)
+	if err != nil || doc.State == "revoked" || doc.DeviceToken == "" {
+		return uplink.ErrNoRefresh
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if doc.DeviceToken == d.current {
+		return uplink.ErrNoRefresh
+	}
+	d.current = doc.DeviceToken
+	return nil
 }
 
 // run is the off-gated daemon loop (invariant 2, 08 §7.6): the marker and
@@ -229,7 +387,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	if cfg.saltHex != "" {
 		root, err := hex.DecodeString(cfg.saltHex)
 		if err != nil || len(root) == 0 {
-			return errors.New("mark1d: --tenant-salt must be non-empty hex")
+			return errors.New("mark1d: tenant root must be non-empty hex (enrollment.json tenant_root_hex or --tenant-salt)")
 		}
 		tenantRoot = root
 		idemKey, err = tailers.DeriveUsageIdemKey(root)
@@ -241,7 +399,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		// An explicit flag ask that cannot be honored fails the boot; the
 		// enable-file path below degrades instead (a CLI write must not brick
 		// the running capture session).
-		return errors.New("mark1d: --workspace requires --tenant-salt (non-empty hex) until enrollment delivers the root")
+		return errors.New("mark1d: --workspace requires a tenant root (enrollment.json tenant_root_hex, or --tenant-salt)")
 	}
 
 	sp, err := spool.Open(spool.Config{Dir: cfg.spoolDir, SpoolCap: cfg.spoolCap, DiskUsage: cfg.diskUsage})
@@ -308,7 +466,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	if err != nil {
 		log.Error("mark1d: workspaces.json unreadable; cortexd not supervised", "err", err)
 	}
-	cx, err := cortex.New(cortex.Config{StateDir: cfg.stateDir, Roots: cxRoots, Budget: cortex.BudgetFrom(bc.Cortex()), Log: log})
+	cx, err := cortex.New(cortex.Config{StateDir: cfg.stateDir, Roots: cxRoots, Budget: cortex.BudgetFrom(bc.Cortex()), Ranker: bc.Cortex().LearnedRanker, Log: log})
 	if err != nil {
 		_ = sp.Close()
 		return err
@@ -324,6 +482,10 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	}
 	blocks := verdict.NewBlocks()
 	eng := verdict.NewEngine(matrices, blocks, nil)
+	var routeSeq atomic.Uint64
+	routeSeq.Store(matrices.Seq)
+	var routeMatrices atomic.Pointer[verdict.BundleMatrices]
+	routeMatrices.Store(&matrices)
 	// The anchor plane (04 §2.2) is the SOURCE half of the verdict plane: with
 	// no runner nothing ever produces an AnchorVote, so the cache is never
 	// written and every gate answers M1E-5001 allow. The catalog is locally
@@ -398,7 +560,15 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	// reopened under the same id (R3) inherits its pre-close streak, and a streak
 	// at the cap short-circuits the next gate query to ALLOW *before* the cache
 	// read — the new attempt runs entirely ungated on the old attempt's state.
-	seg.OnClose = func(t taskseg.TaskID) { blocks.ResetTask(verdict.TaskID(t)) }
+	mem, err := memory.New(memory.Config{
+		StateDir: cfg.stateDir, BaseURL: cfg.policyURL, Token: cfg.deviceToken, EdgeVersion: version, Log: log,
+		Admit: adm.Admit, TaskFor: seg.TaskFor, Verdict: seg.Verdict, PackTokensMax: bc.Memory().PackTokensMax,
+	})
+	if err != nil {
+		_ = sp.Close()
+		return err
+	}
+	seg.OnClose = func(t taskseg.TaskID) { blocks.ResetTask(verdict.TaskID(t)); mem.OnClose(t) }
 	// D-AS: at close, a verdict at ANY stage resolves the task. Without this the
 	// denominator is 100% unresolved on every install with no consented SLOW
 	// anchor, since REVISED is the only stage anything else produces.
@@ -446,12 +616,19 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	// restart. Started after Apply is set — the client publishes on its first
 	// freshness tick, and a publish into a nil Apply would be lost.
 	if cfg.matrices == nil {
-		bc.Apply = eng.SetBundle
+		bc.Apply = func(m verdict.BundleMatrices) { routeSeq.Store(m.Seq); routeMatrices.Store(&m); eng.SetBundle(m) }
 	}
+	bc.ApplyRanker = cx.SetRanker
+	router := &route.Emitter{Next: adm.Admit, Seq: routeSeq.Load, Matrices: routeMatrices.Load, Verdicts: eng.Reader()}
 	bundleDone := make(chan struct{})
 	go func() {
 		defer close(bundleDone)
 		bc.Run(ctx)
+	}()
+	memDone := make(chan struct{})
+	go func() {
+		defer close(memDone)
+		mem.Run(ctx)
 	}()
 
 	// The runner emits through the tee, so its vote lands in the spool AND in
@@ -467,6 +644,10 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		}
 	}
 	runner := anchors.NewRunner(sb, votes, outKey, false)
+	if runner.Evidence, err = evidence.Open(cfg.stateDir); err != nil {
+		_ = sp.Close()
+		return err
+	}
 	// One runner today, so every enabled root's L0 push lands on the same
 	// SetL0Root -- the anchorWorktree ceiling cortex.go's header records.
 	for _, root := range cxRoots {
@@ -511,6 +692,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		<-drainDone
 		<-engDone
 		<-bundleDone
+		<-memDone
 		<-anchorsDone
 		_ = sp.Close()
 		return err
@@ -547,18 +729,25 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 				sched.NoteToolUse(sid, task)
 			}
 		}
+		if ev.GetModelRequest() != nil {
+			return router.Emit(ctx, ev)
+		}
 		return votes.Admit(ctx, ev)
 	}, perEventLoss)
 	// The GateQuery route is constructed with eng.Reader() — a verdict.Reader,
 	// the only verdict surface with no method that computes (04 §2.3).
 	gate := fabric.NewGate(eng.Reader(), blocks, cfg.stateDir)
 	gate.Evidence = votes.Evidence // FR-VERIFY-011: evidence_ref on BLOCK
+	if cfg.matrices == nil {
+		gate.ApplyGates(bc.Gates())
+	}
 	gate.TaskFor = seg.TaskFor
 	gate.OnDropped = func(string) { adm.AccountDropped(dropGateTimeout, spool.ClassDiagnostic, 1) }
 	gate.Health = health
 	srv.Health = health
 	srv.Sync = sp.Sync // FlushAck attests to fsynced records (NFR-DURABILITY-004)
 	srv.SetGate(gate)
+	srv.SetContextHandler(mem)
 	srv.SetContaminationHandler(contaminationRollback{log: log, stateDir: cfg.stateDir, adm: adm})
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- srv.Serve(ctx, l) }()
@@ -572,6 +761,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		<-drainDone
 		<-engDone
 		<-bundleDone
+		<-memDone
 		<-anchorsDone
 		_ = sp.Close()
 		return err
@@ -583,8 +773,9 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	upDone := make(chan error, 1)
 	if cfg.ingestURL != "" {
 		if cfg.deviceToken == "" {
-			return fail(errors.New("mark1d: --ingest-url requires --device-token until enrollment lands (08 §3.1)"))
+			return fail(errors.New("mark1d: an ingest URL needs a device token — enrollment.json's device_token or --device-token (08 §3.1)"))
 		}
+		tokens := &docTokens{stateDir: cfg.stateDir, current: cfg.deviceToken}
 		// The quarantine seal key is the device spill public half spill.Open
 		// just materialized (04 §2.5: encrypted with the device spill key §5.4).
 		spillPub, err := os.ReadFile(filepath.Join(cfg.stateDir, "spill", "spill.pub"))
@@ -607,7 +798,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 		var checkpoint func(context.Context, [][]byte)
 		switch key, kerr := receipt.OpenKey(keyPath); {
 		case cfg.tenantID == "" || cfg.deviceID == "":
-			log.Warn("mark1d: receipts NOT sealed — --tenant-id/--device-id unset; uploads land but carry no chain evidence (08 §3.1)")
+			log.Warn("mark1d: receipts NOT sealed — no tenant_id/device_id (enrollment.json or --tenant-id/--device-id); uploads land but carry no chain evidence (08 §3.1)")
 		case kerr != nil:
 			log.Warn("mark1d: receipts NOT sealed — no usable enrolled device key; uploads land but carry no chain evidence",
 				"path", keyPath, "err", kerr)
@@ -619,7 +810,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 			tid, terr := uuid.Parse(cfg.tenantID)
 			did, derr := uuid.Parse(cfg.deviceID)
 			if terr != nil || derr != nil {
-				return fail(errors.New("mark1d: --tenant-id and --device-id must be UUIDs"))
+				return fail(errors.New("mark1d: tenant_id and device_id must be UUIDs (enrollment.json or --tenant-id/--device-id)"))
 			}
 			headURL, herr := receipt.HeadURL(cfg.ingestURL)
 			if herr != nil {
@@ -627,10 +818,11 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 			}
 			sealer, serr := receipt.New(receipt.Config{
 				Key: key, TenantID: tid.String(), DeviceID: did.String(),
-				HeadURL: headURL,
-				Token:   uplink.StaticToken(cfg.deviceToken).Token,
-				Admit:   adm.Admit,
-				Log:     log,
+				HeadURL:  headURL,
+				Token:    tokens.Token,
+				Admit:    adm.Admit,
+				Log:      log,
+				StateDir: cfg.stateDir,
 			})
 			if serr != nil {
 				return fail(serr)
@@ -639,14 +831,16 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 			log.Info("mark1d: receipt sealing armed", "key_id", key.KeyID(), "head", headURL)
 		}
 
+		bootMono := time.Now()
 		up, err = uplink.New(uplink.Config{
-			Store:       sp,
-			Checkpoint:  checkpoint,
-			Drops:       []uplink.DropSource{sp, adm},
-			Tokens:      uplink.StaticToken(cfg.deviceToken),
-			Endpoint:    cfg.ingestURL,
-			EdgeVersion: version,
-			Health:      health,
+			Store:         sp,
+			Checkpoint:    checkpoint,
+			Drops:         []uplink.DropSource{sp, adm},
+			NetworkChange: uplink.WakeSignal(ctx, 30*time.Second, time.Now, func() time.Duration { return time.Since(bootMono) }, time.After),
+			Tokens:        tokens,
+			Endpoint:      cfg.ingestURL,
+			EdgeVersion:   version,
+			Health:        health,
 			SDK: &m1pv1.SdkInfo{
 				Name: "mark1d", Version: version,
 				Os: runtime.GOOS, Arch: runtime.GOARCH, Agent: agent,
@@ -692,7 +886,7 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 
 	tailDone := make(chan error, 1)
 	if idemKey != nil {
-		go func() { tailDone <- tailWorkspaces(ctx, log, cfg, idemKey, adm, cov) }()
+		go func() { tailDone <- tailWorkspaces(ctx, log, cfg, idemKey, adm, cov, router, seg) }()
 	} else {
 		// Ingest rejects a Usage without idem_key (422, 08 §2.4) — refusing to
 		// tail beats spooling events the server will bounce. Enable-file
@@ -716,9 +910,10 @@ func session(parent context.Context, log *slog.Logger, cfg config) error {
 	if err := <-tailDone; err != nil {
 		log.Error("tail drain", "err", err)
 	}
-	<-drainDone   // ctx is done; the ring drain stops before its spool closes
-	<-engDone     // the fusion goroutine holds no resource; joined so it cannot outlive the session
-	<-bundleDone  // same: the policy client owns only its own HTTP client
+	<-drainDone  // ctx is done; the ring drain stops before its spool closes
+	<-engDone    // the fusion goroutine holds no resource; joined so it cannot outlive the session
+	<-bundleDone // same: the policy client owns only its own HTTP client
+	<-memDone
 	<-anchorsDone // same: the consent reconcile owns a watcher and files, no spool
 	// Joined before the spool closes, and joined at all because the join is what
 	// makes the proxy's stop ORDERED: Supervisor.Run returns only once the child
@@ -798,7 +993,7 @@ func drainCoverageJournal(ctx context.Context, log *slog.Logger, cov *coverage.E
 func superviseProxy(ctx context.Context, log *slog.Logger, cfg config, cov *coverage.Emitter) {
 	cc := &claudecode.Adapter{StateDir: cfg.stateDir}
 	d, err := cc.Detect()
-	if err != nil || d.Regime != adapters.RegimeAPIKey {
+	if cfg.gateway == nil && (err != nil || d.Regime != adapters.RegimeAPIKey) {
 		log.Info("mark1d: mark1-proxy not supervised — 04 §1.2 spawns it only for Detect()==apikey",
 			"apikey", d.Regime == adapters.RegimeAPIKey, "installed", d.Installed, "err", err)
 		return
@@ -823,7 +1018,7 @@ func superviseProxy(ctx context.Context, log *slog.Logger, cfg config, cov *cove
 // fragment on FAILED exactly as before, and silently stops receipting the
 // bypass window — which downstream is indistinguishable from full coverage.
 func proxyChildConfig(cfg config, log *slog.Logger, cov *coverage.Emitter) supervise.ProxyConfig {
-	return supervise.ProxyConfig{StateDir: cfg.stateDir, Log: log, Coverage: cov}
+	return supervise.ProxyConfig{StateDir: cfg.stateDir, Log: log, Coverage: cov, Gateway: cfg.gateway}
 }
 
 // perEventLoss names the two admission outcomes that are an accounted loss of
@@ -1011,20 +1206,41 @@ const wsReloadTick = 2 * time.Second
 // runs starts its tailer without a restart; a disable narrows the LiveSet
 // oracle FIRST and then stops the manager, so the containment check never
 // lags the file (04 §0.3 invariant 3: workspaces are DATA, not processes).
-func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey []byte, adm *capture.Admitter, cov *coverage.Emitter) error {
+func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey []byte, adm *capture.Admitter, cov *coverage.Emitter, router *route.Emitter, seg *taskseg.Segmenter) error {
 	wsPath := filepath.Join(cfg.stateDir, "workspaces.json")
 	live := tailers.NewLiveSet()
 	cc := &claudecode.Adapter{}
+	// The other three adapters each read ONE shared vendor tree with per-stream cwd containment, so one manager per adapter serves every enabled root.
+	type shared struct {
+		key   string
+		ok    bool
+		start func(root string) (*tailers.Manager, error)
+	}
+	cx, gm, oc, cp := &codex.Adapter{StateDir: cfg.stateDir}, &gemini.Adapter{}, &opencode.Adapter{}, &copilot.Adapter{}
+	sniff := func(name string, det func() (adapters.Detection, error), supported func(string) bool) bool {
+		d, err := det()
+		if err != nil || !d.Installed {
+			return false
+		}
+		if !supported(d.Version) {
+			log.Info("mark1d: agent not tailed — version outside the pinned corpus", "agent", name, "version", d.Version)
+			return false
+		}
+		return true
+	}
+	var singles []shared
 	// FR-AGENT-002, before a single line is read: version-sniff, and refuse the
 	// whole surface when the sniff lands outside the fixture set. Returning nil
 	// is the same refusal shape the idem_key branch at the call site already
 	// uses — the daemon stays up and every other capture path keeps running.
 	//
 	// This costs one bounded `claude --version` exec per daemon start.
-	if d, err := cc.Detect(); err != nil || !claudecode.Supported(d.Version) {
+	d, err := cc.Detect()
+	compat, why := cc.Compatibility(d.Version)
+	if err != nil || compat == claudecode.Incompatible {
 		adm.AccountDropped(dropUnsupportedAgentVersion, spool.ClassBilling, 1)
-		log.Error("mark1d: transcript capture DISABLED — no conformance fixture pins this Claude Code version, and the tailer's field names are compiled, so parsing it could report token counts that are silently wrong",
-			"version", d.Version, "installed", d.Installed, "err", err,
+		log.Error("mark1d: transcript capture DISABLED — no conformance fixture pins this Claude Code version and its transcript shape failed the structural probe (D-EE), and the tailer's field names are compiled, so parsing it could report token counts that are silently wrong",
+			"version", d.Version, "installed", d.Installed, "err", err, "probe", why,
 			"fix", "put the `claude` binary on the daemon's PATH, or land a conformance/hooks/claudecode/v<version>/ fixture set and add the version to claudecode.SupportedVersions")
 		// The Dropped row says one SURFACE was refused; it cannot say how many
 		// events were lost, precisely because refusing is what stops us
@@ -1040,11 +1256,38 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 		}
 		return nil
 	}
+	if compat == claudecode.CompatibleUnpinned {
+		// D-EE: capture proceeds, UNVERIFIED — the same receipted window as
+		// the refusal (the seven-code vocabulary has no `unpinned` code), so
+		// the band never counts an unproven parser as verified coverage.
+		log.Warn("mark1d: transcript capture UNVERIFIED — Claude Code version has no conformance corpus; its transcript shape passed the structural probe, capture proceeds and this window is receipted as unsupported_agent_version",
+			"version", d.Version, "fix", "record a corpus: `mark1 corpus record`, then add the version to claudecode.SupportedVersions")
+		if cerr := cov.Transition(ctx, m1pv1.CoverageKind_COVERAGE_KIND_BYPASS,
+			coverage.DeviceWide(), coverage.ReasonUnsupportedAgentVersion, 0); cerr != nil {
+			log.Error("COVERAGE BYPASS NOT RECEIPTED — this is a gap, not a warning",
+				"reason_code", coverage.ReasonUnsupportedAgentVersion, "err", cerr)
+		}
+	}
 	tcfg := claudecode.TailConfig{
 		StateDir:     filepath.Join(cfg.stateDir, "cursors"),
 		UsageIdemKey: idemKey,
-		Emit:         adm.Admit,
+		Emit:         router.Emit,
+		Observe:      func(ev *m1pv1.Event) { seg.Observe(ev, nil) },
 		Log:          log,
+	}
+	singles = []shared{
+		{"\x00codex", sniff("codex", cx.Detect, codex.Supported), func(root string) (*tailers.Manager, error) {
+			return cx.StartTail(adapters.Workspace{Root: root}, live, codex.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: router.Emit, Observe: tcfg.Observe, Log: log})
+		}},
+		{"\x00gemini", sniff("gemini", gm.Detect, gemini.Supported), func(root string) (*tailers.Manager, error) {
+			return gm.StartTail(adapters.Workspace{Root: root}, live, gemini.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: router.Emit, Observe: tcfg.Observe, Log: log})
+		}},
+		{"\x00opencode", sniff("opencode", oc.Detect, opencode.Supported), func(root string) (*tailers.Manager, error) {
+			return oc.StartTail(adapters.Workspace{Root: root}, live, opencode.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: router.Emit, Observe: tcfg.Observe, Log: log})
+		}},
+		{"\x00copilot", sniff("copilot", cp.Detect, copilot.Supported), func(root string) (*tailers.Manager, error) {
+			return cp.StartTail(adapters.Workspace{Root: root}, live, copilot.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: router.Emit, Observe: tcfg.Observe, Log: log})
+		}},
 	}
 	type mgrRun struct {
 		cancel context.CancelFunc
@@ -1089,6 +1332,9 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 			log.Error("mark1d: workspace set swap failed; keeping last good set", "err", err)
 			return
 		}
+		for _, a := range singles {
+			desired[a.key] = a.ok && len(canon) > 0
+		}
 		for root, m := range mgrs {
 			if desired[root] {
 				continue
@@ -1118,6 +1364,22 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 			go func() { m.done <- mgr.Run(mctx) }()
 			mgrs[root] = m
 			log.Info("mark1d: tailing workspace", "root", root)
+		}
+		for _, a := range singles {
+			if !desired[a.key] || mgrs[a.key] != nil || failed[a.key] {
+				continue
+			}
+			mgr, serr := a.start(canon[0])
+			if serr != nil {
+				failed[a.key] = true
+				log.Error("mark1d: tailer start failed", "agent", a.key[1:], "err", serr)
+				continue
+			}
+			mctx, mcancel := context.WithCancel(ctx)
+			m := &mgrRun{cancel: mcancel, done: make(chan error, 1)}
+			go func() { m.done <- mgr.Run(mctx) }()
+			mgrs[a.key] = m
+			log.Info("mark1d: tailing every enabled root", "agent", a.key[1:])
 		}
 	}
 

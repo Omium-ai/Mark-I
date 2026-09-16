@@ -157,6 +157,16 @@ func newChaosRig(t *testing.T, bins chaosBins) *chaosRig {
 		r.env = append(r.env, kv)
 	}
 	r.env = append(r.env, "HOME="+home, "XDG_RUNTIME_DIR="+xdg, "ANTHROPIC_API_KEY=", "MARK1_DISABLE=")
+	// A pinned `claude` first on every child's PATH. Every start below passes
+	// --tenant-salt (see startDaemon), which arms the tailer, and the tailer
+	// refuses any other version with a device-wide unsupported_agent_version
+	// bypass transition — which the proxy leg's "exactly one transition"
+	// would then count.
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "claude"), []byte("#!/bin/sh\necho '"+pinnedAgentVersion(t)+" (Claude Code)'\n"), 0o755); err != nil { //nolint:gosec // G306: it must be executable
+		t.Fatal(err)
+	}
+	r.env = append(r.env, "PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Cleanup(r.reap)
 	return r
 }
@@ -178,9 +188,13 @@ func (r *chaosRig) reap() {
 	}
 }
 
+// startDaemon runs the real binary. --tenant-salt on every start: it is the
+// dev seam that arms transcript tailing (leg 1's Usage), and an unenrolled
+// daemon with none of the enrollment dev seams refuses to boot (`mark1
+// enroll`), so a bare start is not a daemon that can be killed.
 func (r *chaosRig) startDaemon(extra ...string) {
 	r.t.Helper()
-	args := append([]string{"--state-dir", r.state, "--socket", r.socket}, extra...)
+	args := append([]string{"--state-dir", r.state, "--socket", r.socket, "--tenant-salt", "aa"}, extra...)
 	cmd := exec.Command(r.bins.mark1d, args...)
 	cmd.Env = r.env
 	cmd.Stderr = os.Stderr
@@ -331,13 +345,8 @@ func TestChaosMark1dKill9MidSession(t *testing.T) {
 	tap := newWireTap(t)
 
 	// The transcript surface, so the session's Usage has a path to arrive
-	// by: a pinned `claude` on the daemon's PATH (tailWorkspaces refuses any
-	// other), an enabled workspace, and --tenant-salt to arm the tailer.
-	fakeBin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fakeBin, "claude"), []byte("#!/bin/sh\necho '"+pinnedAgentVersion(t)+" (Claude Code)'\n"), 0o755); err != nil { //nolint:gosec // G306: it must be executable
-		t.Fatal(err)
-	}
-	r.env = append(r.env, "PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// by: an enabled workspace (the rig supplies the pinned `claude` and the
+	// tenant salt that arm the tailer).
 	root := filepath.Join(r.home, "ws")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -359,7 +368,7 @@ func TestChaosMark1dKill9MidSession(t *testing.T) {
 	}
 
 	// ---- life 1: the session starts against a healthy daemon ----
-	r.startDaemon("--tenant-salt", "aa")
+	r.startDaemon()
 	live := []string{"toolu_chaos_live_1", "toolu_chaos_live_2", "toolu_chaos_live_3"}
 	var liveMax time.Duration
 	if run := r.hook("SessionStart", r.fixture("SessionStart")); run.wall > liveHookCeiling {
@@ -426,7 +435,7 @@ func TestChaosMark1dKill9MidSession(t *testing.T) {
 
 	// ---- life 2: restart on the same state dir, uplink on ----
 	restarted := time.Now()
-	r.startDaemon("--tenant-salt", "aa", "--ingest-url", tap.url, "--device-token", "tok-test")
+	r.startDaemon("--ingest-url", tap.url, "--device-token", "tok-test")
 	// Inside spillDrainEvery, so a pass is the drain AT ENTRY (04 §5's
 	// restart scan) and not the first periodic tick.
 	waitUpTo(t, spillDrainEvery/2, "the startup drain to truncate the ring", func() bool {
@@ -653,21 +662,11 @@ func childrenNamed(t *testing.T, ppid int, comm string) []int {
 // TestChaosCortexdKill9 is leg 3: the per-workspace cortexd (04 §6.7, the
 // other child 04 §1.2 names) dies under the daemon's supervision. Its death
 // costs ranked maps and nothing else, so what must come back is the MCP wall:
-// a fresh child, a fresh port in the store's mcp.json, the token-less request
-// still refused and the tokened one served — after 04 :80's backoff, not
-// before it.
-//
-// internal/cortex landed while this harness was being written and cmd/main.go
-// does not call it yet, so the leg arms itself on the call: until then it is
-// a named skip the -list tripwire still counts, never a silent absence.
+// a fresh child, a fresh port in the store's mcp.json, the token-less and the
+// stale-token requests refused and the tokened one served — after 04 :80's
+// backoff, not before it. A daemon that stops spawning cortexd for an enabled
+// root fails this leg at the first wait, never skips it.
 func TestChaosCortexdKill9(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(src, []byte("cortex.New(")) {
-		t.Skip("cmd/main.go does not wire internal/cortex yet (no cortex.New call): the daemon spawns no cortexd, so there is no process to kill and no restart to assert; this leg arms itself when the call lands (NFR-AVAILABILITY-001 partial)")
-	}
 	bins := chaosBuild(t)
 	cargo := exec.Command("cargo", "build", "-p", "cortexd", "--locked")
 	cargo.Dir = bins.root

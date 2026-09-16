@@ -30,6 +30,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric/fabrictest"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spill"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
@@ -375,15 +376,26 @@ func TestEnableWorkspaceWhileRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recs) != 1 {
-		t.Fatalf("spool holds %d records, want the tailed Usage exactly once", len(recs))
+	var ev *m1pv1.Event
+	usages, routes := 0, 0
+	for _, r := range recs {
+		e := &m1pv1.Event{}
+		if err := proto.Unmarshal(r.Payload, e); err != nil {
+			t.Fatal(err)
+		}
+		switch e.GetBody().(type) {
+		case *m1pv1.Event_Usage:
+			usages++
+			ev = e
+		case *m1pv1.Event_RouteDecision:
+			routes++
+		}
 	}
-	var ev m1pv1.Event
-	if err := proto.Unmarshal(recs[0].Payload, &ev); err != nil {
-		t.Fatal(err)
+	if usages != 1 || routes != 1 {
+		t.Fatalf("spool holds %d Usage and %d RouteDecision records, want exactly one of each (%d records total)", usages, routes, len(recs))
 	}
 	if ev.GetUsage().GetOutputTokens() != 9 {
-		t.Fatalf("spooled event %v, want the transcript's Usage (output_tokens 9)", &ev)
+		t.Fatalf("spooled event %v, want the transcript's Usage (output_tokens 9)", ev)
 	}
 }
 
@@ -679,5 +691,16 @@ func TestDiskHardStopReceiptsTheBypassWindow(t *testing.T) {
 	// would re-open the bypass instead of ending it.
 	if got[0].GetDurationMs() == 0 {
 		t.Error("duration_ms = 0, so the server files this close as a second bypass_start and the window never ends")
+	}
+}
+
+// optInStopGate plants the local artifact the stop gate now requires before it may BLOCK.
+func optInStopGate(t *testing.T, stateDir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(fabric.OptInPath(stateDir)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fabric.OptInPath(stateDir), []byte(`{"stop_gate":true,"ts":"2026-09-16T00:00:00Z","user":"test"}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

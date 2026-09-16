@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +15,9 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/capture"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/redact"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/route"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/taskseg"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -40,7 +43,26 @@ func fakeClaudeOnPath(t *testing.T, version string) {
 	// Detect reads ANTHROPIC_API_KEY to classify the regime. Unset it so the
 	// test does not depend on the developer's environment.
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	// The structural probe (D-EE) reads ~/.claude/projects; never the developer's.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 }
+
+// unpinnedTranscript lays one transcript line from an unpinned `claude` under
+// the test HOME — the evidence the structural probe admits or refuses on.
+func unpinnedTranscript(t *testing.T, line string) {
+	t.Helper()
+	dir := filepath.Join(os.Getenv("HOME"), ".claude", "projects", "-home-devuser-workspace-acme-app")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "aa000000-0000-4000-8000-000000000201.jsonl"), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const unpinnedUsageLine = `{"isSidechain":false,"message":{"model":"claude-x","id":"msg_01A","role":"assistant","usage":{"input_tokens":2,"cache_creation_input_tokens":6425,"cache_read_input_tokens":10143,"output_tokens":4,"service_tier":"standard"}},"requestId":"req_01A","type":"assistant","cwd":"/home/devuser/workspace/acme-app","sessionId":"aa000000-0000-4000-8000-000000000201","version":"9.9.9"}`
 
 // pinnedAgentVersion is any version the conformance corpus pins — the one
 // input under which capture must run.
@@ -91,7 +113,7 @@ func runTail(t *testing.T, state string, adm *capture.Admitter, cov *coverage.Em
 	done := make(chan error, 1)
 	go func() {
 		done <- tailWorkspaces(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)),
-			config{stateDir: state}, []byte("idem-key-for-the-test"), adm, cov)
+			config{stateDir: state}, []byte("idem-key-for-the-test"), adm, cov, &route.Emitter{Next: adm.Admit}, taskseg.New(make([]byte, 32)))
 	}()
 	select {
 	case <-done:
@@ -246,5 +268,43 @@ func TestSupportedAgentVersionReceiptsNoBypass(t *testing.T) {
 	}
 	if got := spooledCoverage(t, sp); len(got) != 0 {
 		t.Fatalf("a supported version declared %d coverage bypass windows: %v", len(got), got)
+	}
+}
+
+// TestCompatibleUnpinnedVersionCapturesAndReceipts is D-EE's middle verdict:
+// an unpinned version whose transcript shape passes the structural probe is
+// TAILED (no drop row), and the unverified window is receipted as the same
+// unsupported_agent_version bypass the refusal uses.
+func TestCompatibleUnpinnedVersionCapturesAndReceipts(t *testing.T) {
+	state, adm, sp := fakeClaude(t, "9.9.9")
+	unpinnedTranscript(t, unpinnedUsageLine)
+
+	if runTail(t, state, adm, coverage.New(adm.Admit, nil)) {
+		t.Fatal("tailWorkspaces refused a structurally compatible unpinned version")
+	}
+	if drops := adm.DrainDropped(); len(drops) != 0 {
+		t.Fatalf("compatible_unpinned raised drop rows: %v", drops)
+	}
+	got := spooledCoverage(t, sp)
+	if len(got) != 1 || got[0].GetReasonCode() != coverage.ReasonUnsupportedAgentVersion ||
+		got[0].GetKind() != m1pv1.CoverageKind_COVERAGE_KIND_BYPASS || got[0].GetDurationMs() != 0 {
+		t.Fatalf("coverage = %v, want exactly one unsupported_agent_version bypass_start marking the window unverified", got)
+	}
+}
+
+// TestIncompatibleUnpinnedShapeRefuses: the probe fails (a token field the
+// corpus relies on is gone) ⇒ today's refusal, drop row and bypass included.
+func TestIncompatibleUnpinnedShapeRefuses(t *testing.T) {
+	state, adm, sp := fakeClaude(t, "9.9.9")
+	unpinnedTranscript(t, strings.Replace(unpinnedUsageLine, `"cache_read_input_tokens":10143,`, "", 1))
+
+	if !runTail(t, state, adm, coverage.New(adm.Admit, nil)) {
+		t.Fatal("tailWorkspaces tailed an unpinned version whose shape failed the probe — it parsed blind")
+	}
+	if drops := adm.DrainDropped(); len(drops) != 1 || drops[0].Reason != dropUnsupportedAgentVersion {
+		t.Fatalf("drops = %v, want one UNSUPPORTED_AGENT_VERSION row", drops)
+	}
+	if got := spooledCoverage(t, sp); len(got) != 1 {
+		t.Fatalf("coverage transitions = %d, want 1", len(got))
 	}
 }

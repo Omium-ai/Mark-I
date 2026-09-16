@@ -192,6 +192,7 @@ func TestPhase2RetryLoopArrestedAtTheKnee(t *testing.T) {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	optInStopGate(t, stateDir)
 	t.Setenv("HOME", filepath.Join(dir, "home")) // keep the tailer off the real ~/.claude
 
 	ws := defectWorkspace(t)

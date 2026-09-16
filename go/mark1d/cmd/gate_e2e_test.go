@@ -91,6 +91,7 @@ func startProofDaemon(t *testing.T, m *verdict.BundleMatrices) (string, func()) 
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	optInStopGate(t, stateDir)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -396,6 +397,7 @@ func TestAssembledDaemonResolvesItsDenominator(t *testing.T) {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	optInStopGate(t, stateDir)
 	t.Setenv("HOME", filepath.Join(dir, "home")) // keep the tailer off the real ~/.claude
 
 	m := proofMatrices(false)
