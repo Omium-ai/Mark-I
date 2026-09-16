@@ -288,6 +288,10 @@ impl Proxy {
                 (t, observe)
             }
         };
+        // A header-free request learns its ref only here, so a killed session is refused under either name.
+        if self.is_killed(ticket.cred_ref()) {
+            return killed_response();
+        }
 
         self.forward(req, up, ticket, observe, started).await
     }

@@ -780,6 +780,56 @@ func TestEnableThenOffDeletesTheCopilotHooksFile(t *testing.T) {
 	}
 }
 
+// TestEnableThenOffDeletesTheCopilotEnvPointer: FR-AGENT-014's BYOK pointer
+// through the CLI — an eligible credential plus a live guard on the published
+// port makes `mark1 enable` write the owned <state>/env/copilot.sh, and
+// `mark1 off` deletes it and its manifest byte-exactly, independent of the
+// hooks fragment (which stays, since only the pointer is a legal boundary
+// FR-AGENT-014 is closing here — off reverts both, this test isolates one).
+func TestEnableThenOffDeletesTheCopilotEnvPointer(t *testing.T) {
+	env, out, home := enrolledWithBin(t, "copilot", "1.0.85")
+	if err := os.MkdirAll(filepath.Join(home, ".copilot"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"reason_code":"M1E-8001"}`))
+	}))
+	t.Cleanup(srv.Close)
+	port := strconv.Itoa(srv.Listener.Addr().(*net.TCPAddr).Port)
+	if err := os.MkdirAll(env.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.StateDir, "proxy.port"), []byte(port), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COPILOT_PROVIDER_BASE_URL", "https://api.openai.com/v1")
+	t.Setenv("COPILOT_PROVIDER_API_KEY", "sk-synth")
+
+	if err := enable.Run(env, enable.Options{Path: t.TempDir(), Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	target := copilot.EnvFilePath(env.StateDir, runtime.GOOS)
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("enable did not write the env pointer: %v", err)
+	}
+
+	out.Reset()
+	if err := Run(env, Options{Socket: shortSocket(t), ObserveGrace: 50 * time.Millisecond}); err != nil {
+		t.Fatalf("off: %v", err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("mechanism-A off must delete the owned pointer file: %v", err)
+	}
+	if _, err := os.Stat(copilot.EnvManifestPath(env.StateDir)); !os.IsNotExist(err) {
+		t.Fatalf("env-pointer manifest survived off: %v", err)
+	}
+	res, kinds := revertedKinds(t, out)
+	if !res.OK || !res.ByteEquality || kinds["copilot/env"] != "verbatim" {
+		t.Fatalf("result %+v kinds %+v", res, kinds)
+	}
+}
+
 // TestEnableThenOffIsByteEqualForCursor: 08 §8.4 through the CLI for both of
 // cursor's mechanisms — a pre-existing ~/.cursor/hooks.json comes back byte-equal
 // (B) and an owned one is deleted (A).

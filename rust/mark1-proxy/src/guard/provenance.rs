@@ -97,15 +97,13 @@ impl ForwardTicket {
 /// widen a frozen contract to be more helpful.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cause {
-    /// No `M1-Cred-Ref` header (04 §3.1 step 2).
-    MissingCredRef,
     /// `M1-Cred-Ref` present but not a value the registry knows.
     UnknownRef,
     /// No credential in `x-api-key` or `Authorization`, two that disagree, or one name
     /// carrying several values (D-BH — see `credential_bytes`).
     CredentialAmbiguous,
     /// HMAC fingerprint did not match enrollment (FR-ENROLL-006: a refusal, never a silent
-    /// re-provision).
+    /// re-provision). With no `M1-Cred-Ref`, this is "matched no enrollment at all".
     FingerprintMismatch,
     /// Step 5 tripwire: an OAuth-shaped credential reached this listener at all. **P0, and
     /// deliberately not conditioned on matching enrollment** — see `decide`. Whether the
@@ -371,12 +369,14 @@ impl Guard {
             return self.refuse(Cause::GuardUnverifiable, None);
         };
 
-        // Step 2: M1-Cred-Ref presence.
-        let Some(cred_ref) = headers.get(CRED_REF_HEADER).and_then(|v| v.to_str().ok()) else {
-            return self.refuse(Cause::MissingCredRef, None);
-        };
-        let Some(enrolled) = registry.get(cred_ref) else {
-            return self.refuse(Cause::UnknownRef, None);
+        // Step 2: a ref, when sent, must be enrolled; absent, step 3 names the credential by fingerprint (08 §5.5).
+        let cred_ref = headers.get(CRED_REF_HEADER).and_then(|v| v.to_str().ok());
+        let enrolled = match cred_ref {
+            Some(r) => match registry.get(r) {
+                Some(fp) => Some(fp),
+                None => return self.refuse(Cause::UnknownRef, None),
+            },
+            None => None,
         };
 
         let Some(cred) = credential_bytes(headers) else {
@@ -421,13 +421,23 @@ impl Guard {
             CredShape::Unknown => return self.refuse(Cause::ShapeUnknown, None),
         }
 
-        // Step 3: HMAC fingerprint match to enrollment, constant-time.
+        // Step 3: constant-time HMAC match; header-free, the lowest matching ref binds (the kill set is keyed by ref).
         let Some(actual) = fingerprint_under(key.expose_for_upstream(), cred) else {
             return self.refuse(Cause::GuardUnverifiable, None);
         };
-        if !bool::from(actual.ct_eq(enrolled)) {
-            return self.refuse(Cause::FingerprintMismatch, Some(actual));
-        }
+        let cred_ref = match (cred_ref, enrolled) {
+            (Some(r), Some(fp)) if bool::from(actual.ct_eq(fp)) => r,
+            (None, None) => match registry
+                .iter()
+                .filter(|(_, fp)| bool::from(actual.ct_eq(*fp)))
+                .map(|(r, _)| r.as_str())
+                .min()
+            {
+                Some(r) => r,
+                None => return self.refuse(Cause::FingerprintMismatch, Some(actual)),
+            },
+            _ => return self.refuse(Cause::FingerprintMismatch, Some(actual)),
+        };
 
         // Step 4 is structural — see the module header. There is nothing to evaluate.
 
@@ -480,6 +490,8 @@ pub fn refused_record(refusal: Refusal, fingerprint: Option<[u8; 32]>) -> pb::Gu
 /// the caller did not choose, and every such value would be a silent non-match that reads
 /// like an attack.
 fn fingerprint_under(key: &[u8], cred: &[u8]) -> Option<[u8; 32]> {
+    #[cfg(test)]
+    tests::HMACS.with(|c| c.set(c.get() + 1));
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).ok()?;
     mac.update(cred);
     Some(mac.finalize().into_bytes().into())
@@ -572,7 +584,18 @@ fn load_verifier(base: &Path) -> Option<Verifier> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
+
+    thread_local! {
+        /// HMAC calls on this thread; `decide` is synchronous, so parallel tests cannot disturb it.
+        pub(super) static HMACS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn hmacs() -> usize {
+        HMACS.with(Cell::get)
+    }
 
     const KEY: &[u8] = b"device-local-guard-key";
     const API_KEY: &[u8] = b"sk-ant-api03-AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz01";
@@ -624,11 +647,13 @@ mod tests {
         };
         assert!(!t.observe(), "NOOP_FORWARD must not observe");
 
-        // RECEIVED -> REFUSED (no M1-Cred-Ref)
+        // RECEIVED -> REFUSED (no M1-Cred-Ref and no credential: the provisioner's probe)
+        assert_refused(&g, &headers(&[]), Cause::CredentialAmbiguous, false);
+        // RECEIVED -> FP_CHECK -> REFUSED (no M1-Cred-Ref, credential never provisioned)
         assert_refused(
             &g,
-            &headers(&[("x-api-key", API_KEY)]),
-            Cause::MissingCredRef,
+            &headers(&[("x-api-key", b"sk-ant-api03-other")]),
+            Cause::FingerprintMismatch,
             false,
         );
         // FP_CHECK -> REFUSED (unknown ref)
@@ -686,6 +711,128 @@ mod tests {
         let g = Guard::unverifiable(Sampling::default());
         assert_refused(&g, &provisioned(), Cause::GuardUnverifiable, false);
         assert_refused(&g, &provisioned(), Cause::GuardUnverifiable, true);
+    }
+
+    /// Frozen negative 3: header-free binds the same ticket a header request gets, field for field.
+    #[test]
+    fn header_free_request_binds_the_same_ticket_as_the_header_request() {
+        let g = guard_with(API_KEY);
+        let with = g.decide(&provisioned(), false);
+        let without = g.decide(&headers(&[("x-api-key", API_KEY)]), false);
+        let (Some(a), Some(b)) = (with.decision.ticket(), without.decision.ticket()) else {
+            panic!("both must forward")
+        };
+        assert_eq!(a.cred_ref(), "ref-1");
+        assert_eq!(a.cred_ref(), b.cred_ref());
+        assert_eq!(a.cred_identity(), b.cred_identity());
+        assert_eq!(a.observe(), b.observe());
+
+        // The vendor dialect Copilot BYOK actually sends (08 §5.5): bearer, no x-api-key.
+        let bearer = [b"Bearer ".as_slice(), API_KEY].concat();
+        let t = g.decide(&headers(&[("authorization", &bearer)]), false);
+        assert_eq!(
+            t.decision.ticket().map(ForwardTicket::cred_ref),
+            Some("ref-1")
+        );
+
+        // Off narrows what the proxy does, header or not.
+        assert!(matches!(
+            g.decide(&headers(&[("x-api-key", API_KEY)]), true).decision,
+            Decision::NoopForward(_)
+        ));
+    }
+
+    /// Frozen negative 1: header-free OAuth refuses at the shape gate; the HMAC call count proves no compare ran.
+    #[test]
+    fn header_free_oauth_is_refused_before_any_fingerprint() {
+        // Adversarial enrollment: reaching the lookup at all would bind the OAuth token.
+        let g = guard_with(OAUTH);
+        for h in [
+            headers(&[("authorization", OAUTH_BEARER)]),
+            headers(&[("x-api-key", OAUTH)]),
+        ] {
+            let before = hmacs();
+            let out = g.decide(&h, false);
+            assert_eq!(
+                hmacs(),
+                before,
+                "an OAuth-shaped credential was fingerprinted"
+            );
+            let Decision::Refused(Refusal::Unprovisioned(Cause::OauthShaped)) = out.decision else {
+                panic!("expected OauthShaped")
+            };
+            assert!(out.record.unwrap().cred_fingerprint.is_empty());
+        }
+        // Positive control on the counter: a provisioned header-free request does HMAC.
+        let g = guard_with(API_KEY);
+        let before = hmacs();
+        assert!(g
+            .decide(&headers(&[("x-api-key", API_KEY)]), false)
+            .decision
+            .ticket()
+            .is_some());
+        assert_eq!(hmacs(), before + 1);
+    }
+
+    /// Frozen negative 2: a well-shaped key mark1d never provisioned cannot match; unknown shape never reaches the lookup.
+    #[test]
+    fn header_free_unprovisioned_key_is_refused() {
+        let g = guard_with(API_KEY);
+        assert_refused(
+            &g,
+            &headers(&[("x-api-key", b"sk-ant-api03-neverprovisioned")]),
+            Cause::FingerprintMismatch,
+            false,
+        );
+        assert_refused(
+            &g,
+            &headers(&[("x-api-key", b"sk-ant-api03-neverprovisioned")]),
+            Cause::FingerprintMismatch,
+            true,
+        );
+        let before = hmacs();
+        assert_refused(
+            &g,
+            &headers(&[("authorization", b"Bearer hunter2")]),
+            Cause::ShapeUnknown,
+            false,
+        );
+        assert_eq!(hmacs(), before);
+        // An empty registry has nothing to bind to.
+        let empty = Guard::from_parts(KEY.to_vec(), HashMap::new(), Sampling::default());
+        assert_refused(
+            &empty,
+            &headers(&[("x-api-key", API_KEY)]),
+            Cause::FingerprintMismatch,
+            false,
+        );
+    }
+
+    /// Duplicate enrollments bind to the lowest ref every time; a moving binding would dodge the ref-keyed kill set.
+    #[test]
+    fn header_free_binding_is_deterministic_across_duplicate_enrollments() {
+        let fp = fingerprint_under(KEY, API_KEY).unwrap();
+        let registry: HashMap<String, [u8; 32]> = ["copilot", "claudecode", "zeta"]
+            .into_iter()
+            .map(|r| (r.to_owned(), fp))
+            .collect();
+        let g = Guard::from_parts(KEY.to_vec(), registry, Sampling::default());
+        for _ in 0..50 {
+            let out = g.decide(&headers(&[("x-api-key", API_KEY)]), false);
+            assert_eq!(
+                out.decision.ticket().map(ForwardTicket::cred_ref),
+                Some("claudecode")
+            );
+        }
+        // A header still binds exactly the ref it names.
+        let out = g.decide(
+            &headers(&[(CRED_REF_HEADER, b"zeta"), ("x-api-key", API_KEY)]),
+            false,
+        );
+        assert_eq!(
+            out.decision.ticket().map(ForwardTicket::cred_ref),
+            Some("zeta")
+        );
     }
 
     /// D-BH. `headers()` above builds with `insert`, which replaces — so no other test in
@@ -795,6 +942,35 @@ mod tests {
         assert_eq!(g.fingerprint(API_KEY), Some(fp));
     }
 
+    /// Same literal as go:TestApplyEnvPointerRegistersTheBYOKFingerprint pins: mark1d's line admits the key header-free.
+    #[test]
+    fn registry_line_written_by_mark1d_admits_header_free() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("guard.key"),
+            b"0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("registry"),
+            "copilot a47a9f209bb72c805c7e9cff25ea871a53b1b49559bed3f797cd808834038327\n",
+        )
+        .unwrap();
+        let g = Guard::load(dir.path(), Sampling::default());
+        let bearer = [b"Bearer ".as_slice(), API_KEY].concat();
+        let out = g.decide(&headers(&[("authorization", &bearer)]), false);
+        assert_eq!(
+            out.decision.ticket().map(ForwardTicket::cred_ref),
+            Some("copilot")
+        );
+        assert_refused(
+            &g,
+            &headers(&[("authorization", b"Bearer sk-ant-api03-other")]),
+            Cause::FingerprintMismatch,
+            false,
+        );
+    }
+
     #[test]
     fn a_truncated_registry_line_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
@@ -855,9 +1031,9 @@ mod tests {
             Sampling { forward: 0.0 },
         ];
 
-        // Both header names the guard will read a credential from. `x-api-key` holding an
-        // OAuth token is the contamination this crate exists to stop; `authorization` is the
-        // shape the vendor's own subscription client sends.
+        // Both header names the guard will read a credential from, with and without a ref.
+        // `x-api-key` holding an OAuth token is the contamination this crate exists to stop;
+        // `authorization` is the shape the vendor's own subscription client sends.
         let presentations = [
             (
                 "oauth in x-api-key",
@@ -866,6 +1042,15 @@ mod tests {
             (
                 "oauth in authorization",
                 headers(&[(CRED_REF_HEADER, b"ref-1"), ("authorization", OAUTH_BEARER)]),
+            ),
+            // Header-free: the path an agent with no custom-header surface takes.
+            (
+                "oauth in x-api-key, no ref",
+                headers(&[("x-api-key", OAUTH)]),
+            ),
+            (
+                "oauth in authorization, no ref",
+                headers(&[("authorization", OAUTH_BEARER)]),
             ),
         ];
 
@@ -900,7 +1085,9 @@ mod tests {
                 for off in [false, true] {
                     for (shape, h) in &presentations {
                         let case = format!("{how} / off={off} / {shape} / {sampling:?}");
+                        let before = hmacs();
                         let out = g.decide(h, off);
+                        assert_eq!(hmacs(), before, "{case}: fingerprinted");
                         let Decision::Refused(Refusal::Unprovisioned(cause)) = out.decision else {
                             panic!("{case}: an OAuth-shaped credential was not refused");
                         };
@@ -918,6 +1105,6 @@ mod tests {
         }
         // The sweep is the assertion; a refactor that silently drops an arm from any of the
         // four loops would otherwise leave this test passing on less than it claims.
-        assert_eq!(checked, 6 * 4 * 2 * 2, "the override sweep lost coverage");
+        assert_eq!(checked, 6 * 4 * 2 * 4, "the override sweep lost coverage");
     }
 }

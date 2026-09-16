@@ -244,6 +244,10 @@ func revertFragments(env *cli.Env) (done []Reverted, notReverted []string) {
 	if res, err := copilot.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" && len(res.Retained) == 0 {
 		done = append(done, Reverted{"copilot", res.Target, res.Kind, res.ByteEquality})
 	}
+	// And for the BYOK env pointer, a separate owned file reverted independently of the hooks fragment.
+	if res, err := copilot.RevertEnvPointer(env.StateDir); err == nil && res.Kind != "not-provisioned" && len(res.Retained) == 0 {
+		done = append(done, Reverted{"copilot/env", res.Target, res.Kind, res.ByteEquality})
+	}
 	if res, err := cursor.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" {
 		done = append(done, Reverted{"cursor", res.Target, res.Kind, res.ByteEquality})
 	}

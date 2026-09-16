@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -89,6 +90,12 @@ type Result struct {
 	// boundary (CON-001) and a boundary that is only observable by its silence
 	// is one nobody can audit. "not-eligible" is the correct, common answer.
 	ProxyPointer string `json:"proxy_pointer"`
+	// CopilotPointer mirrors ProxyPointer for 08 §5.5's BYOK env-var pointer:
+	// "provisioned" | "not-eligible" | an M1E code. CopilotSourceLine is set
+	// only on "provisioned" — the one line `mark1 enable` prints and never
+	// writes into a profile itself (CON-003's spirit).
+	CopilotPointer    string `json:"copilot_pointer,omitempty"`
+	CopilotSourceLine string `json:"copilot_source_line,omitempty"`
 }
 
 // Refusal is one agent whose fragment could not be applied, with the M1E code
@@ -220,12 +227,18 @@ func Run(env *cli.Env, opts Options) error {
 				_, _ = fmt.Fprintln(w, "note          codex hooks run only after `codex` itself trusts them: run codex once and accept the hooks review (`mark1 doctor` shows hooks_trusted)")
 			case "opencode":
 				_, _ = fmt.Fprintln(w, "note          the opencode plugin loads at startup: restart any running opencode")
-			case "copilot":
-				_, _ = fmt.Fprintln(w, "note          "+copilotPointerNote)
 			}
 		}
 		if res.ProxyPointer == "provisioned" {
 			_, _ = fmt.Fprintln(w, "provisioned   claudecode base URL -> mark1-proxy (API-key credential)")
+		}
+		switch res.CopilotPointer {
+		case "provisioned":
+			_, _ = fmt.Fprintln(w, "provisioned   copilot BYOK base URL -> mark1-proxy (not sourced automatically)")
+			_, _ = fmt.Fprintf(w, "note          add this line to your shell profile: %s\n", res.CopilotSourceLine)
+			_, _ = fmt.Fprintln(w, "note          "+copilotGuardGapNote)
+		case "not-eligible":
+			_, _ = fmt.Fprintln(w, "note          copilot BYOK pointer not provisioned (subscription regime, no BYOK key, or no proxy listening)")
 		}
 		for _, r := range res.AgentsRefused {
 			_, _ = fmt.Fprintf(w, "NOT PROVISIONED %s: %s %s\n", r.Agent, r.Code, r.Detail)
@@ -558,6 +571,26 @@ func provision(env *cli.Env, opts Options, res *Result) (wrote bool, err error) 
 		default:
 			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", cp.Name(), err)
 		}
+
+		// The BYOK env pointer is provisioned only for an eligible API-key
+		// credential and only when a proxy answers the guard probe; every other
+		// answer is ErrNotEligible (08 §5.5, 10 §3.3) and a normal outcome, not
+		// a refusal to show the user. Never written into the user's own profile
+		// (CON-003) — only the source line is printed below.
+		pointer, perr := cp.ApplyEnvPointer()
+		switch code := copilot.RefusalCode(perr); {
+		case perr == nil:
+			res.CopilotPointer = "provisioned"
+			res.CopilotSourceLine = copilot.SourceLine(env.StateDir, runtime.GOOS)
+			wrote = wrote || pointer.Changed
+		case errors.Is(perr, copilot.ErrNotEligible):
+			res.CopilotPointer = "not-eligible"
+		case code != "":
+			res.CopilotPointer = code
+			res.AgentsRefused = append(res.AgentsRefused, Refusal{cp.Name() + "/env", code, perr.Error()})
+		default:
+			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s env pointer: %v", cp.Name(), perr)
+		}
 	}
 
 	cu := &cursor.Adapter{Home: opts.Home, StateDir: env.StateDir}
@@ -576,8 +609,8 @@ func provision(env *cli.Env, opts Options, res *Result) (wrote bool, err error) 
 	return wrote, nil
 }
 
-// copilotPointerNote: 08 §5.5's BYOK base URL is an env var, so there is no fenced file for a proxy pointer to land in.
-const copilotPointerNote = "copilot: no proxy pointer provisioned; COPILOT_PROVIDER_BASE_URL is an env var with no fenced file target"
+// copilotGuardGapNote: the guard admits the key by fingerprint now; what still fails is routing (supervise passes no --upstream).
+const copilotGuardGapNote = "copilot: the proxy admits this BYOK key by fingerprint, but the sidecar forwards only to api.anthropic.com and Copilot posts /chat/completions -- do not source this yet if you need working Copilot completions"
 
 // optedOut reports whether the root .mark1ignore ignores the whole repo —
 // a bare `*` (or `**`) line in gitignore syntax. Finer-grained

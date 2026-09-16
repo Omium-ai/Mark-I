@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -975,7 +977,8 @@ func copilotAndCursorHomes(t *testing.T, home, body string, wantCopilotHome, wan
 // TestEnableProvisionsCopilotAndCursor: with both binaries on PATH the owned hook
 // file lands under ~/.copilot/hooks (A, `|| true` because the vendor fails closed)
 // and the fenced entries land in ~/.cursor/hooks.json beside the user's (B), each
-// with its manifest; the human output says the BYOK pointer is not provisioned.
+// with its manifest; with no BYOK env set the human output says the pointer is
+// not eligible (covered separately: TestEnableProvisionsCopilotEnvPointer).
 func TestEnableProvisionsCopilotAndCursor(t *testing.T) {
 	env, out, _ := enrolledEnv(t)
 	home, _ := claudeHome(t)
@@ -985,7 +988,7 @@ func TestEnableProvisionsCopilotAndCursor(t *testing.T) {
 	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"provisioned   copilot", "provisioned   cursor", "COPILOT_PROVIDER_BASE_URL is an env var with no fenced file target"} {
+	for _, want := range []string{"provisioned   copilot", "provisioned   cursor", "copilot BYOK pointer not provisioned (subscription regime, no BYOK key, or no proxy listening)"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("human output lacks %q:\n%s", want, out.String())
 		}
@@ -1046,6 +1049,74 @@ func TestEnableProvisionsCopilotAndCursor(t *testing.T) {
 	}
 	if c, err := os.ReadFile(cursorHooks2); err != nil || !strings.Contains(string(c), `"version": 1`) {
 		t.Fatalf("owned hooks.json (%v):\n%s", err, c)
+	}
+}
+
+// TestEnableProvisionsCopilotEnvPointer: with an eligible BYOK credential and a
+// live guard answering the published port, `mark1 enable` writes the owned
+// pointer file, registers the key with the guard, prints the exact source line
+// and the upstream-routing gap warning, and
+// --json carries both copilot_pointer and copilot_source_line; a re-run over
+// the unchanged pointer reports changed=false.
+func TestEnableProvisionsCopilotEnvPointer(t *testing.T) {
+	env, out, _ := enrolledEnv(t)
+	home, _ := claudeHome(t)
+	copilotAndCursorHomes(t, home, "", true, false)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"reason_code":"M1E-8001"}`))
+	}))
+	t.Cleanup(srv.Close)
+	if err := os.WriteFile(filepath.Join(env.StateDir, "proxy.port"), []byte(strings.TrimPrefix(srv.URL, "http://127.0.0.1:")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COPILOT_PROVIDER_BASE_URL", "https://api.openai.com/v1")
+	t.Setenv("COPILOT_PROVIDER_API_KEY", "sk-synth")
+
+	root := t.TempDir()
+	env.JSON = false
+	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	target := copilot.EnvFilePath(env.StateDir, runtime.GOOS)
+	wantLine := copilot.SourceLine(env.StateDir, runtime.GOOS)
+	for _, want := range []string{
+		"provisioned   copilot BYOK base URL -> mark1-proxy",
+		"add this line to your shell profile: " + wantLine,
+		"admits this BYOK key by fingerprint, but the sidecar forwards only to api.anthropic.com",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("human output lacks %q:\n%s", want, out.String())
+		}
+	}
+	b, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "export COPILOT_PROVIDER_BASE_URL="+strconv.Quote(srv.URL)) {
+		t.Fatalf("env pointer file: %s", b)
+	}
+	if _, err := os.Stat(copilot.EnvManifestPath(env.StateDir)); err != nil {
+		t.Fatalf("no env-pointer manifest under the CLI's state root: %v", err)
+	}
+	if reg, err := os.ReadFile(filepath.Join(env.StateDir, "registry")); err != nil || !strings.HasPrefix(string(reg), "copilot ") {
+		t.Fatalf("enable did not register the BYOK key with the guard: %q %v", reg, err)
+	}
+
+	env.JSON = true
+	out.Reset()
+	if err := Run(env, Options{Path: root, Home: home, NoAnchors: true}); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.CopilotPointer != "provisioned" || res.CopilotSourceLine != wantLine {
+		t.Fatalf("copilot_pointer=%q copilot_source_line=%q, want provisioned / %q", res.CopilotPointer, res.CopilotSourceLine, wantLine)
+	}
+	if res.Changed {
+		t.Fatal("a re-run over an unchanged pointer reported changed=true")
 	}
 }
 

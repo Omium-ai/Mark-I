@@ -284,6 +284,7 @@ func scanFragments(env *cli.Env, opts Options) []Fragment {
 		gemini.ManifestPath(env.StateDir):            true,
 		opencode.ManifestPath(env.StateDir):          true,
 		copilot.ManifestPath(env.StateDir):           true,
+		copilot.EnvManifestPath(env.StateDir):        true,
 		cursor.ManifestPath(env.StateDir):            true,
 	}
 	if _, err := os.Stat(claudecode.ManifestPath(env.StateDir)); err == nil {
@@ -303,6 +304,9 @@ func scanFragments(env *cli.Env, opts Options) []Fragment {
 	}
 	if _, err := os.Stat(copilot.ManifestPath(env.StateDir)); err == nil {
 		out = append(out, inspectCopilot(env, opts))
+	}
+	if _, err := os.Stat(copilot.EnvManifestPath(env.StateDir)); err == nil {
+		out = append(out, inspectCopilotEnv(env, opts))
 	}
 	if _, err := os.Stat(cursor.ManifestPath(env.StateDir)); err == nil {
 		out = append(out, inspectCursor(env, opts))

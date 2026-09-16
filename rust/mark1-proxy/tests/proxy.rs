@@ -512,8 +512,21 @@ async fn guard_no_forward_path() {
 
     let oauth = String::from_utf8_lossy(OAUTH_TOKEN).to_string();
     let api = String::from_utf8_lossy(API_KEY).to_string();
+    let never =
+        String::from_utf8_lossy(b"sk-ant-api03-NeverProvisionedOnThisDevice0000000000000000000000")
+            .to_string();
     let cases: Vec<(&str, String)> = vec![
-        ("no M1-Cred-Ref at all", format!("x-api-key: {api}\r\n")),
+        // Header-free (08 §5.5): the credential alone must name an enrollment, and these cannot.
+        ("no M1-Cred-Ref, key never provisioned", format!("x-api-key: {never}\r\n")),
+        (
+            "no M1-Cred-Ref, bearer never provisioned",
+            format!("authorization: Bearer {never}\r\n"),
+        ),
+        (
+            "no M1-Cred-Ref, oauth bearer (shape gate, before any HMAC)",
+            format!("authorization: Bearer {oauth}\r\n"),
+        ),
+        ("no M1-Cred-Ref and no credential (the provisioner's probe)", String::new()),
         ("M1-Cred-Ref but no credential", format!("m1-cred-ref: {CRED_REF}\r\n")),
         ("unknown ref", cred_headers("ref-does-not-exist", API_KEY)),
         ("fingerprint mismatch", cred_headers(CRED_REF, b"sk-ant-api03-someotherkey0000000000000000000000")),
@@ -556,7 +569,7 @@ async fn guard_no_forward_path() {
         ),
     ];
     assert!(
-        cases.len() >= 11,
+        cases.len() >= 14,
         "table shrank — this test's coverage is its table"
     );
 
@@ -591,11 +604,14 @@ async fn off_marker_is_not_an_override_path() {
     let ctx = start(http_response("", b"{}"), true).await;
     std::fs::write(ctx._base.path().join("OFF"), b"").unwrap();
 
-    let api = String::from_utf8_lossy(API_KEY).to_string();
-    let res = request(ctx.addr, &format!("x-api-key: {api}\r\n")).await;
+    let res = request(
+        ctx.addr,
+        "x-api-key: sk-ant-api03-NeverProvisionedOnThisDevice0000000000000000000000\r\n",
+    )
+    .await;
     assert_eq!(
         res.status, 403,
-        "off-marker forwarded a request with no M1-Cred-Ref"
+        "off-marker forwarded a request with no M1-Cred-Ref and an unprovisioned key"
     );
     assert_eq!(res.error_code().as_deref(), Some("M1E-8001"));
     assert_eq!(ctx.upstream.connections(), 0);
@@ -604,6 +620,99 @@ async fn off_marker_is_not_an_override_path() {
     // means — and the tee sees nothing.
     let ok = request(ctx.addr, &cred_headers(CRED_REF, API_KEY)).await;
     assert_eq!(ok.status, 200);
+}
+
+/// Frozen negatives 3 and 4: the provisioned key, sent as Copilot sends it, forwards under the
+/// same identity a header request gets (the pool reuses the connection) and reaches only the upstream.
+#[tokio::test(flavor = "multi_thread")]
+async fn header_free_provisioned_key_forwards_bound_to_its_ref() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(|| LogSink)
+        .try_init();
+    let mut ctx = start(http_response("", b"{\"ok\":true}"), true).await;
+    let device = device_spill_key(ctx._base.path());
+    let key = String::from_utf8_lossy(API_KEY).to_string();
+
+    let res = request(ctx.addr, &format!("authorization: Bearer {key}\r\n")).await;
+    assert_eq!(res.status, 200, "{}", res.head);
+    let seen = String::from_utf8_lossy(&ctx.upstream.last_request()).to_ascii_lowercase();
+    assert!(
+        seen.contains(&key.to_ascii_lowercase()),
+        "upstream never saw the key"
+    );
+    assert!(!seen.contains("m1-cred-ref"));
+    assert_eq!(ctx.upstream.connections(), 1);
+
+    // Same identity as the header request: one pooled connection serves both.
+    let with = request(ctx.addr, &cred_headers(CRED_REF, API_KEY)).await;
+    assert_eq!(with.status, 200);
+    assert_eq!(
+        ctx.upstream.connections(),
+        1,
+        "header-free and header requests under one key did not share a credential identity"
+    );
+    // ... and a different enrolled key is a different identity.
+    let other = request(
+        ctx.addr,
+        &format!("x-api-key: {}\r\n", String::from_utf8_lossy(API_KEY_2)),
+    )
+    .await;
+    assert_eq!(other.status, 200);
+    assert_eq!(ctx.upstream.connections(), 2);
+
+    for _ in 0..3 {
+        let report = report(&mut ctx).await;
+        assert!(!format!("{report:?}").contains(&key), "the tee saw the key");
+        Fabric::new(ctx._base.path()).tee_report(&report);
+    }
+    let frames = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let f = spilled_frames(ctx._base.path(), &device);
+            if f.len() >= 6 {
+                return f;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !format!("{frames:?}").contains(&key),
+        "a frame carried the key"
+    );
+    let log = String::from_utf8_lossy(&LOG.lock().unwrap()).to_string();
+    assert!(!log.contains(&key), "a log line carried the key:\n{log}");
+}
+
+/// The kill set is keyed by ref and a header-free request learns its ref only from the guard.
+#[tokio::test(flavor = "multi_thread")]
+async fn header_free_session_is_killed_and_stays_killed() {
+    let contaminated = http_response(
+        "anthropic-ratelimit-unified-status: allowed\r\n",
+        b"{\"ok\":true}",
+    );
+    let ctx = start(contaminated, true).await;
+    let key = String::from_utf8_lossy(API_KEY).to_string();
+    let bare = format!("x-api-key: {key}\r\n");
+
+    let res = request(ctx.addr, &bare).await;
+    assert_eq!(res.error_code().as_deref(), Some("M1E-8002"));
+    assert!(
+        ctx.proxy.is_killed(CRED_REF),
+        "the kill names the bound ref"
+    );
+    assert_eq!(ctx.upstream.connections(), 1);
+
+    let again = request(ctx.addr, &bare).await;
+    assert_eq!(again.error_code().as_deref(), Some("M1E-8002"));
+    let named = request(ctx.addr, &cred_headers(CRED_REF, API_KEY)).await;
+    assert_eq!(named.error_code().as_deref(), Some("M1E-8002"));
+    assert_eq!(
+        ctx.upstream.connections(),
+        1,
+        "a killed session reached the upstream again"
+    );
 }
 
 /// 08 §9 M1E-4004 / M1E-4005, both fail-closed, both ahead of the upstream.
@@ -1218,11 +1327,10 @@ async fn unknown_model_passes_through_unrewritten_as_advisory() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rewrite_happens_only_with_a_forward_ticket() {
     let ctx = start_routed(http_response("", b"{}"), Dialect::AnthropicSse).await;
-    let api = String::from_utf8_lossy(API_KEY).to_string();
     let sent = golden_request(ROUTED);
 
     for headers in [
-        format!("x-api-key: {api}\r\n"),
+        "x-api-key: sk-ant-api03-NeverProvisionedOnThisDevice0000000000000000000000\r\n".to_owned(),
         cred_headers("ref-does-not-exist", API_KEY),
         cred_headers(CRED_REF, OAUTH_TOKEN),
     ] {

@@ -88,6 +88,10 @@ type Manifest struct {
 	FragmentChecksum string `json:"fragment_checksum"`
 	AppliedAt        string `json:"applied_at"`
 	AppliedBy        string `json:"applied_by"`
+	// URL is the env-pointer fragment's only field the hooks fragment leaves
+	// empty: the proxy URL it wrote, so doctor can compare it to what is live
+	// in the process environment without re-deriving it from proxy.port.
+	URL string `json:"url,omitempty"`
 }
 
 type ApplyResult struct {

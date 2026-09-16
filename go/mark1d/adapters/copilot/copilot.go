@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
@@ -33,6 +34,8 @@ type Adapter struct {
 	ShimPath    string // overrides 08 §8.1's command string
 	// Env overrides os.Getenv for the regime sniff (test seam); nil reads the process environment.
 	Env func(string) string
+	// GOOS overrides runtime.GOOS for the env-pointer fragment's sh-vs-ps1 choice (test seam).
+	GOOS string
 }
 
 func (a *Adapter) Name() string { return "copilot" }
@@ -126,13 +129,32 @@ func plainKey(entry map[string]json.RawMessage) bool {
 	return set("apiKey") && !set("bearerToken") && !set("apiKeyCommand")
 }
 
+// githubTokenPrefixes: GitHub's own fixed, published token-shape prefixes
+// (OAuth, GitHub Apps, classic and fine-grained PATs). None of these is ever
+// a model-provider API key, so any one of them in COPILOT_PROVIDER_API_KEY is
+// the GitHub-billed credential CON-001 forbids proxying — checked here,
+// independent of the wire-side shape tripwire (10 §3.3 step 5), so a GitHub
+// token planted in the key slot fails closed before the pointer is ever
+// written, not only after it reaches the gateway.
+var githubTokenPrefixes = []string{"gho_", "ghu_", "ghp_", "ghs_", "ghr_", "github_pat_"}
+
+func githubTokenShaped(s string) bool {
+	for _, p := range githubTokenPrefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // regime: BYOK with a plain API key is the API-key regime; everything else —
 // GitHub-billed (no COPILOT_PROVIDER_BASE_URL), GHES-hosted, a bearer token or
-// a key command (both take precedence over the key at the pin), or a
-// providers.json whose entries are not all plain keys — reads as subscription,
-// the conservative default (CON-001). The key's SHAPE is the gateway's tripwire,
-// not this function's: a gho_ token in COPILOT_PROVIDER_API_KEY is refused on
-// the wire (rust:gateway_refuses_a_github_billed_token_even_when_enrolled).
+// a key command (both take precedence over the key at the pin), a
+// providers.json whose entries are not all plain keys, or a GitHub-token-shaped
+// value in the key slot — reads as subscription, the conservative default
+// (CON-001). The key's broader SHAPE is also the gateway's own tripwire
+// (rust:gateway_refuses_a_github_billed_token_even_when_enrolled); this check
+// is the CLI-side half of the same refusal.
 func (a *Adapter) regime() adapters.Regime {
 	if entries, ok := a.providersFile(); ok {
 		for _, e := range entries {
@@ -146,6 +168,9 @@ func (a *Adapter) regime() adapters.Regime {
 		return adapters.RegimeSubscription
 	}
 	if a.getenv("COPILOT_PROVIDER_BEARER_TOKEN") != "" || a.getenv("COPILOT_PROVIDER_API_KEY_COMMAND") != "" {
+		return adapters.RegimeSubscription
+	}
+	if githubTokenShaped(a.getenv("COPILOT_PROVIDER_API_KEY")) {
 		return adapters.RegimeSubscription
 	}
 	return adapters.RegimeAPIKey

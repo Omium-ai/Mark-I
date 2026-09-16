@@ -87,8 +87,8 @@ const (
 	//
 	// Taken from rust/mark1-proxy/src/router.rs:143-149 — `handle`'s
 	// `Decision::Refused(_)` arm, which returns FORBIDDEN + "M1E-8001" for the
-	// `Cause::MissingCredRef` this probe deliberately produces
-	// (guard/provenance.rs:375-377). The body shape is lib.rs:188 `error_body`.
+	// `Cause::CredentialAmbiguous` this probe deliberately produces (no header,
+	// no credential; guard/provenance.rs decide()). The body shape is lib.rs:188 `error_body`.
 	// Cited by line on purpose: if the proxy's refusal shape ever changes, this
 	// gate must fail visibly at the next probe rather than start silently
 	// refusing a live proxy, or silently accepting a squatter.

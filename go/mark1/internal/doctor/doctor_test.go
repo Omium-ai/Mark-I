@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1138,10 +1141,11 @@ func TestDoctorCopilotAndCursorRowsWithoutBinaries(t *testing.T) {
 	}
 }
 
-// TestDoctorCopilotRow: version and regime ride the row; the row always says the
-// BYOK base URL has no fenced file target (no proxy pointer is provisioned, and
-// doctor must not pretend otherwise); an absent $COPILOT_HOME is named; the owned
-// file classifies OK / FRAGMENT-DAMAGED through the adapter and --fix rewrites it.
+// TestDoctorCopilotRow: version and regime ride the row; the byok-pointer note
+// names one of FR-AGENT-014's three states (doctor only classifies, so it reads
+// absent here — only `mark1 enable` applies the pointer, covered separately);
+// an absent $COPILOT_HOME is named; the owned hooks file classifies
+// OK / FRAGMENT-DAMAGED through the adapter and --fix rewrites it.
 func TestDoctorCopilotRow(t *testing.T) {
 	env, out := enrolledEnv(t)
 	fakeBin(t, "copilot", "1.0.85")
@@ -1154,7 +1158,7 @@ func TestDoctorCopilotRow(t *testing.T) {
 		t.Fatalf("an absent vendor dir must not fail doctor: %v", err)
 	}
 	row := agentRow(t, rep, "copilot")
-	if row.Version != "1.0.85" || row.Regime != "subscription" || !strings.Contains(row.Note, "no ~/.copilot") || !strings.Contains(row.Note, "COPILOT_PROVIDER_BASE_URL is an env var with no fenced file target") {
+	if row.Version != "1.0.85" || row.Regime != "subscription" || !strings.Contains(row.Note, "no ~/.copilot") || !strings.Contains(row.Note, "byok pointer absent") {
 		t.Fatalf("absent vendor dir: %+v", row)
 	}
 	if err := os.MkdirAll(copilotHome, 0o700); err != nil {
@@ -1163,7 +1167,10 @@ func TestDoctorCopilotRow(t *testing.T) {
 	t.Setenv("COPILOT_PROVIDER_BASE_URL", "https://api.openai.com/v1")
 	t.Setenv("COPILOT_PROVIDER_API_KEY", "sk-synth")
 	rep, _ = runDoctor(t, env, out, opts)
-	if row := agentRow(t, rep, "copilot"); row.Regime != "apikey" || strings.Contains(row.Note, "no ~/.copilot") || !strings.Contains(row.Note, "no proxy pointer") {
+	// doctor only classifies; it never applies the pointer (only `mark1 enable`
+	// does), so even under an eligible BYOK env the row still reads absent —
+	// nothing was ever written.
+	if row := agentRow(t, rep, "copilot"); row.Regime != "apikey" || strings.Contains(row.Note, "no ~/.copilot") || !strings.Contains(row.Note, "byok pointer absent") {
 		t.Fatalf("BYOK env: %+v", row)
 	}
 	t.Setenv("COPILOT_PROVIDER_BASE_URL", "")
@@ -1192,7 +1199,7 @@ func TestDoctorCopilotRow(t *testing.T) {
 	if err := Run(env, Options{Home: home, ClaudeSettings: noRetention(t), Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "agent         copilot      mechanism A version 1.0.85 regime subscription (no proxy pointer: COPILOT_PROVIDER_BASE_URL") {
+	if !strings.Contains(out.String(), "agent         copilot      mechanism A version 1.0.85 regime subscription (byok pointer absent)") {
 		t.Fatalf("human row:\n%s", out.String())
 	}
 	env.JSON = true
@@ -1227,6 +1234,103 @@ func TestDoctorCopilotRow(t *testing.T) {
 	rep, err = runDoctor(t, env, out, opts)
 	if err == nil || len(rep.Fragments) != 1 || rep.Fragments[0].State != "FRAGMENT-DAMAGED" || !strings.Contains(rep.Fragments[0].Detail, copilot.CodeManifestCorrupt) {
 		t.Fatalf("corrupt manifest: %v %+v", err, rep.Fragments)
+	}
+}
+
+// TestDoctorCopilotEnvPointerRow: FR-AGENT-014's three-way byok-pointer state
+// — absent before anything is applied; written, not sourced once applied but
+// the CURRENT process env does not carry it (never sourced, sourced
+// elsewhere, or stale); active once it does — plus the fragment row's OK and
+// FRAGMENT-DAMAGED classification through the adapter, with --fix naming the
+// remedy instead of performing it (re-pointing needs a fresh `mark1 enable`
+// eligibility check, not a blind rewrite).
+func TestDoctorCopilotEnvPointerRow(t *testing.T) {
+	env, out := enrolledEnv(t)
+	fakeBin(t, "copilot", "1.0.85")
+	home := t.TempDir()
+	opts := Options{Home: home}
+
+	rep, err := runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatalf("nothing applied yet must not fail doctor: %v", err)
+	}
+	if row := agentRow(t, rep, "copilot"); !strings.Contains(row.Note, "byok pointer absent") {
+		t.Fatalf("before apply: %+v", row)
+	}
+	if len(rep.Fragments) != 0 {
+		t.Fatalf("no env-pointer manifest yet, so no fragment row: %+v", rep.Fragments)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"reason_code":"M1E-8001"}`))
+	}))
+	t.Cleanup(srv.Close)
+	if err := os.MkdirAll(env.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.StateDir, "proxy.port"), []byte(strconv.Itoa(srv.Listener.Addr().(*net.TCPAddr).Port)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &copilot.Adapter{Home: home, StateDir: env.StateDir, Env: func(k string) string {
+		return map[string]string{"COPILOT_PROVIDER_BASE_URL": "https://api.openai.com/v1", "COPILOT_PROVIDER_API_KEY": "sk-synth"}[k]
+	}}
+	if _, err := a.ApplyEnvPointer(); err != nil {
+		t.Fatalf("setup apply: %v", err)
+	}
+	target := copilot.EnvFilePath(env.StateDir, runtime.GOOS)
+
+	// Written but the CLI process's own env does not have it: doctor and the
+	// user's shell are not the same process unless it was actually sourced.
+	rep, err = runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatalf("written-not-sourced must not fail doctor: %v", err)
+	}
+	if row := agentRow(t, rep, "copilot"); !strings.Contains(row.Note, "byok pointer written, not sourced") {
+		t.Fatalf("written, not sourced: %+v", row)
+	}
+	if len(rep.Fragments) != 1 || rep.Fragments[0].Agent != "copilot" || rep.Fragments[0].Fragment != "env" ||
+		rep.Fragments[0].Mechanism != "A" || rep.Fragments[0].State != "OK" || rep.Fragments[0].Target != target {
+		t.Fatalf("env fragment row: %+v", rep.Fragments)
+	}
+
+	// Sourced into doctor's own process: exactly what "active" means.
+	t.Setenv("COPILOT_PROVIDER_BASE_URL", srv.URL)
+	rep, err = runDoctor(t, env, out, opts)
+	if err != nil {
+		t.Fatalf("active must not fail doctor: %v", err)
+	}
+	if row := agentRow(t, rep, "copilot"); !strings.Contains(row.Note, "byok pointer active") {
+		t.Fatalf("active: %+v", row)
+	}
+	env.JSON = false
+	out.Reset()
+	if err := Run(env, Options{Home: home, ClaudeSettings: noRetention(t), Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "byok pointer active") {
+		t.Fatalf("human row:\n%s", out.String())
+	}
+	env.JSON = true
+	t.Setenv("COPILOT_PROVIDER_BASE_URL", "https://api.openai.com/v1")
+
+	// A hand-edit is FRAGMENT-DAMAGED, and --fix explains rather than repairs.
+	b, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, target, string(b)+"# edited\n")
+	rep, err = runDoctor(t, env, out, opts)
+	if err == nil || rep.OK || len(rep.Fragments) != 1 || rep.Fragments[0].State != "FRAGMENT-DAMAGED" {
+		t.Fatalf("hand-edited pointer: %v %+v", err, rep.Fragments)
+	}
+	rep, err = runDoctor(t, env, out, Options{Home: home, Fix: true})
+	if err == nil || rep.Fragments[0].State != "FRAGMENT-DAMAGED" || rep.Fragments[0].Fixed ||
+		!strings.Contains(rep.Fragments[0].Detail, "does not re-point copilot at the proxy") {
+		t.Fatalf("--fix must name the remedy, not perform it: %v %+v", err, rep.Fragments)
+	}
+	if got, _ := os.ReadFile(target); !strings.Contains(string(got), "# edited") {
+		t.Fatal("--fix must not have touched the file it refuses to repair")
 	}
 }
 

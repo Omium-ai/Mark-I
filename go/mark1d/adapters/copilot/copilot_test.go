@@ -167,6 +167,13 @@ func TestRegimeFollowsVendorProviderResolution(t *testing.T) {
 	if a.regime() != adapters.RegimeSubscription {
 		t.Fatal("COPILOT_PROVIDERS_CONFIG names the file; the default path is not consulted when it is set")
 	}
+	if err := os.Remove(filepath.Join(ch, "providers.json")); err != nil {
+		t.Fatal(err)
+	}
+	set(map[string]string{"COPILOT_PROVIDER_BASE_URL": "https://api.openai.com/v1", "COPILOT_PROVIDER_API_KEY": "gho_AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTt"})
+	if a.regime() != adapters.RegimeSubscription {
+		t.Fatal("a GitHub-token-shaped value in COPILOT_PROVIDER_API_KEY must never read as BYOK, even with a base URL set (CON-001, fail closed independent of the wire tripwire)")
+	}
 }
 
 // TestGitHubBilledSessionNeverYieldsAWireCredential is FR-AGENT-014's
@@ -184,6 +191,11 @@ func TestGitHubBilledSessionNeverYieldsAWireCredential(t *testing.T) {
 		{"GH_TOKEN": gh, "COPILOT_GITHUB_TOKEN": gh},
 		{"COPILOT_PROVIDER_GHES_HOST": "ghe.example", "COPILOT_PROVIDER_GHES_TOKEN": gh},
 		{"COPILOT_PROVIDER_BASE_URL": "https://api.githubcopilot.com", "COPILOT_PROVIDER_BEARER_TOKEN": gh},
+		// The bug FR-AGENT-014 closes: a GitHub token planted in the KEY slot
+		// beside a real base URL used to read as plain BYOK (presence-only
+		// classification, no shape check) and WireCredential would have handed
+		// it straight to the pointer's caller.
+		{"COPILOT_PROVIDER_BASE_URL": "https://api.openai.com/v1", "COPILOT_PROVIDER_API_KEY": gh},
 	} {
 		a.Env = envOf(env)
 		d, err := a.Detect()
