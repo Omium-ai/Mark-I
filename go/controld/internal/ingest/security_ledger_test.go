@@ -35,7 +35,7 @@ func (h *harness) withModule(t *testing.T, proj *chproj.Projector, rs *scanner.R
 	m := New(Deps{
 		Verifier: h.verifier,
 		ObsCfg:   obs.Config{ServiceName: "controld-test"},
-		PG:       fakeReady{}, Store: h.store, Proj: proj, Sidefx: h.sfx,
+		PG:       fakeReady{}, Store: h.store, Proj: proj, Sidefx: h.sfx, DB: h.tomb,
 		Scanner:  rs,
 		PoolSize: 4,
 	})
@@ -202,7 +202,7 @@ func TestRescanUnderNewerRulesetAlertsAndQuarantines(t *testing.T) {
 
 	// Replay honours the marker: the batch is not re-projected (05 §2.3).
 	replayIns := &fakeInserter{}
-	replayed, err := Replay(ctx, h.store, replayIns, nil, tenant, now, now)
+	replayed, err := Replay(ctx, h.tomb, h.store, replayIns, nil, tenant, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}

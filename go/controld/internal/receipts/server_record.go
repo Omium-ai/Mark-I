@@ -31,12 +31,13 @@ import (
 // mint a "checkpoint" with no device signature by picking a string, and
 // `discontinuity` is excluded because it carries no subject.
 var ServerRecordTypes = map[string]bool{
-	"noise_certificate":  true,
-	"memory_admission":   true,
-	"bundle_publication": true,
-	"corpus_export":      true,
-	"key_rotation":       true,
-	"verifier_promotion": true,
+	"noise_certificate":   true,
+	"memory_admission":    true,
+	"bundle_publication":  true,
+	"corpus_export":       true,
+	"key_rotation":        true,
+	"verifier_promotion":  true,
+	"quarantine_deletion": true, // m1_080: subject = batch_id; origin edge (device-verified at stage 11) or cloud (the sweep)
 }
 
 // reservedPayloadKeys are the chain fields this function owns. A class-specific

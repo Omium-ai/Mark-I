@@ -522,7 +522,7 @@ Four buckets, named to the estate convention `omium-<purpose>-<env>-<account>`. 
 
 | Bucket | Purpose (07) | Versioning | Object lock | Lifecycle |
 |---|---|---|---|---|
-| `omium-mark1-ingest-prod-965384155704` | The replay log + quarantine — ack-gate for every batch | On | **GOVERNANCE, 35 d** | Glacier IR at 90 d, expire at 760 d (`ingest/`); expire 90 d (`quarantine/`) |
+| `omium-mark1-ingest-prod-965384155704` | The replay log + quarantine — ack-gate for every batch | On | **GOVERNANCE, 35 d (`ingest/`) / 30 d (`quarantine/`)** | Glacier IR at 90 d, expire at 760 d (`ingest/`); expire 32 d (`quarantine/`, backstop behind controld's receipted 30 d sweep) |
 | `omium-mark1-corpus-prod-965384155704` | Parquet mirrors + KTO JSONL/manifest pairs | On | None (receipt-integrity, not lock) | Default expire 400 d, tenant-overridable |
 | `omium-mark1-evidence-prod-965384155704` | Opt-in E1/E2 blobs | On | None | Expire 90 d — a hard ceiling, not a default |
 | `omium-mark1-witness-prod-965384155704` | Hourly chain heads | On | **COMPLIANCE, 2 y** | None — no delete, ever |
@@ -575,7 +575,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "ingest" {
     id         = "quarantine-short-life"
     status     = "Enabled"
     filter { prefix = "" } # refined per-tenant: t/*/quarantine/ via tag-based filter at apply
-    expiration { days = 90 }
+    expiration { days = 32 } # backstop only: controld's receipted sweep deletes at 30 d (07, D-EI)
   }
 }
 ```
@@ -621,7 +621,7 @@ Bucket policies carry, beyond `DenyInsecureTransport`, the two statements 07 pro
 
 ### 5.2 Per-tenant KMS keys
 
-Every object under `t/<tenant>/` is SSE-KMS under `alias/mark1-tenant-<tenant_uuid>` (07). Keys are created **at tenant enrollment by `controld.enroll`**, not by Terraform — tenants arrive at runtime, and a Terraform-managed key list would either lag enrollment or grant CI a standing key-creation role. controld's IAM (§6) permits `kms:CreateKey`/`CreateAlias`/`TagResource` **constrained by request tags** (`aws:RequestTag/Service = mark1-tenant-key`), and each key's policy grants usage to controld and intel via **grants** (revocable per-tenant, auditable, and the offboarding path: retire the grants, schedule key deletion, and the tenant's every byte becomes ciphertext with no key — cryptographic erasure that satisfies deletion obligations without touching object-locked replay objects, exactly the reconciliation 07 §Receipts-vs-deletion describes).
+Every object under `t/<tenant>/` is SSE-KMS under `alias/mark1-tenant-<tenant_uuid>` (07) for organization tenants; personal tenants share the IaC-created `alias/mark1-personal` (ADR-0011: per-person keys cost ~US$1/key/month and the per-tenant deny statements hit the 20 KB bucket-policy cap at a few hundred tenants — personal isolation is prefix + tenant predicate + RLS, and personal deletion is a receipted object delete, not crypto-erasure). Keys are created **at tenant enrollment by `controld.enroll`**, not by Terraform — tenants arrive at runtime, and a Terraform-managed key list would either lag enrollment or grant CI a standing key-creation role. controld's IAM (§6) permits `kms:CreateKey`/`CreateAlias`/`TagResource` **constrained by request tags** (`aws:RequestTag/Service = mark1-tenant-key`), and each key's policy grants usage to controld and intel via **grants** (revocable per-tenant, auditable, and the offboarding path: retire the grants, schedule key deletion, and the tenant's every byte becomes ciphertext with no key — cryptographic erasure that satisfies deletion obligations without touching object-locked replay objects, exactly the reconciliation 07 §Receipts-vs-deletion describes).
 
 **S3 Bucket Keys are enabled on all four buckets** — without them, every PUT/GET is a KMS request and per-tenant keys would turn the request bill into the dominant line; with them, KMS calls amortise per bucket-key-cache window and the marginal request cost is noise.
 

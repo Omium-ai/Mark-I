@@ -574,7 +574,7 @@ func TestChaosCHOutageIngestUnaffected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replayed, err := Replay(ctx, r.s3, r.conn, nil, tid, time.Now().UTC().Add(-24*time.Hour), time.Now().UTC())
+	replayed, err := Replay(ctx, nil, r.s3, r.conn, nil, tid, time.Now().UTC().Add(-24*time.Hour), time.Now().UTC())
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}

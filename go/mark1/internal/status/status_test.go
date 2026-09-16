@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -235,6 +239,11 @@ func TestStatusListsQuarantinedBatches(t *testing.T) {
   "note": "M1E-2003: batch_id landed with different bytes — local spool corruption suspected"
 }`)
 	plant(torn, 8, `{"batch_id": "`+torn+`", "status": 4`) // crash mid-write
+	if err := os.WriteFile(filepath.Join(env.QuarantineDir(), "last-sweep.json"), []byte(`{"swept_at":"2026-09-16T11:00:00Z","deleted":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now = func() time.Time { return time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { now = time.Now })
 
 	if err := Run(env, Options{Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
 		t.Fatal(err)
@@ -260,8 +269,14 @@ func TestStatusListsQuarantinedBatches(t *testing.T) {
 	if q := byID[torn]; q.Bytes != 8 || !strings.HasPrefix(q.Reason, "manifest unreadable: ") {
 		t.Fatalf("torn manifest must be listed, not hidden: %+v", q)
 	}
-	if rep.Spool.QuarantineRetention != quarantineRetention || !strings.HasPrefix(rep.Spool.QuarantineRetention, "none") {
-		t.Fatalf("retention %q: no window exists anywhere, none may be claimed", rep.Spool.QuarantineRetention)
+	if rep.Spool.QuarantineRetention != quarantineRetention || !strings.HasPrefix(rep.Spool.QuarantineRetention, "30 d, then deleted with a receipt") {
+		t.Fatalf("retention %q: the founder-fixed 30 d window must be stated", rep.Spool.QuarantineRetention)
+	}
+	if rep.Spool.QuarantineOldestDays != 2 {
+		t.Fatalf("oldest %d d, want 2 (batch a at 09-14T10:00 seen at 09-16T12:00; the torn manifest is undated and counts nothing)", rep.Spool.QuarantineOldestDays)
+	}
+	if s := rep.Spool.QuarantineLastSweep; s == nil || s.SweptAt != "2026-09-16T11:00:00Z" || s.Deleted != 1 {
+		t.Fatalf("last sweep %+v, want the daemon's last-sweep.json", s)
 	}
 
 	var human bytes.Buffer
@@ -271,11 +286,32 @@ func TestStatusListsQuarantinedBatches(t *testing.T) {
 		a + " parked 2026-09-14T10:00:00.123456789Z, 512 bytes, 3 events — reason: HTTP 400 M1E-2001",
 		b + " parked 2026-09-14T11:00:00Z, 64 bytes, 1 events — reason: HTTP 409 M1E-2003 M1E-2003: batch_id landed",
 		torn + " parked , 8 bytes, 0 events — reason: manifest unreadable: ",
-		"retention: none — kept until removed by an operator",
+		"quarantine    3 batches, oldest 2 d, retention 30 d, last sweep 2026-09-16T11:00:00Z deleted 1 (receipted)",
 	} {
 		if !strings.Contains(human.String(), want) {
 			t.Fatalf("human render lacks %q:\n%s", want, human.String())
 		}
+	}
+}
+
+// TestStatusQuarantineSummaryBeforeAnySweep: no batches and no sweep record still state the window, claim no age and
+// no sweep.
+func TestStatusQuarantineSummaryBeforeAnySweep(t *testing.T) {
+	env, out := enrolledEnv(t)
+	if err := Run(env, Options{Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	var rep Report
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Spool.Quarantined != 0 || rep.Spool.QuarantineOldestDays != 0 || rep.Spool.QuarantineLastSweep != nil || rep.Spool.QuarantineRetention != quarantineRetention {
+		t.Fatalf("spool %+v", rep.Spool)
+	}
+	var human bytes.Buffer
+	renderHuman(&human, &rep)
+	if !strings.Contains(human.String(), "quarantine    0 batches, retention 30 d, last sweep: none recorded\n") {
+		t.Fatalf("human render:\n%s", human.String())
 	}
 }
 
@@ -323,6 +359,133 @@ func TestStatusShowsStopGatePosture(t *testing.T) {
 		}
 		if rep := report(); rep.StopGate.State != "not_opted_in" {
 			t.Fatalf("artifact %q reported %+v; the daemon would not arm on it", body, rep.StopGate)
+		}
+	}
+}
+
+func controlStub(t *testing.T, env *cli.Env, token string, handler http.HandlerFunc) (*httptest.Server, string) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	if err := cli.WriteFileAtomic(ControlPath(env.StateDir), []byte(`{"port":`+strconv.Itoa(port)+`,"token":"`+token+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return srv, "127.0.0.1:" + strconv.Itoa(port)
+}
+
+// TestStatusReadsTheControlAPI: with run/control.json present and the daemon
+// answering, the daemon-state section is GET /v1/status — carried verbatim as
+// `control`, with daemon.running taken from it — while the CLI-owned sections
+// (enrollment, key custody, quarantine, bundle) stay file-derived.
+func TestStatusReadsTheControlAPI(t *testing.T) {
+	env, out := enrolledEnv(t)
+	errOut := &bytes.Buffer{}
+	env.Stderr = errOut
+	const token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const answer = `{"running":true,"paused":true,"version":"1.2.3","since":"2026-09-16T00:00:00Z","agents_live":[{"agent":"claudecode","session_id":"01","tokens":20}],"projects_enabled":2,"spool":{"bytes":64,"cap":1048576,"hard_stop":false}}`
+	hits := 0
+	var host string
+	_, host = controlStub(t, env, token, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path != "/v1/status" || r.Header.Get("Authorization") != "Bearer "+token || r.Host != host {
+			t.Errorf("request %s %s auth=%q host=%q want host %q", r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Host, host)
+		}
+		if _, origin := r.Header["Origin"]; origin {
+			t.Error("a local process sends no Origin")
+		}
+		_, _ = w.Write([]byte(answer + "\n"))
+	})
+	if err := Run(env, Options{Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	var rep struct {
+		Report
+		Control json.RawMessage `json:"control"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatalf("stdout %q: %v", out.String(), err)
+	}
+	if string(rep.Control) != answer || hits != 1 {
+		t.Fatalf("control must be the daemon's bytes verbatim: %s (hits %d)", rep.Control, hits)
+	}
+	if !rep.Daemon.Running || rep.Daemon.Control != host || rep.Daemon.Socket != "" {
+		t.Fatalf("daemon %+v must come from the API, not the socket probe", rep.Daemon)
+	}
+	if rep.Enrollment == nil || rep.Enrollment.DeviceID != "dev-1" || rep.KeyCustody.Tier == "" {
+		t.Fatalf("CLI-owned sections must survive: %s", out.String())
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("no notice on the live path: %q", errOut.String())
+	}
+
+	env.JSON = false
+	out.Reset()
+	if err := Run(env, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"mark1d        running (control 127.0.0.1:", "version 1.2.3", "paused        YES", "projects      2 enabled", "spool         64 bytes of 1048576 cap", "claudecode session 01, 20 tokens", "enrollment    active device dev-1"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("human output lacks %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "(socket ") {
+		t.Fatalf("live path must not print the socket probe line:\n%s", out.String())
+	}
+}
+
+// TestStatusFallsBackToFiles: control.json absent, stale (dead port), or
+// refused — each falls back to the file read with one notice on stderr.
+func TestStatusFallsBackToFiles(t *testing.T) {
+	env, out := enrolledEnv(t)
+	errOut := &bytes.Buffer{}
+	env.Stderr = errOut
+	run := func() Report {
+		t.Helper()
+		out.Reset()
+		errOut.Reset()
+		if err := Run(env, Options{Socket: filepath.Join(t.TempDir(), "no.sock")}); err != nil {
+			t.Fatal(err)
+		}
+		var rep Report
+		if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+			t.Fatalf("stdout not the file report: %v: %s", err, out.String())
+		}
+		if !strings.Contains(errOut.String(), "reading daemon state from files") || strings.Count(errOut.String(), "\n") != 1 {
+			t.Fatalf("want one notice line, got %q", errOut.String())
+		}
+		return rep
+	}
+	if rep := run(); rep.Enrollment.DeviceID != "dev-1" || rep.Daemon.Running || rep.Daemon.Socket == "" || rep.Daemon.Control != "" {
+		t.Fatalf("absent control.json: %+v", rep)
+	}
+	if !strings.Contains(errOut.String(), "no run/control.json") {
+		t.Fatalf("notice names the cause: %q", errOut.String())
+	}
+
+	srv, _ := controlStub(t, env, "tok", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	srv.Close()
+	run()
+	if !strings.Contains(errOut.String(), "connection refused") && !strings.Contains(errOut.String(), "connect") {
+		t.Fatalf("stale control.json: %q", errOut.String())
+	}
+
+	controlStub(t, env, "tok", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"code":"M1E-1002","message":"missing or wrong control bearer token"}}`))
+	})
+	run()
+	if !strings.Contains(errOut.String(), "HTTP 401 M1E-1002") {
+		t.Fatalf("refused bearer: %q", errOut.String())
+	}
+
+	if err := os.Chmod(ControlPath(env.StateDir), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		run()
+		if !strings.Contains(errOut.String(), "must be 0600") {
+			t.Fatalf("world-readable token file: %q", errOut.String())
 		}
 	}
 }

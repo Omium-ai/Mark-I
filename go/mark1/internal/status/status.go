@@ -8,12 +8,17 @@
 package status
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +39,9 @@ type Report struct {
 	Bundle     *Bundle      `json:"bundle"` // null until the policy client persists one
 	Off        Off          `json:"off"`
 	StopGate   cli.StopGate `json:"stop_gate"`
+	// Control is GET /v1/status verbatim (desktop spec §7.1); absent when the daemon did not answer.
+	Control json.RawMessage `json:"control,omitempty"`
+	live    *Live
 }
 
 type Enrollment struct {
@@ -57,7 +65,8 @@ type KeyCustody struct {
 
 type Daemon struct {
 	Running bool   `json:"running"`
-	Socket  string `json:"socket"`
+	Socket  string `json:"socket,omitempty"`
+	Control string `json:"control,omitempty"` // 127.0.0.1:<port> when the answer came from the control API
 }
 
 // Workspace: the reading sub-object of §7.3 lists live tailer targets; the
@@ -76,15 +85,22 @@ type Spool struct {
 	// the reason the daemon recorded beside its sealed bytes. Additive to
 	// §7.3's counts; nothing is renamed.
 	Quarantine []Quarantined `json:"quarantine"`
-	// QuarantineRetention is stated on every report because 08 §2.5 fixes only
-	// "never silently discarded and never auto-retried" — no doc names a
-	// retention window, so none is claimed.
-	QuarantineRetention string `json:"quarantine_retention"`
+	// QuarantineRetention is the founder-fixed window (2026-09-16): 30 d, then the daemon deletes with a receipt
+	// (mark1d uplink/retention.go). Stated on every report, never auto-retried (08 §2.5).
+	QuarantineRetention  string `json:"quarantine_retention"`
+	QuarantineOldestDays int    `json:"quarantine_oldest_days"`
+	// QuarantineLastSweep is the daemon's last-sweep.json; nil until the daemon has swept once.
+	QuarantineLastSweep *QuarantineSweep `json:"quarantine_last_sweep"`
 }
 
-// quarantineRetention is the honest answer until a product decision names a
-// window: the bytes stay until an operator removes them.
-const quarantineRetention = "none — kept until removed by an operator (never auto-retried, 08 §2.5)"
+const quarantineRetention = "30 d, then deleted with a receipt (never auto-retried, 08 §2.5)"
+
+type QuarantineSweep struct {
+	SweptAt string `json:"swept_at"`
+	Deleted int    `json:"deleted"`
+}
+
+var now = time.Now
 
 // Quarantined is one parked batch, read from the daemon's
 // <state>/quarantine/<batch_id>.manifest.json (go/mark1d/internal/uplink/
@@ -147,13 +163,22 @@ func Run(env *cli.Env, opts Options) error {
 		Degraded: degradation != "", Reason: degradation,
 	}
 
-	socket := opts.Socket
-	if socket == "" {
-		if s, err := cli.SocketPath(); err == nil {
-			socket = s
+	// The daemon's own state comes from GET /v1/status on the control API; the file read below is the fallback (08 §7.3: status must always answer).
+	live, body, err := fromControl(env)
+	if err != nil {
+		_, _ = fmt.Fprintf(env.Stderr, "mark1: control API not answering (%v); reading daemon state from files\n", err)
+		socket := opts.Socket
+		if socket == "" {
+			if s, err := cli.SocketPath(); err == nil {
+				socket = s
+			}
 		}
+		rep.Daemon = Daemon{Running: socket != "" && cli.DaemonReachable(socket), Socket: socket}
+	} else {
+		rep.Daemon = Daemon{Running: live.Running, Control: live.addr}
+		rep.Control = body
+		rep.live = live
 	}
-	rep.Daemon = Daemon{Running: socket != "" && cli.DaemonReachable(socket), Socket: socket}
 
 	// Degradation never silences status (§7.3 exit rule) — unreadable
 	// sub-surfaces report empty, and the daemon line already says why.
@@ -166,6 +191,8 @@ func Run(env *cli.Env, opts Options) error {
 	rep.Spool.Quarantine = readQuarantine(env.QuarantineDir())
 	rep.Spool.Quarantined = len(rep.Spool.Quarantine)
 	rep.Spool.QuarantineRetention = quarantineRetention
+	rep.Spool.QuarantineOldestDays = oldestDays(rep.Spool.Quarantine, now())
+	rep.Spool.QuarantineLastSweep = readSweep(env.QuarantineDir())
 	rep.Bundle = readBundleMeta(env)
 	rep.Off = readOff(env)
 	rep.StopGate = env.ReadStopGate()
@@ -231,6 +258,29 @@ func readQuarantine(dir string) []Quarantined {
 		out = append(out, q)
 	}
 	return out
+}
+
+// oldestDays is the age of the oldest dated batch in whole days; undated (torn) manifests count nothing.
+func oldestDays(qs []Quarantined, at time.Time) int {
+	days := 0
+	for _, q := range qs {
+		if t, err := time.Parse(time.RFC3339Nano, q.QuarantinedAt); err == nil {
+			days = max(days, int(at.Sub(t).Hours()/24))
+		}
+	}
+	return days
+}
+
+func readSweep(dir string) *QuarantineSweep {
+	data, err := os.ReadFile(filepath.Join(dir, "last-sweep.json"))
+	if err != nil {
+		return nil
+	}
+	var s QuarantineSweep
+	if json.Unmarshal(data, &s) != nil || s.SweptAt == "" {
+		return nil
+	}
+	return &s
 }
 
 // quarantineReason renders the 08 §2.4 verdict the manifest carries. Every
@@ -303,7 +353,11 @@ func renderHuman(w io.Writer, r *Report) {
 	if r.Daemon.Running {
 		daemon = "running"
 	}
-	_, _ = fmt.Fprintf(w, "mark1d        %s (socket %s)\n", daemon, r.Daemon.Socket)
+	if r.live != nil {
+		renderLive(w, r.live)
+	} else {
+		_, _ = fmt.Fprintf(w, "mark1d        %s (socket %s)\n", daemon, r.Daemon.Socket)
+	}
 	fresh := "STALE"
 	if r.Enrollment.TokenFresh {
 		fresh = "fresh"
@@ -330,9 +384,14 @@ func renderHuman(w io.Writer, r *Report) {
 		_, _ = fmt.Fprintf(w, "quarantine    %s parked %s, %d bytes, %d events — reason: %s\n",
 			q.BatchID, q.QuarantinedAt, q.Bytes, q.Events, q.Reason)
 	}
-	if len(r.Spool.Quarantine) > 0 {
-		_, _ = fmt.Fprintf(w, "quarantine    retention: %s\n", r.Spool.QuarantineRetention)
+	oldest, sweep := "", "last sweep: none recorded"
+	if r.Spool.Quarantined > 0 {
+		oldest = fmt.Sprintf("oldest %d d, ", r.Spool.QuarantineOldestDays)
 	}
+	if s := r.Spool.QuarantineLastSweep; s != nil {
+		sweep = fmt.Sprintf("last sweep %s deleted %d (receipted)", s.SweptAt, s.Deleted)
+	}
+	_, _ = fmt.Fprintf(w, "quarantine    %d batches, %sretention 30 d, %s\n", r.Spool.Quarantined, oldest, sweep)
 	if r.Bundle == nil {
 		_, _ = fmt.Fprintf(w, "policy        no bundle applied yet\n")
 	} else {
@@ -345,4 +404,104 @@ func renderHuman(w io.Writer, r *Report) {
 		_, _ = fmt.Fprintf(w, "off           inactive\n")
 	}
 	_, _ = fmt.Fprintf(w, "stop gate     %s\n", r.StopGate)
+}
+
+// Live is the daemon's own answer, GET /v1/status on the control API (desktop spec §7.1).
+type Live struct {
+	Running    bool   `json:"running"`
+	Paused     bool   `json:"paused"`
+	Version    string `json:"version"`
+	Since      string `json:"since"`
+	AgentsLive []struct {
+		Agent     string `json:"agent"`
+		SessionID string `json:"session_id"`
+		Tokens    uint64 `json:"tokens"`
+	} `json:"agents_live"`
+	ProjectsEnabled int `json:"projects_enabled"`
+	Spool           struct {
+		Bytes    int64 `json:"bytes"`
+		Cap      int64 `json:"cap"`
+		HardStop bool  `json:"hard_stop"`
+	} `json:"spool"`
+	addr string
+}
+
+func ControlPath(stateDir string) string { return filepath.Join(stateDir, "run", "control.json") }
+
+func fromControl(env *cli.Env) (*Live, json.RawMessage, error) {
+	path := ControlPath(env.StateDir)
+	fi, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, errors.New("no run/control.json: mark1d is not running, or predates the control API")
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
+		return nil, nil, fmt.Errorf("%s has mode %o; must be 0600 — refusing to read it", path, fi.Mode().Perm())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var d struct {
+		Port  int    `json:"port"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil || d.Port == 0 || d.Token == "" {
+		return nil, nil, fmt.Errorf("%s is corrupt", path)
+	}
+	addr := "127.0.0.1:" + strconv.Itoa(d.Port)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/v1/status", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+d.Token)
+	resp, err := env.Client().Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		var e struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(body, &e)
+		return nil, nil, fmt.Errorf("GET /v1/status: HTTP %d %s %s", resp.StatusCode, e.Error.Code, e.Error.Message)
+	}
+	live := &Live{addr: addr}
+	if err := json.Unmarshal(body, live); err != nil {
+		return nil, nil, fmt.Errorf("GET /v1/status: %w", err)
+	}
+	return live, json.RawMessage(bytes.TrimSpace(body)), nil
+}
+
+func renderLive(w io.Writer, l *Live) {
+	state := "running"
+	if !l.Running {
+		state = "not running"
+	}
+	_, _ = fmt.Fprintf(w, "mark1d        %s (control %s, version %s, since %s)\n", state, l.addr, l.Version, l.Since)
+	if l.Paused {
+		_, _ = fmt.Fprintln(w, "paused        YES — capture, gating and uploads parked (resume with `mark1 on`)")
+	} else {
+		_, _ = fmt.Fprintln(w, "paused        no")
+	}
+	_, _ = fmt.Fprintf(w, "projects      %d enabled\n", l.ProjectsEnabled)
+	_, _ = fmt.Fprintf(w, "spool         %d bytes of %d cap, hard stop: %v\n", l.Spool.Bytes, l.Spool.Cap, l.Spool.HardStop)
+	if len(l.AgentsLive) == 0 {
+		_, _ = fmt.Fprintln(w, "agents        none live")
+	}
+	for _, a := range l.AgentsLive {
+		_, _ = fmt.Fprintf(w, "agents        %s session %s, %d tokens\n", a.Agent, a.SessionID, a.Tokens)
+	}
 }

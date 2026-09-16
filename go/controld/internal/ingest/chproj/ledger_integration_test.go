@@ -99,6 +99,14 @@ func (m *memStore) Probe(_ context.Context, key string, body []byte) (s3land.Out
 
 func (m *memStore) Ready(context.Context) error { return nil }
 
+func (m *memStore) Delete(_ context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.objects, key)
+	delete(m.devices, key)
+	return nil
+}
+
 func (m *memStore) List(_ context.Context, prefix string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -250,7 +258,7 @@ func TestIntegrationSecurityEventRowReachesLedger(t *testing.T) {
 	mod := ingest.New(ingest.Deps{
 		Verifier: auth.NewHMACVerifier(key, auth.StaticRevocations{}),
 		ObsCfg:   obs.Config{ServiceName: "controld-ledger-it"},
-		PG:       noopReady{}, Store: store, Proj: proj, Sidefx: sfx,
+		PG:       noopReady{}, Store: store, Proj: proj, Sidefx: sfx, DB: noopDB{},
 		Scanner:  editionA,
 		PoolSize: 4,
 	})
@@ -328,7 +336,7 @@ func TestIntegrationSecurityEventRowReachesLedger(t *testing.T) {
 	bumped := ingest.New(ingest.Deps{
 		Verifier: auth.NewHMACVerifier(key, auth.StaticRevocations{}),
 		ObsCfg:   obs.Config{ServiceName: "controld-ledger-it"},
-		PG:       noopReady{}, Store: store, Proj: proj, Sidefx: sfx,
+		PG:       noopReady{}, Store: store, Proj: proj, Sidefx: sfx, DB: noopDB{},
 		PoolSize: 4,
 	})
 	tid, err := querychoke.FromClaims(auth.Claims{TenantID: tenant})

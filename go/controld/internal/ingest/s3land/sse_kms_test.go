@@ -20,6 +20,7 @@ package s3land
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -161,5 +162,104 @@ func TestLandDisableSSEKMSOmitsEncryptionHeaders(t *testing.T) {
 		if got := req.Header.Get(h); got != "" {
 			t.Errorf("DisableSSEKMS still sent %s = %q; MinIO lanes would 400", h, got)
 		}
+	}
+}
+
+// ADR-0011 §2: alias by tenant KIND from the enrollment seam; the assertion is the SSEKMSKeyId AWS would receive.
+func TestLandSelectsKMSKeyByTenantKind(t *testing.T) {
+	const prefix, pooled = "alias/mark1-tenant-", "alias/mark1-personal"
+	org := uuid.MustParse("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa")
+	personal := uuid.MustParse("bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb")
+	batch := uuid.MustParse("0191c2f3-7a10-7cc3-b1aa-3f60be1a9e01")
+	kinds := map[uuid.UUID]string{org: "org", personal: "personal"}
+	var asked []uuid.UUID
+	opt := Options{Bucket: "mark1-ingest", KMSAliasPrefix: prefix, PersonalKMSAlias: pooled,
+		TenantKind: func(_ context.Context, tenant uuid.UUID) (string, error) {
+			asked = append(asked, tenant)
+			return kinds[tenant], nil
+		}}
+
+	land := func(tenant uuid.UUID) string {
+		t.Helper()
+		c, cap := capturingClient(opt)
+		key := IngestKey(tenant, batch)
+		if out, err := c.Land(context.Background(), key, []byte("payload"), tenant, uuid.New()); err != nil || out != Landed {
+			t.Fatalf("Land(%s): out %v, err %v", tenant, out, err)
+		}
+		req := cap.only(t)
+		if req.Method != http.MethodPut || !strings.Contains(req.URL.Path, key) {
+			t.Fatalf("captured %s %s, not the landing PUT of %s", req.Method, req.URL.Path, key)
+		}
+		if got := req.Header.Get(sseHeader); got != "aws:kms" {
+			t.Errorf("%s = %q, want aws:kms", sseHeader, got)
+		}
+		return req.Header.Get(kmsHeader)
+	}
+
+	// An org tenant lands under ITS key and can never name the pooled one.
+	if got := land(org); got != prefix+org.String() {
+		t.Errorf("org tenant SSEKMSKeyId = %q, want %q", got, prefix+org.String())
+	} else if strings.Contains(got, pooled) {
+		t.Errorf("org tenant landed under the pooled personal key %q — ADR-0011 §1 broken", got)
+	}
+	// A personal tenant lands under the pooled key and never under alias/mark1-tenant-*.
+	got := land(personal)
+	if got != pooled {
+		t.Errorf("personal tenant SSEKMSKeyId = %q, want %q", got, pooled)
+	}
+	if strings.Contains(got, prefix) || strings.Contains(got, personal.String()) {
+		t.Errorf("personal tenant named a per-tenant key %q — a CMK the enrollment never created (ADR-0011 §2)", got)
+	}
+	// The kind came from the seam per stamped tenant, not a constant.
+	if len(asked) != 2 || asked[0] != org || asked[1] != personal {
+		t.Errorf("TenantKind consulted for %v, want [%s %s]", asked, org, personal)
+	}
+}
+
+// Fail-closed: an unresolved kind refuses the landing and NOTHING is PUT — no fallback to either alias (ADR-0011 §2).
+func TestLandRefusesUnresolvedTenantKind(t *testing.T) {
+	const prefix, pooled = "alias/mark1-tenant-", "alias/mark1-personal"
+	tenant := uuid.MustParse("cccccccc-3333-4333-8333-cccccccccccc")
+	key := IngestKey(tenant, uuid.MustParse("0191c2f3-7a10-7cc3-b1aa-3f60be1a9e01"))
+	fixed := func(kind string, err error) func(context.Context, uuid.UUID) (string, error) {
+		return func(context.Context, uuid.UUID) (string, error) { return kind, err }
+	}
+	cases := map[string]Options{
+		"lookup_error":            {KMSAliasPrefix: prefix, PersonalKMSAlias: pooled, TenantKind: fixed("", errors.New("pg: connection refused"))},
+		"empty_kind":              {KMSAliasPrefix: prefix, PersonalKMSAlias: pooled, TenantKind: fixed("", nil)},
+		"unknown_kind":            {KMSAliasPrefix: prefix, PersonalKMSAlias: pooled, TenantKind: fixed("team", nil)},
+		"personal_without_pool":   {KMSAliasPrefix: prefix, TenantKind: fixed("personal", nil)},
+		"lookup_error_minio_lane": {KMSAliasPrefix: prefix, PersonalKMSAlias: pooled, DisableSSEKMS: true, TenantKind: fixed("", errors.New("pg: connection refused"))},
+		"unknown_kind_minio_lane": {KMSAliasPrefix: prefix, PersonalKMSAlias: pooled, DisableSSEKMS: true, TenantKind: fixed("Personal", nil)},
+	}
+	for name, opt := range cases {
+		t.Run(name, func(t *testing.T) {
+			opt.Bucket = "mark1-ingest"
+			c, cap := capturingClient(opt)
+			out, err := c.Land(context.Background(), key, []byte("payload"), tenant, uuid.New())
+			if !errors.Is(err, ErrTenantKind) {
+				t.Fatalf("Land: out %v, err %v; want ErrTenantKind", out, err)
+			}
+			if len(cap.reqs) != 0 {
+				t.Fatalf("landing refused but %d request(s) were still sent — a refused batch must leave NO partial state", len(cap.reqs))
+			}
+		})
+	}
+	// Positive control: the org branch still lands, so the refusals above are the kind check, not a broken fake.
+	c, cap := capturingClient(Options{Bucket: "mark1-ingest", KMSAliasPrefix: prefix, PersonalKMSAlias: pooled, TenantKind: fixed("org", nil)})
+	if out, err := c.Land(context.Background(), key, []byte("payload"), tenant, uuid.New()); err != nil || out != Landed {
+		t.Fatalf("org control: out %v, err %v", out, err)
+	}
+	if got := cap.only(t).Header.Get(kmsHeader); got != prefix+tenant.String() {
+		t.Fatalf("org control SSEKMSKeyId = %q", got)
+	}
+}
+
+// A pooled alias with no kind seam is refused before any AWS call (ADR-0011 §2).
+func TestOpenRefusesPooledAliasWithoutKindSeam(t *testing.T) {
+	_, err := Open(context.Background(), Options{Bucket: "mark1-ingest", Endpoint: "https://s3.invalid",
+		KMSAliasPrefix: "alias/mark1-tenant-", PersonalKMSAlias: "alias/mark1-personal"})
+	if err == nil || !strings.Contains(err.Error(), "TenantKind") || !strings.Contains(err.Error(), "ADR-0011") {
+		t.Fatalf("Open with PersonalKMSAlias and no TenantKind: err %v; want a refusal naming TenantKind and ADR-0011", err)
 	}
 }

@@ -86,6 +86,11 @@ type Config struct {
 	// existed.
 	Checkpoint func(ctx context.Context, eventIDs [][]byte)
 
+	// Origin signs quarantine-deletion receipts (retention.go); nil ⇒ unsigned, the same posture as a nil Checkpoint.
+	Origin *Origin
+	// Admit uploads each signed deletion receipt as a QuarantineDeletion through the capture admitter; nil ⇒ disk only.
+	Admit func(ctx context.Context, ev *m1pv1.Event) error
+
 	// Test seams; nil ⇒ production defaults.
 	HTTPClient *http.Client
 	Log        *slog.Logger
@@ -110,7 +115,10 @@ type Uplink struct {
 	seal          func([]byte) ([]byte, error)
 	netChange     <-chan struct{}
 	checkpoint    func(context.Context, [][]byte)
+	origin        *Origin
+	admit         func(context.Context, *m1pv1.Event) error
 	health        *obs.Health
+	lastSweep     time.Time
 	// lastAck is the instant of the most recent verified 2xx — Run-owned, like
 	// every other field here.
 	lastAck time.Time
@@ -194,7 +202,7 @@ func New(cfg Config) (*Uplink, error) {
 		store: cfg.Store, drops: cfg.Drops, tokens: cfg.Tokens,
 		endpoint: cfg.Endpoint, edgeVersion: cfg.EdgeVersion, sdk: cfg.SDK,
 		quarantineDir: cfg.QuarantineDir, seal: cfg.Seal, netChange: cfg.NetworkChange,
-		checkpoint: cfg.Checkpoint, health: cfg.Health,
+		checkpoint: cfg.Checkpoint, origin: cfg.Origin, admit: cfg.Admit, health: cfg.Health,
 		client: cfg.HTTPClient, log: cfg.Log, now: cfg.Now, after: cfg.After,
 		rand: cfg.Rand, poll: cfg.Poll, enc: enc,
 	}, nil
@@ -225,6 +233,7 @@ func (u *Uplink) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		u.maybeSweep(ctx)
 		b, err := u.compose()
 		if err != nil {
 			return err

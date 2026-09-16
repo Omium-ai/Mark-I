@@ -55,8 +55,9 @@ import (
 )
 
 const (
-	itRegion      = "us-east-1"
-	itAliasPrefix = "alias/mark1-tenant-"
+	itRegion        = "us-east-1"
+	itAliasPrefix   = "alias/mark1-tenant-"
+	itPersonalAlias = "alias/mark1-personal"
 )
 
 // s3Endpoint resolves the store-contract var and proves the server answers
@@ -113,16 +114,31 @@ func clientFor(t *testing.T, endpoint string, creds aws.Credentials) *s3.Client 
 	})
 }
 
-// r6Policy is the shape Open's R6 probe demands (05 §1.2): a Deny conditioned
-// on the per-tenant KMS alias. MinIO stores and returns it verbatim-enough
-// (it normalises Action/Principal to arrays), which is what lets the R6 test
-// below read the policy back off a real server instead of a Go string literal.
+// r6Policy is the shape Open's R6 probe demands (05 §1.2; ADR-0011 §3): a Deny
+// on t/* conditioned on the KMS alias — per-tenant, plus the pooled personal
+// alias. MinIO stores and returns it verbatim-enough (it normalises Action and
+// Principal to arrays), which is what lets the R6 test below read the policy
+// back off a real server instead of a Go string literal. MinIO rejects
+// NotResource outright, so the AWS-side statement that pins the pooled key to
+// t/* (the docs/09 form) cannot be round-tripped here; this Resource-scoped
+// form is the one the dev stack carries.
 func r6Policy(bucket string) string {
+	return `{"Version":"2012-10-17","Statement":[
+	  {"Effect":"Deny","Principal":"*","Action":"s3:PutObject",
+	   "Resource":"arn:aws:s3:::` + bucket + `/t/*",
+	   "Condition":{"StringNotLike":{"s3:x-amz-server-side-encryption-aws-kms-key-id":["*` + itAliasPrefix + `*","*` + itPersonalAlias + `"]}}}]}`
+}
+
+// r6TenantOnlyPolicy is the pre-ADR-0011 shape: per-tenant deny, no pooled statement.
+func r6TenantOnlyPolicy(bucket string) string {
 	return `{"Version":"2012-10-17","Statement":[
 	  {"Effect":"Deny","Principal":"*","Action":"s3:PutObject",
 	   "Resource":"arn:aws:s3:::` + bucket + `/t/*",
 	   "Condition":{"StringNotLike":{"s3:x-amz-server-side-encryption-aws-kms-key-id":"*` + itAliasPrefix + `*"}}}]}`
 }
+
+// orgKind is the default seam below: every tenant is an organization, the posture the older lanes assume.
+func orgKind(context.Context, uuid.UUID) (string, error) { return "org", nil }
 
 // newBucket creates a scratch bucket, applies policy (nil ⇒ no bucket policy
 // at all) and registers the cleanup that empties and removes it: this suite
@@ -175,15 +191,46 @@ func setup(t *testing.T) (*Client, string, string) {
 
 	bucket := newBucket(t, endpoint, creds, r6Policy)
 	c, err := Open(context.Background(), Options{
-		Bucket:         bucket,
-		Endpoint:       endpoint,
-		KMSAliasPrefix: itAliasPrefix,
-		DisableSSEKMS:  true, // MinIO has no KMS (Options doc); the ceiling, stated in the file header
+		Bucket:           bucket,
+		Endpoint:         endpoint,
+		KMSAliasPrefix:   itAliasPrefix,
+		PersonalKMSAlias: itPersonalAlias,
+		TenantKind:       orgKind,
+		DisableSSEKMS:    true, // MinIO has no KMS (Options doc); the ceiling, stated in the file header
 	})
 	if err != nil {
 		t.Fatalf("Open against real S3: %v", err)
 	}
 	return c, bucket, endpoint
+}
+
+// ADR-0011 §2 against a real store: a refused landing leaves NOTHING behind (the alias itself is proven on the wire in sse_kms_test.go).
+func TestIntegrationLandRefusesUnresolvedTenantKind(t *testing.T) {
+	c, _, _ := setup(t)
+	ctx := context.Background()
+	tenant, device := uuid.New(), uuid.New()
+	key := IngestKey(tenant, uuid.Must(uuid.NewV7()))
+	body := []byte("batch-whose-tenant-kind-is-unknown")
+
+	c.opt.TenantKind = func(context.Context, uuid.UUID) (string, error) {
+		return "", errors.New("m1_tenants: row unreadable")
+	}
+	if out, err := c.Land(ctx, key, body, tenant, device); !errors.Is(err, ErrTenantKind) {
+		t.Fatalf("Land with an erroring kind seam: out %v, err %v; want ErrTenantKind", out, err)
+	}
+	if got, err := c.Probe(ctx, key, body); err != nil || got != NotLanded {
+		t.Fatalf("a refused landing left an object behind: Probe %v, err %v; want NotLanded", got, err)
+	}
+
+	// Positive controls, both branches: the refusal above was the kind check, not an unreachable bucket.
+	c.opt.TenantKind = func(context.Context, uuid.UUID) (string, error) { return "personal", nil }
+	if out, err := c.Land(ctx, key, body, tenant, device); err != nil || out != Landed {
+		t.Fatalf("personal tenant Land: out %v, err %v", out, err)
+	}
+	c.opt.TenantKind = orgKind
+	if out, err := c.Land(ctx, IngestKey(uuid.New(), uuid.Must(uuid.NewV7())), body, uuid.New(), device); err != nil || out != Landed {
+		t.Fatalf("org tenant Land: out %v, err %v", out, err)
+	}
 }
 
 // ─── FR-SPINE-010: the conditional PUT, against a server that enforces it ────
@@ -525,7 +572,8 @@ func TestIntegrationOpenR6AgainstRealBucketPolicies(t *testing.T) {
 	ctx := context.Background()
 
 	open := func(bucket string) error {
-		_, err := Open(ctx, Options{Bucket: bucket, Endpoint: endpoint, KMSAliasPrefix: itAliasPrefix, DisableSSEKMS: true})
+		_, err := Open(ctx, Options{Bucket: bucket, Endpoint: endpoint, KMSAliasPrefix: itAliasPrefix,
+			PersonalKMSAlias: itPersonalAlias, TenantKind: orgKind, DisableSSEKMS: true})
 		return err
 	}
 
@@ -533,6 +581,15 @@ func TestIntegrationOpenR6AgainstRealBucketPolicies(t *testing.T) {
 	// control. The deny-bearing policy must actually boot.
 	if err := open(newBucket(t, endpoint, creds, r6Policy)); err != nil {
 		t.Fatalf("R6 refused a bucket carrying the per-tenant-KMS Deny: %v", err)
+	}
+
+	// Pre-ADR-0011 policy: boots without a pooled alias, refused with one, naming the ADR.
+	tenantOnly := newBucket(t, endpoint, creds, r6TenantOnlyPolicy)
+	if _, err := Open(ctx, Options{Bucket: tenantOnly, Endpoint: endpoint, KMSAliasPrefix: itAliasPrefix, DisableSSEKMS: true}); err != nil {
+		t.Fatalf("R6 refused the per-tenant-only policy with no pooled alias configured: %v", err)
+	}
+	if err := open(tenantOnly); err == nil || !strings.Contains(err.Error(), "ADR-0011") {
+		t.Fatalf("R6 booted with a pooled alias on a stored policy that never binds it (err %v) — a personal PUT would be refused by nobody", err)
 	}
 
 	// A policy MinIO accepts and stores, without the Deny.

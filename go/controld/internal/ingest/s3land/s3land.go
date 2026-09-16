@@ -67,7 +67,12 @@ type Store interface {
 	List(ctx context.Context, prefix string) ([]string, error)
 	// Get fetches a landed object + its device stamp for replay.
 	Get(ctx context.Context, key string) ([]byte, uuid.UUID, error)
+	// Delete removes key; a missing key is not an error (the sweep receipts what it observed, 07 §S3 layout).
+	Delete(ctx context.Context, key string) error
 }
+
+// quarantineTag is what 09's lifecycle rule filters on: prefixes cannot wildcard the tenant segment, the tag can.
+const quarantineTag = "class=quarantine"
 
 // batchTime is the uuidv7 batch_id's embedded millisecond timestamp — the
 // batch's own creation time, validated as v7 at stage 1 before any key exists.
@@ -116,12 +121,19 @@ type Options struct {
 	// Endpoint overrides the AWS resolver for the dev/compose MinIO stack
 	// (13 §11 C4). Path-style addressing is implied when set.
 	Endpoint       string
-	KMSAliasPrefix string // "alias/mark1-tenant-" (05 §2.2)
+	KMSAliasPrefix string // "alias/mark1-tenant-" (05 §2.2), kind='org' tenants
+	// PersonalKMSAlias is the one pooled key for kind='personal' (ADR-0011 §2); "" refuses every personal landing.
+	PersonalKMSAlias string
+	// TenantKind reads "org" | "personal" from the tenant row, never the request (ADR-0011 §2); nil ⇒ all org.
+	TenantKind func(ctx context.Context, tenant uuid.UUID) (string, error)
 	// DisableSSEKMS exists ONLY for MinIO, which has no KMS. The R6 bucket-
-	// policy probe still runs — the refusal shape is preserved even where
-	// enforcement is cosmetic (05 §1.2: no --skip-checks flag).
+	// policy probe and the kind lookup still run — the refusal shape is
+	// preserved even where enforcement is cosmetic (05 §1.2: no --skip-checks).
 	DisableSSEKMS bool
 }
+
+// ErrTenantKind: nothing landed; the pipeline answers 503 and the edge retries — never a fallback key (ADR-0011 §2).
+var ErrTenantKind = errors.New("s3land: tenant kind unresolved, landing refused (ADR-0011)")
 
 type Client struct {
 	s3          *s3.Client
@@ -137,6 +149,9 @@ type Client struct {
 // statement — the "cross-tenant encryption is a write failure" property §2
 // assumes; run without it and every ack is a false promise.
 func Open(ctx context.Context, o Options) (*Client, error) {
+	if o.PersonalKMSAlias != "" && o.TenantKind == nil {
+		return nil, errors.New("s3land: PersonalKMSAlias set without a TenantKind seam — the pooled key would be unreachable by kind and reachable by accident (ADR-0011 §2)")
+	}
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("s3land: aws config: %w", err)
@@ -155,7 +170,7 @@ func Open(ctx context.Context, o Options) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("s3land: bucket policy unreadable (R6 probe): %w", err)
 	}
-	if err := VerifyTenantKMSDeny(aws.ToString(pol.Policy), o.KMSAliasPrefix); err != nil {
+	if err := VerifyTenantKMSDeny(aws.ToString(pol.Policy), o.KMSAliasPrefix, o.PersonalKMSAlias); err != nil {
 		return nil, fmt.Errorf("s3land: R6: %w", err)
 	}
 	return c, nil
@@ -172,32 +187,71 @@ func MustOpen(ctx context.Context, o Options) *Client {
 
 // VerifyTenantKMSDeny checks the bucket policy carries a Deny statement
 // conditioned on the per-tenant KMS key prefix (05 §1.2 R6; the policy body
-// itself is 07's). Structural, not string-equality: any Deny statement whose
-// condition names the SSE-KMS key id and the tenant alias prefix satisfies it.
-func VerifyTenantKMSDeny(policyJSON, aliasPrefix string) error {
+// itself is 07's) and, when personalAlias is set, a second Deny binding the
+// pooled personal key to the t/* prefix (ADR-0011 §3). Structural, not
+// string-equality: any Deny statement whose condition names the SSE-KMS key
+// id and the alias satisfies it; the pooled statement must also scope t/*.
+func VerifyTenantKMSDeny(policyJSON, aliasPrefix, personalAlias string) error {
 	var doc struct {
 		Statement []struct {
-			Effect    string          `json:"Effect"`
-			Condition json.RawMessage `json:"Condition"`
+			Effect      string          `json:"Effect"`
+			Resource    json.RawMessage `json:"Resource"`
+			NotResource json.RawMessage `json:"NotResource"`
+			Condition   json.RawMessage `json:"Condition"`
 		} `json:"Statement"`
 	}
 	if err := json.Unmarshal([]byte(policyJSON), &doc); err != nil {
 		return fmt.Errorf("bucket policy is not parseable JSON: %w", err)
 	}
+	tenantDeny, pooledDeny := false, false
 	for _, st := range doc.Statement {
 		if st.Effect != "Deny" || len(st.Condition) == 0 {
 			continue
 		}
 		cond := string(st.Condition)
-		if strings.Contains(cond, "s3:x-amz-server-side-encryption-aws-kms-key-id") &&
-			strings.Contains(cond, aliasPrefix) {
-			return nil
+		if !strings.Contains(cond, "s3:x-amz-server-side-encryption-aws-kms-key-id") {
+			continue
+		}
+		if strings.Contains(cond, aliasPrefix) {
+			tenantDeny = true
+		}
+		if personalAlias != "" && strings.Contains(cond, personalAlias) &&
+			strings.Contains(string(st.Resource)+string(st.NotResource), "/t/*") {
+			pooledDeny = true
 		}
 	}
-	return errors.New("bucket policy lacks the per-tenant-KMS Deny statement — a stamping bug upstream would become a cross-tenant write, not a write failure")
+	if !tenantDeny {
+		return errors.New("bucket policy lacks the per-tenant-KMS Deny statement — a stamping bug upstream would become a cross-tenant write, not a write failure")
+	}
+	if personalAlias != "" && !pooledDeny {
+		return fmt.Errorf("bucket policy lacks the Deny binding the pooled key %s to the t/* prefix (ADR-0011 §3)", personalAlias)
+	}
+	return nil
+}
+
+// kmsKeyFor: org ⇒ the tenant's own alias, personal ⇒ the pooled alias, anything else ⇒ refused (ADR-0011 §2).
+func (c *Client) kmsKeyFor(ctx context.Context, tenant uuid.UUID) (string, error) {
+	if c.opt.TenantKind == nil {
+		return c.opt.KMSAliasPrefix + tenant.String(), nil
+	}
+	kind, err := c.opt.TenantKind(ctx, tenant)
+	if err != nil {
+		return "", fmt.Errorf("%w: tenant %s: %v", ErrTenantKind, tenant, err)
+	}
+	switch {
+	case kind == "org":
+		return c.opt.KMSAliasPrefix + tenant.String(), nil
+	case kind == "personal" && c.opt.PersonalKMSAlias != "":
+		return c.opt.PersonalKMSAlias, nil
+	}
+	return "", fmt.Errorf("%w: tenant %s kind %q (pooled alias %q)", ErrTenantKind, tenant, kind, c.opt.PersonalKMSAlias)
 }
 
 func (c *Client) Land(ctx context.Context, key string, body []byte, tenant, device uuid.UUID) (Outcome, error) {
+	kmsKey, err := c.kmsKeyFor(ctx, tenant)
+	if err != nil {
+		return 0, err
+	}
 	sum := sha256.Sum256(body)
 	shaB64 := base64.StdEncoding.EncodeToString(sum[:])
 	in := &s3.PutObjectInput{
@@ -209,11 +263,14 @@ func (c *Client) Land(ctx context.Context, key string, body []byte, tenant, devi
 		ChecksumSHA256:    aws.String(shaB64),
 		Metadata:          map[string]string{"m1-device-id": device.String()},
 	}
+	if strings.Contains(key, "/quarantine/v1/") {
+		in.Tagging = aws.String(quarantineTag)
+	}
 	if !c.opt.DisableSSEKMS {
 		in.ServerSideEncryption = s3types.ServerSideEncryptionAwsKms
-		in.SSEKMSKeyId = aws.String(c.opt.KMSAliasPrefix + tenant.String())
+		in.SSEKMSKeyId = aws.String(kmsKey)
 	}
-	_, err := c.s3.PutObject(ctx, in)
+	_, err = c.s3.PutObject(ctx, in)
 	if err == nil {
 		// S3 returns 200 only after durable multi-AZ persistence — this
 		// return IS the ack license (05 §2.2).
@@ -302,6 +359,15 @@ func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
 		}
 	}
 	return keys, nil
+}
+
+// Delete is a plain DeleteObject: under versioning it writes a delete marker and the lifecycle's noncurrent
+// expiry finishes the job, which is exactly the 32 d backstop 09 configures.
+func (c *Client) Delete(ctx context.Context, key string) error {
+	if _, err := c.s3.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(c.opt.Bucket), Key: aws.String(key)}); err != nil {
+		return fmt.Errorf("s3land: delete %s: %w", key, err)
+	}
+	return nil
 }
 
 func (c *Client) Get(ctx context.Context, key string) ([]byte, uuid.UUID, error) {
