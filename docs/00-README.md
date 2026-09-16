@@ -141,16 +141,17 @@ authorship.
 
 | ADR | Decision | Status |
 |---|---|---|
-| `0001-clickhouse-ordering-key.md` | ordering key + `ReplacingMergeTree` layout | **Proposed — founder sign-off required** |
-| `0002-task-seg-v1.md` | the TVO denominator's merge rules | **Proposed — founder sign-off required** |
+| `0001-clickhouse-ordering-key.md` | ordering key + `ReplacingMergeTree` layout | Accepted (founder, 2026-09-16; `tools/ci/adr_signed_gate.sh` reads it) |
+| `0002-task-seg-v1.md` | the TVO denominator's merge rules | Accepted (founder, 2026-09-16); rule changes become `task_seg.v2` on new events only |
 | `0003-shapley-game-definition.md` | players and `v(S)` | **Proposed — deferred**; the deterministic waste taxonomy ships first regardless, and no Shapley code may be written until this is signed |
-| `0004-key-ceremony.md` | device / chain / bundle / update keys, rotation, witness | **Proposed — founder sign-off required**; resolves R-01 |
+| `0004-key-ceremony.md` | device / chain / bundle / update keys, rotation, witness | Accepted (founder, 2026-09-16; the ceremony itself executes at deployment); resolves R-01 |
 | `0005-no-otel-m1p.md` | zero OpenTelemetry; M1P is the sole fabric | Accepted |
 | `0006-language-boundaries.md` | where Rust, Go and Python each go, and why | Accepted |
 | `0007-spool-durability-classes.md` | block-on-full vs drop-newest per class | Accepted |
 | `0008-client-side-first-judges.md` | judges run through the customer's key by default | Accepted |
-| `0009-verdict-to-training-label.md` | four verdicts → binary KTO labels | **Proposed**; resolves R-02 |
-| `0010-tvo-rollup-writer.md` | who writes `tvo_tenant_day` — a daily job-keyed batch writer, never a materialized view | **Proposed — founder sign-off required before the first `tvo_tenant_day` write**, the same gate ADR-0001 carries; resolves D-F / F37 |
+| `0009-verdict-to-training-label.md` | four verdicts → binary KTO labels | Accepted (founder, 2026-09-16); resolves R-02 |
+| `0010-tvo-rollup-writer.md` | who writes `tvo_tenant_day` — a daily job-keyed batch writer, never a materialized view | Accepted (founder, 2026-09-16; the unsigned-write guard in `rollup.py` is retired); resolves D-F / F37 |
+| `0011-personal-tenants-pooled-kms.md` | organizations keep per-tenant KMS keys; personal tenants share `alias/mark1-personal` | Accepted (founder, 2026-09-16) |
 
 **The design phase is not complete.** It closes when:
 

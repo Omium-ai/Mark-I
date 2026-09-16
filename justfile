@@ -340,6 +340,7 @@ gates:
     tools/ci/override_pattern_gate.sh
     tools/ci/build_tag_gate.sh
     tools/ci/shapley_gate.sh
+    tools/ci/adr_signed_gate.sh
     tools/ci/vendor_binary_gate.sh
     tools/ci/ci_matrix_gate.sh
     tools/ci/verifier_offline_gate.sh

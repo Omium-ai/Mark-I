@@ -1,6 +1,6 @@
 # ADR-0009 — Mapping the four-verdict vocabulary onto the trainer's binary KTO label
 
-- **Status:** Proposed — awaiting founder sign-off
+- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/RECONCILIATION.md (D-EI).
 - **Date:** 2026-08-28
 - **Deciders:** Anurag Upadhyay (founder), Omium
 - **Reversibility:** cheap for future exports, impossible for past training runs — corpus exports are immutable and receipted (a corrected export is a new `export_id`, never a rewrite), so changing the mapping is a new exporter release producing new exports under the new rule; nothing historical is restated and every old export's receipt stays valid. What cannot be reversed: gradient updates already taken from a corpus built under the old mapping. A model trained on a mis-mapped corpus is retrained from checkpoints, at GPU cost, not patched.

@@ -1,6 +1,6 @@
 # ADR-0001 — ClickHouse ordering key and `ReplacingMergeTree` layout
 
-- **Status:** Proposed — awaiting founder sign-off
+- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/RECONCILIATION.md (D-EI).
 - **Date:** 2026-08-28
 - **Deciders:** Anurag Upadhyay (founder), Omium
 - **Reversibility:** expensive — a MergeTree `ORDER BY` cannot be altered in place; reversing means a new table plus a full re-ingest from the S3 replay log. At pilot scale (~10⁷–10⁸ events, tens of GB of zstd batches) that is hours of one backfill worker and negligible S3 GET cost. At 100× (~10¹⁰ events, tens of TB) it is days of parallel backfill, four-to-five-figure S3 GET + transfer spend, and a dual-write window in `controld.ingest` while the backfill catches up. Painful, bounded, and *possible* — which is exactly why the S3-first landing exists. Without the replay log this decision would be unrecoverable, not merely expensive.

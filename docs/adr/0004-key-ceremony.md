@@ -1,6 +1,6 @@
 # ADR-0004 — Key ceremony: every key in the system, and the Ed25519/KMS split
 
-- **Status:** Proposed — awaiting founder sign-off (one of the four ADRs the plan requires signed before Phase 1)
+- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/RECONCILIATION.md (D-EI). The design is signed; the ceremony itself (real KMS keys, P-256 arms, witness selection) executes at deployment (Block E) and is recorded as an addendum here when it happens.
 - **Date:** 2026-08-28
 - **Deciders:** Anurag Upadhyay (founder), Omium
 - **Reversibility:** expensive — every signature ever produced must verify forever, so an algorithm or custody change is additive-only: the offline verifier and `KeyRing` carry every historical algorithm permanently, and reversing means a rotation ceremony plus a verifier release, never a deletion

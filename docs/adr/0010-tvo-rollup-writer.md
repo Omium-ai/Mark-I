@@ -1,6 +1,6 @@
 # ADR-0010 — Who writes `tvo_tenant_day`: a daily job-keyed batch writer, never a materialized view
 
-- **Status:** Proposed — founder sign-off required **before the first `tvo_tenant_day` write**, the same gate ADR-0001 carries and for the same reason
+- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/RECONCILIATION.md (D-EI). Signed before any production `tvo_tenant_day` write; none exists yet.
 - **Date:** 2026-08-28
 - **Deciders:** Anurag Upadhyay (founder), Omium
 - **Reversibility:** cheap for the mechanics, irreversible for the rows. Schedule, grace lag, dedupe-window size and the job's SQL are config and a migration — hours. What cannot be reversed is a written `(tenant_id, day, task_seg_version)` row: it is append-only by decision, so a number assembled from it and quoted to a customer stays quotable forever and stays *wrong* forever if it was wrong. Correction is a new, differently-keyed series, never an edit. A wholesale rebuild stays possible — `tvo_task` is retained 760 d, so the writer's input outlives its output — which keeps this expensive rather than fatal, exactly as the S3 replay log does for ADR-0001.

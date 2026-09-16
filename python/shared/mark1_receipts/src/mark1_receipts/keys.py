@@ -18,8 +18,9 @@ Rotation follows ro_012's rule, enforced by m1_002's tables rather than here: re
 keys stop SIGNING and are never unpublished — dropping one is the operational
 equivalent of deleting the receipts it signed.
 
-ponytail: ed25519 only. ADR-0004 (Proposed) adds "p256:"-prefixed KMS countersign keys;
-the prefix scheme already absorbs that — add a P-256 arm to ``verify`` when it signs.
+ponytail: ed25519 only. ADR-0004 (Accepted 2026-09-16; the ceremony runs at deployment) adds
+"p256:"-prefixed KMS countersign keys; the prefix scheme already absorbs that — add a P-256 arm
+to ``verify`` when it signs.
 """
 
 from __future__ import annotations

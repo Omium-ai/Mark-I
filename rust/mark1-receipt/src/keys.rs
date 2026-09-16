@@ -99,7 +99,7 @@ pub fn verify(public_raw: &[u8; 32], signature: &[u8; 64], message: &[u8]) -> bo
 /// A rotation cross-signature as published in the key manifest (08 §3.5).
 ///
 /// ponytail: carried opaque, not yet verified — the byte contract for what
-/// the predecessor key signs is ADR-0004's (still Proposed) and no vector
+/// the predecessor key signs is ADR-0004's (Accepted 2026-09-16; ceremony at deployment) and no vector
 /// fixes it; the verification arm lands with the signed ADR.
 #[derive(Debug, Clone)]
 pub struct CrossSig {
