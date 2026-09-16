@@ -15,6 +15,7 @@
 package policydist
 
 import (
+	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/sha256"
 	"fmt"
@@ -23,10 +24,13 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/receipts"
 )
 
-// SectionSigner signs one section's D-Q signing input.
+// SectionSigner signs one section's D-Q signing input. receipts.SignerLike
+// by another name: the in-process seed signer and the KMS-shaped signer both
+// satisfy it, and the manifest builder needs the public half.
 type SectionSigner interface {
 	Sign(domainPrefixed []byte) ([]byte, error)
 	KeyID() string
+	Public() ed25519.PublicKey
 }
 
 // Keyring holds exactly one signer per section of SectionNames.

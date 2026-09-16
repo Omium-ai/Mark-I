@@ -178,6 +178,8 @@ type RouteSection struct {
 	Ladders     []Ladder     `cbor:"ladders"`
 	Knee        KneeTable    `cbor:"knee"`
 	Exploration *Exploration `cbor:"exploration,omitempty"`
+	// D-EF: the publisher-signed tenant opt-in that ε>0 requires; a pointer so present-false round-trips canonically.
+	ExplorationOptIn *bool `cbor:"exploration_opt_in,omitempty"`
 }
 
 type CPVSRow struct {
@@ -232,6 +234,17 @@ type MemoryBudgets struct {
 type CortexSection struct {
 	MapBudgetTokens BudgetRange `cbor:"map_budget_tokens"`
 	Channels        []string    `cbor:"channels"`
+	// 07 `? learned_ranker`: ABSENT ⇒ no learned ranker, cortexd serves PPR order (06 §12.4).
+	LearnedRanker *LearnedRanker `cbor:"learned_ranker,omitempty"`
+}
+
+// LearnedRanker is 07's `learned-ranker`; Coefficients is a slice, not [4]float64, so a
+// wrong arity reaches validateCortex as M1E-3001 instead of being zero-padded by the decoder.
+type LearnedRanker struct {
+	Stage        string    `cbor:"stage"` // "probation" | "shadow" | "active"
+	Weight       float64   `cbor:"weight"`
+	Bias         float64   `cbor:"bias"`
+	Coefficients []float64 `cbor:"coefficients"`
 }
 
 type BudgetRange struct {
@@ -277,7 +290,11 @@ const jsonPointerMaxLen = 1024
 var (
 	cortexChannels = map[string]bool{"session_start": true, "prompt_submit": true, "before_model": true}
 	costBases      = map[string]bool{"usd": true, "quota": true}
+	rankerStages   = map[string]bool{"probation": true, "shadow": true, "active": true}
 )
+
+// rankerCoefficients is l2_graph::FEATURES' arity: [fan_in, recency, path_depth, tag_count].
+const rankerCoefficients = 4
 
 // RejectError carries an 08 §9 code. Distinct from an infrastructure error:
 // a rejection is final for these bytes (the compiler must fix the bundle),
@@ -519,6 +536,9 @@ func validateRoute(r RouteSection) error {
 		if err := unitInterval("route.exploration.epsilon", r.Exploration.Epsilon); err != nil {
 			return err
 		}
+		if r.Exploration.Epsilon > 0 && (r.ExplorationOptIn == nil || !*r.ExplorationOptIn) {
+			return reject("M1E-3001", "route.exploration.epsilon = %v without exploration_opt_in = true (D-EF)", r.Exploration.Epsilon)
+		}
 	}
 	return nil
 }
@@ -540,6 +560,29 @@ func validateCortex(c CortexSection) error {
 	for i, ch := range c.Channels {
 		if !cortexChannels[ch] {
 			return reject("M1E-3005", "cortex.channels[%d] = %q is not the closed enum session_start|prompt_submit|before_model", i, ch)
+		}
+	}
+	if c.LearnedRanker == nil {
+		return nil
+	}
+	// Every ranker miss is M1E-3001, matching both edge decoders and the frozen
+	// cortex_ranker_* negatives; cortexd never clamps, so the publisher never lets one through.
+	r := c.LearnedRanker
+	if !rankerStages[r.Stage] {
+		return reject("M1E-3001", "cortex.learned_ranker.stage = %q is not the closed enum probation|shadow|active", r.Stage)
+	}
+	if err := unitInterval("cortex.learned_ranker.weight", r.Weight); err != nil {
+		return err
+	}
+	if err := finite("cortex.learned_ranker.bias", r.Bias); err != nil {
+		return err
+	}
+	if len(r.Coefficients) != rankerCoefficients {
+		return reject("M1E-3001", "cortex.learned_ranker.coefficients has %d entries, want exactly %d (one per cortexd file feature)", len(r.Coefficients), rankerCoefficients)
+	}
+	for i, cf := range r.Coefficients {
+		if err := finite(fmt.Sprintf("cortex.learned_ranker.coefficients[%d]", i), cf); err != nil {
+			return err
 		}
 	}
 	return nil

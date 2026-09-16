@@ -173,7 +173,7 @@ func (s *Store) Publish(ctx context.Context, tenant querychoke.TenantID, d Draft
 		}
 		bodyHash := sha256.Sum256(body)
 
-		incl, treeSize, err := s.appendLeaf(ctx, tx, tenant, "policy_bundle", bodyHash)
+		incl, treeSize, err := s.appendLeaf(ctx, tx, tenant, LeafKindPolicyBundle, bodyHash)
 		if err != nil {
 			return err
 		}

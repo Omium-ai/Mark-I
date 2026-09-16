@@ -25,6 +25,15 @@ import (
 // in the estate.
 const TLogHeadDomainPrefix = "mark1-tlog-head-v1\x00"
 
+// The leaf kinds this package appends (m1_062's CHECK admits a third,
+// receipt_chain_head, which the witness job owns). One tree, kind-tagged:
+// a head signed after a manifest leaf covers every bundle AND the keys that
+// signed them, which is what makes a rotation auditable from one root.
+const (
+	LeafKindPolicyBundle = "policy_bundle"
+	LeafKindKeyManifest  = "key_manifest"
+)
+
 // RFC 6962 §2 domain separation: leaves are hashed under 0x00, interior nodes
 // under 0x01. Without it, an interior node can be presented as a leaf and a
 // proof for a subtree becomes a proof for a value that was never logged.

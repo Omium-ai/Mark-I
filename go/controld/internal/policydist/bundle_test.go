@@ -2,7 +2,11 @@ package policydist
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"errors"
+	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +117,18 @@ func TestDecodeSectionsAcceptsCanonicalBaseline(t *testing.T) {
 	if _, err := DecodeSections(mustEncode(t, s)); err != nil {
 		t.Fatalf("hourly_block_ceiling at the bound (%d) must decode: %v", maxHourlyBlockCeiling, err)
 	}
+	// D-EF positive control: ε>0 under a signed opt-in true, and present-false at ε 0.
+	yes, no := true, false
+	s = validSections()
+	s.Route.Exploration, s.Route.ExplorationOptIn = &Exploration{Epsilon: 0.05}, &yes
+	if got, err := DecodeSections(mustEncode(t, s)); err != nil || got.Route.Exploration.Epsilon != 0.05 {
+		t.Fatalf("ε 0.05 with exploration_opt_in true must decode: %v", err)
+	}
+	s = validSections()
+	s.Route.Exploration, s.Route.ExplorationOptIn = &Exploration{Epsilon: 0}, &no
+	if _, err := DecodeSections(mustEncode(t, s)); err != nil {
+		t.Fatalf("ε 0 with exploration_opt_in false must decode: %v", err)
+	}
 }
 
 // The rejection table. Each case names the 08 §9 code the publisher must emit;
@@ -194,9 +210,50 @@ func TestDecodeSectionsRejections(t *testing.T) {
 		{"exploration epsilon outside [0,1]", mut(func(s *Sections) {
 			s.Route.Exploration = &Exploration{Epsilon: 1.5}
 		}), "M1E-3001"},
+		{"exploration epsilon > 0 without the signed opt-in (D-EF)", mut(func(s *Sections) {
+			s.Route.Exploration = &Exploration{Epsilon: 0.05}
+		}), "M1E-3001"},
+		{"exploration epsilon > 0 with the signed opt-in false (D-EF)", mut(func(s *Sections) {
+			no := false
+			s.Route.Exploration, s.Route.ExplorationOptIn = &Exploration{Epsilon: 0.05}, &no
+		}), "M1E-3001"},
 		{"p_pass outside [0,1]", mut(func(s *Sections) {
 			s.Route.CPVS[0].PPass = 1.2
 		}), "M1E-3001"},
+		{"ranker stage outside closed enum", mut(func(s *Sections) {
+			s.Cortex.LearnedRanker = ranker(func(r *LearnedRanker) { r.Stage = "canary" })
+		}), "M1E-3001"},
+		{"ranker weight above 1", mut(func(s *Sections) {
+			s.Cortex.LearnedRanker = ranker(func(r *LearnedRanker) { r.Weight = 1.5 })
+		}), "M1E-3001"},
+		{"ranker weight below 0", mut(func(s *Sections) {
+			s.Cortex.LearnedRanker = ranker(func(r *LearnedRanker) { r.Weight = -0.01 })
+		}), "M1E-3001"},
+		{"ranker weight NaN", mut(func(s *Sections) {
+			s.Cortex.LearnedRanker = ranker(func(r *LearnedRanker) { r.Weight = math.NaN() })
+		}), "M1E-3001"},
+		{"ranker bias infinite", mut(func(s *Sections) {
+			s.Cortex.LearnedRanker = ranker(func(r *LearnedRanker) { r.Bias = math.Inf(1) })
+		}), "M1E-3001"},
+		{"ranker with 3 coefficients", mut(func(s *Sections) {
+			s.Cortex.LearnedRanker = ranker(func(r *LearnedRanker) { r.Coefficients = []float64{0.6, 0.25, -0.1} })
+		}), "M1E-3001"},
+		{"ranker with 5 coefficients", mut(func(s *Sections) {
+			s.Cortex.LearnedRanker = ranker(func(r *LearnedRanker) { r.Coefficients = []float64{0.6, 0.25, -0.1, 0.15, 0} })
+		}), "M1E-3001"},
+		{"ranker coefficient NaN", mut(func(s *Sections) {
+			s.Cortex.LearnedRanker = ranker(func(r *LearnedRanker) { r.Coefficients[2] = math.NaN() })
+		}), "M1E-3001"},
+		{"ranker with a stray key", sectionsMap(t, map[string]any{"cortex": map[string]any{
+			"map_budget_tokens": map[string]any{"min": uint64(500), "max": uint64(2000)}, "channels": []string{"session_start"},
+			"learned_ranker": map[string]any{"stage": "shadow", "weight": 0.5, "bias": 0.05, "coefficients": []float64{0.6, 0.25, -0.1, 0.15}, "model_id": "x"},
+		}}), "M1E-3005"},
+		// An absent required key zero-fills under the typed decoder and dies at the
+		// canonical re-encode, the publisher's existing road for every missing key.
+		{"ranker missing its bias", sectionsMap(t, map[string]any{"cortex": map[string]any{
+			"map_budget_tokens": map[string]any{"min": uint64(500), "max": uint64(2000)}, "channels": []string{"session_start"},
+			"learned_ranker": map[string]any{"stage": "shadow", "weight": 0.5, "coefficients": []float64{0.6, 0.25, -0.1, 0.15}},
+		}}), "M1E-3005"},
 		// 07 rule 3: an unknown key anywhere fails decode. Rule 4's wasm_module
 		// is the specific shape that must never be tolerated, and it can only be
 		// expressed by hand-building the map — the Go type has no such field.
@@ -242,6 +299,112 @@ func TestDecodeSectionsRejections(t *testing.T) {
 	if seen["M1E-3005"] == 0 || seen["M1E-3001"] == 0 {
 		t.Fatalf("rejection table stopped covering both codes: %v", seen)
 	}
+}
+
+// ranker is the cortex_learned_ranker vector's values with one field mutated.
+func ranker(f func(*LearnedRanker)) *LearnedRanker {
+	r := &LearnedRanker{Stage: "shadow", Weight: 0.5, Bias: 0.05, Coefficients: []float64{0.6, 0.25, -0.1, 0.15}}
+	f(r)
+	return r
+}
+
+// vectorSections lifts the six-section map's canonical bytes out of a frozen bundle vector.
+func vectorSections(t *testing.T, name string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(bundleVectorsDir, name+".cbor"))
+	if err != nil {
+		t.Skipf("frozen vectors unavailable: %v", err)
+	}
+	var top struct {
+		Sections cbor.RawMessage `cbor:"sections"`
+	}
+	if err := cbor.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("decode %s: %v", name, err)
+	}
+	return top.Sections
+}
+
+// TestLearnedRankerIsOptionalClosedEnumAndBounded: the publisher's positive
+// control is the frozen cortex_learned_ranker vector's own sections, decoded and
+// re-encoded byte-for-byte (a decoder that dropped the key would fail the canonical
+// check, not merely accept); the two frozen negatives reject with the edge's code.
+func TestLearnedRankerIsOptionalClosedEnumAndBounded(t *testing.T) {
+	got, err := DecodeSections(vectorSections(t, "cortex_learned_ranker"))
+	if err != nil {
+		t.Fatalf("cortex_learned_ranker sections must publish: %v", err)
+	}
+	want := LearnedRanker{Stage: "shadow", Weight: 0.5, Bias: 0.05, Coefficients: []float64{0.6, 0.25, -0.1, 0.15}}
+	if r := got.Cortex.LearnedRanker; r == nil || r.Stage != want.Stage || r.Weight != want.Weight || r.Bias != want.Bias || !equalFloats(r.Coefficients, want.Coefficients) {
+		t.Fatalf("learned_ranker: got %+v, want %+v", got.Cortex.LearnedRanker, want)
+	}
+	for _, tc := range []struct{ name, detail string }{
+		{"cortex_ranker_bad_stage", "stage"},
+		{"cortex_ranker_weight_out_of_range", "weight"},
+	} {
+		_, err := DecodeSections(vectorSections(t, tc.name))
+		var rej *RejectError
+		if err == nil || !errors.As(err, &rej) || rej.Code != "M1E-3001" || !strings.Contains(rej.Detail, tc.detail) {
+			t.Fatalf("%s: %v, want M1E-3001 naming %s", tc.name, err, tc.detail)
+		}
+	}
+	// Absent stays absent: the baseline carries no ranker and its bytes must not grow a null.
+	s := validSections()
+	if got, err := DecodeSections(mustEncode(t, s)); err != nil || got.Cortex.LearnedRanker != nil {
+		t.Fatalf("no ranker: %v %+v", err, got.Cortex.LearnedRanker)
+	}
+	// Every stage of the closed enum and both weight bounds publish through the Go types.
+	for _, stage := range []string{"probation", "shadow", "active"} {
+		for _, w := range []float64{0, 1} {
+			s := validSections()
+			s.Cortex.LearnedRanker = ranker(func(r *LearnedRanker) { r.Stage, r.Weight = stage, w })
+			if got, err := DecodeSections(mustEncode(t, s)); err != nil || got.Cortex.LearnedRanker == nil || got.Cortex.LearnedRanker.Weight != w {
+				t.Fatalf("stage %s weight %v must publish: %v", stage, w, err)
+			}
+		}
+	}
+}
+
+// TestDraftPublisherDecodesRankerFixture is the compiler lane's round-trip for a
+// ranker-bearing draft: python/intel carried cortex_learned_ranker's cortex section
+// through compile_sections (test_ranker_bearing_draft_carries_through_to_the_committed_fixture)
+// and pinned the map; here it decodes, validates, re-encodes byte-for-byte and vets.
+func TestDraftPublisherDecodesRankerFixture(t *testing.T) {
+	raw, err := os.ReadFile(strings.TrimSuffix(compilerFixture, ".cbor") + "_ranker.cbor")
+	if err != nil {
+		t.Fatalf("compiler ranker fixture: %v", err)
+	}
+	s, err := DecodeSections(raw)
+	if err != nil {
+		t.Fatalf("compiler output does not pass the reference decoder: %v", err)
+	}
+	r := s.Cortex.LearnedRanker
+	if r == nil || r.Stage != "shadow" || r.Weight != 0.5 || r.Bias != 0.05 || !equalFloats(r.Coefficients, []float64{0.6, 0.25, -0.1, 0.15}) ||
+		s.Cortex.MapBudgetTokens != (BudgetRange{Min: 400, Max: 2000}) || len(s.Cortex.Channels) != 3 {
+		t.Fatalf("cortex: %+v %+v", s.Cortex, r)
+	}
+	base, err := DecodeSections(readCompilerFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.Cortex.LearnedRanker != nil || !near(base.Route.Knee.Rows[0].CN, s.Route.Knee.Rows[0].CN) || len(base.Route.CPVS) != len(s.Route.CPVS) {
+		t.Fatalf("the two compiler fixtures must differ only by the carried cortex section: %+v vs %+v", base.Cortex, s.Cortex)
+	}
+	dr, body, err := vet(draftOf(t, raw, "canary"))
+	if err != nil || string(body) != string(raw) || string(dr.SectionsCBOR) != string(raw) {
+		t.Fatalf("vet: %v %+v", err, dr)
+	}
+}
+
+func equalFloats(a, b []float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func evenConfusion() [4][3]float64 {
@@ -376,6 +539,7 @@ type fixedKeyID string
 
 func (f fixedKeyID) Sign([]byte) ([]byte, error) { return make([]byte, 64), nil }
 func (f fixedKeyID) KeyID() string               { return string(f) }
+func (f fixedKeyID) Public() ed25519.PublicKey   { return nil }
 
 func TestKeyringRefusesPartialAndSharedRings(t *testing.T) {
 	full := map[string]SectionSigner{}
