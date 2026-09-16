@@ -653,16 +653,16 @@ func decodeRoute(v any) (RouteSection, *Reject) {
 			}
 		}
 	}
-	// D-EF: ε>0 needs the publisher-signed opt-in; ponytail: absent ⇒ pre-ruling grammar until the re-freeze fixes `full` (ε 0.05, no opt-in).
+	// D-EF: ε>0 needs the publisher-signed opt-in; absent or present-false both refuse (fail closed, same as the publisher).
+	op := p + ".exploration_opt_in"
+	var optIn bool
 	if o, ok := m["exploration_opt_in"]; ok {
-		op := p + ".exploration_opt_in"
-		optIn, rej := boolVal(o, op)
-		if rej != nil {
+		if optIn, rej = boolVal(o, op); rej != nil {
 			return out, rej
 		}
-		if !optIn && out.ExplorationEpsilon > 0 {
-			return out, schemaErr(op, "exploration.epsilon > 0 without opt-in")
-		}
+	}
+	if !optIn && out.ExplorationEpsilon > 0 {
+		return out, schemaErr(op, "exploration.epsilon > 0 without opt-in")
 	}
 	return out, nil
 }

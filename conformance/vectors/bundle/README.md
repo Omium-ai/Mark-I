@@ -70,7 +70,7 @@ Each entry carries `tlog_head` (D-S): the pinned log head the driving caller hol
 | name | expect | proves |
 |---|---|---|
 | `bundle_zero` | accept | D-P's Phase 2 fixture: seq 0, channel `local`, genesis prev_hash, null inclusion, fusion ON with literature-default 4×3 confusion matrices (D-R)/priors + the normative syntactic∪tests correlation group |
-| `full` | accept | all six sections with every optional field, seq 1 on `stable`, single-leaf tlog proof targeting the pinned head |
+| `full` | accept | all six sections with every optional field, seq 1 on `stable`, single-leaf tlog proof targeting the pinned head; carries the D-EF pair `route.exploration.epsilon = 0.05` WITH signed `route.exploration_opt_in = true` |
 | `minimal` | accept | smallest CDDL-admissible sections, seq 2, prev_hash chained to `full`'s body hash, 3-leaf tlog proof (non-trivial audit path) |
 | `knee_p_lcb` | accept | D-Z's OPTIONAL knee-row `p_lcb`, in all three states (absent / 0.0 / 0.75) in one table: both decoders once had it out of their optional key set, which made every bundle able to arm the knee governor an `M1E-3001` |
 | `bad_section_sig` | M1E-3001 / bad_signature | one corrupted section signature rejects the whole bundle |
@@ -102,6 +102,8 @@ Each entry carries `tlog_head` (D-S): the pinned log head the driving caller hol
 | `cortex_learned_ranker` | accept | 07's OPTIONAL cortex `learned_ranker` (06 §12.4) populated: stage `shadow`, weight 0.5, bias 0.05, 4 coefficients. Both decoders once had the key out of their optional set, so no bundle could carry ranker weights to cortexd; the dedicated drivers assert the decoded values, since an accept alone would not catch a decoder that swallowed the key |
 | `cortex_ranker_weight_out_of_range` | M1E-3001 / schema | a properly SIGNED seq-0 bundle whose `learned_ranker.weight` is 1.5: the blend weight is bounded to [0,1] at decode, never clamped at cortexd |
 | `cortex_ranker_bad_stage` | M1E-3001 / schema | a properly SIGNED seq-0 bundle whose `learned_ranker.stage` is `canary`: the stage is a closed enum (07 rule 1c), and an enum miss is schema, never the paged M1E-3005 |
+| `exploration_opt_in_false` | M1E-3001 / schema | D-EF: a properly SIGNED seq-0 bundle with `route.exploration.epsilon = 0.05` and `route.exploration_opt_in = false`: ε > 0 under a signed present-false opt-in refuses in both decoders |
+| `exploration_opt_in_absent` | M1E-3001 / schema | D-EF: the same bundle with `route.exploration_opt_in` dropped entirely: ε > 0 with the opt-in key absent refuses the same as present-false, fail closed like the controld publisher — closes the carve-out `full` needed before this freeze |
 
 Every implementation MUST drive every manifest entry, positives and negatives, and for
 accepts assert `body_sha256_hex` plus the `summary` fields against its own decode.
@@ -135,6 +137,31 @@ Rust `conf_vectors_bundle_rotation_*` (mark1-policy, reference), Go
 `TestConfVectorsBundleRotationManifests` (controld publish-side validator).
 
 ## Changelog
+
+- **2026-09-16 — 33 → 35 vectors (5 accepts / 30 rejects; no new kind), D-EF re-freeze
+  (RECONCILIATION D-EF, ledger FR-ROUTE-003).** `full` now carries the D-EF pair with a
+  POSITIVE value set: `route.exploration_opt_in = true` alongside the existing
+  `route.exploration.epsilon = 0.05` (previously `full` carried ε > 0 with no opt-in key
+  at all — the pre-ruling grammar the decoders' absent-key carve-out existed for). Two
+  negatives appended: `exploration_opt_in_false` and `exploration_opt_in_absent`, both ε
+  0.05 under a properly SIGNED bundle, refused `M1E-3001/schema`. Both decoders' `route`
+  section decode now fails CLOSED on the opt-in key (absent counts as `false`, matching
+  the controld publisher's existing absent-or-false refusal) — previously only
+  present-and-false refused; absent accepted regardless of ε, which is the carve-out this
+  freeze closes. This is **not** an additive-only freeze: because `full`'s section
+  content changed, its section signature, `body_sha256`, and single-leaf inclusion root
+  changed, cascading into every vector that chains from `full`'s body hash or reuses its
+  raw bytes/tlog head — `minimal`, `seq_replay`, `backdated_issued_at`,
+  `inclusion_missing`, `tlog_head_missing`, `forged_inclusion_root`,
+  `tampered_body_self_proof`, `forged_inclusion_root_seq2`, and `rotation_accepted`
+  (chained off `minimal`'s body) all re-froze with new bytes/hashes; their DECODED
+  content (summary fields, expected code/kind) is unchanged — only the derived hashes and
+  proof roots moved, driven entirely by the one added field on `full`. Every vector
+  independent of `full`'s chain (`bundle_zero` and everything built from it, `knee_p_lcb`,
+  the `cortex_*` and `mcb_over_cap`/`hourly_over_ceiling` family, the `non_canonical_*`
+  family, `command_string`, `schema_stray_key`, `outside_validity`, `too_large`,
+  `missing_max_age`, `missing_prev_hash`, `unknown_section`) is byte-identical to the
+  previous freeze.
 
 - **2026-09-16 — 30 → 33 vectors (5 accepts / 28 rejects; no new kind), additive.** Three
   appended for the cortex section's new OPTIONAL `learned_ranker` key (`cortex_learned_ranker`,

@@ -3419,7 +3419,7 @@ route-section = {
     ? exploration_opt_in: bool,                       ; D-EF: the signed half of that opt-in. ε>0 with this key present-and-false is a
                                                       ; schema refusal (M1E-3001) in both decoders and at the publisher; the edge additionally
                                                       ; applies ε>0 only under a local `<state>/gates/opt-in.json` {"exploration": true},
-                                                      ; else ε=0. Key absence keeps the pre-ruling grammar until the next vector re-freeze.
+                                                      ; else ε=0. Key absence refuses exactly like present-false since the 2026-09-16 re-freeze (D-EI).
 }
 
 ladder = {
@@ -3555,7 +3555,7 @@ heads/<tenant>/dt=<YYYY-MM-DD>/<hour>.json
 | Prefix class | Versioning | Object lock | Retention | Why |
 |---|---|---|---|---|
 | `ingest/` (replay log) | On | **GOVERNANCE**, 35 days | Lifecycle: Glacier IR at 90 d, delete at 760 d | The replay window must survive an operator mistake or a compromised writer (governance lock), but tenant offboarding must be able to delete it — COMPLIANCE mode would make a legal deletion obligation unsatisfiable. Governance bypass requires the offboarding role under dual control. |
-| `quarantine/` | On | GOVERNANCE, 35 days | Delete at 90 d | Same tamper posture; short life — quarantine is a triage queue, not an archive. |
+| `quarantine/` | On | GOVERNANCE, 30 days | controld sweep deletes at 30 d with a `quarantine_deletion` receipt row (founder ruling 2026-09-16, D-EI); lifecycle expires at 32 d as the backstop, and a sweep that finds the object already gone still writes the receipt naming the backstop | Same tamper posture; short life — quarantine is a triage queue, not an archive. The never-replay marker is the Postgres tombstone (`m1_quarantined_batches`), not the object's existence. |
 | `parquet/`, `kto/` (corpus) | On | None | Tenant-configured; default delete at 400 d | Integrity comes from the export receipt (digests in the chain), not from lock; corpus must be deletable on demand (erasure → retrain path). |
 | `evidence/` | On | None | ≤ 90 d hard ceiling | Highest-sensitivity class gets the shortest life; opt-in never means indefinite. |
 | `witness/heads/` | On | **COMPLIANCE**, 2 years | No delete | Chain heads are 32-byte hashes — zero content, maximal integrity value; this is the one class where "cannot be deleted by anyone including us" is exactly the product promise. |
@@ -3747,7 +3747,7 @@ Two rings, one shape: the proxy tee's spill and the hookshim's emergency spill. 
 | ClickHouse | billing / verdict / route / receipt-ref events | 760 d (25 mo) | table `TTL` (blanket clause) |
 | ClickHouse | rollup tables | 760 d | partition `TTL` on `day` |
 | S3 `ingest/` | raw batches (replay log) | 760 d; Glacier IR at 90 d | lifecycle + 35 d GOVERNANCE lock |
-| S3 `quarantine/` | flagged batches | 90 d | lifecycle |
+| S3 `quarantine/` | flagged batches | 30 d | controld sweep + receipt (lifecycle 32 d backstop) |
 | S3 corpus (`parquet/`, `kto/`) | exports | tenant-configured, default 400 d | lifecycle per tenant prefix |
 | S3 `evidence/` | E1/E2 blobs | ≤ 90 d hard ceiling | lifecycle; ceiling is not tenant-raisable |
 | S3 `witness/heads/` | chain heads | ≥ 2 y, COMPLIANCE-locked | object lock; contains hashes only |

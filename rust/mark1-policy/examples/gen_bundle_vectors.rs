@@ -188,6 +188,7 @@ fn sections_full(rich: bool) -> Value {
     ];
     if rich {
         route_pairs.push(("exploration", m(&[("epsilon", f(0.05))])));
+        route_pairs.push(("exploration_opt_in", Value::Bool(true)));
     }
     let route = m(&route_pairs);
 
@@ -1233,6 +1234,41 @@ fn build_vectors(signers: &Signers) -> Result<Vec<Vector>> {
             last_applied_seq: None,
             tlog_head: None,
             expect,
+        });
+    }
+
+    // exploration_opt_in_false / exploration_opt_in_absent — D-EF (RECONCILIATION):
+    // a properly SIGNED seq-0 bundle whose route section carries epsilon > 0
+    // (via `sections_full(true)`) with the opt-in key present-and-false, or
+    // dropped entirely. Both must refuse the same way the controld publisher
+    // already does (absent-or-false), closing the carve-out `full` needed
+    // before this freeze — `full` itself now carries `exploration_opt_in: true`.
+    for (name, opt_in) in [
+        ("exploration_opt_in_false", Some(Value::Bool(false))),
+        ("exploration_opt_in_absent", None),
+    ] {
+        let mut sections = sections_full(true);
+        let mut route = section_of(&sections, "route")?.clone();
+        match opt_in {
+            Some(v) => map_set(&mut route, "exploration_opt_in", v)?,
+            None => map_remove(&mut route, "exploration_opt_in")?,
+        }
+        map_set(&mut sections, "route", route)?;
+        let sigs = signatures(signers, &sections, &env_local0)?;
+        out.push(Vector {
+            name,
+            raw: canon(&bundle_value(
+                env_local0.seq,
+                env_local0.channel,
+                env_local0.prev_hash,
+                env_local0.max_age,
+                sections,
+                sigs,
+                Value::Null,
+            ))?,
+            last_applied_seq: None,
+            tlog_head: None,
+            expect: Some(("M1E-3001", "schema")),
         });
     }
 

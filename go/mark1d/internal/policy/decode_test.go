@@ -48,8 +48,11 @@ func TestKneePLCBIsOptionalAndRangeChecked(t *testing.T) {
 	}
 }
 
-// TestEpsilonNeedsSignedOptInWhenKeyPresent — D-EF: ε>0 under a signed opt_in:false is M1E-3001; absent is the pre-ruling grammar the frozen `full` needs until the re-freeze (vector owed).
-func TestEpsilonNeedsSignedOptInWhenKeyPresent(t *testing.T) {
+// TestEpsilonNeedsSignedOptInPresentOrAbsent — D-EF: ε>0 needs a signed
+// opt_in:true; present-false OR the key absent both refuse as M1E-3001,
+// fail closed the same as the controld publisher (re-freeze closed the
+// absent-key carve-out `full` used to need).
+func TestEpsilonNeedsSignedOptInPresentOrAbsent(t *testing.T) {
 	route := func(eps float64, optIn ...any) any {
 		m := vmap{
 			{"cpvs", []any{}},
@@ -68,10 +71,13 @@ func TestEpsilonNeedsSignedOptInWhenKeyPresent(t *testing.T) {
 	if _, rej := decodeRoute(route(0.05, uint64(1))); rej == nil || rej.Kind() != "schema" {
 		t.Fatalf("non-bool opt_in must be a schema reject, got %v", rej)
 	}
+	if _, rej := decodeRoute(route(0.05)); rej == nil || rej.Kind() != "schema" {
+		t.Fatalf("ε 0.05 with opt_in absent must be a schema reject, got %v", rej)
+	}
 	for _, tc := range []struct {
 		v    any
 		want float64
-	}{{route(0.05, true), 0.05}, {route(0.0, false), 0.0}, {route(0.05), 0.05}} {
+	}{{route(0.05, true), 0.05}, {route(0.0, false), 0.0}, {route(0.0), 0.0}} {
 		r, rej := decodeRoute(tc.v)
 		if rej != nil || r.ExplorationEpsilon != tc.want {
 			t.Fatalf("%v: got %v %v, want ε %v", tc.v, r.ExplorationEpsilon, rej, tc.want)

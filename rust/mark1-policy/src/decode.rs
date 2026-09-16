@@ -494,12 +494,14 @@ pub(crate) fn decode_route(v: &Value) -> Result<RouteSection, Reject> {
             exploration_epsilon = prob(e, &ep)?;
         }
     }
-    // D-EF: ε>0 needs the publisher-signed opt-in; ponytail: absent ⇒ pre-ruling grammar until the re-freeze fixes `full` (ε 0.05, no opt-in).
-    if let Some(o) = m.get("exploration_opt_in") {
-        let op = format!("{p}.exploration_opt_in");
-        if !boolean(o, &op)? && exploration_epsilon > 0.0 {
-            return Err(schema(&op, "exploration.epsilon > 0 without opt-in"));
-        }
+    // D-EF: ε>0 needs the publisher-signed opt-in; absent or present-false both refuse (fail closed, same as the publisher).
+    let op = format!("{p}.exploration_opt_in");
+    let opt_in = match m.get("exploration_opt_in") {
+        Some(o) => boolean(o, &op)?,
+        None => false,
+    };
+    if !opt_in && exploration_epsilon > 0.0 {
+        return Err(schema(&op, "exploration.epsilon > 0 without opt-in"));
     }
 
     Ok(RouteSection {
@@ -918,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn d_ef_epsilon_needs_the_signed_opt_in_when_the_key_is_present() {
+    fn d_ef_epsilon_needs_the_signed_opt_in_present_or_absent() {
         let txt = |s: &str| Value::Text(s.into());
         let route = |eps: f64, opt_in: Option<Value>| {
             let mut m = vec![
@@ -960,8 +962,13 @@ mod tests {
             decode_route(&route(0.05, Some(Value::Integer(1.into())))),
             Err(Reject::Schema { .. })
         ));
-        // Absent ⇒ pre-ruling grammar: the frozen `full` (ε 0.05, no key) decodes until the re-freeze (vector owed).
-        assert_eq!(eps(&route(0.05, None)), 0.05);
+        // Absent ⇒ fail closed, same as present-false (D-EF re-freeze: the
+        // carve-out `full` needed is gone; `full` now signs opt_in true).
+        assert!(matches!(
+            decode_route(&route(0.05, None)),
+            Err(Reject::Schema { .. })
+        ));
+        assert_eq!(eps(&route(0.0, None)), 0.0);
     }
 
     #[test]

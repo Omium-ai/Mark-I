@@ -215,9 +215,9 @@ func TestConfVectorsBundle(t *testing.T) {
 			kindsSeen[v.Kind] = true
 		}
 	}
-	// The frozen contract: 5 accepts, 28 rejects covering all 10 kinds. A
+	// The frozen contract: 5 accepts, 30 rejects covering all 10 kinds. A
 	// shrunken manifest must fail loudly, not pass vacuously.
-	if accepts != 5 || rejects != 28 {
+	if accepts != 5 || rejects != 30 {
 		t.Fatalf("manifest shape changed: accepts=%d rejects=%d", accepts, rejects)
 	}
 	for _, k := range kindNames {

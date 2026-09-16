@@ -44,12 +44,12 @@
   "rotation": {
     "bundle": {
       "before": "M1E-3001/unknown_key against the pinned ring; accept after rotation_accepted is applied",
-      "body_sha256_hex": "be3370ce87a86a8a24e951ce7d266f5f31ed28d625dd22359e2b5738b7161617",
+      "body_sha256_hex": "bdda870839871ec09c9e6917199f232f893b750f1fc7583967987a1ce51ca242",
       "file": "rotation_accepted.cbor",
-      "file_sha256_hex": "b3e2f54b3276a231c89c463f91ada8183fd619a165c0a892d9adb968003b67fc",
+      "file_sha256_hex": "bdc0d8c111b6e9eb66bddc7e141269193744311f8cf80666ad7a4095dabbb6fc",
       "last_applied_seq": 2,
       "tlog_head": {
-        "root_hex": "c8af0dc5cb4d4b719c8f2b0dabc19d2508d335a0c74d0819f43c66045347e37c",
+        "root_hex": "fd6db68829b8a1ed56de5e156ae01c584410fe408b5bfa0347979519357cd5fb",
         "tree_size": 1
       }
     },
@@ -136,10 +136,10 @@
       "tlog_head": null
     },
     {
-      "body_sha256_hex": "a24cda32944301b985e59a6e2be768df476ce50ea2bc0cce12863755aab18215",
+      "body_sha256_hex": "2985b2838627dc97615e0f3b80f440f17dd33579f03ef4f29ef9797ebd9434e8",
       "expect": "accept",
       "file": "full.cbor",
-      "file_sha256_hex": "2f4a3ea9910a397850e86e9c4790d0f0c5e8505cb88f18381d35b8bdff64acca",
+      "file_sha256_hex": "d3ea1481700edf442d067d1d5dc7fb661c1b064279e9709efc351e33be243fc1",
       "last_applied_seq": 0,
       "name": "full",
       "summary": {
@@ -158,15 +158,15 @@
         "verifiers": 3
       },
       "tlog_head": {
-        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "root_hex": "536f19dce6cbcd05c91259ca24d1bbf93ae51389197db597341be9b35fd47054",
         "tree_size": 1
       }
     },
     {
-      "body_sha256_hex": "2040fb758ae62ef566af5b84afb0a9e305147423fc342ae97699fa0ccdeff475",
+      "body_sha256_hex": "1688818cd79afb99cf3e4faf72742513feff1f71872b695fb7bfabce2ca7e8d5",
       "expect": "accept",
       "file": "minimal.cbor",
-      "file_sha256_hex": "249f8f3d4e4bd6d6df4cbd4b64300559bcc24706cb1df62f4a202e407d041d6c",
+      "file_sha256_hex": "5e70e1553e625a65551e459de05cbe899a26e557d4b095df274922a6dcd3f8d9",
       "last_applied_seq": 1,
       "name": "minimal",
       "summary": {
@@ -185,7 +185,7 @@
         "verifiers": 0
       },
       "tlog_head": {
-        "root_hex": "53fbdbc9c40a0f63f2d8ca423cfa8a82d95c48689fd4a450b333f8e018f8e05b",
+        "root_hex": "9a6032a05713c5738ede021c07ab5516e7486d876985dd4f6a00d386d9f5b8f2",
         "tree_size": 3
       }
     },
@@ -283,12 +283,12 @@
       "code": "M1E-3002",
       "expect": "reject",
       "file": "seq_replay.cbor",
-      "file_sha256_hex": "2f4a3ea9910a397850e86e9c4790d0f0c5e8505cb88f18381d35b8bdff64acca",
+      "file_sha256_hex": "d3ea1481700edf442d067d1d5dc7fb661c1b064279e9709efc351e33be243fc1",
       "kind": "seq_replay",
       "last_applied_seq": 1,
       "name": "seq_replay",
       "tlog_head": {
-        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "root_hex": "536f19dce6cbcd05c91259ca24d1bbf93ae51389197db597341be9b35fd47054",
         "tree_size": 1
       }
     },
@@ -306,12 +306,12 @@
       "code": "M1E-3001",
       "expect": "reject",
       "file": "backdated_issued_at.cbor",
-      "file_sha256_hex": "061098808d3b2823396a073e0ffe64818dea7ba074ce7774258fa03711c5576f",
+      "file_sha256_hex": "96a25131e04facb6911c5bdce4076344439a00e2791071e1569c1a9e0f7deccd",
       "kind": "bad_signature",
       "last_applied_seq": 0,
       "name": "backdated_issued_at",
       "tlog_head": {
-        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "root_hex": "536f19dce6cbcd05c91259ca24d1bbf93ae51389197db597341be9b35fd47054",
         "tree_size": 1
       }
     },
@@ -319,12 +319,12 @@
       "code": "M1E-3003",
       "expect": "reject",
       "file": "inclusion_missing.cbor",
-      "file_sha256_hex": "9c22efca183530fbd0e0cc2c0eb58b0a0314d1250b7a3c2c3d347713deb67d54",
+      "file_sha256_hex": "0e5c106a4af141a3601d97437f44160711eb0072b9a734244d83a067a9c8eb8c",
       "kind": "inclusion_invalid",
       "last_applied_seq": 0,
       "name": "inclusion_missing",
       "tlog_head": {
-        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "root_hex": "536f19dce6cbcd05c91259ca24d1bbf93ae51389197db597341be9b35fd47054",
         "tree_size": 1
       }
     },
@@ -332,7 +332,7 @@
       "code": "M1E-3003",
       "expect": "reject",
       "file": "tlog_head_missing.cbor",
-      "file_sha256_hex": "2f4a3ea9910a397850e86e9c4790d0f0c5e8505cb88f18381d35b8bdff64acca",
+      "file_sha256_hex": "d3ea1481700edf442d067d1d5dc7fb661c1b064279e9709efc351e33be243fc1",
       "kind": "inclusion_invalid",
       "last_applied_seq": 0,
       "name": "tlog_head_missing",
@@ -342,12 +342,12 @@
       "code": "M1E-3003",
       "expect": "reject",
       "file": "forged_inclusion_root.cbor",
-      "file_sha256_hex": "64017690ac4f7c5c4f2887d82a8005422d48ce447c42d82faabdde2369a0470d",
+      "file_sha256_hex": "bcc95b8773afbcf0c55f9ea6d79926f849fe2d1007ad5a5252398958a94dd429",
       "kind": "inclusion_invalid",
       "last_applied_seq": 0,
       "name": "forged_inclusion_root",
       "tlog_head": {
-        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "root_hex": "536f19dce6cbcd05c91259ca24d1bbf93ae51389197db597341be9b35fd47054",
         "tree_size": 1
       }
     },
@@ -355,12 +355,12 @@
       "code": "M1E-3001",
       "expect": "reject",
       "file": "tampered_body_self_proof.cbor",
-      "file_sha256_hex": "389cd7c0f421d97c8e494df0b7a1967456fbd2245cc626f0fa35456baa790fb5",
+      "file_sha256_hex": "e8deb1f9cddf33cebb754044aea1d35aa0ef4628d99269a0fdf800fd00e7ffe3",
       "kind": "bad_signature",
       "last_applied_seq": 0,
       "name": "tampered_body_self_proof",
       "tlog_head": {
-        "root_hex": "15794da1bf96dd53969ef4e3cd2431b010f79bff767ad0353c949b0a256b754b",
+        "root_hex": "536f19dce6cbcd05c91259ca24d1bbf93ae51389197db597341be9b35fd47054",
         "tree_size": 1
       }
     },
@@ -432,12 +432,12 @@
       "code": "M1E-3003",
       "expect": "reject",
       "file": "forged_inclusion_root_seq2.cbor",
-      "file_sha256_hex": "6f42ce59d4247719a607c2dbcaf32cb9bf31c2ab5c5da0661f80480a2b5f1385",
+      "file_sha256_hex": "afefa8c94e747578d1323557c201cb350c4b977a8b41733ad43611399e808d30",
       "kind": "inclusion_invalid",
       "last_applied_seq": 1,
       "name": "forged_inclusion_root_seq2",
       "tlog_head": {
-        "root_hex": "53fbdbc9c40a0f63f2d8ca423cfa8a82d95c48689fd4a450b333f8e018f8e05b",
+        "root_hex": "9a6032a05713c5738ede021c07ab5516e7486d876985dd4f6a00d386d9f5b8f2",
         "tree_size": 3
       }
     },
@@ -533,6 +533,26 @@
       "kind": "schema",
       "last_applied_seq": null,
       "name": "cortex_ranker_bad_stage",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "exploration_opt_in_false.cbor",
+      "file_sha256_hex": "db1e59e83c85c17fde3a1918e21cbe12dfa70d0ba31a737790b96c6baee705aa",
+      "kind": "schema",
+      "last_applied_seq": null,
+      "name": "exploration_opt_in_false",
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "exploration_opt_in_absent.cbor",
+      "file_sha256_hex": "e6e982976966fa7f4067f335a96f5f874014055d5b0dc495509f7dbf5e93ebc2",
+      "kind": "schema",
+      "last_applied_seq": null,
+      "name": "exploration_opt_in_absent",
       "tlog_head": null
     }
   ]
