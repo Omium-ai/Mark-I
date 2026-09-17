@@ -16,11 +16,12 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 )
 
-// ponytail: a session whose end is tailer-inferred never sends SessionEnd, so it lingers until the cap evicts it; add an idle TTL if agents_live reads stale.
+// A session whose end is tailer-inferred never sends SessionEnd (opencode's session.idle is a turn, not an end), so any event refreshes `seen` and live() drops a session quiet for liveIdleTTL.
 // ponytail: the verify ring, checkpoint ring and last_run are memory-only since boot; the spool is the durable record and is never re-read here.
 const (
 	subscriberBuffer = 256
 	maxLiveSessions  = 64
+	liveIdleTTL      = 30 * time.Minute
 	verifyRing       = 1024
 	checkpointRing   = 256
 )
@@ -33,6 +34,7 @@ type LiveSession struct {
 	SessionID string `json:"session_id"`
 	Tokens    uint64 `json:"tokens"`
 	started   time.Time
+	seen      time.Time
 }
 
 type frame struct {
@@ -209,7 +211,7 @@ func (h *Hub) track(ev *m1pv1.Event) {
 	copy(sid[:], ev.GetSessionId())
 	switch b := ev.GetBody().(type) {
 	case *m1pv1.Event_SessionStart:
-		h.sessions[sid] = &LiveSession{Agent: b.SessionStart.GetAgent(), SessionID: uuid.UUID(sid).String(), started: time.Now()}
+		h.sessions[sid] = &LiveSession{Agent: b.SessionStart.GetAgent(), SessionID: uuid.UUID(sid).String(), started: time.Now(), seen: time.Now()}
 		for len(h.sessions) > maxLiveSessions {
 			var oldest [16]byte
 			var at time.Time
@@ -227,6 +229,9 @@ func (h *Hub) track(ev *m1pv1.Event) {
 			u := b.Usage
 			s.Tokens += u.GetInputTokens() + u.GetOutputTokens() + u.GetCacheCreationInputTokens() + u.GetCacheReadInputTokens()
 		}
+	}
+	if s := h.sessions[sid]; s != nil {
+		s.seen = time.Now()
 	}
 }
 
@@ -248,6 +253,10 @@ func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSessio
 	out := make([]LiveSession, 0, len(h.sessions))
 	ids := make([][16]byte, 0, len(h.sessions))
 	for id, s := range h.sessions {
+		if time.Since(s.seen) > liveIdleTTL {
+			delete(h.sessions, id)
+			continue
+		}
 		out = append(out, *s)
 		ids = append(ids, id)
 	}

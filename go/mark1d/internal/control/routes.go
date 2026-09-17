@@ -380,6 +380,9 @@ func (s *Server) claudeCompat(cc *claudecode.Adapter) func(string) string {
 		}
 		k, _ := cc.Compatibility(v)
 		c = k.String()
+		if k == claudecode.Incompatible {
+			return c // not memoised: "no transcript at this version yet" becomes compatible after the user's first session
+		}
 		s.mu.Lock()
 		s.compat[v] = c
 		s.mu.Unlock()

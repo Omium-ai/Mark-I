@@ -1376,3 +1376,31 @@ func TestEnableProvisionsThroughTheControlAPI(t *testing.T) {
 		t.Fatalf("removing the last project reverts as `mark1 off` does: %s\n%s", body, b0(t, settings))
 	}
 }
+
+// TestLiveDropsASessionQuietForTheIdleTTL: opencode never sends SessionEnd (session.idle is a turn), so a quiet session must leave agents_live on its own; any event refreshes it.
+func TestLiveDropsASessionQuietForTheIdleTTL(t *testing.T) {
+	h := NewHub()
+	h.Publish(sessionEvent(1, &m1pv1.SessionStart{Agent: "opencode"}))
+	h.Publish(sessionEvent(2, &m1pv1.SessionStart{Agent: "codex"}))
+	h.mu.Lock()
+	for id, s := range h.sessions {
+		if id[0] == 1 {
+			s.seen = time.Now().Add(-liveIdleTTL - time.Second)
+		}
+	}
+	h.mu.Unlock()
+	h.Publish(sessionEvent(2, &m1pv1.Usage{InputTokens: 1}))
+	got := map[byte]bool{}
+	for _, ls := range h.live(nil) {
+		got[uuid.MustParse(ls.SessionID)[0]] = true
+	}
+	if got[1] || !got[2] {
+		t.Fatalf("live = %v, want only the session that spoke within the TTL", got)
+	}
+	h.mu.Lock()
+	_, stale := h.sessions[[16]byte{1}]
+	h.mu.Unlock()
+	if stale {
+		t.Fatal("the idle session was listed out but not evicted")
+	}
+}
