@@ -27,11 +27,24 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-      - name: Start the instance
+      - name: Start one of the pinned instances (first that has capacity wins)
         env:
-          ID: ${{ vars.MARK1_BENCH_INSTANCE_ID }}
+          IDS: ${{ vars.MARK1_BENCH_INSTANCE_ID }}
         run: |
           set -euo pipefail
-          aws ec2 start-instances --instance-ids "$ID" --query 'StartingInstances[0].CurrentState.Name' --output text
-          aws ec2 wait instance-running --instance-ids "$ID"
-          echo "bench runner $ID is running; the runner service registers within a minute and the bench job queues on label ${{ vars.MARK1_BENCH_RUNNER }}"
+          # A stopped instance is bound to its AZ and EC2 can answer InsufficientInstanceCapacity for a
+          # while; try each box a few times, in order, before giving up.
+          for id in $IDS; do
+            for attempt in 1 2 3 4; do
+              if aws ec2 start-instances --instance-ids "$id" >/dev/null 2>&1; then
+                aws ec2 wait instance-running --instance-ids "$id"
+                echo "bench runner $id is running; the runner service registers within a minute and the bench job queues on label ${{ vars.MARK1_BENCH_RUNNER }}"
+                exit 0
+              fi
+              echo "start of $id refused (attempt $attempt/4, likely capacity); retrying in 30s"
+              sleep 30
+            done
+            echo "::warning title=Bench box unavailable::$id would not start after 4 attempts; trying the next one"
+          done
+          echo "::error title=No bench runner would start::none of [$IDS] could be started (EC2 capacity). The budgets were not measured."
+          exit 1

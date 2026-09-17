@@ -48,10 +48,20 @@ resource "aws_security_group" "bench_runner" {
   tags = { Service = "ci" }
 }
 
+# Two boxes of the pinned class in two AZs, both stopped: a stopped instance is bound to its AZ, and
+# us-east-1a answered InsufficientInstanceCapacity on the first release day. bench-runner.yml starts
+# "a" and falls back to "b"; the class, AMI and disk are identical, which is what RUNNER.md pins.
+moved {
+  from = aws_instance.bench_runner
+  to   = aws_instance.bench_runner["a"]
+}
+
 resource "aws_instance" "bench_runner" {
+  for_each = { a = 0, b = 1 }
+
   ami                                  = data.aws_ssm_parameter.ubuntu_2404.value
   instance_type                        = "c7i.2xlarge"
-  subnet_id                            = data.terraform_remote_state.platform.outputs.private_subnets[0]
+  subnet_id                            = data.terraform_remote_state.platform.outputs.private_subnets[each.value]
   vpc_security_group_ids               = [aws_security_group.bench_runner.id]
   iam_instance_profile                 = aws_iam_instance_profile.bench_runner.name
   instance_initiated_shutdown_behavior = "stop"
@@ -70,13 +80,13 @@ resource "aws_instance" "bench_runner" {
     ignore_changes = [ami, user_data]
   }
   tags = {
-    Name    = "omium-mark1-bench-runner"
+    Name    = "omium-mark1-bench-runner-${each.key}"
     Service = "ci"
     Purpose = "pinned bench runner (bench/RUNNER.md) - started only by bench-runner.yml; self-stops when idle"
   }
 }
 
-output "bench_runner_instance_id" {
-  description = "Set as repo variable MARK1_BENCH_INSTANCE_ID"
-  value       = aws_instance.bench_runner.id
+output "bench_runner_instance_ids" {
+  description = "Set as repo variable MARK1_BENCH_INSTANCE_ID, space-separated, in this order (a is tried first)"
+  value       = join(" ", [for k in ["a", "b"] : aws_instance.bench_runner[k].id])
 }

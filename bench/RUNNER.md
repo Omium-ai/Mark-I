@@ -30,9 +30,11 @@ against it, which only works if the samples come from the same hardware.
 
 ## The machine we have
 
-`deploy/terraform/envs/prod/bench_runner.tf`: one c7i.2xlarge (Ubuntu 24.04, 100 GiB encrypted gp3
-root — EBS on Nitro, not instance store; the baseline is measured on exactly this) in the prod VPC's
-first private subnet, egress-only, instance profile with SSM only. Nothing else runs on it.
+`deploy/terraform/envs/prod/bench_runner.tf`: two identical c7i.2xlarge boxes (Ubuntu 24.04, 100 GiB
+encrypted gp3 root — EBS on Nitro, not instance store; the baseline is measured on exactly this class)
+in the prod VPC's first two private subnets (us-east-1a and 1b), egress-only, instance profile with SSM
+only. Nothing else runs on them. Two because a stopped instance is bound to its AZ and EC2 answered
+`InsufficientInstanceCapacity` in 1a on release day one; the wake step tries `a` four times, then `b`.
 
 It is **stopped between runs**. `bench-runner.yml` starts it through `omium-mark1-gha-release`
 (OIDC; trusts `main` and `edge/v*` tags only) before every `bench` job on a main push or a release,
@@ -44,15 +46,16 @@ First boot (`bench_runner_cloud_init.sh`) reads a 1-hour registration token from
 `/omium/mark1/bench-runner/registration-token` (written just before `terraform apply`, deleted after)
 and installs the runner as a systemd service under `/opt/runner`, label `mark1-bench-c7i2xl`.
 
-Repo variables: `MARK1_BENCH_RUNNER=mark1-bench-c7i2xl`, `MARK1_BENCH_INSTANCE_ID=<terraform output
-bench_runner_instance_id>`. To rebuild the box: `terraform taint aws_instance.bench_runner`, write a
+Repo variables: `MARK1_BENCH_RUNNER=mark1-bench-c7i2xl`, `MARK1_BENCH_INSTANCE_ID="<terraform output
+bench_runner_instance_ids>"` (space-separated, `a` first). Runner names are `mark1-bench-<instance-id>`
+(the first box registered as `mark1-bench-c7i2xl` before the second existed). To rebuild the box: `terraform taint aws_instance.bench_runner`, write a
 fresh token, apply, then delete the stale runner in repo settings.
 
 ## What the variable controls
 
 | `MARK1_BENCH_RUNNER` | `ci.yml` | `release.yml` |
 |---|---|---|
-| set | main pushes: `bench-wake` starts the box, `bench` runs on it; `bench-gate` is red on a regression or a box that would not start. PRs: `bench-deferred` | `bench-wake` then `bench`; a regression blocks the release |
+| set | main pushes: `bench-wake` starts a box, `bench` runs on it; `bench-gate` is red on a regression and only warns when no box would start (capacity is not code). PRs: `bench-deferred` | `bench-wake` then `bench`; a regression blocks the release |
 | empty | `bench-deferred` posts a loud warning; `bench-gate` passes *as deferred*, not as measured | `bench-preflight` **fails the release** |
 
 That asymmetry is deliberate: an unowned machine must not block every merge in the repo, but

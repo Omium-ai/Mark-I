@@ -15,8 +15,10 @@ VER=$(curl -sSL https://api.github.com/repos/actions/runner/releases/latest | jq
 curl -sSL -o runner.tgz "https://github.com/actions/runner/releases/download/v${VER}/actions-runner-linux-x64-${VER}.tar.gz"
 sudo -u runner tar xzf runner.tgz && rm runner.tgz
 TOKEN=$(aws ssm get-parameter --region us-east-1 --name /omium/mark1/bench-runner/registration-token --with-decryption --query Parameter.Value --output text)
+IMDS=$(curl -sS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+IID=$(curl -sS -H "X-aws-ec2-metadata-token: $IMDS" http://169.254.169.254/latest/meta-data/instance-id)
 sudo -u runner ./config.sh --unattended --url https://github.com/Omium-ai/Mark-I --token "$TOKEN" \
-  --name mark1-bench-c7i2xl --labels mark1-bench-c7i2xl --replace
+  --name "mark1-bench-$IID" --labels mark1-bench-c7i2xl --replace
 ./svc.sh install runner
 ./svc.sh start
 

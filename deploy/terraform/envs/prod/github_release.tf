@@ -58,7 +58,7 @@ data "aws_iam_policy_document" "gha_release" {
     sid       = "BenchRunnerPower"
     effect    = "Allow"
     actions   = ["ec2:StartInstances", "ec2:StopInstances"]
-    resources = [aws_instance.bench_runner.arn]
+    resources = [for i in aws_instance.bench_runner : i.arn]
   }
   statement {
     sid       = "BenchRunnerDescribe"

@@ -467,8 +467,9 @@ jobs:
             failure) echo "::error title=Benchmark regression::A gated benchmark exceeded its budget. There is no perf-waiver label (12 §7.3): raise the budget in 02 and 12 in its own PR, or fix the regression."; exit 1 ;;
           esac
           if [ "${{ needs.bench-wake.result }}" = "failure" ]; then
-            echo "::error title=Bench runner did not start::bench-runner.yml could not start the pinned instance (bench/RUNNER.md); the budgets were not measured."
-            exit 1
+            # EC2 capacity, not code: the mandatory measurement is release.yml's, where a wake failure IS red.
+            echo "::warning title=Bench runner did not start::bench-runner.yml could not start a pinned instance (bench/RUNNER.md); budgets not measured on this push — release.yml measures them mandatorily before anything ships."
+            exit 0
           fi
           if [ "${{ needs.bench-deferred.result }}" != "success" ]; then
             echo "::error title=Bench stage did not run::Neither the pinned-runner bench nor the deferral notice completed. The stage must never be silently absent."
