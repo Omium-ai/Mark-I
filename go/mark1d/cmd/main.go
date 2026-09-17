@@ -857,11 +857,12 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		if err != nil {
 			return fail(err)
 		}
-		// Advisory: claudecode is the only adapter this daemon can run, and it
-		// runs iff the tail subsystem is armed (idem key present).
+		// Advisory only: the per-session truth is SessionStart.agent (chproj stamps from it);
+		// this single string is the fallback for a session whose SessionStart missed both the
+		// batch and the read window, so it names an agent only when exactly one is armed.
 		agent := ""
-		if idemKey != nil {
-			agent = "claudecode"
+		if armed := armedAgents(idemKey, cfg.stateDir); len(armed) == 1 {
+			agent = armed[0]
 		}
 		// Receipt sealing (07's checkpoint model) fails SOFT and by design:
 		// capture is the product, so a device with no enrolled identity turns
@@ -1287,6 +1288,35 @@ const wsReloadTick = 2 * time.Second
 // runs starts its tailer without a restart; a disable narrows the LiveSet
 // oracle FIRST and then stops the manager, so the containment check never
 // lags the file (04 §0.3 invariant 3: workspaces are DATA, not processes).
+// ponytail: re-runs the bounded --version sniffs tailWorkspaces also runs (double sniff at boot); pass the set in if it ever matters.
+func armedAgents(idemKey []byte, stateDir string) []string {
+	if idemKey == nil {
+		return nil
+	}
+	var out []string
+	cc := &claudecode.Adapter{StateDir: stateDir}
+	if d, err := cc.Detect(); err == nil {
+		if c, _ := cc.Compatibility(d.Version); c != claudecode.Incompatible {
+			out = append(out, "claudecode")
+		}
+	}
+	for _, a := range []struct {
+		name string
+		det  func() (adapters.Detection, error)
+		ok   func(string) bool
+	}{
+		{"codex", (&codex.Adapter{StateDir: stateDir}).Detect, codex.Supported},
+		{"gemini", (&gemini.Adapter{StateDir: stateDir}).Detect, gemini.Supported},
+		{"opencode", (&opencode.Adapter{StateDir: stateDir}).Detect, opencode.Supported},
+		{"copilot", (&copilot.Adapter{StateDir: stateDir}).Detect, copilot.Supported},
+	} {
+		if d, err := a.det(); err == nil && d.Installed && a.ok(d.Version) {
+			out = append(out, a.name)
+		}
+	}
+	return out
+}
+
 func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey []byte, adm *capture.Admitter, cov *coverage.Emitter, router *route.Emitter, seg *taskseg.Segmenter) error {
 	wsPath := filepath.Join(cfg.stateDir, "workspaces.json")
 	live := tailers.NewLiveSet()
