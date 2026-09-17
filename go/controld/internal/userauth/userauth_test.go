@@ -19,6 +19,7 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 )
 
@@ -218,5 +219,34 @@ func TestMiddlewareStampsAndMapsErrors(t *testing.T) {
 	}
 	if st, _ := do(admin, "Bearer "+f.token(nil)); st != http.StatusNoContent {
 		t.Fatalf("admin refused: %d", st)
+	}
+}
+
+// The read-surface adapter: a user token becomes a tenant-scoped auth.Claims with Subject and no device, composes beside the device verifier under auth.Multi, and every refusal is auth.ErrBadToken (401 M1E-1002, never a pass-through).
+func TestTenantVerifierAdmitsUserTokenBesideDeviceVerifier(t *testing.T) {
+	f := newFixture(t)
+	devKey := []byte("device-key")
+	device := uuid.New()
+	multi := auth.Multi(auth.NewHMACVerifier(devKey, auth.StaticRevocations{}), f.v.TenantVerifier())
+
+	c, err := multi.Verify(context.Background(), f.token(nil))
+	if err != nil || c.TenantID != f.tenant || c.Subject != "user-1" || c.DeviceID != uuid.Nil {
+		t.Fatalf("user token: %+v %v", c, err)
+	}
+	c, err = multi.Verify(context.Background(), auth.Mint(devKey, f.tenant, device, time.Hour))
+	if err != nil || c.DeviceID != device || c.Subject != "" {
+		t.Fatalf("device token still device-shaped: %+v %v", c, err)
+	}
+	for name, tok := range map[string]string{
+		"wrong_aud": f.token(func(c map[string]any) { c["aud"] = "dashboard" }),
+		"expired":   f.token(func(c map[string]any) { c["exp"] = time.Now().Add(-time.Minute).Unix() }),
+		"garbage":   "not.a.jwt",
+	} {
+		if _, err := f.v.TenantVerifier().Verify(context.Background(), tok); !errors.Is(err, auth.ErrBadToken) {
+			t.Fatalf("%s: want auth.ErrBadToken, got %v", name, err)
+		}
+		if _, err := multi.Verify(context.Background(), tok); !errors.Is(err, auth.ErrBadToken) {
+			t.Fatalf("%s under Multi: want auth.ErrBadToken, got %v", name, err)
+		}
 	}
 }

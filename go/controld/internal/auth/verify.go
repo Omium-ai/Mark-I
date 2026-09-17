@@ -23,6 +23,8 @@ type Claims struct {
 	KeyID     string
 	IssuedAt  time.Time
 	ExpiresAt time.Time
+	// Subject is set only by userauth's TenantVerifier: the Mark 1 user token's sub, a tenant-scoped principal with no device (desktop spec §7.2).
+	Subject string
 }
 
 // Sentinel errors map 1:1 onto 08 §9 rows; the HTTP layer owns the mapping.

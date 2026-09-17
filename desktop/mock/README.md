@@ -13,7 +13,7 @@ node server.mjs --scenario active [--local-port 4001] [--cloud-port 4002]
 Two HTTP servers start: the local control API (default `:4001`, `/v1/...`)
 and the cloud API (default `:4002`, `/api/v1/...`). It prints `READY
 <localPort> <cloudPort>` once listening, and writes `control.json` (port +
-a random per-boot bearer) next to `server.mjs` — what a real app reads from
+a random per-boot `token`, the daemon's own field name) next to `server.mjs` — what a real app reads from
 `<state>/run/control.json`. Any non-empty `Authorization` header is accepted
 on the cloud API (real auth is an OAuth session, not simulated here).
 

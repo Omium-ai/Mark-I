@@ -160,7 +160,7 @@ if (isMain) {
   }
   const token = crypto.randomBytes(16).toString('hex');
   const controlPath = path.join(HERE, 'control.json');
-  fs.writeFileSync(controlPath, JSON.stringify({ port: localPort, bearer: token }, null, 2) + '\n');
+  fs.writeFileSync(controlPath, JSON.stringify({ port: localPort, token: token }, null, 2) + '\n');
 
   await startLocal(scenario, localPort, token);
   if (scenario === 'offline') {

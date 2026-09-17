@@ -17,6 +17,7 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 )
 
@@ -65,6 +66,19 @@ func New(issuer, jwksPinned string) (*Verifier, error) {
 	return &Verifier{v: oidc.NewVerifier(issuer, &oidc.StaticKeySet{PublicKeys: keys}, &oidc.Config{
 		ClientID: Audience, SupportedSigningAlgs: []string{oidc.ES256},
 	})}, nil
+}
+
+// TenantVerifier admits the user token on the read surface (desktop spec §7.2: the cloud API takes the user session bearer) as an auth.Verifier whose Claims carry the tenant and Subject but no device; auth.Multi composes it beside the device verifier.
+func (v *Verifier) TenantVerifier() auth.Verifier { return tenantVerifier{v} }
+
+type tenantVerifier struct{ v *Verifier }
+
+func (t tenantVerifier) Verify(ctx context.Context, bearer string) (auth.Claims, error) {
+	c, err := t.v.Verify(ctx, bearer)
+	if err != nil {
+		return auth.Claims{}, fmt.Errorf("%w: %v", auth.ErrBadToken, err)
+	}
+	return auth.Claims{TenantID: c.TenantID, Subject: c.Sub}, nil
 }
 
 type wireClaims struct {

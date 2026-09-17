@@ -244,11 +244,16 @@ func main() {
 		TenantPepper:  tenantPepper,
 		Users:         users,
 	})
+	// the read surface admits a device token or a Mark 1 user token (desktop spec §7.2); ingest/enroll/policy stay device-only
+	reads := verifier
+	if users != nil {
+		reads = auth.Multi(verifier, users.TenantVerifier())
+	}
 	chRunner := querychoke.NewRunner(chQuery, ch, chOffboard)
 	qc := querychoke.New(querychoke.Deps{ // 08 §3.3 report/query chokepoint
 		Registry:           tmpl,
 		Runner:             chRunner,
-		Verifier:           verifier,
+		Verifier:           reads,
 		ObsCfg:             obsCfg,
 		RollupWriteEnabled: cfg.RollupWriteEnabled,
 		IntelServiceToken:  cfg.IntelServiceToken,
@@ -270,17 +275,17 @@ func main() {
 	}), enrollMod, receipts.NewModule(receipts.ModuleDeps{ // 08 §3.4 retrieval + verifier food
 		DB:                tenantDB,
 		PG:                tenantDB,
-		Verifier:          verifier,
+		Verifier:          reads,
 		ObsCfg:            obsCfg,
 		Store:             chainStore,
 		IntelServiceToken: cfg.IntelServiceToken,
 	}), policy, qc, memory.New(memory.Deps{ // 08 §3.7 memory delivery: device-token verified, tenant from claims, proxied to intel
-		Verifier:          verifier,
+		Verifier:          reads,
 		ObsCfg:            obsCfg,
 		IntelBaseURL:      cfg.IntelBaseURL,
 		IntelServiceToken: cfg.IntelServiceToken,
 	}), appapi.New(appapi.Deps{ // desktop app read surface (mark1-desktop-app-spec §5, §7.2)
-		Verifier: verifier,
+		Verifier: reads,
 		ObsCfg:   obsCfg,
 		Registry: tmpl,
 		Runner:   chRunner,

@@ -47,9 +47,12 @@ func (m *Module) handleMe(w http.ResponseWriter, r *http.Request) {
 			regime = map[string]any{"cost_basis": reg.CostBasis, "price_model_id": model}
 		}
 	}
+	user := map[string]any{"id": claims.DeviceID.String(), "kind": "device"}
+	if claims.Subject != "" {
+		user = map[string]any{"id": claims.Subject, "kind": "user"}
+	}
 	writeJSON(w, map[string]any{
-		// ponytail: the device-token principal has no user; B3's user session fills kind "user" + id from its claims.
-		"user":   map[string]any{"id": claims.DeviceID.String(), "kind": "device"},
+		"user":   user,
 		"tenant": map[string]any{"id": tid.String(), "name": name, "region": region, "status": status},
 		"plan":   nil,
 		"regime": regime,

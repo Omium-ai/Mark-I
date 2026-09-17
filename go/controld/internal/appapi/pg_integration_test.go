@@ -7,6 +7,9 @@ package appapi
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -19,6 +22,7 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
@@ -28,16 +32,18 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/policydist"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/receipts"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/userauth"
 )
 
 type pgRig struct {
-	t      *testing.T
-	admin  *pgx.Conn
-	db     *pg.TenantDB
-	store  *policydist.Store
-	api    *httptest.Server
-	schema *schemaSet
-	orgID  uuid.UUID
+	t       *testing.T
+	admin   *pgx.Conn
+	db      *pg.TenantDB
+	store   *policydist.Store
+	api     *httptest.Server
+	schema  *schemaSet
+	orgID   uuid.UUID
+	userKey *ecdsa.PrivateKey
 }
 
 func setupPG(t *testing.T) *pgRig {
@@ -132,7 +138,18 @@ func setupPG(t *testing.T) *pgRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier := auth.NewHMACVerifier([]byte(testKey), auth.StaticRevocations{})
+	userKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userJWK := jose.JSONWebKey{Key: userKey.Public(), Algorithm: "ES256", Use: "sig", KeyID: "it"}
+	userJWKS, _ := json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{userJWK}})
+	users, err := userauth.New("https://issuer.it", string(userJWKS))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// main.go's `reads` composition: the device verifier first, the Mark 1 user token beside it (desktop spec §7.2).
+	verifier := auth.Multi(auth.NewHMACVerifier([]byte(testKey), auth.StaticRevocations{}), users.TenantVerifier())
 	obsCfg := obs.Config{ServiceName: "appapi-pg-it"}
 	run := &fakeRunner{}
 	m := New(Deps{
@@ -144,7 +161,30 @@ func setupPG(t *testing.T) *pgRig {
 	m.RegisterRoutes(mux)
 	api := httptest.NewServer(mux)
 	t.Cleanup(api.Close)
-	return &pgRig{t: t, admin: admin, db: db, store: store, api: api, schema: loadSchemas(t), orgID: orgID}
+	return &pgRig{t: t, admin: admin, db: db, store: store, api: api, schema: loadSchemas(t), orgID: orgID, userKey: userKey}
+}
+
+// userToken mints the platform's Mark 1 user token (ES256, aud mark1) for sub over tenant.
+func (r *pgRig) userToken(sub string, tenant uuid.UUID) string {
+	r.t.Helper()
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: r.userKey}, (&jose.SignerOptions{}).WithType("JWT"))
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	now := time.Now()
+	payload, _ := json.Marshal(map[string]any{
+		"iss": "https://issuer.it", "aud": "mark1", "sub": sub, "email": sub + "@it.example",
+		"tenant_id": tenant.String(), "rol": []string{"member"}, "iat": now.Unix(), "exp": now.Add(time.Hour).Unix(),
+	})
+	jws, err := signer.Sign(payload)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	raw, err := jws.CompactSerialize()
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return raw
 }
 
 func (r *pgRig) tenant(name, region string) uuid.UUID {
@@ -166,12 +206,16 @@ func (r *pgRig) tid(id uuid.UUID) querychoke.TenantID {
 }
 
 func (r *pgRig) get(path string, tenant uuid.UUID) (int, []byte) {
+	return r.getAs(path, auth.Mint([]byte(testKey), tenant, uuid.New(), time.Hour))
+}
+
+func (r *pgRig) getAs(path, bearer string) (int, []byte) {
 	r.t.Helper()
 	req, err := http.NewRequest(http.MethodGet, r.api.URL+path, nil)
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+auth.Mint([]byte(testKey), tenant, uuid.New(), time.Hour))
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		r.t.Fatal(err)
@@ -229,6 +273,24 @@ func TestIntegrationMeAndRegimeUnderRLS(t *testing.T) {
 	}
 	if raw, _ := json.Marshal(meB); strings.Contains(string(raw), "Acme") || strings.Contains(string(raw), tenantA.String()) {
 		t.Fatalf("B's /me carried A: %s", raw)
+	}
+	// The desktop app's principal (spec §7.2): the Mark 1 user token reads its own tenant, /me names the user, and a token for B never sees A.
+	sub := uuid.NewString()
+	code, body := r.getAs("/api/v1/me", r.userToken(sub, tenantA))
+	if code != http.StatusOK {
+		t.Fatalf("user token on /me: %d %s", code, body)
+	}
+	r.schema.Validate("me.json", body)
+	var meU map[string]any
+	_ = json.Unmarshal(body, &meU)
+	if u := meU["user"].(map[string]any); u["kind"] != "user" || u["id"] != sub || meU["tenant"].(map[string]any)["name"] != "Acme" {
+		t.Fatalf("user principal: %v", meU)
+	}
+	if code, body := r.getAs("/api/v1/me", r.userToken(sub, tenantB)); code != http.StatusOK || strings.Contains(string(body), "Acme") {
+		t.Fatalf("user token for B: %d %s", code, body)
+	}
+	if code, _ := r.getAs("/api/v1/me", r.userToken(sub, tenantA)+"x"); code != http.StatusUnauthorized {
+		t.Fatalf("tampered user token admitted: %d", code)
 	}
 }
 

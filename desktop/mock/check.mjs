@@ -87,7 +87,7 @@ async function run(scenario) {
   const child = await startServer(scenario);
   try {
     const control = JSON.parse(fs.readFileSync(path.join(HERE, 'control.json'), 'utf8'));
-    const token = control.bearer;
+    const token = control.token;
     const authHeaders = { authorization: `Bearer ${token}` };
 
     await checkJson(scenario, 'GET', `http://127.0.0.1:${LOCAL_PORT}/v1/status`, {}, 401);
