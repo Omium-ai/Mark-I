@@ -1,0 +1,41 @@
+{
+  "map_version": 1,
+  "agent": "claudecode",
+  "agent_version": "2.1.251",
+  "event_field": "hook_event_name",
+  "session_id_field": "session_id",
+  "events": {
+    "SessionStart": { "kind": "session_start", "fields": {} },
+    "UserPromptSubmit": { "kind": "turn_human", "fields": {} },
+    "PreToolUse": {
+      "kind": "tool_open",
+      "fields": { "tool_name": "tool_name", "tool_use_id": "tool_use_id" }
+    },
+    "PostToolUse": {
+      "kind": "tool_close_ok",
+      "fields": {
+        "tool_name": "tool_name",
+        "tool_use_id": "tool_use_id",
+        "duration_ms": "duration_ms"
+      }
+    },
+    "PostToolUseFailure": {
+      "kind": "tool_close_error",
+      "fields": {
+        "tool_name": "tool_name",
+        "tool_use_id": "tool_use_id",
+        "duration_ms": "duration_ms",
+        "error": "error",
+        "is_interrupt": "is_interrupt"
+      }
+    },
+    "Stop": {
+      "kind": "turn_agent",
+      "gate": { "kind": "stop", "budget_ms": 250 },
+      "fields": { "stop_hook_active": "stop_hook_active" }
+    },
+    "SubagentStop": { "kind": "turn_agent", "fields": {} },
+    "PreCompact": { "kind": "none", "fields": {} },
+    "SessionEnd": { "kind": "session_end", "fields": {} }
+  }
+}

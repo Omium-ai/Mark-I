@@ -4,6 +4,7 @@
 //	GET  /api/v1/policy/stream?channel=stable   SSE hints
 //	POST /api/v1/policy/ack                     the ACK ledger's intake
 //	POST /internal/v1/judge-requests            service-token: fan a JudgeRequest out (judge.go)
+//	GET  /.well-known/mark1-keys                08 §3.5: bundle section keys, plus the caller's tlog head under a device token
 //
 // Publication has no route here on purpose: 05 §4.1 places it on "policydist's
 // internal publication path (in-repo, not a public route)". Module.Publish is
@@ -26,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,6 +88,39 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/policy/stream", chain(http.HandlerFunc(m.handleStream)))
 	mux.Handle("POST /api/v1/policy/ack", chain(http.HandlerFunc(m.handleAck)))
 	mux.Handle("POST /internal/v1/judge-requests", m.obsCfg.HTTPMiddleware(nil)(http.HandlerFunc(m.handleJudgeRequest)))
+	mux.Handle("GET /.well-known/mark1-keys", m.obsCfg.HTTPMiddleware(nil)(http.HandlerFunc(m.handleKeys)))
+}
+
+// BundleKeys is the section ring as 08 §3.5 lists it, nil when this process holds no ring; enrollment pins it on the edge.
+func (m *Module) BundleKeys() []ManifestKey {
+	if m.store.ring == nil {
+		return nil
+	}
+	keys, _ := m.store.ring.ManifestKeys(nil)
+	return keys
+}
+
+// handleKeys is unauthenticated by design (08 §3.5) — public keys only. The tlog is per tenant (m1_062), so the head rides only for a verifiable device token, at ?tree_size (the head a bundle's proof targets) or newest.
+func (m *Module) handleKeys(w http.ResponseWriter, r *http.Request) {
+	keys := m.BundleKeys()
+	if keys == nil {
+		keys = []ManifestKey{}
+	}
+	out := map[string]any{"schema": KeyManifestSchema, "bundle_section_keys": keys, "tlog": map[string]any{}}
+	if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && bearer != "" {
+		if claims, err := m.verifier.Verify(r.Context(), bearer); err == nil {
+			if tenant, err := querychoke.FromClaims(claims); err == nil {
+				size, _ := strconv.ParseInt(r.URL.Query().Get("tree_size"), 10, 64)
+				if h, err := m.store.SignedHead(r.Context(), tenant, max(size, 0)); err == nil {
+					out["tlog"] = map[string]any{"head": map[string]any{
+						"size": h.TreeSize, "root": hex.EncodeToString(h.Root), "key_id": h.KeyID, "sig": hex.EncodeToString(h.Signature),
+					}}
+				}
+			}
+		}
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	writeJSON(w, out)
 }
 
 // Publish is the internal publication path. The SSE hint fires only after the

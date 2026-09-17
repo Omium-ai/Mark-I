@@ -16,6 +16,7 @@ package enroll
 //     as a cross-tenant admin attempt (security event).
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -222,6 +223,7 @@ func (m *Module) handlePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	transitionsTotal.WithLabelValues("active").Inc()
+	m.bootstrapPolicy(r.Context(), tenant)
 	// APPROVED → ACTIVE: first token + endpoints + key manifest, 08 §3.1.
 	body := map[string]any{
 		"status":          "active",
@@ -241,10 +243,25 @@ func (m *Module) handlePoll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-// addTenantRoot puts 04 §2.9's per-tenant HMAC root on an ACTIVE-device body (08 §3.1: poll and token bodies). Absent pepper ⇒ the key is absent, never empty.
+// addTenantRoot puts 04 §2.9's per-tenant HMAC root and the bundle section keys the edge pins (04 §2.6 keys file) on an ACTIVE-device body (08 §3.1: poll, approve and token bodies). Absent ⇒ the key is absent, never empty.
 func (m *Module) addTenantRoot(body map[string]any, tenant uuid.UUID) {
 	if root, err := m.TenantRoot(tenant); err == nil {
 		body["tenant_root_hex"] = hex.EncodeToString(root)
+	}
+	if m.bundleKeys != nil {
+		if keys := m.bundleKeys(); len(keys) > 0 {
+			body["bundle_section_keys"] = keys
+		}
+	}
+}
+
+// bootstrapPolicy is the enrollment-time trigger for the tenant's first bundle (idempotent server-side); a failure is logged, never an enrollment error — the next enrollment retries it.
+func (m *Module) bootstrapPolicy(ctx context.Context, tenant uuid.UUID) {
+	if m.bootstrap == nil {
+		return
+	}
+	if err := m.bootstrap(ctx, tenant); err != nil {
+		log.Printf("enroll: bootstrap bundle for tenant %s not published: %v", tenant, err)
 	}
 }
 
@@ -311,6 +328,7 @@ func (m *Module) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	transitionsTotal.WithLabelValues("active").Inc()
+	m.bootstrapPolicy(r.Context(), tenant)
 	body := map[string]any{
 		"status":          "active",
 		"device_id":       device.String(),

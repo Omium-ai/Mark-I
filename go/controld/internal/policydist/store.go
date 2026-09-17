@@ -91,7 +91,12 @@ type Draft struct {
 	Channel      string
 	MaxAge       time.Duration
 	SectionsCBOR []byte
+	// FirstOnly publishes only as the channel's seq 1: a channel that already has a head is left untouched (ErrChannelHasHead), under the same row lock, so two enrollments cannot both bootstrap.
+	FirstOnly bool
 }
+
+// ErrChannelHasHead is a FirstOnly draft meeting a channel that already published.
+var ErrChannelHasHead = errors.New("policydist: channel already has a head; FirstOnly draft not published")
 
 // Published reports where a bundle landed.
 type Published struct {
@@ -145,6 +150,9 @@ func (s *Store) Publish(ctx context.Context, tenant querychoke.TenantID, d Draft
 			  WHERE tenant_id = $1 AND channel = $2 FOR UPDATE`,
 			tenant.UUID(), d.Channel).Scan(&headSeq, &headHash); err != nil {
 			return err
+		}
+		if d.FirstOnly && headSeq != 0 {
+			return ErrChannelHasHead
 		}
 		if headSeq < 0 {
 			// Unreachable while the CHECK on bundle_channel_heads holds. If it
@@ -379,6 +387,33 @@ func (s *Store) Latest(ctx context.Context, tenant querychoke.TenantID, channel 
 	}
 	return out, nil
 }
+
+// SignedHead is the tenant's signed head at treeSize (05 §4.4), newest when 0: a bundle's proof targets the head at ITS tree_size, and the log keeps growing past it.
+func (s *Store) SignedHead(ctx context.Context, tenant querychoke.TenantID, treeSize int64) (SignedHead, error) {
+	var out SignedHead
+	err := s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT tree_size, root_hash, key_id, signature FROM tlog_signed_heads
+			 WHERE tenant_id = $1 AND ($2 = 0 OR tree_size = $2)
+			 ORDER BY tree_size DESC LIMIT 1`, tenant.UUID(), treeSize).
+			Scan(&out.TreeSize, &out.Root, &out.KeyID, &out.Signature)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SignedHead{}, ErrNoHead
+	}
+	return out, err
+}
+
+// SignedHead is a tlog_signed_heads row.
+type SignedHead struct {
+	TreeSize  int64
+	Root      []byte
+	KeyID     string
+	Signature []byte
+}
+
+// ErrNoHead: the tenant's log has no signed head at that size (or none at all).
+var ErrNoHead = errors.New("policydist: no signed tlog head")
 
 // ETag is 05 §4.2's `"t<n>-<channel>-<seq06>"`.
 //

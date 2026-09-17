@@ -243,6 +243,16 @@ func main() {
 		ServerMinEdge: cfg.ServerMinEdge,
 		TenantPepper:  tenantPepper,
 		Users:         users,
+		// The tenant's first bundle at first enrollment, and the ring every ACTIVE body pins (05 §4.5: keys reach the edge here, never fetched later).
+		Bootstrap: func(ctx context.Context, tenant uuid.UUID) error {
+			tid, err := querychoke.FromClaims(auth.Claims{TenantID: tenant})
+			if err != nil {
+				return err
+			}
+			_, _, err = policy.Bootstrap(ctx, tid)
+			return err
+		},
+		BundleKeys: policy.BundleKeys,
 	})
 	// the read surface admits a device token or a Mark 1 user token (desktop spec §7.2); ingest/enroll/policy stay device-only
 	reads := verifier

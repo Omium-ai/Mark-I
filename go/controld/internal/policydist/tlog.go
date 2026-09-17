@@ -112,7 +112,7 @@ func InclusionProof(leaves [][]byte, index int) ([][]byte, error) {
 	for i, l := range leaves {
 		hashes[i] = LeafHash(l)
 	}
-	var path [][]byte
+	path := [][]byte{} // never nil: a one-leaf tree's empty path must encode as [] (the frozen vectors' 0x80), not CBOR null, which every edge decoder refuses
 	for len(hashes) > 1 {
 		k := splitPoint(len(hashes))
 		if index < k {

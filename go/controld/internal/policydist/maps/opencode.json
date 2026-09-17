@@ -1,0 +1,20 @@
+{
+  "map_version": 1,
+  "agent": "opencode",
+  "agent_version": "1.18.31",
+  "event_field": "hook_event_name",
+  "session_id_field": "session_id",
+  "events": {
+    "session.created": { "kind": "session_start", "fields": {} },
+    "chat.message": { "kind": "turn_human", "fields": {} },
+    "tool.execute.before": {
+      "kind": "tool_open",
+      "fields": { "tool_name": "tool", "tool_use_id": "callID" }
+    },
+    "tool.execute.after": {
+      "kind": "tool_close_ok",
+      "fields": { "tool_name": "tool", "tool_use_id": "callID" }
+    },
+    "session.idle": { "kind": "turn_agent", "fields": {} }
+  }
+}

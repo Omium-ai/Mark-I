@@ -47,7 +47,9 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/enroll"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/pg"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/policydist"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/receipts"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/userauth"
 )
 
@@ -1254,4 +1256,98 @@ func TestIntegrationPersonalTenantApprove(t *testing.T) {
 			t.Fatalf("unconfigured: %d %v", resp.StatusCode, body)
 		}
 	})
+}
+
+// TestEnrollResponseCarriesBundlePinAndBootstraps: every ACTIVE transition (OIDC poll, one-shot approve) fires the tenant's bootstrap once per enrollment and pins the section ring on the body; the PoP refresh re-delivers the pin; the operator list never carries it.
+func TestEnrollResponseCarriesBundlePinAndBootstraps(t *testing.T) {
+	h := setup(t)
+	ring, err := policydist.DeriveKeyring(bytes.Repeat([]byte{0x44}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var bootstrapped []uuid.UUID
+	deps := h.deps
+	deps.Bootstrap = func(_ context.Context, tenant uuid.UUID) error {
+		mu.Lock()
+		defer mu.Unlock()
+		bootstrapped = append(bootstrapped, tenant)
+		return errors.New("simulated publish failure: enrollment must still succeed")
+	}
+	deps.BundleKeys = func() []policydist.ManifestKey { keys, _ := ring.ManifestKeys(nil); return keys }
+	mod := enroll.New(deps)
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+	h.api.Close()
+	h.api = httptest.NewServer(mux)
+	t.Cleanup(h.api.Close)
+
+	pinOf := func(body map[string]any) map[string]string {
+		t.Helper()
+		list, _ := body["bundle_section_keys"].([]any)
+		if len(list) != len(policydist.SectionNames) {
+			t.Fatalf("bundle_section_keys = %v, want one entry per section", body["bundle_section_keys"])
+		}
+		out := map[string]string{}
+		for _, e := range list {
+			m := e.(map[string]any)
+			out[m["section"].(string)] = m["pubkey_hex"].(string)
+		}
+		return out
+	}
+
+	priv, code := h.startEnrollment()
+	h.idp.setLatest("approved:pin@enroll-it.example")
+	st, body := h.poll(code)
+	if st != http.StatusOK {
+		t.Fatalf("active poll: %d %v", st, body)
+	}
+	pin := pinOf(body)
+	for section, id := range ring.PublicKeyIDs() {
+		if pin[section] == "" || receipts.DeriveKeyID(mustHex(t, pin[section])) != id {
+			t.Fatalf("%s: pinned %q is not the ring's %s", section, pin[section], id)
+		}
+	}
+	device := uuid.MustParse(body["device_id"].(string))
+	st, body = h.popRefresh(priv, device)
+	if st != http.StatusOK || len(pinOf(body)) != len(policydist.SectionNames) {
+		t.Fatalf("refresh must re-deliver the pin: %d %v", st, body)
+	}
+
+	personal := uuid.New()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, body = h.post("/api/v1/enroll/device/approve", map[string]any{
+		"client": "mark1-app", "client_version": "0.1.0", "platform": "linux-amd64",
+		"device_pubkey": "ed25519:" + base64.StdEncoding.EncodeToString(pub),
+		"hostname_hash": "hmac-sha256:" + strings.Repeat("cd", 32),
+	}, map[string]string{"Authorization": "Bearer " + h.userToken("u-pin", personal, "tenant_admin")})
+	if st != http.StatusOK || body["status"] != "active" {
+		t.Fatalf("approve: %d %v", st, body)
+	}
+	pinOf(body)
+
+	mu.Lock()
+	got := append([]uuid.UUID(nil), bootstrapped...)
+	mu.Unlock()
+	if len(got) != 2 || got[0] != h.tenantA || got[1] != personal {
+		t.Fatalf("bootstrap fired for %v, want [%s %s] (once per ACTIVE transition, failures swallowed)", got, h.tenantA, personal)
+	}
+	st, list := h.get("/api/v1/enroll/devices", map[string]string{
+		"X-M1-Tenant": h.tenantA.String(), "Authorization": "Bearer " + h.operatorToken("m1-admin"),
+	})
+	if raw, _ := json.Marshal(list); st != http.StatusOK || bytes.Contains(raw, []byte("bundle_section_keys")) {
+		t.Fatalf("operator list: %d %s", st, raw)
+	}
+}
+
+func mustHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

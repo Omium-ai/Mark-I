@@ -31,6 +31,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/pg"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/policydist"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/server"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/userauth"
@@ -105,6 +106,10 @@ type Deps struct {
 	// omit tenant_root_hex and the edge can never key idem_key — the caller
 	// (cmd) decides whether that is a boot refusal or a dev-mode WARNING.
 	TenantPepper []byte
+	// Bootstrap is policydist.Module.Bootstrap: the tenant's first bundle, published when a device goes ACTIVE; nil ⇒ none (a fresh edge stays on built-ins).
+	Bootstrap func(ctx context.Context, tenant uuid.UUID) error
+	// BundleKeys is policydist.Module.BundleKeys: the section keys every ACTIVE and refresh body pins on the edge (bundle_section_keys); nil ⇒ absent.
+	BundleKeys func() []policydist.ManifestKey
 }
 
 type Module struct {
@@ -116,11 +121,13 @@ type Module struct {
 	cache    *RevocationCache
 	users    *userauth.Verifier
 
-	baseURL string
-	minEdge string
-	http    *http.Client
-	now     func() time.Time
-	pepper  []byte
+	baseURL    string
+	minEdge    string
+	http       *http.Client
+	now        func() time.Time
+	pepper     []byte
+	bootstrap  func(context.Context, uuid.UUID) error
+	bundleKeys func() []policydist.ManifestKey
 
 	nonces    *nonceStore
 	pollGap   *pacer         // §8.2: /poll at the flow's own interval (5 s)
@@ -142,6 +149,7 @@ func New(d Deps) *Module {
 		obsCfg: d.ObsCfg, cache: d.Cache, users: d.Users,
 		baseURL: d.PublicBaseURL, minEdge: d.ServerMinEdge,
 		http: d.HTTPClient, now: d.Now, pepper: d.TenantPepper,
+		bootstrap: d.Bootstrap, bundleKeys: d.BundleKeys,
 		nonces:    newNonceStore(d.Now),
 		pollGap:   newPacer(pollInterval, d.Now),
 		startIP:   newBucketLimiter(10, time.Hour, d.Now),

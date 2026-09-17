@@ -1,0 +1,26 @@
+{
+  "map_version": 1,
+  "agent": "gemini",
+  "agent_version": "0.59.0",
+  "event_field": "hook_event_name",
+  "session_id_field": "session_id",
+  "events": {
+    "SessionStart": { "kind": "session_start", "fields": {} },
+    "BeforeAgent": { "kind": "turn_human", "fields": {} },
+    "BeforeTool": {
+      "kind": "tool_open",
+      "fields": { "tool_name": "tool_name" }
+    },
+    "AfterTool": {
+      "kind": "tool_close_ok",
+      "fields": { "tool_name": "tool_name" }
+    },
+    "AfterAgent": {
+      "kind": "turn_agent",
+      "gate": { "kind": "stop", "budget_ms": 250 },
+      "fields": { "stop_hook_active": "stop_hook_active" }
+    },
+    "PreCompress": { "kind": "none", "fields": {} },
+    "SessionEnd": { "kind": "session_end", "fields": {} }
+  }
+}
