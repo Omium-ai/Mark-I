@@ -93,7 +93,7 @@ clickhouse:
   storageClassName: gp3
   storageSize: 50Gi
   queryProfile:                    # m1p_query server-side guards (05 §6.5); strings: Go templates float-format big ints
-    maxExecutionTime: "30"
+    maxExecutionTime: "60"         # cap, not the class: clickhouse-go sends ceil(remaining ctx) for the 30 s report class, and a cap of exactly 30 refused every report (code 452)
     maxResultRows: "100000"
     maxRowsToRead: "5000000000"
     maxBytesToRead: "53687091200"
