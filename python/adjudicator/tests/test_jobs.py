@@ -35,6 +35,7 @@ def test_gold_refresh_and_spectral_run_before_certs_recompute_and_targets_resolv
         "certs.recompute",
         "readjudicate.run",
         "promotion.step",
+        "judge_batch.run",
     ]
     assert set(validate(JOBS)) == {
         "gold.refresh",
@@ -42,10 +43,12 @@ def test_gold_refresh_and_spectral_run_before_certs_recompute_and_targets_resolv
         "certs.recompute",
         "readjudicate.run",
         "promotion.step",
+        "judge_batch.run",
     }
     by_name = {j.name: j for j in JOBS}
     assert by_name["readjudicate.run"].runs_after == ("spectral.estimate",)
     assert "readjudicate.run" in by_name["promotion.step"].runs_after
+    assert by_name["judge_batch.run"].runs_after == ("readjudicate.run",)
 
 
 FIXTURE = json.loads(

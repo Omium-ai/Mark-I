@@ -16,6 +16,7 @@ import pytest
 from app.certified.runner import CONSENT_ID, CONSISTENCY_ID, definition, execution_hash
 from app.db import _tenant_guc_reset, set_local_tenant
 from app.jobs import JOBS
+from app.jobs.judge_batch import run as judge_batch_run
 from app.jobs.nightly import certs_recompute, promotion_step, spectral_estimate
 from app.jobs.readjudicate import NO_ATTEMPT, measured_pairs, run
 from app.jobs.registry import validate
@@ -26,6 +27,7 @@ from mark1_receipts import canonical_json
 from pydantic import SecretStr
 from tests.test_certified import ANCHOR, T3_ID, TEMPLATE
 from tests.test_jobs import FakeChoke
+from tests.test_judge_batch import FakeBatch
 from tests.test_pg_stores import FakeControld, _mk_judge_verifier, _mk_tenant
 from tests.test_promotion_pg import _head, _mk_cert
 from tests.test_readjudicate import AMBIGUOUS, NO_TEST, FakeCloud, row, rows
@@ -136,6 +138,7 @@ def _targets(http: httpx.AsyncClient) -> dict:
             run, http=http, evidence_for=_evidence, archive_for=_archive
         ),
         "promotion.step": functools.partial(promotion_step, http=http),
+        "judge_batch.run": functools.partial(judge_batch_run, http=http, batch=FakeBatch()),
     }
 
 

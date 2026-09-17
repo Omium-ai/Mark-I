@@ -12,7 +12,16 @@ from uuid import UUID
 
 import httpx
 import zstandard
-from m1p.v1 import Batch, CertificationStatus, Event, SdkInfo, Verdict, VerdictEvent, VerdictStage
+from m1p.v1 import (
+    Batch,
+    CertificationStatus,
+    Event,
+    JudgeVote,
+    SdkInfo,
+    Verdict,
+    VerdictEvent,
+    VerdictStage,
+)
 
 from app.adjudicate import algorithm
 from app.choke import QuerychokeError
@@ -28,6 +37,7 @@ _CERTIFICATION = {
     "uncertified": CertificationStatus.UNCERTIFIED,
 }
 _DOMAIN = b"adjudicator/verdict/"
+_JUDGE_DOMAIN = b"adjudicator/judge/"
 
 
 def deterministic_v7(domain: bytes, key: bytes, at: datetime) -> bytes:
@@ -80,6 +90,25 @@ def verdict_wire(
             vote_count=event.vote_count,
             certification=_CERTIFICATION[event.stage],
         ),
+    )
+
+
+def judge_vote_wire(
+    vote: JudgeVote, *, tenant_id: UUID, task_id: UUID, session_id: UUID, window_start: datetime
+) -> Event:
+    """The cloud judge's vote as the edge would have spooled it (06 §6.2 step 6), one
+    deterministic event_id per (tenant, task, judge), so a re-post collapses like a verdict."""
+    at = window_close(window_start)
+    return Event(
+        event_id=deterministic_v7(
+            _JUDGE_DOMAIN, tenant_id.bytes + task_id.bytes + vote.judge_id.encode(), at
+        ),
+        seq=int(at.timestamp() * 1000),
+        session_id=session_id.bytes,
+        task_id=task_id.bytes,
+        occurred_at=at,
+        session_epoch=SERVICE_EPOCH,
+        judge_vote=vote,
     )
 
 

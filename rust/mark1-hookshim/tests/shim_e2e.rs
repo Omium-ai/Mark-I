@@ -155,15 +155,11 @@ impl TestEnv {
             .unwrap_or(0)
     }
 
-    /// The `MARK1_HOOKSHIM_TIMING=1` sidecar `spill::record_timing` writes:
-    /// the gate path's own elapsed millis for its most recent fail-open.
-    fn gate_elapsed_ms(&self) -> u64 {
-        let raw = std::fs::read(
-            self.home
-                .path()
-                .join(".omium/mark1/spill/hookshim.gate_elapsed_ms"),
-        )
-        .unwrap();
+    /// A `MARK1_HOOKSHIM_TIMING=1` sidecar `spill::record_timing` writes: the
+    /// named path's own millis for its most recent fail-open (gate deadline,
+    /// observer abandon budget/elapsed, flush deadline).
+    fn timing_ms(&self, name: &str) -> u64 {
+        let raw = std::fs::read(self.home.path().join(".omium/mark1/spill").join(name)).unwrap();
         u64::from_le_bytes(raw[..8].try_into().unwrap())
     }
 
@@ -721,15 +717,22 @@ fn deadline_blocked_fabric_spills_within_budget() {
     // This is the stall the 45 ms abandon timer exists for.
     let listener = starve_backlog(&env);
 
-    let (ok, chatter, wall) = env.run(&fixture("PreToolUse"), &[]);
+    let (ok, chatter, wall) = env.run(&fixture("PreToolUse"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok, "a blocked fabric must still exit 0");
     assert!(chatter.is_empty());
     // Only the 45 ms abandon timer can unblock this shim: the connect is
     // parked on a starved backlog with nothing to time it out, so ANY exit
-    // proves the timer fired. The margin above 45 ms is the spill path
-    // itself — dominated by the debug-build ruleset compile, which the
-    // release profile collapses to single-digit ms.
-    assert!(wall < fail_open_ceiling(45), "took {wall:?}");
+    // proves the timer fired. The property is the shim's own timer: the
+    // budget it handed the abandon wait is what was LEFT of 45 ms after
+    // startup, and the wait ended on that budget — not the process wall,
+    // which the debug-build ruleset compile and the scheduler own.
+    let budget = env.timing_ms("hookshim.observe_budget_ms");
+    assert!(
+        budget <= 45,
+        "abandon budget exceeds 04 §5's 45 ms: {budget}ms"
+    );
+    assert_gate_timer_honored_deadline(env.timing_ms("hookshim.observe_elapsed_ms"), budget);
+    assert!(wall < loose_wall_ceiling(45), "took {wall:?}");
     let entries = unseal_ring(&env);
     assert_eq!(entries.len(), 1, "the abandoned event must be in the ring");
     let ev = decode_one_event(&entries[0]);
@@ -1047,7 +1050,7 @@ fn gate_deadline_exceeded_allows_within_budget() {
     assert_eq!(d.query().deadline_ms, 50, "60 ms budget − 08 §4.4's 10 ms");
     // The daemon answers LATE_BY past the deadline; the shim's own timer, not
     // the OS scheduler, is what must have answered before.
-    assert_gate_timer_honored_deadline(env.gate_elapsed_ms(), 50);
+    assert_gate_timer_honored_deadline(env.timing_ms("hookshim.gate_elapsed_ms"), 50);
     assert!(wall < loose_wall_ceiling(50), "took {wall:?}");
     // The daemon never answered, so it never accounted the event either.
     assert_eq!(unseal_ring(&env).len(), 1, "the event must reach the ring");
@@ -1097,7 +1100,7 @@ fn gate_mute_daemon_allows_within_budget() {
     let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok);
     assert!(chatter.is_empty());
-    assert_gate_timer_honored_deadline(env.gate_elapsed_ms(), 50);
+    assert_gate_timer_honored_deadline(env.timing_ms("hookshim.gate_elapsed_ms"), 50);
     assert!(wall < loose_wall_ceiling(50), "took {wall:?}");
     assert_eq!(
         unseal_ring(&env).len(),
@@ -1129,7 +1132,7 @@ fn shipped_stop_budget_bounds_a_wedged_daemon() {
     let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok);
     assert!(chatter.is_empty(), "silence is allow, not block");
-    assert_gate_timer_honored_deadline(env.gate_elapsed_ms(), STOP_DEADLINE_MS);
+    assert_gate_timer_honored_deadline(env.timing_ms("hookshim.gate_elapsed_ms"), STOP_DEADLINE_MS);
     assert!(wall < loose_wall_ceiling(STOP_DEADLINE_MS), "took {wall:?}");
     assert_eq!(
         unseal_ring(&env).len(),
@@ -1151,7 +1154,7 @@ fn gate_blocked_connect_allows_within_budget() {
     let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok, "a parked connect must still exit 0");
     assert!(chatter.is_empty());
-    assert_gate_timer_honored_deadline(env.gate_elapsed_ms(), 500);
+    assert_gate_timer_honored_deadline(env.timing_ms("hookshim.gate_elapsed_ms"), 500);
     assert!(wall < loose_wall_ceiling(500), "took {wall:?}");
     assert_eq!(unseal_ring(&env).len(), 1);
     assert_eq!(env.gate_timeouts(), 1);
@@ -1170,7 +1173,7 @@ fn gate_silence_after_slow_handshake_spends_one_budget() {
     let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok);
     assert!(chatter.is_empty());
-    assert_gate_timer_honored_deadline(env.gate_elapsed_ms(), 2_000);
+    assert_gate_timer_honored_deadline(env.timing_ms("hookshim.gate_elapsed_ms"), 2_000);
     assert!(wall < loose_wall_ceiling(2_000), "took {wall:?}");
     assert!(
         wall > HELLO_DELAY,
@@ -1244,11 +1247,20 @@ fn session_end_flush_unacked_returns_within_deadline_and_is_counted() {
     let env = TestEnv::new();
     env.install_spill_pubkey();
     let d = env.listen_as(Mode::NoFlushAck);
-    let (ok, chatter, wall) = env.run(&fixture("SessionEnd"), &[]);
+    let (ok, chatter, wall) = env.run(&fixture("SessionEnd"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok, "a mute drain must still exit 0");
     assert!(chatter.is_empty());
     assert_eq!(d.frame_log(), ["Hello", "Event(SessionEnd)", "Flush"]);
-    assert!(wall < fail_open_ceiling(FLUSH_DEADLINE_MS), "took {wall:?}");
+    // The shim's own flush timer waited the whole stated deadline and no
+    // longer; the wall is only a hang net.
+    assert_gate_timer_honored_deadline(
+        env.timing_ms("hookshim.flush_elapsed_ms"),
+        FLUSH_DEADLINE_MS,
+    );
+    assert!(
+        wall < loose_wall_ceiling(FLUSH_DEADLINE_MS),
+        "took {wall:?}"
+    );
     let entries = unseal_ring(&env);
     assert_eq!(entries.len(), 1, "an unreceipted SessionEnd must spill");
     match decode_one_event(&entries[0]).body.unwrap() {

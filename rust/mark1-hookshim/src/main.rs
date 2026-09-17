@@ -169,6 +169,7 @@ fn observe(home: Option<&Path>, frame: Vec<u8>, session_id: &[u8], budget: Durat
     std::thread::spawn(move || {
         let _ = tx.send(fabric::send(&worker_frame, &worker_session, budget));
     });
+    let waited = Instant::now();
     match rx.recv_timeout(budget) {
         Ok(Ok(())) => {}
         // Unreachable daemon, refused handshake, or a blown deadline: the
@@ -176,7 +177,12 @@ fn observe(home: Option<&Path>, frame: Vec<u8>, session_id: &[u8], budget: Durat
         // next connect. Before the handshake existed this arm was
         // unreachable: write_all succeeded against a socket mark1d was
         // closing, so every event was lost with Ok(()) and no spill.
-        _ => spill::append(home, frame),
+        _ => {
+            let elapsed = waited.elapsed(); // before the spill: sealing is real work, not the budget
+            spill::append(home, frame);
+            spill::record_timing(home, "hookshim.observe_budget_ms", budget);
+            spill::record_timing(home, "hookshim.observe_elapsed_ms", elapsed);
+        }
     }
 }
 
@@ -186,9 +192,12 @@ fn observe(home: Option<&Path>, frame: Vec<u8>, session_id: &[u8], budget: Durat
 /// spill it and count the missed ack.
 fn flush(home: Option<&Path>, frame: Vec<u8>, session_id: &[u8]) {
     let budget = Duration::from_millis(FLUSH_DEADLINE_MS);
+    let waited = Instant::now();
     if fabric::flush(&frame, session_id, budget).is_err() {
+        let elapsed = waited.elapsed();
         spill::append(home, frame);
         spill::count_flush_timeout(home);
+        spill::record_timing(home, "hookshim.flush_elapsed_ms", elapsed);
     }
 }
 
