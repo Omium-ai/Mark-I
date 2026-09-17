@@ -56,6 +56,31 @@ Numbers are internally consistent: `tokens_saved.total` = the sum of its
 `arrests`/`re_exploration_avoided`/`routing` parts, and `tvo` = tokens ÷
 verified outcomes.
 
+Ids join across the two sides byte-for-byte: the live session is
+`0191c7a0-5b1e-7c2d-9e4f-0123456789a0` (ids are dashed UUID strings on every
+app-facing surface, local and cloud) in `local-status.agents_live`,
+`local-verify-events`, `cloud-sessions`, `cloud-sessions/{id}` (the route
+literal in `CLOUD_ROUTES`), `cloud-moments` and `cloud-memory-injections`;
+its tasks are `…89a1` (the arrest, also `reports-interventions.knee_arrests[0]`),
+`…89a2` (the injection) and `…89a3` (the route decision). Agent names are the
+daemon's catalog vocabulary on both sides (`claudecode`, never `claude-code`).
+Receipt seqs join too: `local-receipts` numbers checkpoints 1..3 with head
+`{seq: 1042, checkpoint_seq: 3}`, and `cloud-receipts-export` is controld's
+real export shape — `application/x-ndjson`, one signed receipt per line
+(`tools/verifier` `ExportRow`: `seq, payload, receipt_hash_hex,
+device_key_id, device_signature_hex, server_key_id, server_signature_hex`),
+the fixture holding the lines as an array. Chain seq 1042 is checkpoint 3 and
+its `receipt_hash_hex` is the local `head.hash`; `merkle_root`, `key_id`
+(`device_key_id`) and `leaf_count` sit inside each line's canonical
+`payload`. Witness heads are their own route, `GET /api/v1/receipts/witness`
+(`{heads:[{witnessed_seq, witnessed_hash_hex, witnessed_at, statement,
+server_key_id, signature_hex, object_bucket_uri?, log_backend?}]}`), as on
+controld. Signatures and hashes here are shaped, not verifiable.
+
+`POST /v1/shutdown` answers `{ok: true}` and is how the app stops the daemon
+where no SIGTERM exists (Windows); the daemon then takes the same graceful
+stop path a signal does.
+
 ## What the local fixtures are held to
 
 `go/mark1d/internal/control/conformance_test.go` runs every `local-*.json`
@@ -105,6 +130,9 @@ node desktop/mock/check.mjs
 ```
 
 Starts the server once per scenario, hits every endpoint with the real
-bearer, asserts `200` + parseable JSON (`401` without a bearer on the local
-API; connection refused on the cloud port for `offline`), reads one replayed
-SSE event where the fixture has any. Exits non-zero on any failure.
+bearer, asserts `200` + parseable JSON (or one JSON document per line on an
+`application/x-ndjson` reply; `401` without a bearer on the local API;
+connection refused on the cloud port for `offline`), reads one replayed SSE
+event where the fixture has any. Exits non-zero on any failure. It binds
+`4501`/`4502`; `MOCK_CHECK_LOCAL_PORT`/`MOCK_CHECK_CLOUD_PORT` move it when
+another mock holds them.

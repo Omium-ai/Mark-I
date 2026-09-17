@@ -4,7 +4,7 @@
     "event": "session_start",
     "data": {
       "task_id": null,
-      "session_id": "ses_9a1",
+      "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
       "agent": "claudecode",
       "project": "/Users/dev/myrepo"
     }
@@ -13,8 +13,8 @@
     "delayMs": 900,
     "event": "turn",
     "data": {
-      "task_id": "task_401",
-      "session_id": "ses_9a1",
+      "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a1",
+      "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
       "turn": 1
     }
   },
@@ -22,8 +22,8 @@
     "delayMs": 900,
     "event": "tool",
     "data": {
-      "task_id": "task_401",
-      "session_id": "ses_9a1",
+      "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a1",
+      "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
       "tool": "edit",
       "path": "payments.py"
     }
@@ -32,8 +32,8 @@
     "delayMs": 900,
     "event": "usage",
     "data": {
-      "task_id": "task_401",
-      "session_id": "ses_9a1",
+      "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a1",
+      "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
       "input": 1800,
       "output": 620,
       "cache": 4100
@@ -43,8 +43,8 @@
     "delayMs": 900,
     "event": "verdict",
     "data": {
-      "task_id": "task_401",
-      "session_id": "ses_9a1",
+      "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a1",
+      "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
       "state": "provisional"
     }
   },
@@ -52,8 +52,8 @@
     "delayMs": 900,
     "event": "arrest",
     "data": {
-      "task_id": "task_401",
-      "session_id": "ses_9a1",
+      "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a1",
+      "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
       "attempt": 3,
       "tokens_saved_estimate": 4200
     }
@@ -62,8 +62,8 @@
     "delayMs": 900,
     "event": "injection",
     "data": {
-      "task_id": "task_402",
-      "session_id": "ses_9a1",
+      "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a2",
+      "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
       "artifact_id": "art_pit_7",
       "tokens_used": 180
     }
@@ -72,8 +72,8 @@
     "delayMs": 900,
     "event": "route_decision",
     "data": {
-      "task_id": "task_403",
-      "session_id": "ses_9a1",
+      "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a3",
+      "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
       "served_model": "sonnet-4.5",
       "action": "stay"
     }

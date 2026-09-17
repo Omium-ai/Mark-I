@@ -2,7 +2,7 @@
   {
     "id": "rd_1",
     "time": "2026-09-16T13:42:00.000Z",
-    "task_id": "task_403",
+    "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a3",
     "served_model": "haiku-4.5",
     "action": "stay",
     "fidelity": "WIRE_ENFORCED",
@@ -12,7 +12,7 @@
   {
     "id": "rd_2",
     "time": "2026-09-16T11:32:00.000Z",
-    "task_id": "task_355",
+    "task_id": "0191c711-5b1e-7c2d-9e4f-012345678355",
     "served_model": "sonnet-4.5",
     "action": "escalate",
     "fidelity": "CONFIG_STEERED",

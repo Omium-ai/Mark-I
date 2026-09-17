@@ -1,0 +1,14 @@
+{
+  "heads": [
+    {
+      "witnessed_seq": 1041,
+      "witnessed_hash_hex": "a3b6ee3cb380f46b99d0fece33aff7d52cea6730fd2350cf0da387e25af2e5d9",
+      "witnessed_at": "2026-09-16T14:00:00Z",
+      "statement": "{\"checkpoint_seq\":2,\"hash\":\"a3b6ee3cb380f46b99d0fece33aff7d52cea6730fd2350cf0da387e25af2e5d9\",\"seq\":1041,\"tenant_id\":\"0191a000-0000-7000-8000-000000000001\",\"witnessed_at\":\"2026-09-16T14:00:00Z\"}",
+      "server_key_id": "ed25519:1325b850c2871916",
+      "signature_hex": "4dc25a7c7576f3ab6442750e3cd0791536507770b80ba40f3ddb4222323cdb196e4309a47cb1c8b300e8767678f5fb5def28c518df608597154ee60a38129de1",
+      "object_bucket_uri": "s3://omium-witness-us/0191a000-0000-7000-8000-000000000001/2026-09-16T14.json",
+      "log_backend": "rekor"
+    }
+  ]
+}

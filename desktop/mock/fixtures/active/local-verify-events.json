@@ -3,8 +3,8 @@
     "type": "arrest",
     "id": "0191c7a0-5b1e-7c2d-9e4f-0123456789ab",
     "time": "2026-09-16T14:12:00Z",
-    "task_id": "0191c7a05b1e7c2d9e4f0123456789a1",
-    "session_id": "0191c7a05b1e7c2d9e4f0123456789a0",
+    "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a1",
+    "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
     "attempt": 3,
     "p_lcb": 0.18,
     "v": 6000,
@@ -14,30 +14,30 @@
   },
   {
     "type": "verdict",
-    "id": "0191c7a05b1e7c2d9e4f0123456789b2",
+    "id": "0191c7a0-5b1e-7c2d-9e4f-0123456789b2",
     "time": "2026-09-16T14:14:00Z",
-    "task_id": "0191c7a05b1e7c2d9e4f0123456789a1",
-    "session_id": "0191c7a05b1e7c2d9e4f0123456789a0",
+    "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a1",
+    "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
     "verdict": "satisfied",
     "state": "certified",
     "certificate_id": "cert_5591"
   },
   {
     "type": "verdict",
-    "id": "0191c7a05b1e7c2d9e4f0123456789b3",
+    "id": "0191c7a0-5b1e-7c2d-9e4f-0123456789b3",
     "time": "2026-09-16T14:02:00Z",
-    "task_id": "0191c7a05b1e7c2d9e4f0123456789a2",
-    "session_id": "0191c7a05b1e7c2d9e4f0123456789a0",
+    "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a2",
+    "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
     "verdict": "satisfied",
     "state": "certified",
     "certificate_id": "cert_5592"
   },
   {
     "type": "tamper",
-    "id": "0191c7a05b1e7c2d9e4f0123456789b4",
+    "id": "0191c7a0-5b1e-7c2d-9e4f-0123456789b4",
     "time": "2026-09-16T13:58:00Z",
-    "task_id": "0191c7a05b1e7c2d9e4f0123456789a2",
-    "session_id": "0191c7a05b1e7c2d9e4f0123456789a0",
+    "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a2",
+    "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
     "anchor_id": "ruff@cat-1"
   }
 ]

@@ -19,6 +19,7 @@ export const LOCAL_ROUTES = [
   ['POST', '/v1/pause', 'local-pause'],
   ['POST', '/v1/resume', 'local-resume'],
   ['GET', '/v1/doctor', 'local-doctor'],
+  ['POST', '/v1/shutdown', 'local-shutdown'],
   ['GET', '/v1/receipts', 'local-receipts'],
   ['POST', '/v1/receipts/verify', 'local-receipts-verify'],
   ['GET', '/v1/verify/events', 'local-verify-events'],
@@ -32,7 +33,7 @@ export const CLOUD_ROUTES = [
   ['GET', '/api/v1/reports/tvo', 'cloud-reports-tvo'],
   ['GET', '/api/v1/reports/interventions', 'cloud-reports-interventions'],
   ['GET', '/api/v1/sessions', 'cloud-sessions'],
-  ['GET', '/api/v1/sessions/ses_9a1', 'cloud-sessions-detail'],
+  ['GET', '/api/v1/sessions/0191c7a0-5b1e-7c2d-9e4f-0123456789a0', 'cloud-sessions-detail'],
   ['GET', '/api/v1/moments', 'cloud-moments'],
   ['GET', '/api/v1/memory/artifacts', 'cloud-memory-artifacts'],
   ['GET', '/api/v1/memory/injections', 'cloud-memory-injections'],
@@ -41,12 +42,15 @@ export const CLOUD_ROUTES = [
   ['GET', '/api/v1/route/decisions', 'cloud-route-decisions'],
   ['GET', '/api/v1/route/bundle', 'cloud-route-bundle'],
   ['GET', '/api/v1/receipts/export', 'cloud-receipts-export'],
+  ['GET', '/api/v1/receipts/witness', 'cloud-receipts-witness'],
   ['GET', '/api/v1/team', 'cloud-team'],
   ['POST', '/api/v1/team/invites', 'cloud-team-invites'],
   ['GET', '/api/v1/me', 'cloud-me'],
 ];
 
 const SSE_EVENT_NAME = 'local-events';
+// controld streams the export as application/x-ndjson (one ExportRow per line); the fixture holds the rows as an array.
+const NDJSON_FIXTURES = new Set(['cloud-receipts-export']);
 
 function loadFixtures(scenario) {
   const dir = path.join(HERE, 'fixtures', scenario);
@@ -67,6 +71,12 @@ function drain(req) {
 function json(res, code, body) {
   const buf = Buffer.from(JSON.stringify(body));
   res.writeHead(code, { 'content-type': 'application/json', 'content-length': buf.length });
+  res.end(buf);
+}
+
+function ndjson(res, rows) {
+  const buf = Buffer.from(rows.map((r) => JSON.stringify(r) + '\n').join(''));
+  res.writeHead(200, { 'content-type': 'application/x-ndjson', 'content-length': buf.length });
   res.end(buf);
 }
 
@@ -124,6 +134,7 @@ export function startCloud(scenario, port) {
     const url = new URL(req.url, 'http://localhost');
     const fixture = matchRoute(CLOUD_ROUTES, req.method, url.pathname);
     if (!fixture) return json(res, 404, { error: 'not found' });
+    if (NDJSON_FIXTURES.has(fixture)) return ndjson(res, fixtures.get(fixture));
     return json(res, 200, fixtures.get(fixture));
   });
   return listen(server, port);

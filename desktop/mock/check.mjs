@@ -7,8 +7,8 @@ import { LOCAL_ROUTES, CLOUD_ROUTES } from './server.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCENARIOS = ['first-run', 'active', 'paused', 'offline', 'below-floor'];
-const LOCAL_PORT = 4501;
-const CLOUD_PORT = 4502;
+const LOCAL_PORT = Number(process.env.MOCK_CHECK_LOCAL_PORT || 4501);
+const CLOUD_PORT = Number(process.env.MOCK_CHECK_CLOUD_PORT || 4502);
 
 const failures = [];
 const fail = (msg) => failures.push(msg);
@@ -43,7 +43,11 @@ async function checkJson(scenario, method, url, headers, wantStatus) {
     }
     if (wantStatus === 200) {
       const text = await res.text();
-      JSON.parse(text);
+      if ((res.headers.get('content-type') || '').includes('application/x-ndjson')) {
+        for (const line of text.split('\n').filter(Boolean)) JSON.parse(line);
+      } else {
+        JSON.parse(text);
+      }
     }
   } catch (err) {
     fail(`${scenario} ${method} ${url}: ${err.message}`);

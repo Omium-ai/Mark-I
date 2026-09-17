@@ -1,6 +1,6 @@
 {
-  "id": "ses_9a1",
-  "agent": "claude-code",
+  "id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
+  "agent": "claudecode",
   "project": "/Users/dev/myrepo",
   "time": "2026-09-16T14:12:00.000Z",
   "tokens": {
@@ -14,7 +14,7 @@
   },
   "tasks": [
     {
-      "task_id": "task_401",
+      "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a1",
       "name": "fix retry storm in payments.py",
       "attempts": [
         {
@@ -60,7 +60,7 @@
       "injections": []
     },
     {
-      "task_id": "task_402",
+      "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a2",
       "name": "add idempotency key to charge endpoint",
       "attempts": [
         {
@@ -97,5 +97,5 @@
       ]
     }
   ],
-  "receipt_checkpoint_seq": 1042
+  "receipt_checkpoint_seq": 3
 }

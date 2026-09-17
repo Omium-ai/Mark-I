@@ -35,3 +35,6 @@ mark1-test-*/
 .idea/
 .vscode/
 *.swp
+
+# Per-boot port + bearer the desktop mock writes at start (the GUI chmods it); never committable.
+/desktop/mock/control.json
