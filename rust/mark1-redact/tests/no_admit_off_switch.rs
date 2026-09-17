@@ -468,8 +468,9 @@ const REVIEWED_SINKS: &[(&str, &str, &str)] = &[
     // Frames to the LOCAL mark1d socket. Not disk and not off-machine, so
     // invariant 5 does not bind here; mark1d owns redaction on its side.
     // Listed rather than filtered so the judgement is visible and reviewable.
-    ("mark1-proxy/src/fabric.rs", "send", "29738378eadc9c8e"),
-    ("mark1-hookshim/src/fabric.rs", "write_frame", "a9afcc9f2a24dbd3"),
+    ("mark1-proxy/src/fabric.rs", "deliver", "4a99678aa5460439"), // re-reviewed 2026-09-18: Hello + the frame to the local socket or the owner-only named pipe; `send` only connects now
+    ("mark1-hookshim/src/fabric.rs", "write_frame", "eb1a5e88683f885e"), // re-reviewed 2026-09-18: one frame to the per-platform Stream below
+    ("mark1-hookshim/src/fabric.rs", "write_all", "869fe8b224b21db6"), // the Stream itself: unix socket (write timeout) and the owner-only named pipe (File); local only
 ];
 
 /// A write-like call, as this token walk can see it.

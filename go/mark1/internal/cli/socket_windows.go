@@ -2,6 +2,9 @@
 package cli
 
 import (
+	"io"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/Microsoft/go-winio"
@@ -16,9 +19,16 @@ func SocketPath() (string, error) {
 	return `\\.\pipe\omium-mark1-` + u.User.Sid.String(), nil
 }
 
+// DaemonReachable dials by shape: a pipe name via the pipe, anything else as an AF_UNIX path (an explicit --socket, or a test's fake).
 func DaemonReachable(socket string) bool {
 	d := 300 * time.Millisecond
-	conn, err := winio.DialPipe(socket, &d)
+	var conn io.Closer
+	var err error
+	if strings.HasPrefix(socket, `\\.\pipe\`) {
+		conn, err = winio.DialPipe(socket, &d)
+	} else {
+		conn, err = net.DialTimeout("unix", socket, d)
+	}
 	if err != nil {
 		return false
 	}
