@@ -421,6 +421,15 @@ POST /api/v1/memory/match                                 auth: device token
 ```
 The reactive fuzz tier (06 §9.5 D29): admitted `pitfall` artifacts within cosine 0.15 over the one halfvec HNSW column, at most `limit` ≤ m_inject = 3. The server hop is deadline-bounded at 1.5 s, the edge's own budget. A `tenant_id` (or any unknown field) in the body is refused, not ignored. Errors: 400 M1E-2001 (malformed/oversize body, unknown field, or intel refused the request) · 401 M1E-1002 · 403 M1E-1003 · 502 M1E-9500 · 503 M1E-9500. No §8.2 rate-limit row exists yet for these two routes.
 
+### 3.7a Device consents (desktop onboarding Step 4; 04 §2.7, 07 `m1_082`)
+
+```
+PUT /api/v1/consents                                      auth: device token (a user token is refused)
+  { "e1": bool, "cloud_judge": bool, "training": bool }   # exactly these three, all present; ≤4 KiB, unknown field refused
+→ 200 { "recorded_at": "<RFC 3339>" }
+```
+The body is the device's whole consent state, not a patch: each PUT appends one `m1_device_consents` row stamped with the token's `(tenant, device)`, and the latest row per device is that device's consent (the table is append-only; history stays answerable). The edge relays the same record it wrote to `<state>/gates/consents.json` and keeps it pending until acknowledged, so the cloud's view never runs ahead of the local one. Consumers: `e1` gates `EmitExcerpt`'s E1 case on the edge (a `Dropped{e1_consent_absent}` row when absent); `cloud_judge` is the §3.8 judge path's precondition; `training` gates `corpus.export` — the job runs only when every device of the tenant that has ever recorded consent currently consents (`bool_and` over latest rows; a tenant with no rows is refused, never assumed). Errors: 400 M1E-2001 (shape) · 401 M1E-1002 · 403 M1E-1001 (no device claim) · 503 M1E-9500 (store unavailable or unconfigured).
+
 ### 3.8 Internal service surface (never public; service credential, ADR-0010 §2.2)
 
 ```

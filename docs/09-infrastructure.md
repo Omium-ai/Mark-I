@@ -846,139 +846,25 @@ Chart `omium-mark1/deploy/helm/omium-mark1/` (apiVersion v2, `version: 0.1.0`), 
 - **Scraping by pod annotation only.** `prometheus.io/{scrape,port,path}` on the pod template. No ServiceMonitor objects — none exist anywhere in the estate, and inventing the first one would silently do nothing until someone also installs a Prometheus Operator config to honour it.
 - **Values keys are camelCase per service**, images render as `{{ .Values.imageRegistry.url }}/{{ .Values.imageRegistry.organization }}/<name>:{{ .Values.<svc>.imageTag }}` — and the chart default for `imageTag` is **empty, failing render**, not `latest`. The platform's `| default "latest"` is a fossil from before 2026-08-13; on IMMUTABLE ECR it produces permanent pins that look like pointers, and Mark 1's chart makes the unpinned state a loud error instead.
 
-### 7.2 The representative chart in full — `templates/controld.yaml`
+### 7.2 The representative chart — `deploy/helm/omium-mark1/templates/controld.yaml`
 
-```yaml
-{{- if .Values.controld.enabled }}
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: controld
-  namespace: {{ .Values.global.namespace | default "omium-mark1" }}
-spec:
-  replicas: {{ .Values.controld.replicas | default 2 }}
-  selector:
-    matchLabels:
-      app: controld
-  template:
-    metadata:
-      labels:
-        app: controld
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
-        prometheus.io/path: "/metrics"
-    spec:
-      {{- include "omium.podSecurityContext" (dict "root" $ "svc" "controld") | nindent 6 }}
-      {{- include "omium.spread" (dict "root" $ "svc" "controld" "app" "controld") | nindent 6 }}
-      # IRSA: the SA is annotated with omium-prod-mark1-controld-irsa (§6);
-      # the AWS SDK assumes it via the projected web-identity token.
-      serviceAccountName: {{ .Values.controld.serviceAccountName | default "controld" }}
-      containers:
-      - name: controld
-        {{- include "omium.containerSecurityContext" (dict "root" $ "svc" "controld") | nindent 8 }}
-        image: {{ .Values.imageRegistry.url }}/{{ .Values.imageRegistry.organization }}/mark1-controld:{{ required "controld.imageTag must be a pinned <sha7> - latest is retired estate-wide" .Values.controld.imageTag }}
-        ports:
-        - containerPort: 8443
-          name: ingest        # M1P/1 HTTPS from the ALB
-        - containerPort: 8080
-          name: api           # enroll / policy-dist / query-choke REST (08)
-        - containerPort: 9090
-          name: metrics
-        env:
-        - name: METRICS_PORT
-          value: "9090"
-        - name: POSTGRES_HOST
-          value: {{ .Values.config.postgresql.host }}
-        - name: POSTGRES_PORT
-          value: "{{ .Values.config.postgresql.port }}"
-        - name: POSTGRES_DB
-          value: {{ .Values.config.postgresql.database }}
-        # No master-user branch, by design (§3.3): the role is pinned in
-        # values so a diff shows plainly what connects as what, and only the
-        # password comes from the Secret.
-        - name: POSTGRES_USER
-          value: {{ .Values.controld.postgresRole | default "controld_app" | quote }}
-        - name: POSTGRES_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mark1-db-service-credentials
-              key: {{ .Values.controld.postgresRole | default "controld_app" | quote }}
-        - name: POSTGRES_SSLMODE
-          value: {{ .Values.config.postgresql.sslMode | default "require" }}
-        - name: CLICKHOUSE_HOST
-          valueFrom:
-            secretKeyRef: { name: mark1-clickhouse, key: host }
-        - name: CLICKHOUSE_INGEST_PASSWORD
-          valueFrom:
-            secretKeyRef: { name: mark1-clickhouse, key: ingest_password }
-        - name: CLICKHOUSE_QUERY_PASSWORD
-          valueFrom:
-            secretKeyRef: { name: mark1-clickhouse, key: query_password }
-        - name: INGEST_BUCKET
-          value: {{ .Values.config.s3.ingestBucket }}
-        - name: WITNESS_BUCKET
-          value: {{ .Values.config.s3.witnessBucket }}
-        - name: CHAIN_KEY_ALIAS
-          value: {{ .Values.controld.chainKeyAlias | default "alias/mark1-server-chain" }}
-        resources:
-          requests:
-            cpu: {{ .Values.controld.resources.requests.cpu | default "250m" }}
-            memory: {{ .Values.controld.resources.requests.memory | default "256Mi" }}
-          limits:
-            cpu: {{ .Values.controld.resources.limits.cpu | default "1000m" }}
-            memory: {{ .Values.controld.resources.limits.memory | default "512Mi" }}
-        # HTTP probes, not exec: distroless has no shell and no grpc_health_probe;
-        # /readyz asserts PG + CH reachability and the async-insert settings
-        # handshake (07 requires the client-side assertion at startup).
-        livenessProbe:
-          httpGet: { path: /healthz, port: 8080 }
-          initialDelaySeconds: 10
-          periodSeconds: 10
-        readinessProbe:
-          httpGet: { path: /readyz, port: 8080 }
-          initialDelaySeconds: 5
-          periodSeconds: 5
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: controld
-  namespace: {{ .Values.global.namespace | default "omium-mark1" }}
-spec:
-  selector:
-    app: controld
-  ports:
-  - { port: 8443, targetPort: 8443, protocol: TCP, name: ingest }
-  - { port: 8080, targetPort: 8080, protocol: TCP, name: api }
-  - { port: 9090, targetPort: 9090, protocol: TCP, name: metrics }
-  type: ClusterIP
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: controld
-  namespace: {{ .Values.global.namespace | default "omium-mark1" }}
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: controld
-  minReplicas: {{ .Values.controld.minReplicas | default 2 }}
-  maxReplicas: {{ .Values.controld.maxReplicas | default 6 }}
-  metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target: { type: Utilization, averageUtilization: 70 }
-  - type: Resource
-    resource:
-      name: memory
-      target: { type: Utilization, averageUtilization: 80 }
-{{- end }}
-```
+The chart is in the repo and is the authority; this section no longer reprints it. The design sketch that used to sit here was reconciled against the built chart on 2026-09-17 and lost on every point below — recorded so nobody re-derives the sketch from the LLD:
 
-`adjudicator.yaml` and `intel.yaml` are the same skeleton minus the HPA (§2.4: batch-shaped, values-scaled), minus ClickHouse env (neither may ever hold a CH credential — that absence *is* the query-choke control), plus intel's `CORPUS_BUCKET`. The ingest ALB is wired by an `Ingress` (AWS Load Balancer Controller annotations, `alb.ingress.kubernetes.io/scheme: internet-facing`, ACM cert ARN from values) in `templates/ingress.yaml` — the LBC is already installed by `modules/aws-controllers`.
+| Sketch said | Chart is | Why |
+|---|---|---|
+| Two listeners: 8443 `ingest` (M1P/1 HTTPS from an ALB) + 8080 `api`; TLS in-pod; `templates/ingress.yaml` with LBC annotations and an ACM cert | **One** API port, `CONTROLD_PORT` 8080, plaintext in-cluster, no Ingress; `POST /m1p/v1/ingest` and the REST surface share it behind the platform's Kong (`mark1.enabled` in `Omium-platform/.../kong.yaml`, routes `api.omium.ai/m1p/*` and `/api/v1/*`) | The estate terminates TLS once at the edge; a second ALB per plane was a cost line, not a control |
+| Metrics on 9090 | `METRICS_PORT` **9092**, pod-annotation scraping (§7.1) | 9090 collides with the platform's Prometheus convention |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_SSLMODE` | `POSTGRES_APP_USER` / `POSTGRES_APP_PASSWORD` (Secret `mark1-db-service-credentials`, key = the role); no sslmode knob — `config.go AppDSN` derives the DSN with `sslmode=require` unconditionally | A knob that can be set to `disable` is a downgrade path (§3.3) |
+| `CLICKHOUSE_HOST` from Secret key `host` | `CLICKHOUSE_ADDR` (`host:port`, native 9000, the in-cluster StatefulSet Service) + `CLICKHOUSE_DATABASE` in values; only the three passwords (`ingest_password`, `query_password`, `offboard_password`) come from Secret `mark1-clickhouse` | The address is topology, not a secret |
+| `INGEST_BUCKET`; `CHAIN_KEY_ALIAS` (KMS-resident chain key) | `S3_INGEST_BUCKET` + `AWS_REGION`; custody is three Ed25519 **seeds** from Secret `mark1-signing-seeds` — `SERVER_CHAIN_ED25519_SEED`, `AUTH_TOKEN_ED25519_SEED`, `BUNDLE_SECTION_ED25519_SEED` (ADR-0004 key ceremony; KMS signing is the Phase-5 upgrade) | KMS `Sign` per receipt is a latency and cost line the pilot does not need; the seeds never leave Secrets Manager → ESO → the pod env |
+| — (absent from the sketch) | `TENANT_HMAC_PEPPER` (Secret `mark1-hmac-pepper`), `OMIUM_USER_ISSUER` + `OMIUM_USER_JWKS_PINNED` (FR-ENROLL-007 user tokens), `PUBLIC_BASE_URL`, `WITNESS_BUCKET` + `WITNESS_TENANTS` (required together — boot refusal R1) + `WITNESS_RETAIN`, `INTEL_SERVICE_TOKEN` + `INTEL_BASE_URL` (the internal seam, ADR-0010 §2.2), `CLICKHOUSE_OFFBOARD_PASSWORD`, `SERVER_MIN_EDGE` | Landed with their features after the sketch was written |
+| `/readyz` asserts PG + CH reachability and the async-insert handshake | `/readyz` asserts PG and the S3 `HeadBucket` (R6); the async-insert settings handshake is **boot refusal R3**, and ClickHouse is deliberately excluded from ingest readiness (05 §1.4: ingest is S3-first, CH down must not shed ingest) | A readiness probe that flaps on CH takes ingest down with the ledger |
+| "zero `securityContext` overrides" | ClickHouse runs as uid **101**; intel, adjudicator and the migrate Job mount `/tmp` emptyDirs (read-only root fs) | The `omium.containerSecurityContext` helper defaults hold everywhere else |
+| intel's `CORPUS_BUCKET` | `INTEL_CORPUS_ROOT_URI` = `s3://<config.s3.corpusBucket>` (a URI, so a local path works in dev); empty ⇒ `corpus.export` parks | — |
+| Sketch had no `tenants` | `tenants: []` in values drives `WITNESS_TENANTS`, the canary rollout controller, the quarantine sweep and every CronJob's `--tenant`; empty ⇒ those loops stay off and the CronJobs are `suspend: true` | 05 §7.3: no sanctioned cross-tenant lister exists yet; a values PR per tenant |
+| No ClickHouse template | `clickhouse.yaml` StatefulSet (26.7, gp3 50 Gi) + `clickhouse-configmap.yaml`; `migrate-job.yaml` is an Argo Sync-hook Job on image `mark1-migrate`; `cronjobs.yaml`, `networkpolicies.yaml`, `poddisruptionbudget.yaml`, `prometheusrule.yaml`, `serviceaccounts.yaml` | §4 (single-node CH day one) |
+
+`adjudicator.yaml` and `intel.yaml` keep the sketch's shape: same skeleton minus the HPA (§2.4: batch-shaped, values-scaled), minus every ClickHouse variable (neither may ever hold a CH credential — that absence *is* the query-choke control).
 
 ### 7.3 Values structure and the overlay shape
 

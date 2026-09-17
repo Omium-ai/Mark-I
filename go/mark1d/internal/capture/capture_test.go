@@ -312,7 +312,7 @@ func TestSessionExemptionIsClosedOverEveryBodyType(t *testing.T) {
 	// CoverageTransition joins the two originals because it has nowhere to put a
 	// session even if we wanted one: the message carries workspace_id and no
 	// session field (proto/m1p/v1/intelligence.proto), and every one of 04 §2.7's
-	// seven reason codes names a condition that exists when no session does —
+	// nine reason codes names a condition that exists when no session does —
 	// `mark1 off`, a hard-stopped disk, a proxy that will not start.
 	exempt := map[string]bool{"EdgeHealth": true, "ReceiptCheckpoint": true, "CoverageTransition": true, "QuarantineDeletion": true}
 

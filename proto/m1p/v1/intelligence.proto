@@ -138,7 +138,8 @@ message CoverageTransition {
   string reason_code = 4;   // [P0] machine code: "mark1_off" | "disk_hard_stop" |
                             //      "user_enable" | "proxy_bypass" |
                             //      "proxy_failed" | "unsupported_agent_version" |
-                            //      "transcript_retention_gap" (04 §2.7)
+                            //      "transcript_retention_gap" | "agent_pause" |
+                            //      "agent_resume" (04 §2.7)
 }
 
 enum CoverageKind {

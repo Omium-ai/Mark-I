@@ -373,7 +373,7 @@ func (e *Env) SaveWorkspaces(ws *Workspaces) error {
 // closing it.
 //
 // The reason_code is stamped HERE, from the kind, because 04 §2.7's vocabulary
-// is frozen at seven values and this command owns exactly two of them. A kind
+// is frozen at nine values and this command owns exactly two of them. A kind
 // outside that pair is refused rather than journalled: mark1d cannot receipt a
 // line it cannot classify, so a silent typo would cost the window entirely.
 func (e *Env) AppendCoverageTransition(rec map[string]any) error {

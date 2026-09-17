@@ -29,9 +29,9 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// The reason_code vocabulary, frozen at seven values in
+// The reason_code vocabulary, frozen at nine values in
 // proto/m1p/v1/intelligence.proto and mirrored VERBATIM by m1_043's `reason`
-// column. 04 §2.7 is its only authority; an eighth code is a doc change first.
+// column. 04 §2.7 is its only authority; a tenth code is a doc change first.
 // The two agent_* codes are POST /v1/agents/{name}/pause|resume (desktop spec
 // §5.9); the wire carries no agent field, so the agent name stays in the local
 // journal line and the transition lands device-wide, exactly as `mark1 off --all` does.

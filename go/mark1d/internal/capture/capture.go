@@ -272,7 +272,7 @@ func (a *Admitter) quarantine(ev *m1pv1.Event, detail string) error {
 //   - CoverageTransition — 04 §2.7's door reports on a WORKSPACE or on the
 //     machine ("enable", a failed proxy, a full disk, an unsupported agent
 //     binary), and its wire message carries a workspace_id and no session
-//     field at all (intelligence.proto). Every one of its seven reason codes
+//     field at all (intelligence.proto). Every one of its nine reason codes
 //     names a condition that exists when no session does, so requiring a
 //     session_id here does not tighten anything — it quarantines the entire
 //     coverage plane, which is what it did until this line was added: an
