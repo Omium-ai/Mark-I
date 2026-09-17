@@ -196,8 +196,9 @@ jobs:
           set -euo pipefail
           mkdir -p "dist/${{ matrix.triple }}"
           ext=""; [ "${{ matrix.goos }}" = windows ] && ext=.exe
+          VERSION="${GITHUB_REF_NAME#edge/v}"
           for m in mark1d mark1; do
-            (cd "go/$m" && go build -mod=readonly -trimpath -ldflags "-s -w" \
+            (cd "go/$m" && go build -mod=readonly -trimpath -ldflags "-s -w -X main.version=$VERSION" \
                -o "../../dist/${{ matrix.triple }}/$m$ext" ./cmd)
           done
       - name: Stage the supervised set
