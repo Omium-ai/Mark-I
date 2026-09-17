@@ -246,6 +246,7 @@ End of FR-AGENT.
 | FR-ENROLL-005 | P1 | Tenant/device records **must** carry IdP binding and an offboarding audit trail; enrollment and revocation events are per-event receipted. |
 | FR-ENROLL-006 | P1 | Enrollment tokens **must** bind the device fingerprint used for the proxy's credential HMAC match (CON-001); a fingerprint mismatch at the guard is a refusal, not a re-enroll. |
 | FR-ENROLL-007 | P1 | An individual developer **must** be able to enroll without a corporate IdP: Omium-hosted sign-in (GitHub/Google via the platform's Supabase-backed `/auth` page, PKCE + loopback redirect per RFC 8252) mints a 1-hour ES256 user token (aud `mark1`, carrying `tenant_id`) that controld verifies against a pinned JWKS and exchanges, with a daemon-generated device key, for a personal tenant (`m1_tenants.kind='personal'`, id = the platform tenant id) and a device enrollment through the same state machine as the IdP path. Personal tenants share one pooled KMS key (ADR-0011) and never enter federation. No shared secret may mint an approval. *(Added 2026-09-16 for the desktop phase, D-EI.)* |
+| FR-ENROLL-008 | P2 | A tenant's members, pending invites, shared-memory setting and 30-day TVO summary **must** be readable by any principal of that tenant and by no other (RLS), and an invite **must** be a hash-only, 7-day token minted server-side — the desktop Team screen (spec §5.10) has no other source. |
 
 ### 7.3 FR-POLICY-* — bundle distribution, ACK, transparency
 
@@ -531,6 +532,7 @@ End of §9.4.
 | FR-ENROLL-005 | Enrollment audit | P1 | Enroll/revoke each produce a per-event receipt; device row carries IdP binding + offboarding fields | Phase 1 | unit |
 | FR-ENROLL-006 | Fingerprint binding | P1 | Credential HMAC mismatch at the guard ⇒ 403 (never a silent re-provision) | Phase 3 | negative |
 | FR-ENROLL-007 | Personal tenants / Omium-hosted sign-in | P1 | HS256 or a non-P-256 pinned key refused; aud/iss/exp enforced; approve mints tenant + device once and re-issues idempotently; cross-tenant user token refused on the operator leg; a personal tenant cannot carry `org_id` (schema CHECK); pooled key selected by tenant kind only | Phase 1 | negative |
+| FR-ENROLL-008 | Team v1 | P2 | Members/invites/shared-memory/TVO summary served under RLS to the tenant's principals only; cross-tenant read is empty; invite tokens are hashed at rest and expire in 7 days | Phase 4 | negative |
 | FR-POLICY-001 | Bundle format | P0 | Canonical-CBOR round-trip stable; non-monotonic seq rejected; missing `prev_hash`/`max_age` rejected; unknown section rejected | Phase 3 | unit + fuzz |
 | FR-POLICY-002 | No commands/code decode gate | P0 | Command-string-bearing bundle fails decode in both languages (shared with CON-009) | Phase 3 | negative |
 | FR-POLICY-003 | Split KMS keys | P0 | Section signed with the wrong key fails verify; update key ≠ bundle key asserted in key inventory; both logged | Phase 3 | negative |
