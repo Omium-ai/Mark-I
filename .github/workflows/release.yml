@@ -161,9 +161,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "dist/${{ matrix.triple }}"
+          ext=""; [ "${{ matrix.goos }}" = windows ] && ext=.exe
           for m in mark1d mark1; do
             (cd "go/$m" && go build -mod=readonly -trimpath -ldflags "-s -w" \
-               -o "../../dist/${{ matrix.triple }}/$m" ./cmd)
+               -o "../../dist/${{ matrix.triple }}/$m$ext" ./cmd)
           done
       - name: Stage the supervised set
         shell: bash
@@ -179,6 +180,17 @@ jobs:
         with:
           name: edge-${{ matrix.triple }}
           path: dist/${{ matrix.triple }}/
+      # The raw per-triple set is what the desktop app's release fetches and packages beside itself (Mark-1-GUI release.yml).
+      - name: Raw per-triple tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/pkg
+          tar -czf "dist/pkg/mark1-${GITHUB_REF_NAME#edge/v}-${{ matrix.triple }}.tar.gz" -C "dist/${{ matrix.triple }}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-raw-${{ matrix.triple }}
+          path: dist/pkg/
 
   # ---------------------------------------------------------------------------
   # macOS: lipo to Universal2, hardened-runtime codesign, .pkg, notarize, staple.
@@ -299,7 +311,6 @@ jobs:
               NFPM_VERSION_ENV="$VERSION" BIN_DIR="dist/$triple" ARCH="$arch" \
                 nfpm package -f deploy/packaging/linux/nfpm.yaml -p "$fmt" -t dist/pkg/
             done
-            tar -czf "dist/pkg/mark1-${VERSION}-${triple}.tar.gz" -C "dist/$triple" .
           done
       - name: Detached GPG signatures
         env:
