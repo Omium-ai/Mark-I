@@ -109,6 +109,9 @@ func (s *Server) SetShutdown(fn func()) {
 }
 
 func (s *Server) Serve() error {
+	stop := make(chan struct{})
+	defer close(stop)
+	go s.relayLoop(stop)
 	if err := s.http.Serve(s.l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

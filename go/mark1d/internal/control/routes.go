@@ -45,6 +45,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /v1/agents", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, s.agents()) })
 	mux.HandleFunc("POST /v1/agents/{name}/provision", s.provisionAgent)
 	mux.HandleFunc("POST /v1/agents/{name}/disable", s.disableAgent)
+	mux.HandleFunc("POST /v1/agents/{name}/pause", func(w http.ResponseWriter, r *http.Request) { s.setAgentOff(w, r, true) })
+	mux.HandleFunc("POST /v1/agents/{name}/resume", func(w http.ResponseWriter, r *http.Request) { s.setAgentOff(w, r, false) })
 	mux.HandleFunc("GET /v1/projects", s.getProjects)
 	mux.HandleFunc("POST /v1/projects", s.postProject)
 	mux.HandleFunc("DELETE /v1/projects", s.deleteProject)
@@ -112,14 +114,13 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		"paused":           off.Off(s.cfg.StateDir),
 		"version":          s.cfg.Version,
 		"since":            s.since.UTC().Format(time.RFC3339),
-		"agents_live":      s.hub.live(s.projectOf(enabled)),
+		"agents_live":      s.markPaused(s.hub.live(s.projectOf(enabled))),
 		"projects_enabled": enabled,
 		"spool":            map[string]any{"bytes": spoolBytes, "cap": s.cfg.SpoolCap, "hard_stop": s.hardStop.Load()},
 	})
 }
 
-// projectOf joins a live session to the enabled root whose Claude Code transcript names it: the hookshim's SessionStart carries no cwd, the transcript head does (08 §5.1).
-// ponytail: claudecode only — its session id IS the transcript file name; the other adapters derive session ids from a shared vendor tree and need the tailer's own session→cwd table (tailers.Manager) wired in.
+// projectOf is the hub's fallback after its session resolver (tailers.Resolve): it joins a live session to the enabled root whose Claude Code transcript names it, since that session id IS the transcript file name and the head carries the cwd the hookshim's SessionStart does not (08 §5.1). The other adapters derive session ids, so only their tailers can attribute them.
 func (s *Server) projectOf(roots []string) func(agent string, sid [16]byte) string {
 	return func(agent string, sid [16]byte) string {
 		if agent != "claudecode" {
@@ -165,7 +166,20 @@ func streamCwd(path string) (string, bool) {
 	return "", false
 }
 
-// agentsSeen is what the daemon has observed working in root: live sessions attributed there, plus Claude Code's on-disk transcripts for it. Never inferred from provisioning.
+// sessionTrees are the vendor session trees whose stream heads name a cwd, by agent; cursor's is always empty (hooks only).
+func (s *Server) sessionTrees() map[string]func(limit int) []string {
+	d := s.cfg.StateDir
+	return map[string]func(int) []string{
+		"codex":    (&codex.Adapter{StateDir: d}).RecentProjects,
+		"gemini":   (&gemini.Adapter{StateDir: d}).RecentProjects,
+		"opencode": (&opencode.Adapter{StateDir: d}).RecentProjects,
+		"copilot":  (&copilot.Adapter{StateDir: d}).RecentProjects,
+		"cursor":   (&cursor.Adapter{StateDir: d}).RecentProjects,
+	}
+}
+
+// agentsSeen is what the daemon has observed working in root: live sessions attributed there, plus every on-disk session tree (Claude Code's per-root transcripts, the other vendors' shared trees) naming a cwd the root's oracle admits. Never inferred from provisioning.
+// ponytail: one full tree scan per vendor per project row; memoize per request if GET /v1/projects ever reads slow.
 func (s *Server) agentsSeen(root string) []string {
 	seen := map[string]bool{}
 	for _, ls := range s.hub.live(s.projectOf([]string{root})) {
@@ -181,6 +195,17 @@ func (s *Server) agentsSeen(root string) []string {
 			}
 			if cwd, ok := streamCwd(filepath.Join(dir, e.Name())); ok && within(root, cwd) {
 				seen["claudecode"] = true
+				break
+			}
+		}
+	}
+	for name, recent := range s.sessionTrees() {
+		if seen[name] {
+			continue
+		}
+		for _, cwd := range recent(0) {
+			if within(root, cwd) {
+				seen[name] = true
 				break
 			}
 		}
@@ -256,9 +281,10 @@ func (s *Server) agents() []map[string]any {
 		},
 	}
 	frags := s.fragments()
+	trees := s.sessionTrees()
 	out := make([]map[string]any, 0, len(adapters.Roster))
 	for _, slot := range adapters.Roster {
-		row := map[string]any{"name": slot.Name, "installed": false, "version": nil, "compat": nil, "regime": nil, "provisioned": nil, "recent_projects": []string{}}
+		row := map[string]any{"name": slot.Name, "installed": false, "version": nil, "compat": nil, "regime": nil, "provisioned": nil, "recent_projects": []string{}, "paused": off.AgentOff(d, slot.Name)}
 		det, ok := detect[slot.Name]
 		if !ok {
 			out = append(out, row)
@@ -273,6 +299,8 @@ func (s *Server) agents() []map[string]any {
 			}
 			if slot.Name == "claudecode" {
 				row["recent_projects"] = claudeRecentProjects()
+			} else if recent := trees[slot.Name]; recent != nil {
+				row["recent_projects"] = recent(0)
 			}
 		}
 		row["regime"] = "subscription"
@@ -306,8 +334,7 @@ func (s *Server) agents() []map[string]any {
 
 func must(d adapters.Detection, _ error) adapters.Detection { return d }
 
-// claudeRecentProjects reads the cwd each ~/.claude/projects/<munged> tree's transcripts name, newest tree first — the munge is lossy, so the head line is the only honest root.
-// ponytail: claudecode only; codex/gemini/opencode/copilot keep their Format.Cwd readers unexported — export one RecentProjects() per adapter to extend.
+// claudeRecentProjects reads the cwd each ~/.claude/projects/<munged> tree's transcripts name, newest tree first — the munge is lossy, so the head line is the only honest root. The other vendors' readers are their adapters' RecentProjects (sessionTrees).
 func claudeRecentProjects() []string {
 	out := []string{}
 	home, err := os.UserHomeDir()
@@ -922,6 +949,9 @@ func (s *Server) putOptIns(w http.ResponseWriter, r *http.Request) {
 	if err := s.setConsents(body.Consents); err != nil {
 		internal(w, err)
 		return
+	}
+	if body.Consents != nil {
+		go s.relayNow()
 	}
 	for p, on := range body.TestsByProject {
 		root, err := canonical(p)

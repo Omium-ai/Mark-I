@@ -129,18 +129,23 @@ func TestTransitionLandsInTheSpoolAsADecodableCoverageEvent(t *testing.T) {
 	}
 }
 
-// TestEveryFrozenReasonCodeIsEmittable walks all seven of 04 §2.7's codes with
-// the kind each one legally carries. It is the positive control for the
-// vocabulary: without it, a refusal test is satisfied by a door that refuses
-// everything, and the plane would be just as dead as it was empty.
+// TestEveryFrozenReasonCodeIsEmittable walks all seven of 04 §2.7's codes plus
+// the two agent-scoped ones with the kind each one legally carries. It is the
+// positive control for the vocabulary: without it, a refusal test is satisfied
+// by a door that refuses everything, and the plane would be just as dead as it
+// was empty.
 func TestEveryFrozenReasonCodeIsEmittable(t *testing.T) {
 	all := []string{
 		ReasonMark1Off, ReasonDiskHardStop, ReasonUserEnable, ReasonProxyBypass,
 		ReasonProxyFailed, ReasonUnsupportedAgentVersion, ReasonTranscriptRetentionGap,
+		ReasonAgentPause, ReasonAgentResume,
 	}
 	if len(all) != len(reasonKind) {
-		t.Fatalf("the vocabulary is frozen at seven values in proto/m1p/v1/intelligence.proto; "+
+		t.Fatalf("the vocabulary is the seven frozen values in proto/m1p/v1/intelligence.proto plus agent_pause/agent_resume; "+
 			"this package knows %d and the test lists %d", len(reasonKind), len(all))
+	}
+	if reasonKind[ReasonAgentPause] != m1pv1.CoverageKind_COVERAGE_KIND_DISABLE || reasonKind[ReasonAgentResume] != m1pv1.CoverageKind_COVERAGE_KIND_ENABLE {
+		t.Fatal("agent_pause is a DISABLE and agent_resume an ENABLE, the same kinds mark1_off/user_enable carry")
 	}
 	cov, sp := wire(t)
 	for _, r := range all {

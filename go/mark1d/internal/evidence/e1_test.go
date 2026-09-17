@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/evidence"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/receipt"
@@ -195,8 +196,12 @@ func TestPrepareE1RedactsSignsAndPassesTheEmitDoor(t *testing.T) {
 
 	rec := &recorder{}
 	r := anchors.NewRunner(noSandbox{}, rec, nil, false)
+	r.StateDir = f.state
+	if err := consents.Write(f.state, consents.Consents{E1: true}); err != nil {
+		t.Fatal(err)
+	}
 	if err := r.EmitExcerpt(context.Background(), [16]byte{9}, [16]byte{8}, x); err != nil {
-		t.Fatalf("the emit door refused a receipted E1 excerpt: %v", err)
+		t.Fatalf("the emit door refused a receipted, consented E1 excerpt: %v", err)
 	}
 	if len(rec.evs) != 1 || !bytes.Equal(rec.evs[0].GetEvidenceExcerpt().GetRedactionReceiptId(), x.GetRedactionReceiptId()) {
 		t.Fatalf("emitted %v", rec.evs)

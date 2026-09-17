@@ -29,6 +29,28 @@ func Off(stateDir string) bool {
 	return err == nil || !os.IsNotExist(err)
 }
 
+// AgentMarker is the per-agent twin of Marker, written by POST /v1/agents/{name}/pause; a global OFF still wins because every reader checks Off first.
+func AgentMarker(stateDir, agent string) string { return filepath.Join(stateDir, "paused", agent) }
+
+// AgentOff is Off for one agent, same fail-closed stat; a name that is not a bare catalog word is never paused (nothing writes such a marker).
+func AgentOff(stateDir, agent string) bool {
+	if agent == "" || agent[0] == '.' || filepath.Base(agent) != agent {
+		return false
+	}
+	_, err := os.Lstat(AgentMarker(stateDir, agent))
+	return err == nil || !os.IsNotExist(err)
+}
+
+// Unless gates a tailer's emit on the agent's pause marker: a paused agent's stream never reaches admission; the pause is journalled as its own coverage transition, so nothing is lost silently.
+func Unless[T any](stateDir, agent string, next func(context.Context, T) error) func(context.Context, T) error {
+	return func(ctx context.Context, v T) error {
+		if AgentOff(stateDir, agent) {
+			return nil
+		}
+		return next(ctx, v)
+	}
+}
+
 // Wait parks until Mark 1 is on (marker gone, MARK1_DISABLE unset) or ctx
 // ends; the return value is ctx.Err(). Polling, not fsnotify: the marker is
 // the correctness path and a watch on a possibly-not-yet-existing directory

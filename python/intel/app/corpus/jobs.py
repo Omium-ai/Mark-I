@@ -10,7 +10,14 @@ from typing import Any
 import httpx
 from mark1_receipts import append_server_record
 
-from app.corpus.export import RECEIPT_TYPE, build, load_gate, tenant_root, write
+from app.corpus.export import (
+    RECEIPT_TYPE,
+    build,
+    load_gate,
+    tenant_root,
+    training_consented,
+    write,
+)
 from app.db import set_local_tenant
 from app.tvo.reader import QuerychokeReader
 
@@ -30,10 +37,11 @@ def _candidate(row: dict[str, Any]) -> dict[str, Any]:
 
 
 async def export(ctx: Any, *, http: httpx.AsyncClient | None = None) -> str | None:
-    """Scheduler target `app.corpus.jobs:export`: objects → controld's corpus_export receipt (the
-    one chain writer, m1_002 §5) → manifest.json + receipt.json. A refusal or crash before the
-    receipt leaves an unreferenced export_id with no manifest (06 §13: never served); the receipt
-    is never ahead of the bytes it attests."""
+    """Scheduler target `app.corpus.jobs:export`: the tenant's training consent (m1_082) first --
+    nothing is read, written or receipted without it -- then objects → controld's corpus_export
+    receipt (the one chain writer, m1_002 §5) → manifest.json + receipt.json. A refusal or crash
+    before the receipt leaves an unreferenced export_id with no manifest (06 §13: never served);
+    the receipt is never ahead of the bytes it attests."""
     root = getattr(ctx.settings, "corpus_root_uri", None)
     pepper = getattr(ctx.settings, "tenant_hmac_pepper", None)
     if not (root and pepper):
@@ -46,6 +54,9 @@ async def export(ctx: Any, *, http: httpx.AsyncClient | None = None) -> str | No
         raise RuntimeError("INTEL_QUERYCHOKE_TOKEN is required (intel's service credential)")
     async with ctx.pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, ctx.tenant_id)
+        if not await training_consented(conn, ctx.tenant_id):
+            log.info("corpus.export %s %s: skipped, no training consent", ctx.tenant_id, ctx.day)
+            return None
         admitted, certs = await load_gate(conn, ctx.tenant_id)
     own = (
         contextlib.nullcontext(http)

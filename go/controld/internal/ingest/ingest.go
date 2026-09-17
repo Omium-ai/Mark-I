@@ -140,6 +140,7 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 		authFailures.WithLabelValues(reason).Inc()
 	})
 	mux.Handle("POST /m1p/v1/ingest", chain(http.HandlerFunc(m.handleIngest)))
+	mux.Handle("PUT /api/v1/consents", chain(http.HandlerFunc(m.handleConsents)))
 	mux.Handle("POST /internal/v1/ingest/service", m.obsCfg.HTTPMiddleware(nil)(http.HandlerFunc(m.handleServiceIngest)))
 }
 

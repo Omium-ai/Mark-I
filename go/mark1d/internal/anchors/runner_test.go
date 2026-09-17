@@ -16,6 +16,8 @@ import (
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
 )
 
 // fakeSandbox returns a canned RunResult — runner/scheduler logic is platform-
@@ -766,6 +768,10 @@ func TestEmitExcerptRefusals(t *testing.T) {
 		t.Fatal("a refused excerpt was emitted")
 	}
 	e1.RedactionReceiptId = []byte{1, 2, 3}
+	r.StateDir = t.TempDir()
+	if err := consents.Write(r.StateDir, consents.Consents{E1: true}); err != nil {
+		t.Fatal(err)
+	}
 	if err := emit(e1); err != nil {
 		t.Fatal(err)
 	}
@@ -775,5 +781,68 @@ func TestEmitExcerptRefusals(t *testing.T) {
 	}
 	if evs := em.all(); len(evs) != 2 || evs[0].GetEvidenceExcerpt().GetTier() != m1pv1.EvidenceTier_EVIDENCE_TIER_E1 {
 		t.Fatalf("emitted %v", evs)
+	}
+}
+
+// TestEmitExcerptE1NeedsTheStepFourConsent: a receipted E1 excerpt still needs
+// gates/consents.json {e1:true} (desktop spec §3.2 Step 4) — absent, false or
+// a runner with no state dir refuses with a Dropped{e1_consent_absent} row and
+// emits nothing; the consent flipping on mid-run admits the next one without a
+// restart, and the E2/E0 paths never read it.
+func TestEmitExcerptE1NeedsTheStepFourConsent(t *testing.T) {
+	em := &fakeEmitter{}
+	r := NewRunner(&fakeSandbox{}, em, nil, false)
+	var dropped []string
+	r.OnDropped = func(reason string) { dropped = append(dropped, reason) }
+	e1 := func() *m1pv1.EvidenceExcerpt {
+		return &m1pv1.EvidenceExcerpt{Tier: m1pv1.EvidenceTier_EVIDENCE_TIER_E1, AttachmentName: "hunks", RedactionReceiptId: []byte{1, 2, 3}}
+	}
+	emit := func(x *m1pv1.EvidenceExcerpt) error {
+		return r.EmitExcerpt(context.Background(), testSession, testTask, x)
+	}
+	if err := emit(e1()); !errors.Is(err, ErrRefused) {
+		t.Fatalf("no state dir: err = %v, want ErrRefused", err)
+	}
+	r.StateDir = t.TempDir()
+	if err := emit(e1()); !errors.Is(err, ErrRefused) {
+		t.Fatalf("no consents.json: err = %v, want ErrRefused", err)
+	}
+	if err := consents.Write(r.StateDir, consents.Consents{E1: false, CloudJudge: true, Training: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := emit(e1()); !errors.Is(err, ErrRefused) {
+		t.Fatalf("e1:false: err = %v, want ErrRefused", err)
+	}
+	if len(em.all()) != 0 {
+		t.Fatal("a refused E1 excerpt was emitted")
+	}
+	if len(dropped) != 3 || dropped[0] != "e1_consent_absent" {
+		t.Fatalf("dropped = %v, want three e1_consent_absent rows — a consent refusal is accounted, never silent", dropped)
+	}
+	if err := consents.Write(r.StateDir, consents.Consents{E1: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := emit(e1()); err != nil {
+		t.Fatalf("e1:true: %v", err)
+	}
+	if evs := em.all(); len(evs) != 1 || evs[0].GetEvidenceExcerpt().GetTier() != m1pv1.EvidenceTier_EVIDENCE_TIER_E1 {
+		t.Fatalf("emitted %v", evs)
+	}
+	if err := consents.Write(r.StateDir, consents.Consents{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := emit(e1()); !errors.Is(err, ErrRefused) {
+		t.Fatalf("consent withdrawn: err = %v, want ErrRefused on the very next excerpt", err)
+	}
+	r.OnDropped = nil
+	if err := emit(e1()); !errors.Is(err, ErrRefused) {
+		t.Fatalf("no OnDropped wired: err = %v, want ErrRefused still", err)
+	}
+	t.Setenv("MARK1_PROFILE", "vpc")
+	if err := emit(&m1pv1.EvidenceExcerpt{Tier: m1pv1.EvidenceTier_EVIDENCE_TIER_E2, AttachmentName: "diff"}); err != nil {
+		t.Fatalf("E2 does not read the e1 consent: %v", err)
+	}
+	if len(dropped) != 4 || len(em.all()) != 2 {
+		t.Fatalf("dropped %v, emitted %d", dropped, len(em.all()))
 	}
 }

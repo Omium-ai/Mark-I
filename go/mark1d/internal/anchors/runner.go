@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"lukechampine.com/blake3"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/evidence"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
 )
@@ -257,6 +258,10 @@ type Runner struct {
 
 	// Evidence is the raw local store (NFR-PRIVACY-005); nil stores nothing.
 	Evidence *evidence.Store
+	// StateDir locates gates/consents.json, the Step-4 record EmitExcerpt reads for E1; empty reads as nothing consented (consents.Read).
+	StateDir string
+	// OnDropped receives the Dropped{reason} accounting for an excerpt refused at the door (wired to capture.AccountDropped); nil is legal.
+	OnDropped func(reason string)
 
 	mu     sync.Mutex
 	l0root []byte // latest cortexd L0 root; nil ⇒ integrity incomplete
@@ -464,9 +469,15 @@ func (r *Runner) signVote(av *m1pv1.AnchorVote) {
 func (r *Runner) EmitExcerpt(ctx context.Context, session, task [16]byte, x *m1pv1.EvidenceExcerpt) error {
 	switch x.GetTier() {
 	case m1pv1.EvidenceTier_EVIDENCE_TIER_E1:
-		// ponytail: consents.Read(stateDir).E1 (the Step-4 record the control API writes) is not checked here yet; the first caller gives Runner a state dir and refuses when it is false.
 		if len(x.GetRedactionReceiptId()) == 0 {
 			return fmt.Errorf("%w: E1 excerpt without redaction_receipt_id (FR-VERIFY-016)", ErrRefused)
+		}
+		// Read per call, like the off marker: a consent withdrawn in Settings takes effect on the next excerpt, and the refusal is accounted, never silent.
+		if !consents.Read(r.StateDir).E1 {
+			if r.OnDropped != nil {
+				r.OnDropped("e1_consent_absent")
+			}
+			return fmt.Errorf("%w: E1 excerpt without the Step-4 e1 consent in %s (FR-VERIFY-016)", ErrRefused, consents.Path(r.StateDir))
 		}
 	case m1pv1.EvidenceTier_EVIDENCE_TIER_E2:
 		if p := os.Getenv("MARK1_PROFILE"); p != "vpc" && p != "selfhost" {

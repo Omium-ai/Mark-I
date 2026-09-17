@@ -124,6 +124,20 @@ def label_confidence(p_verdict: float, natarajan_lcb: float) -> float:
     return round(min(1.0, max(0.0, float(p_verdict) * float(natarajan_lcb))), 6)
 
 
+async def training_consented(conn: asyncpg.Connection, tenant_id: str) -> bool:
+    """The Step-4 training opt-in as controld persisted it per device (m1_082, relayed by mark1d
+    from gates/consents.json). A device speaks for itself only, and corpus_candidates carries no
+    device_id to separate one device's tasks from another's, so the tenant exports only when
+    every device that ever recorded a consent currently consents, and at least one did."""
+    ok = await conn.fetchval(
+        "SELECT bool_and(training) FROM (SELECT DISTINCT ON (device_id) training"
+        " FROM m1_device_consents WHERE tenant_id = $1"
+        " ORDER BY device_id, recorded_at DESC) d",
+        uuid.UUID(tenant_id),
+    )
+    return ok is True
+
+
 async def load_gate(
     conn: asyncpg.Connection, tenant_id: str
 ) -> tuple[set[bytes], dict[str, float]]:

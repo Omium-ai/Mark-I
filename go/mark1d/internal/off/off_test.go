@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 )
@@ -89,5 +90,82 @@ func TestWatchCtxCancelsWhenMarkerAppears(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("marker appeared but the capture context survived — kill switch circumvented")
+	}
+}
+
+func TestAgentOffMarkerIsPerAgentAndNeverGlobal(t *testing.T) {
+	dir := t.TempDir()
+	if AgentOff(dir, "codex") || Off(dir) {
+		t.Fatal("no marker: nothing is paused")
+	}
+	if err := os.MkdirAll(filepath.Dir(AgentMarker(dir, "codex")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(AgentMarker(dir, "codex"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !AgentOff(dir, "codex") {
+		t.Fatal("codex marker present: codex must read paused")
+	}
+	if AgentOff(dir, "claudecode") {
+		t.Fatal("a codex pause must not pause claudecode")
+	}
+	if Off(dir) {
+		t.Fatal("a per-agent pause is not the global kill switch")
+	}
+	if err := os.WriteFile(Marker(dir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"", ".", "..", "../OFF", "a/b", ".hidden"} {
+		if AgentOff(dir, bad) {
+			t.Fatalf("%q is not a catalog word and can never be paused, even when the path it names exists", bad)
+		}
+	}
+	if !AgentOff(filepath.Join(dir, "missing"), "codex") == false {
+		t.Fatal("no paused/ dir at all: nothing is paused")
+	}
+	if os.Geteuid() != 0 && runtime.GOOS != "windows" {
+		locked := filepath.Join(dir, "locked")
+		if err := os.MkdirAll(filepath.Join(locked, "paused"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(locked, "paused"), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(filepath.Join(locked, "paused"), 0o700) //nolint:errcheck // best-effort cleanup unlock
+		if !AgentOff(locked, "codex") {
+			t.Fatal("an unreadable paused/ dir must read as paused, the same fail-closed rule as Off")
+		}
+	}
+}
+
+func TestUnlessDropsOnlyThePausedAgentsStream(t *testing.T) {
+	dir := t.TempDir()
+	var got []string
+	next := func(_ context.Context, v string) error { got = append(got, v); return nil }
+	codex, claude := Unless(dir, "codex", next), Unless(dir, "claudecode", next)
+	if err := codex(context.Background(), "c1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(AgentMarker(dir, "codex")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(AgentMarker(dir, "codex"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := codex(context.Background(), "c2"); err != nil {
+		t.Fatalf("a paused agent's emit must answer nil, got %v", err)
+	}
+	if err := claude(context.Background(), "a1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(AgentMarker(dir, "codex")); err != nil {
+		t.Fatal(err)
+	}
+	if err := codex(context.Background(), "c3"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"c1", "a1", "c3"}; !slices.Equal(got, want) {
+		t.Fatalf("emitted %v, want %v", got, want)
 	}
 }

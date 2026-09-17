@@ -89,6 +89,9 @@ const coverageDrainEvery = 5 * time.Second
 // event, it loses a decision (11 §2.3's ledger line).
 const dropGateTimeout spool.DropReason = 5
 
+// dropE1ConsentAbsent reuses DROP_REASON_LOCAL_QUARANTINE (= 4): the admission door refused an E1 excerpt because the Step-4 consent is absent; the enum has no consent row.
+const dropE1ConsentAbsent spool.DropReason = 4
+
 // dropUnsupportedAgentVersion is m1p.v1.DROP_REASON_UNSUPPORTED_AGENT_VERSION
 // (envelope.proto = 3), raised when the transcript surface is refused because
 // the agent's version has no fixture. Class is BILLING-grade, unlike the gate
@@ -231,6 +234,7 @@ type enrollment struct {
 	TenantID      string `json:"tenant_id"`
 	DeviceToken   string `json:"device_token"`
 	TenantRootHex string `json:"tenant_root_hex"` // 04 §2.9 root, delivered at enrollment
+	Server        string `json:"server"`          // the control-plane origin: 08 §3.2's policy routes hang off it
 	Endpoints     struct {
 		Ingest string `json:"ingest"`
 	} `json:"endpoints"`
@@ -295,7 +299,7 @@ func applyEnrollment(cfg *config, log *slog.Logger) error {
 	}
 	if doc.State == "revoked" {
 		log.Warn("mark1d: enrollment is REVOKED — uplink off, capture local-only; re-enroll with `mark1 enroll` (04 §9.3)")
-		doc.DeviceToken, doc.Endpoints.Ingest = "", ""
+		doc.DeviceToken, doc.Endpoints.Ingest, doc.Server = "", "", ""
 	}
 	fill := func(dst *string, v string) {
 		if *dst == "" {
@@ -307,6 +311,7 @@ func applyEnrollment(cfg *config, log *slog.Logger) error {
 	fill(&cfg.deviceID, doc.DeviceID)
 	fill(&cfg.saltHex, doc.TenantRootHex)
 	fill(&cfg.ingestURL, doc.Endpoints.Ingest)
+	fill(&cfg.policyURL, doc.Server)
 	log.Info("mark1d: identity from enrollment document", "path", enrollmentPath(cfg.stateDir),
 		"tenant_id", cfg.tenantID, "device_id", cfg.deviceID, "tenant_root", cfg.saltHex != "", "flag_overrides", flagged)
 	return nil
@@ -488,6 +493,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		return err
 	}
 	adm.Tap = ctl.Hub().Publish
+	ctl.Hub().SetSessionResolver(tailers.Resolve)
 
 	// Self-monitoring is an EdgeHealth event through the one admission door,
 	// not a metrics port (11 §0.4). Every consumer below takes it as a nilable
@@ -508,6 +514,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		StateDir:    cfg.stateDir,
 		BaseURL:     cfg.policyURL,
 		Channel:     cfg.policyChannel,
+		TenantID:    cfg.tenantID,
 		Token:       cfg.deviceToken,
 		EdgeVersion: version,
 		Log:         log,
@@ -683,6 +690,12 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		bc.Apply = func(m verdict.BundleMatrices) { routeSeq.Store(m.Seq); routeMatrices.Store(&m); eng.SetBundle(m) }
 	}
 	bc.ApplyRanker = cx.SetRanker
+	// The gate exists before Run so a bundle fetched after boot (enrollment) arms or opens it live; its other seams are wired below.
+	gate := fabric.NewGate(eng.Reader(), blocks, cfg.stateDir)
+	gate.AgentFor = ctl.Hub().AgentFor
+	if cfg.matrices == nil {
+		bc.ApplyGates = gate.ApplyGates
+	}
 	jr, err := judge.New(judge.Config{
 		StateDir: cfg.stateDir, TenantRoot: tenantRoot, Log: log,
 		TaskFor: seg.TaskFor, Verdict: seg.Verdict, Evidence: votes.Evidence, Admit: adm.Admit,
@@ -717,6 +730,8 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		}
 	}
 	runner := anchors.NewRunner(sb, votes, outKey, false)
+	runner.StateDir = cfg.stateDir
+	runner.OnDropped = func(string) { adm.AccountDropped(dropE1ConsentAbsent, spool.ClassDiagnostic, 1) }
 	if runner.Evidence, err = evidence.Open(cfg.stateDir); err != nil {
 		_ = sp.Close()
 		return err
@@ -812,7 +827,6 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	}, perEventLoss)
 	// The GateQuery route is constructed with eng.Reader() — a verdict.Reader,
 	// the only verdict surface with no method that computes (04 §2.3).
-	gate := fabric.NewGate(eng.Reader(), blocks, cfg.stateDir)
 	gate.Evidence = votes.Evidence // FR-VERIFY-011: evidence_ref on BLOCK
 	gate.Corrections = eng.TakeCorrections
 	gate.OnArrest = ctl.Hub().Arrest
@@ -1385,22 +1399,22 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 	tcfg := claudecode.TailConfig{
 		StateDir:     filepath.Join(cfg.stateDir, "cursors"),
 		UsageIdemKey: idemKey,
-		Emit:         router.Emit,
+		Emit:         off.Unless(cfg.stateDir, "claudecode", router.Emit),
 		Observe:      func(ev *m1pv1.Event) { seg.Observe(ev, nil) },
 		Log:          log,
 	}
 	singles = []shared{
 		{"\x00codex", sniff("codex", cx.Detect, codex.Supported), func(root string) (*tailers.Manager, error) {
-			return cx.StartTail(adapters.Workspace{Root: root}, live, codex.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: router.Emit, Observe: tcfg.Observe, Log: log})
+			return cx.StartTail(adapters.Workspace{Root: root}, live, codex.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: off.Unless(cfg.stateDir, "codex", router.Emit), Observe: tcfg.Observe, Log: log})
 		}},
 		{"\x00gemini", sniff("gemini", gm.Detect, gemini.Supported), func(root string) (*tailers.Manager, error) {
-			return gm.StartTail(adapters.Workspace{Root: root}, live, gemini.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: router.Emit, Observe: tcfg.Observe, Log: log})
+			return gm.StartTail(adapters.Workspace{Root: root}, live, gemini.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: off.Unless(cfg.stateDir, "gemini", router.Emit), Observe: tcfg.Observe, Log: log})
 		}},
 		{"\x00opencode", sniff("opencode", oc.Detect, opencode.Supported), func(root string) (*tailers.Manager, error) {
-			return oc.StartTail(adapters.Workspace{Root: root}, live, opencode.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: router.Emit, Observe: tcfg.Observe, Log: log})
+			return oc.StartTail(adapters.Workspace{Root: root}, live, opencode.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: off.Unless(cfg.stateDir, "opencode", router.Emit), Observe: tcfg.Observe, Log: log})
 		}},
 		{"\x00copilot", sniff("copilot", cp.Detect, copilot.Supported), func(root string) (*tailers.Manager, error) {
-			return cp.StartTail(adapters.Workspace{Root: root}, live, copilot.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: router.Emit, Observe: tcfg.Observe, Log: log})
+			return cp.StartTail(adapters.Workspace{Root: root}, live, copilot.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: off.Unless(cfg.stateDir, "copilot", router.Emit), Observe: tcfg.Observe, Log: log})
 		}},
 	}
 	type mgrRun struct {

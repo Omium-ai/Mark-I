@@ -32,6 +32,9 @@ import (
 // The reason_code vocabulary, frozen at seven values in
 // proto/m1p/v1/intelligence.proto and mirrored VERBATIM by m1_043's `reason`
 // column. 04 §2.7 is its only authority; an eighth code is a doc change first.
+// The two agent_* codes are POST /v1/agents/{name}/pause|resume (desktop spec
+// §5.9); the wire carries no agent field, so the agent name stays in the local
+// journal line and the transition lands device-wide, exactly as `mark1 off --all` does.
 const (
 	ReasonMark1Off                = "mark1_off"
 	ReasonDiskHardStop            = "disk_hard_stop"
@@ -40,6 +43,8 @@ const (
 	ReasonProxyFailed             = "proxy_failed"
 	ReasonUnsupportedAgentVersion = "unsupported_agent_version"
 	ReasonTranscriptRetentionGap  = "transcript_retention_gap"
+	ReasonAgentPause              = "agent_pause"
+	ReasonAgentResume             = "agent_resume"
 )
 
 // reasonKind pairs each frozen code with the ONE kind it can legally carry.
@@ -57,6 +62,8 @@ var reasonKind = map[string]m1pv1.CoverageKind{
 	ReasonProxyFailed:             m1pv1.CoverageKind_COVERAGE_KIND_BYPASS,
 	ReasonUnsupportedAgentVersion: m1pv1.CoverageKind_COVERAGE_KIND_BYPASS,
 	ReasonTranscriptRetentionGap:  m1pv1.CoverageKind_COVERAGE_KIND_BYPASS,
+	ReasonAgentPause:              m1pv1.CoverageKind_COVERAGE_KIND_DISABLE,
+	ReasonAgentResume:             m1pv1.CoverageKind_COVERAGE_KIND_ENABLE,
 }
 
 // WorkspaceIDLen is m1_043's CHECK (octet_length(workspace_digest) = 32),
@@ -157,7 +164,7 @@ func (e *Emitter) emit(ctx context.Context, kind m1pv1.CoverageKind, workspaceID
 		// deliberately has no CHECK (m1_043: codes must be able to land as
 		// data). This map is therefore the only place an invented code is
 		// caught before it becomes an unclassifiable row in the band query.
-		return fmt.Errorf("coverage: %q is not one of 04 §2.7's seven reason codes", reason)
+		return fmt.Errorf("coverage: %q is not one of 04 §2.7's reason codes", reason)
 	}
 	if kind != want {
 		return fmt.Errorf("coverage: reason %q is kind %v, not %v", reason, want, kind)

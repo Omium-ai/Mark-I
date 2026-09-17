@@ -15,6 +15,7 @@ import (
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/policy"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/taskseg"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
@@ -117,6 +118,46 @@ func TestGateOffShortCircuits(t *testing.T) {
 	v := g.Answer(query(1, 0), testSession) // no deadline stated: off still wins
 	if v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || v.GetReason() != "mark1_off" {
 		t.Fatalf("off gate answered %v %q", v.GetDecision(), v.GetReason())
+	}
+}
+
+// TestGatePerAgentPauseShortCircuits: a paused agent's session answers allow
+// before counters, deadline or cache, like the OFF marker; another agent's
+// session on the same daemon still blocks, and an unresolvable session gates
+// normally (no pause can match a session nobody named).
+func TestGatePerAgentPauseShortCircuits(t *testing.T) {
+	g := blockableGate(t, stubReader{{1}: violatedEntry(false, false)})
+	other := [16]byte{0xBB}
+	g.TaskFor = func(session, want [16]byte) ([16]byte, bool) { return want, want != [16]byte{} }
+	g.AgentFor = func(s [16]byte) string {
+		switch s {
+		case testSession:
+			return "codex"
+		case other:
+			return "claudecode"
+		}
+		return ""
+	}
+	if v := g.Answer(query(1, 5000), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_BLOCK {
+		t.Fatalf("unpaused codex answered %v %q, want BLOCK", v.GetDecision(), v.GetReason())
+	}
+	marker := off.AgentMarker(g.stateDir, "codex")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g.OnDropped = func(string) { t.Fatal("pause-check must precede deadline accounting") }
+	if v := g.Answer(query(1, 0), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || v.GetReason() != "agent_paused" {
+		t.Fatalf("paused codex answered %v %q", v.GetDecision(), v.GetReason())
+	}
+	g.OnDropped = nil
+	if v := g.Answer(query(1, 5000), other); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_BLOCK {
+		t.Fatalf("claudecode answered %v %q while only codex is paused, want BLOCK", v.GetDecision(), v.GetReason())
+	}
+	if v := g.Answer(query(1, 5000), [16]byte{0xCC}); v.GetReason() == "agent_paused" {
+		t.Fatal("a session with no agent cannot match a pause")
 	}
 }
 
@@ -936,5 +977,31 @@ func TestContextChainServesBothChannelsOnOneSession(t *testing.T) {
 	}
 	if q := <-mem.got; q.Channel != uint32(m1pv1.InjectionChannel_INJECTION_CHANNEL_CORRECTION) {
 		t.Fatalf("memory handler saw %+v after the drain", q)
+	}
+}
+
+// TestApplyGatesArmsALiveGate: a bundle fetched after boot reaches the gate through ApplyGates while Answer serves — the enrollment moment — and the armed/opened posture flips without a restart; -race is the second half of this test.
+func TestApplyGatesArmsALiveGate(t *testing.T) {
+	entries := stubReader{{1}: violatedEntry(false, false)}
+	g := blockableGate(t, entries)
+	g.ApplyGates(policy.GatesSection{}) // no bundle at boot: opened (FR-POLICY-005 gates open)
+	if v := g.Answer(query(1, 5000), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || !strings.Contains(v.GetReason(), "opened") {
+		t.Fatalf("boot with no bundle: %v %q, want ALLOW opened by policy", v.GetDecision(), v.GetReason())
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			g.ApplyGates(gates(i%2 == 1, 3, 30))
+		}
+		g.ApplyGates(gates(true, 3, 30)) // the bootstrap bundle lands
+	}()
+	for i := 0; i < 200; i++ {
+		g.Answer(query(1, 5000), testSession)
+	}
+	<-done
+	g.blocks.ResetTask(verdict.TaskID{1}) // the interleaved blocks hit the cap; new evidence resets it (D-Y)
+	if v := g.Answer(query(1, 5000), testSession); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_BLOCK {
+		t.Fatalf("after the bundle applied live: %v %q, want BLOCK", v.GetDecision(), v.GetReason())
 	}
 }

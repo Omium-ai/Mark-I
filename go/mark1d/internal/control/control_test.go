@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,7 +22,9 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
@@ -1087,6 +1090,153 @@ func TestSessionsAttributeToTheRootTheirTranscriptNames(t *testing.T) {
 	decodeTo(t, body, &agents)
 	if agents[0].Name != "claudecode" || !slices.Equal(agents[0].RecentProjects, []string{root, "/elsewhere"}) && !slices.Equal(agents[0].RecentProjects, []string{"/elsewhere", root}) {
 		t.Fatalf("recent_projects are the cwds the transcripts name, not the munged dir names: %s", body)
+	}
+}
+
+// TestLiveConsultsTheSessionResolverFirst pins the attribution order: the fleet resolver wins when it names the session's own agent, an agent-less row (a manager without Config.Agent) is trusted, a mismatch falls through to the transcript-head resolve, and a hit is cached.
+func TestLiveConsultsTheSessionResolverFirst(t *testing.T) {
+	h := NewHub()
+	for sid, agent := range map[byte]string{1: "codex", 2: "gemini", 3: "claudecode", 4: "copilot"} {
+		h.Publish(sessionEvent(sid, &m1pv1.SessionStart{Agent: agent}))
+	}
+	h.SetSessionResolver(func(id uuid.UUID) (string, string, bool) {
+		switch id[0] {
+		case 1:
+			return "codex", "/r/codex", true
+		case 2:
+			return "codex", "/r/wrong-agent", true
+		case 3:
+			return "", "/r/agentless", true
+		}
+		return "", "", false
+	})
+	fallback := func(agent string, sid [16]byte) string {
+		if sid[0] == 1 || sid[0] == 2 {
+			return "/fallback/" + agent
+		}
+		return ""
+	}
+	got := map[byte]string{}
+	for _, ls := range h.live(fallback) {
+		got[uuid.MustParse(ls.SessionID)[0]] = ls.Project
+	}
+	want := map[byte]string{1: "/r/codex", 2: "/fallback/gemini", 3: "/r/agentless", 4: ""}
+	if !maps.Equal(got, want) {
+		t.Fatalf("live = %v, want %v", got, want)
+	}
+	h.SetSessionResolver(nil)
+	got = map[byte]string{}
+	for _, ls := range h.live(nil) {
+		got[uuid.MustParse(ls.SessionID)[0]] = ls.Project
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("a resolved project is cached on the live row: %v", got)
+	}
+}
+
+// TestCodexSessionAttributesThroughTheTailerResolver drives the production chain: a codex rollout under the enabled root, its tailer inside Run, tailers.Resolve on the hub, and a SessionStart carrying the thread id the hookshim derives — agents_live.project, agents_seen and recent_projects all name the root.
+func TestCodexSessionAttributesThroughTheTailerResolver(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stubs for claude and codex")
+	}
+	bin, home := t.TempDir(), t.TempDir()
+	for stub, version := range map[string]string{"claude": "2.1.251 (Claude Code)", "codex": "codex-cli 0.154.0"} {
+		if err := os.WriteFile(filepath.Join(bin, stub), []byte("#!/bin/sh\necho '"+version+"'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("HOME", home)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	s, dir := newServer(t)
+	root, _ := canonical(t.TempDir())
+	if err := writeAtomic(filepath.Join(dir, "workspaces.json"), []byte(`{"version":1,"workspaces":[{"path":`+jsonString(root)+`,"enabled_at":"2026-09-16T00:00:00Z"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	thread := uuid.MustParse("019965a0-0000-7000-8000-00000000aa01")
+	day := filepath.Join(codexHome, "sessions", "2026", "09", "17")
+	if err := os.MkdirAll(day, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(day, "rollout-2026-09-17T08-00-00-"+thread.String()+".jsonl"), []byte(`{"type":"session_meta","payload":{"cwd":`+jsonString(root)+`}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	txDir, err := (&claudecode.Adapter{}).TranscriptDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(txDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(txDir, uuid.UUID([16]byte{2}).String()+".jsonl"), []byte(`{"cwd":`+jsonString(root)+`}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s.Hub().SetSessionResolver(tailers.Resolve)
+	live := tailers.NewLiveSet()
+	if err := live.SetRoots([]string{root}); err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := (&codex.Adapter{CodexHome: codexHome}).StartTail(adapters.Workspace{Root: root}, live, codex.TailConfig{
+		StateDir: t.TempDir(), UsageIdemKey: []byte("m1p-usage-idem-TEST-KEY-32bytes!"),
+		Emit: func(context.Context, *m1pv1.Event) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- mgr.Run(ctx) }()
+	s.Hub().Publish(&m1pv1.Event{SessionId: thread[:], Body: &m1pv1.Event_SessionStart{SessionStart: &m1pv1.SessionStart{Agent: "codex"}}})
+	s.Hub().Publish(sessionEvent(2, &m1pv1.SessionStart{Agent: "claudecode"}))
+
+	var st struct {
+		AgentsLive []struct {
+			Agent   string `json:"agent"`
+			Project string `json:"project"`
+		} `json:"agents_live"`
+	}
+	projects := func() map[string]string {
+		_, body := call(t, s, http.MethodGet, "/v1/status", nil)
+		decodeTo(t, body, &st)
+		out := map[string]string{}
+		for _, ls := range st.AgentsLive {
+			out[ls.Agent] = ls.Project
+		}
+		return out
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for projects()["codex"] != root {
+		if time.Now().After(deadline) {
+			t.Fatalf("codex session never attributed through the tailer: %v", projects())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := projects(); got["claudecode"] != root {
+		t.Fatalf("the transcript-head fallback must still run beside the resolver: %v", got)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	s.Hub().Publish(&m1pv1.Event{SessionId: thread[:], Body: &m1pv1.Event_SessionEnd{SessionEnd: &m1pv1.SessionEnd{}}})
+	var rows []struct {
+		AgentsSeen []string `json:"agents_seen"`
+	}
+	_, body := call(t, s, http.MethodGet, "/v1/projects", nil)
+	decodeTo(t, body, &rows)
+	if len(rows) != 1 || !slices.Equal(rows[0].AgentsSeen, []string{"claudecode", "codex"}) {
+		t.Fatalf("agents_seen unions the on-disk codex rollout tree with the transcript dir once the session is gone: %s", body)
+	}
+	var agentRows []struct {
+		Name           string   `json:"name"`
+		RecentProjects []string `json:"recent_projects"`
+	}
+	_, body = call(t, s, http.MethodGet, "/v1/agents", nil)
+	decodeTo(t, body, &agentRows)
+	if agentRows[1].Name != "codex" || !slices.Equal(agentRows[1].RecentProjects, []string{root}) {
+		t.Fatalf("codex recent_projects come from its rollout heads: %s", body)
 	}
 }
 

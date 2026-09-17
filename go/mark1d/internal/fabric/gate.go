@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
@@ -53,20 +54,23 @@ type Gate struct {
 	blocks   *verdict.Blocks
 	stateDir string
 	// HourlyCeiling is LOWERED from the bundle's gates section by ApplyGates;
-	// zero means DefaultHourlyCeiling.
+	// zero means DefaultHourlyCeiling. Read and written atomically: ApplyGates
+	// now also runs from the bundle client's apply goroutine while Answer serves.
 	HourlyCeiling uint32
 	// consecutiveCap is the same for max_consecutive_blocks; zero means
 	// maxConsecutiveBlocks. Unexported: only ApplyGates' clamp writes it.
-	consecutiveCap uint32
+	consecutiveCap atomic.Uint32
 	// opened: the applied policy set stop_gate_enabled=false. The zero value
 	// is the compiled default (armed, subject to the local opt-in), so a gate
 	// that never saw a bundle behaves as it always did.
-	opened bool
+	opened atomic.Bool
 	// TaskFor is D-AA parts 2 and 3: the daemon's segmenter resolves the
 	// connection's session plus the query's (possibly empty) task_id to a real
 	// task, or misses. nil means no segmenter is wired, so every query misses —
 	// which is M1E-5001, the fail-open direction.
 	TaskFor func(session, want [16]byte) ([16]byte, bool)
+	// AgentFor resolves the connection's session to the agent its SessionStart named (control.Hub.AgentFor); nil or "" means no per-agent pause can match, so the query gates normally.
+	AgentFor func(session [16]byte) string
 	// Now is a test seam; nil means time.Now.
 	Now func() time.Time
 	// OnDropped receives the Dropped{gate_timeout} accounting for M1E-5001
@@ -104,12 +108,13 @@ func NewGate(r verdict.Reader, blocks *verdict.Blocks, stateDir string) *Gate {
 // operator's local opt-in artifact, which no bundle can supply. Boot-time,
 // before Serve: the fields are plain, like the rest of the wiring.
 func (g *Gate) ApplyGates(sec policy.GatesSection) {
-	g.opened = !sec.StopGateEnabled
-	g.consecutiveCap = min(uint32(sec.MaxConsecutiveBlocks), maxConsecutiveBlocks)
-	g.HourlyCeiling = DefaultHourlyCeiling
+	g.opened.Store(!sec.StopGateEnabled)
+	g.consecutiveCap.Store(min(uint32(sec.MaxConsecutiveBlocks), maxConsecutiveBlocks))
+	ceiling := uint32(DefaultHourlyCeiling)
 	if h := sec.HourlyBlockCeiling; h > 0 && h < DefaultHourlyCeiling {
-		g.HourlyCeiling = uint32(h)
+		ceiling = uint32(h)
 	}
+	atomic.StoreUint32(&g.HourlyCeiling, ceiling)
 }
 
 // OptInPath is the local on-disk tenant opt-in artifact FR-POLICY-006 names
@@ -148,7 +153,7 @@ func ExplorationEpsilon(stateDir string, eps float64) float64 {
 }
 
 // armed is FR-POLICY-006: opted in on disk AND the applied policy left the gate closed.
-func (g *Gate) armed() bool { return !g.opened && optedIn(g.stateDir).StopGate }
+func (g *Gate) armed() bool { return !g.opened.Load() && optedIn(g.stateDir).StopGate }
 
 func (g *Gate) evidence(task verdict.TaskID) string {
 	if g.Evidence == nil {
@@ -250,6 +255,12 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 	if off.Off(g.stateDir) {
 		return allow("mark1_off")
 	}
+	// 1b. POST /v1/agents/{name}/pause — the per-agent marker, same posture, same place: before any counter or read.
+	if g.AgentFor != nil {
+		if a := g.AgentFor(session); a != "" && off.AgentOff(g.stateDir, a) {
+			return allow("agent_paused")
+		}
+	}
 
 	// 2. D-AA: resolve the task BEFORE any counter is keyed by it. An
 	// unresolvable query never reaches the cap, the ceiling or the cache, so the
@@ -262,7 +273,7 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 	ctr := g.blocks.Counters(session, task, received)
 
 	// 3. ≤3 consecutive blocks per task (or fewer, if the bundle lowered it).
-	capN := g.consecutiveCap
+	capN := g.consecutiveCap.Load()
 	if capN == 0 {
 		capN = maxConsecutiveBlocks
 	}
@@ -270,7 +281,7 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		return allow(CodeGateCap + " consecutive block cap")
 	}
 	// 4. hourly block ceiling.
-	ceiling := g.HourlyCeiling
+	ceiling := atomic.LoadUint32(&g.HourlyCeiling)
 	if ceiling == 0 {
 		ceiling = DefaultHourlyCeiling
 	}
@@ -317,7 +328,7 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		// only local, fail-open, stop-allowed row; there is no dedicated code
 		// for the normal open posture, and M1E-3006 would misreport a fresh
 		// bundle as stale.
-		if g.opened {
+		if g.opened.Load() {
 			v.Reason = CodeGateCap + " stop gate opened by policy"
 			return note(v, e.UnknownVoters)
 		}

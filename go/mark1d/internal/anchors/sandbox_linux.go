@@ -192,7 +192,7 @@ func (s *LinuxSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error)
 	}
 
 	start := time.Now()
-	if err := cmd.Start(); err != nil {
+	if err := startDumpable(cmd); err != nil {
 		// EPERM/EINVAL here is the kernel refusing unprivileged userns —
 		// the sandbox floor cannot be established.
 		return RunResult{}, fmt.Errorf("%w: %v", ErrSandboxUnavailable, err)
@@ -348,6 +348,22 @@ func (w *capWriter) Write(p []byte) (int, error) {
 		w.buf = append(w.buf, p[:n]...)
 	}
 	return len(p), nil
+}
+
+var startMu sync.Mutex
+
+// startDumpable clones the helper with this process momentarily dumpable: harden.Apply's PR_SET_DUMPABLE=0 is inherited by the forked child, and the kernel refuses the parent's uid_map write to a non-dumpable child (PTRACE_MODE_READ), so under the shipped main() every anchor died at Start with EPERM — VERDICT_ERROR sandbox_unavailable on every install.
+func startDumpable(cmd *exec.Cmd) error {
+	startMu.Lock()
+	defer startMu.Unlock()
+	was, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+	if err == nil && was == 0 {
+		if err := unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0); err != nil {
+			return err
+		}
+		defer func() { _ = unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0) }()
+	}
+	return cmd.Start()
 }
 
 // MaybeRunHelper is the re-exec hook: cmd/main.go (and this package's
