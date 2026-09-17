@@ -93,13 +93,46 @@ async def admitted(conn: asyncpg.Connection, tenant_id: str) -> list[dict[str, A
     async with conn.transaction():
         await set_local_tenant(conn, tenant_id)
         rows = await conn.fetch(
-            "SELECT id, kind, body, lcb FROM memory_artifacts WHERE tenant_id = $1 "
+            "SELECT id, kind, body, lcb, state::text AS state, scope, pinned, n_obs "
+            "FROM memory_artifacts WHERE tenant_id = $1 "
             "AND state = 'admitted' AND kind::text = ANY($2::text[]) "
             "ORDER BY lcb DESC NULLS LAST, id",
             uuid.UUID(tenant_id),
             sorted(INJECTABLE_KINDS),
         )
-    return [_row(r) for r in rows]
+    # state/scope/pinned/n are the app's action fields (spec §5.5); the edge cache ignores them.
+    return [
+        {
+            **_row(r),
+            "state": str(r["state"]),
+            "scope": str(r["scope"]),
+            "pinned": bool(r["pinned"]),
+            "n": int(r["n_obs"]),
+        }
+        for r in rows
+    ]
+
+
+async def outcomes(conn: asyncpg.Connection, tenant_id: str) -> list[dict[str, Any]]:
+    """Per-artifact ADMIT-LCB evidence for the app (spec §5.5): the stored lcb and the certified
+    sample count it was computed from; verified_outcomes is that same count (the samples are
+    certified tasks), not a satisfied-only subset, which no column holds."""
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        rows = await conn.fetch(
+            "SELECT id, lcb, n_obs FROM memory_artifacts WHERE tenant_id = $1 AND n_obs > 0 "
+            "ORDER BY lcb DESC NULLS LAST, id",
+            uuid.UUID(tenant_id),
+        )
+    return [
+        {
+            "artifact_id": str(r["id"]),
+            "verified_outcomes": int(r["n_obs"]),
+            "uplift_lcb": float(r["lcb"]) if r["lcb"] is not None else 0.0,
+            "n": int(r["n_obs"]),
+        }
+        for r in rows
+    ]
 
 
 async def fuzzy_match(

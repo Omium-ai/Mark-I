@@ -86,8 +86,8 @@ func uvCmd(ctx context.Context, t *testing.T, env []string, args ...string) *exe
 	return cmd
 }
 
-// startIntel boots the real app on a free port against the shared test database and waits for /healthz.
-func startIntel(t *testing.T, dsn string) string {
+// startIntel boots the real app on a free port against the shared test database and waits for /healthz; chokeURL is where its receipt appends go (an unreachable port when the leg needs none).
+func startIntel(t *testing.T, dsn, chokeURL string) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -102,7 +102,7 @@ func startIntel(t *testing.T, dsn string) string {
 	}
 	cmd := uvCmd(ctx, t, []string{
 		"INTEL_PG_DSN=" + pgDSN,
-		"INTEL_QUERYCHOKE_BASE_URL=http://127.0.0.1:1",
+		"INTEL_QUERYCHOKE_BASE_URL=" + chokeURL,
 		"INTEL_ADJUDICATOR_BASE_URL=http://127.0.0.1:1",
 		"INTEL_QUERYCHOKE_TOKEN=" + smokeSvc,
 	}, "python", "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", fmt.Sprint(port), "--log-level", "warning")
@@ -140,7 +140,7 @@ func TestIntegrationCrossServiceSmokeEdgeCacheSyncsPlantedArtifacts(t *testing.T
 		t.Fatalf("embed_missing leg: %v\n%s", err, out)
 	}
 
-	intelURL := startIntel(t, h.dsn)
+	intelURL := startIntel(t, h.dsn, "http://127.0.0.1:1")
 	api := h.serve(intelURL, smokeSvc)
 	tokA := h.mint(tenantA, deviceA)
 	bMarkers := map[string]string{tenantB.String(): "tenant B's tenant id", artB.String(): "tenant B's artifact id", "TENANT-B-SENTINEL": "tenant B's guidance"}

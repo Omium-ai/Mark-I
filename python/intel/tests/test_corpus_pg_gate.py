@@ -89,6 +89,27 @@ async def _mk_cert(conn, tenant: str, *, status: str, issued: datetime, expires:
     )
 
 
+async def _consent(pool, tenant: str, *, training: bool, device: UUID | None = None) -> UUID:
+    """One m1_082 row as controld's PUT /api/v1/consents writes it; a fresh device unless given."""
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant)
+        if device is None:
+            device = await conn.fetchval(
+                "INSERT INTO m1_devices (tenant_id, platform, hostname_hmac)"
+                " VALUES ($1, 'linux', $2) RETURNING id",
+                UUID(tenant),
+                random.randbytes(32),
+            )
+        await conn.execute(
+            "INSERT INTO m1_device_consents (tenant_id, device_id, e1, cloud_judge, training)"
+            " VALUES ($1, $2, false, false, $3)",
+            UUID(tenant),
+            device,
+            training,
+        )
+    return device
+
+
 async def _admit(conn, tenant: str, digest: bytes, cert: UUID) -> None:
     await conn.execute(
         "INSERT INTO corpus_admissions (tenant_id, task_digest, label, cert_id)"
@@ -187,6 +208,7 @@ async def test_export_job_plumbing(pool, tmp_path, monkeypatch):
     gated row through the mock template to the receipted pair on disk."""
     monkeypatch.delenv("INTEL_QUERYCHOKE_TOKEN", raising=False)
     tenant = await _mk_tenant(pool)
+    await _consent(pool, tenant, training=True)
     now = datetime.now(UTC)
     pepper = bytes(range(32))
     session, task = str(uuid4()), str(uuid4())
@@ -275,3 +297,53 @@ async def test_export_job_plumbing(pool, tmp_path, monkeypatch):
     assert (pair / "receipt.json").read_text() == ack["payload"]
     assert json.loads((pair / "receipt.json").read_text())["export_id"] == export_id
     assert json.loads((pair / "manifest.json").read_text())["dataset_id"] == export_id
+
+
+async def test_export_needs_every_devices_training_consent(pool, tmp_path, monkeypatch):
+    """The Step-4 training opt-in (m1_082): no row, or any device whose latest row revokes,
+    skips the tenant before the choke is asked and before a byte or receipt exists; every
+    device consenting (latest row wins) runs the job; a foreign tenant's rows count for
+    nothing under RLS."""
+    monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "svc")
+    tenant = await _mk_tenant(pool)
+    ctx = SimpleNamespace(
+        pool=pool,
+        settings=SimpleNamespace(
+            corpus_root_uri=str(tmp_path),
+            tenant_hmac_pepper=bytes(range(32)).hex(),
+            querychoke_base_url="http://choke",
+            http_timeout_s=5.0,
+        ),
+        tenant_id=tenant,
+        day=date(2026, 9, 15),
+    )
+    choke = MockChoke()
+    choke.templates[jobs.CANDIDATES_TEMPLATE] = []
+
+    async def consented() -> bool:
+        async with pool.acquire() as conn, conn.transaction():
+            await set_local_tenant(conn, tenant)
+            return await ex.training_consented(conn, tenant)
+
+    assert await consented() is False
+    assert await jobs.export(ctx, http=choke.client()) is None
+    assert choke.requests == [] and not (tmp_path / "t").exists()
+
+    other = await _mk_tenant(pool)
+    await _consent(pool, other, training=True)
+    assert await consented() is False  # another tenant's consent is invisible
+
+    a = await _consent(pool, tenant, training=True)
+    assert await consented() is True
+    b = await _consent(pool, tenant, training=False)
+    assert await consented() is False
+    assert await jobs.export(ctx, http=choke.client()) is None
+    assert choke.requests == []
+    await _consent(pool, tenant, training=True, device=b)  # b's latest row wins
+    assert await consented() is True
+    await _consent(pool, tenant, training=False, device=a)  # a revokes
+    assert await consented() is False
+    await _consent(pool, tenant, training=True, device=a)
+    assert await consented() is True
+    assert await jobs.export(ctx, http=choke.client()) is not None
+    assert choke.requests[-1][0] == jobs.CANDIDATES_TEMPLATE

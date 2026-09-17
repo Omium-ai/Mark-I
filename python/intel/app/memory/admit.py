@@ -189,6 +189,63 @@ async def admit_artifact(
     return receipt_id
 
 
+RETIRE_KEY = "memory.retire:{artifact_id}"
+
+
+async def retire_artifact(
+    conn: asyncpg.Connection,
+    append: ReceiptAppend,
+    *,
+    tenant_id: str,
+    artifact_id: uuid.UUID,
+    reason: str,
+    by: str,
+) -> uuid.UUID | None:
+    """admit_artifact's discipline for the user's retire (spec §5.5): receipt first, flip in the
+    same transaction; None when not visible in-tenant, the existing receipt when already retired."""
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        row = await conn.fetchrow(
+            "SELECT state, receipt_id FROM memory_artifacts WHERE id = $1 AND tenant_id = $2",
+            artifact_id,
+            uuid.UUID(tenant_id),
+        )
+        if row is None:
+            return None
+        if row["state"] == "retired":
+            return row["receipt_id"]
+        ref = await append(
+            tenant_id=tenant_id,
+            record_type=RECEIPT_TYPE,
+            subject_id=artifact_id,
+            idempotency_key=RETIRE_KEY.format(artifact_id=artifact_id),
+            payload={"act": "retire", "reason": reason, "by": by, "from_state": row["state"]},
+        )
+        await conn.execute(
+            "UPDATE memory_artifacts SET state = 'retired', receipt_id = $3, updated_at = now() "
+            "WHERE id = $1 AND tenant_id = $2",
+            artifact_id,
+            uuid.UUID(tenant_id),
+            ref.receipt_id,
+        )
+    return ref.receipt_id
+
+
+async def set_flag(
+    conn: asyncpg.Connection, *, tenant_id: str, artifact_id: uuid.UUID, column: str, value: object
+) -> bool:
+    sql = {
+        "pinned": "UPDATE memory_artifacts SET pinned = $3, updated_at = now() "
+        "WHERE id = $1 AND tenant_id = $2 RETURNING id",
+        "scope": "UPDATE memory_artifacts SET scope = $3, updated_at = now() "
+        "WHERE id = $1 AND tenant_id = $2 RETURNING id",
+    }[column]
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        flipped = await conn.fetchval(sql, artifact_id, uuid.UUID(tenant_id), value)
+    return flipped is not None
+
+
 async def _set_state(
     conn: asyncpg.Connection, tenant_id: str, artifact_id: uuid.UUID, state: str, d: Decision
 ) -> None:
@@ -223,7 +280,7 @@ async def run_admit(
     async with conn.transaction():
         await set_local_tenant(conn, tenant_id)
         rows = await conn.fetch(
-            "SELECT id, kind, body FROM memory_artifacts WHERE tenant_id = $1 "
+            "SELECT id, kind, body, pinned FROM memory_artifacts WHERE tenant_id = $1 "
             "AND state IN ('extracted', 'shadow') ORDER BY created_at",
             uuid.UUID(tenant_id),
         )
@@ -262,7 +319,7 @@ async def run_admit(
                 )
             )
             admitted += 1
-        elif d.verdict == "retire":
+        elif d.verdict == "retire" and not r["pinned"]:
             await _set_state(conn, tenant_id, r["id"], "retired", d)
             retired += 1
         else:

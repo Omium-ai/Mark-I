@@ -64,6 +64,10 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/route/decisions", chain(http.HandlerFunc(m.handleRouteDecisions)))
 	mux.Handle("GET /api/v1/route/bundle", chain(http.HandlerFunc(m.handleRouteBundle)))
 	mux.Handle("GET /api/v1/me", chain(http.HandlerFunc(m.handleMe)))
+	mux.Handle("GET /api/v1/memory/injections", chain(http.HandlerFunc(m.handleInjections)))
+	mux.Handle("GET /api/v1/team", chain(http.HandlerFunc(m.handleTeam)))
+	mux.Handle("PUT /api/v1/team", chain(http.HandlerFunc(m.handleTeamUpdate)))
+	mux.Handle("POST /api/v1/team/invites", chain(http.HandlerFunc(m.handleTeamInvite)))
 }
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {
@@ -140,6 +144,22 @@ func (m *Module) query(w http.ResponseWriter, r *http.Request, tid querychoke.Te
 
 // honesty lifts coverage band, cost basis and guarantee grade from the in-process GET /reports/tvo for the same window (08 §3.3); a refused report passes its status and code through untouched.
 func (m *Module) honesty(w http.ResponseWriter, r *http.Request, from, to time.Time) (map[string]any, bool) {
+	full, rec := m.tvoReport(r, from, to)
+	if rec.code != http.StatusOK {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(rec.code)
+		_, _ = w.Write(rec.body.Bytes())
+		return nil, false
+	}
+	if full == nil {
+		writeErr(w, http.StatusInternalServerError, "M1E-9500", "report unreadable")
+		return nil, false
+	}
+	return pick(full, "coverage_band", "cost_basis", "guarantee_grade", "task_seg_version", "price_table_version", "refusal"), true
+}
+
+// tvoReport runs the in-process GET /reports/tvo for [from, to] (08 §3.3): the recorder carries status and body; the map decodes only on 200.
+func (m *Module) tvoReport(r *http.Request, from, to time.Time) (map[string]any, *memWriter) {
 	days := int(to.Sub(from).Hours()/24) + 1
 	req := r.Clone(r.Context())
 	req.Method = http.MethodGet
@@ -148,23 +168,23 @@ func (m *Module) honesty(w http.ResponseWriter, r *http.Request, from, to time.T
 	rec := &memWriter{header: http.Header{}, code: http.StatusOK}
 	m.reports.ServeHTTP(rec, req)
 	if rec.code != http.StatusOK {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(rec.code)
-		_, _ = w.Write(rec.body.Bytes())
-		return nil, false
+		return nil, rec
 	}
 	var full map[string]any
 	if err := json.Unmarshal(rec.body.Bytes(), &full); err != nil {
-		writeErr(w, http.StatusInternalServerError, "M1E-9500", "report unreadable")
-		return nil, false
+		return nil, rec
 	}
+	return full, rec
+}
+
+func pick(full map[string]any, keys ...string) map[string]any {
 	out := map[string]any{}
-	for _, k := range []string{"coverage_band", "cost_basis", "guarantee_grade", "task_seg_version", "price_table_version", "refusal"} {
+	for _, k := range keys {
 		if v, ok := full[k]; ok {
 			out[k] = v
 		}
 	}
-	return out, true
+	return out
 }
 
 type memWriter struct {

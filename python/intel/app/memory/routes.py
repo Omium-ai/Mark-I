@@ -6,14 +6,17 @@ route may name a tenant, so both routes verify controld's service credential fir
 import hmac
 import os
 import uuid
+from functools import partial
 from typing import Annotated
 
 import asyncpg
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
+from mark1_receipts import ReceiptAppendError, append_server_record
 from pydantic import BaseModel, Field
 
-from app.memory import retrieve
+from app.memory import admit, retrieve
+from app.memory.admit import ReceiptAppend
 from app.tvo.routes import m1e_error
 
 router = APIRouter()
@@ -23,10 +26,30 @@ def get_pool(request: Request) -> asyncpg.Pool:
     return request.state.pool
 
 
+def get_append(request: Request) -> ReceiptAppend:
+    """memory/jobs.py receipt_append, on the lifespan's client: controld's append route under the
+    same service credential the job presents."""
+    return partial(
+        append_server_record,
+        request.state.http,
+        request.state.settings.querychoke_base_url,
+        os.environ.get("INTEL_QUERYCHOKE_TOKEN", ""),
+    )
+
+
 class MatchBody(BaseModel):
     tenant_id: str
     error: str = Field(max_length=4096)
     limit: int = Field(default=retrieve.M_INJECT, ge=1, le=retrieve.M_INJECT)
+
+
+class TenantBody(BaseModel):
+    tenant_id: str
+
+
+class RetireBody(TenantBody):
+    reason: str = Field(min_length=1, max_length=1024)
+    by: str = Field(default="", max_length=256)
 
 
 def service_cred(authorization: Annotated[str, Header()] = "") -> JSONResponse | None:
@@ -75,3 +98,85 @@ async def match_route(
         status_code=200,
         content={"artifacts": rows, "signature_digest": retrieve.signature_digest(normalized)},
     )
+
+
+@router.get("/v1/memory/outcomes")
+async def outcomes_route(
+    tenant_id: str, pool: Annotated[asyncpg.Pool, Depends(get_pool)], refused: Refusal
+) -> JSONResponse:
+    if refused is not None:
+        return refused
+    if _tenant(tenant_id) is None:
+        return m1e_error(400, "M1E-2001", f"bad tenant_id {tenant_id!r}")
+    async with pool.acquire() as conn:
+        rows = await retrieve.outcomes(conn, tenant_id)
+    return JSONResponse(status_code=200, content={"outcomes": rows})
+
+
+def _artifact(artifact_id: str) -> uuid.UUID | None:
+    return _tenant(artifact_id)
+
+
+@router.post("/v1/memory/artifacts/{artifact_id}/retire")
+async def retire_route(
+    artifact_id: str,
+    body: RetireBody,
+    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
+    append: Annotated[ReceiptAppend, Depends(get_append)],
+    refused: Refusal,
+) -> JSONResponse:
+    if refused is not None:
+        return refused
+    if _tenant(body.tenant_id) is None or (aid := _artifact(artifact_id)) is None:
+        return m1e_error(400, "M1E-2001", "bad tenant_id or artifact id")
+    async with pool.acquire() as conn:
+        try:
+            receipt = await admit.retire_artifact(
+                conn,
+                append,
+                tenant_id=body.tenant_id,
+                artifact_id=aid,
+                reason=body.reason,
+                by=body.by,
+            )
+        except ReceiptAppendError as exc:
+            return m1e_error(502, "M1E-9500", f"retire not receipted: {exc.code}")
+    if receipt is None:
+        return m1e_error(404, "M1E-2009", "artifact not found")
+    return JSONResponse(
+        status_code=200,
+        content={"artifact_id": str(aid), "state": "retired", "receipt_id": str(receipt)},
+    )
+
+
+# (column, value) per action; the response echoes the column so the app renders without a re-read.
+_FLAGS = {
+    "pin": ("pinned", True),
+    "unpin": ("pinned", False),
+    "share": ("scope", "team"),
+    "unshare": ("scope", "mine"),
+}
+
+
+@router.post("/v1/memory/artifacts/{artifact_id}/{action}")
+async def flag_route(
+    artifact_id: str,
+    action: str,
+    body: TenantBody,
+    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
+    refused: Refusal,
+) -> JSONResponse:
+    if refused is not None:
+        return refused
+    if action not in _FLAGS:
+        return m1e_error(404, "M1E-2009", "unknown memory action")
+    if _tenant(body.tenant_id) is None or (aid := _artifact(artifact_id)) is None:
+        return m1e_error(400, "M1E-2001", "bad tenant_id or artifact id")
+    column, value = _FLAGS[action]
+    async with pool.acquire() as conn:
+        ok = await admit.set_flag(
+            conn, tenant_id=body.tenant_id, artifact_id=aid, column=column, value=value
+        )
+    if not ok:
+        return m1e_error(404, "M1E-2009", "artifact not found")
+    return JSONResponse(status_code=200, content={"artifact_id": str(aid), column: value})

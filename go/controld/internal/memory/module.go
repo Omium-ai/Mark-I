@@ -1,4 +1,4 @@
-// Package memory serves the two edge-facing memory routes (06 §9.4-9.5, FR-REMEMBER-004): device-token verified, tenant stamped from claims, proxied to mark1-intel over the ADR-0010 §2.2 service seam.
+// Package memory serves the edge-facing memory routes (06 §9.4-9.5, FR-REMEMBER-004) and the desktop app's memory actions + outcomes (spec §5.5): device- or user-token verified, tenant stamped from claims, proxied to mark1-intel over the ADR-0010 §2.2 service seam.
 package memory
 
 import (
@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
@@ -21,6 +23,9 @@ import (
 const (
 	intelArtifacts = "/v1/memory/artifacts"
 	intelMatch     = "/v1/memory/match"
+	intelOutcomes  = "/v1/memory/outcomes"
+	maxReason      = 1024
+	maxActionBody  = 8 << 10
 	// maxMatchBody: intel caps error at 4096 chars; JSON-escaped that is under 32 KiB.
 	maxMatchBody = 64 << 10
 	// maxIntelBody is the edge cache's own read ceiling (mark1d/memory bodyLimit).
@@ -57,6 +62,93 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	chain := server.Chain(m.deps.Verifier, m.deps.ObsCfg, nil)
 	mux.Handle("GET /api/v1/memory/artifacts", chain(http.HandlerFunc(m.handleArtifacts)))
 	mux.Handle("POST /api/v1/memory/match", chain(http.HandlerFunc(m.handleMatch)))
+	mux.Handle("GET /api/v1/memory/outcomes", chain(http.HandlerFunc(m.handleOutcomes)))
+	mux.Handle("POST /api/v1/memory/artifacts/{id}/retire", chain(http.HandlerFunc(m.handleRetire)))
+	for _, action := range []string{"pin", "unpin", "share", "unshare"} {
+		mux.Handle("POST /api/v1/memory/artifacts/{id}/"+action, chain(m.flagHandler(action)))
+	}
+}
+
+func (m *Module) handleOutcomes(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := tenantFrom(w, r)
+	if !ok {
+		return
+	}
+	body, ok := m.proxy(w, r, http.MethodGet, intelOutcomes+"?tenant_id="+tenant.String(), nil)
+	if !ok {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// artifactPath is the intel action path for a well-formed id; a malformed id is 404, the same answer a foreign id gets (no oracle).
+func artifactPath(w http.ResponseWriter, r *http.Request, action string) (string, bool) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil || id == uuid.Nil {
+		writeError(w, http.StatusNotFound, "M1E-2009", "artifact not found")
+		return "", false
+	}
+	return intelArtifacts + "/" + id.String() + "/" + action, true
+}
+
+// actor is what the receipt names: the user token's subject, else the device.
+func actor(r *http.Request) string {
+	claims, _ := auth.ClaimsFrom(r.Context())
+	if claims.Subject != "" {
+		return claims.Subject
+	}
+	return "device:" + claims.DeviceID.String()
+}
+
+type retireWire struct {
+	Reason string `json:"reason"`
+}
+
+// POST /api/v1/memory/artifacts/{id}/retire {reason}: retired state + a receipted act, intel-side (admit.retire_artifact).
+func (m *Module) handleRetire(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := tenantFrom(w, r)
+	if !ok {
+		return
+	}
+	path, ok := artifactPath(w, r, "retire")
+	if !ok {
+		return
+	}
+	var wire retireWire
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxActionBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&wire); err != nil || strings.TrimSpace(wire.Reason) == "" || len(wire.Reason) > maxReason {
+		writeError(w, http.StatusBadRequest, "M1E-2001", "retire body: want {reason} with 1..1024 chars and nothing else")
+		return
+	}
+	upstream, _ := json.Marshal(map[string]string{"tenant_id": tenant.String(), "reason": wire.Reason, "by": actor(r)})
+	m.act(w, r, path, upstream)
+}
+
+// flagHandler is pin/unpin/share/unshare: no body, tenant-only wire to intel (admit.set_flag).
+func (m *Module) flagHandler(action string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tenant, ok := tenantFrom(w, r)
+		if !ok {
+			return
+		}
+		path, ok := artifactPath(w, r, action)
+		if !ok {
+			return
+		}
+		upstream, _ := json.Marshal(map[string]string{"tenant_id": tenant.String()})
+		m.act(w, r, path, upstream)
+	})
+}
+
+func (m *Module) act(w http.ResponseWriter, r *http.Request, path string, upstream []byte) {
+	body, ok := m.proxy(w, r, http.MethodPost, path, upstream)
+	if !ok {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
 }
 
 func (m *Module) handleArtifacts(w http.ResponseWriter, r *http.Request) {
@@ -148,6 +240,9 @@ func (m *Module) proxy(w http.ResponseWriter, r *http.Request, method, path stri
 	case http.StatusOK:
 	case http.StatusBadRequest, http.StatusUnprocessableEntity:
 		writeError(w, http.StatusBadRequest, "M1E-2001", "memory service refused the request")
+		return nil, false
+	case http.StatusNotFound:
+		writeError(w, http.StatusNotFound, "M1E-2009", "artifact not found")
 		return nil, false
 	default:
 		writeError(w, http.StatusBadGateway, "M1E-9500", "memory service failed")

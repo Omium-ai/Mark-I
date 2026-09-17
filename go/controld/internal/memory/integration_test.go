@@ -43,6 +43,7 @@ type itHarness struct {
 	t      *testing.T
 	dsn    string
 	admin  *pgx.Conn
+	db     *pg.TenantDB
 	cache  *enroll.RevocationCache
 	signer *auth.Signer
 	verify auth.Verifier
@@ -72,7 +73,7 @@ func itSetup(t *testing.T) *itHarness {
 		t.Fatal(err)
 	}
 	cache := enroll.NewRevocationCache(db, 60*time.Second)
-	return &itHarness{t: t, dsn: dsn, admin: admin, cache: cache, signer: signer, verify: auth.NewEd25519Verifier(signer.Public(), cache)}
+	return &itHarness{t: t, dsn: dsn, admin: admin, db: db, cache: cache, signer: signer, verify: auth.NewEd25519Verifier(signer.Public(), cache)}
 }
 
 // tenant plants an org + tenant + one enrolled device under the tenant GUC (the RLS-confined path intel's own PG fixtures use).

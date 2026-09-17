@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/team_update.json",
+  "title": "PUT /api/v1/team",
+  "description": "The shared-memory flag as committed on m1_tenants.",
+  "type": "object",
+  "required": ["shared_memory"],
+  "additionalProperties": false,
+  "properties": {
+    "shared_memory": { "type": "boolean" }
+  }
+}

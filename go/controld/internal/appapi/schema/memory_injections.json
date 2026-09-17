@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/memory_injections.json",
+  "title": "GET /api/v1/memory/injections",
+  "description": "The injection log (desktop spec §5.5): one row per artifact delivered by a MemoryInjection event in the window, newest first, with the task's stage-final verdict as the outcome at close ('pending' until it has one).",
+  "type": "object",
+  "required": ["window", "injections", "honesty"],
+  "additionalProperties": false,
+  "properties": {
+    "window": { "$ref": "sessions.json#/$defs/window" },
+    "injections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "artifact_id", "at", "session_id", "task_id", "channel", "tokens_used", "outcome"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[0-9a-f-]{36}/[0-9]+$", "description": "event_id/<index into artifact_ids>" },
+          "artifact_id": { "type": "string" },
+          "at": { "type": "string", "format": "date-time" },
+          "session_id": { "type": "string", "format": "uuid" },
+          "task_id": { "type": ["string", "null"], "format": "uuid" },
+          "channel": { "type": "string", "enum": ["unspecified", "session_start", "hook_context", "mcp_pull", "reactive_pitfall", "correction"] },
+          "tokens_used": { "type": "integer", "minimum": 0 },
+          "outcome": { "type": "string", "enum": ["pending", "satisfied", "violated", "refused", "error"] }
+        }
+      }
+    },
+    "honesty": { "$ref": "honesty.json" }
+  }
+}

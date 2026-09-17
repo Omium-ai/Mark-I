@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/memory_action.json",
+  "title": "POST /api/v1/memory/artifacts/{id}/{retire|pin|unpin|share|unshare}",
+  "description": "The action's result as intel committed it: retire answers state + the receipt it was chained under; pin/unpin answer pinned; share/unshare answer scope.",
+  "type": "object",
+  "required": ["artifact_id"],
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": { "type": "string", "format": "uuid" },
+    "state": { "type": "string", "enum": ["retired"] },
+    "receipt_id": { "type": "string", "format": "uuid" },
+    "pinned": { "type": "boolean" },
+    "scope": { "type": "string", "enum": ["mine", "team"] }
+  }
+}

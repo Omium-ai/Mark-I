@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/memory_outcomes.json",
+  "title": "GET /api/v1/memory/outcomes",
+  "description": "Per-artifact ADMIT-LCB evidence (06 §9.3, desktop spec §5.5): the stored lcb and the certified sample count; served by mark1-intel through the memory proxy.",
+  "type": "object",
+  "required": ["outcomes"],
+  "additionalProperties": false,
+  "properties": {
+    "outcomes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["artifact_id", "verified_outcomes", "uplift_lcb", "n"],
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": { "type": "string", "format": "uuid" },
+          "verified_outcomes": { "type": "integer", "minimum": 0 },
+          "uplift_lcb": { "type": "number" },
+          "n": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}
