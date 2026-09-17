@@ -1,29 +1,31 @@
 {
   "status": "sealed",
+  "head": {
+    "seq": 1042,
+    "hash": "ab7e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71ad",
+    "checkpoint_seq": 3
+  },
   "checkpoints": [
     {
-      "seq": 1040,
-      "time": "2026-09-16T12:32:00.000Z",
-      "events_covered": 214,
-      "device_signature": "ok",
-      "server_countersignature": "ok",
-      "witness": null
-    },
-    {
-      "seq": 1041,
-      "time": "2026-09-16T13:32:00.000Z",
-      "events_covered": 198,
-      "device_signature": "ok",
-      "server_countersignature": "ok",
-      "witness": "wit_2026_09_16_13"
-    },
-    {
-      "seq": 1042,
-      "time": "2026-09-16T14:12:00.000Z",
+      "seq": 3,
+      "time": "2026-09-16T14:12:00Z",
       "events_covered": 87,
-      "device_signature": "ok",
-      "server_countersignature": "ok",
-      "witness": null
+      "merkle_root": "c40e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71ad",
+      "key_id": "ed25519:a1cf5c00b2784f6e"
+    },
+    {
+      "seq": 2,
+      "time": "2026-09-16T13:32:00Z",
+      "events_covered": 198,
+      "merkle_root": "2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c",
+      "key_id": "ed25519:a1cf5c00b2784f6e"
+    },
+    {
+      "seq": 1,
+      "time": "2026-09-16T12:32:00Z",
+      "events_covered": 214,
+      "merkle_root": "9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e",
+      "key_id": "ed25519:a1cf5c00b2784f6e"
     }
   ]
 }

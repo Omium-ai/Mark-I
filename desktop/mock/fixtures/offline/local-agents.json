@@ -1,41 +1,84 @@
 [
   {
-    "name": "claude-code",
+    "name": "claudecode",
     "installed": true,
-    "version": "2.1.4",
+    "version": "2.1.251",
     "compat": "pinned",
     "regime": "apikey",
     "provisioned": {
-      "mechanism": "hook_settings_json",
+      "mechanism": "B",
       "files": [
         {
-          "path": "~/.claude/settings.json",
-          "lines_added": 6,
+          "path": "/Users/dev/.claude/settings.json",
+          "lines_added": 9,
           "byte_equal_revert": true
         }
       ],
       "notes": []
-    }
+    },
+    "recent_projects": [
+      "/Users/dev/myrepo",
+      "/Users/dev/api-service"
+    ]
   },
   {
     "name": "codex",
     "installed": true,
     "version": "0.44.0",
-    "compat": "compatible_unpinned",
+    "compat": "pinned",
     "regime": "apikey",
     "provisioned": {
-      "mechanism": "hook_settings_json",
+      "mechanism": "A/B",
       "files": [
         {
-          "path": "~/.codex/config.toml",
+          "path": "/Users/dev/.codex/hooks.json",
           "lines_added": 4,
           "byte_equal_revert": true
         }
       ],
       "notes": [
-        "hooks are inert until you accept the review inside Codex once"
+        "hooks: USER-EDITED",
+        "fragment intact; the rest of the file changed since apply"
       ]
-    }
+    },
+    "recent_projects": []
+  },
+  {
+    "name": "gemini",
+    "installed": false,
+    "version": null,
+    "compat": null,
+    "regime": "subscription",
+    "provisioned": null,
+    "recent_projects": []
+  },
+  {
+    "name": "opencode",
+    "installed": false,
+    "version": null,
+    "compat": null,
+    "regime": "subscription",
+    "provisioned": null,
+    "recent_projects": []
+  },
+  {
+    "name": "copilot",
+    "installed": true,
+    "version": "1.9.2",
+    "compat": "pinned",
+    "regime": "apikey",
+    "provisioned": {
+      "mechanism": "A",
+      "files": [
+        {
+          "path": "/Users/dev/.copilot/hooks/mark1.json",
+          "lines_added": 1,
+          "byte_equal_revert": true
+        }
+      ],
+      "notes": []
+    },
+    "recent_projects": []
   },
   {
     "name": "cursor",
@@ -44,47 +87,21 @@
     "compat": "pinned",
     "regime": "apikey",
     "provisioned": {
-      "mechanism": "observe_only",
+      "mechanism": "A/B",
       "files": [],
       "notes": [
         "observe/gate only, no proxy"
       ]
-    }
+    },
+    "recent_projects": []
   },
   {
-    "name": "github-copilot-cli",
-    "installed": true,
-    "version": "1.9.2",
-    "compat": "compatible_unpinned",
-    "regime": "apikey",
-    "provisioned": {
-      "mechanism": "byok_env",
-      "files": [
-        {
-          "path": "~/.copilot/config.json",
-          "lines_added": 1,
-          "byte_equal_revert": true
-        }
-      ],
-      "notes": [
-        "no proxy pointer; BYOK base URL is an env var"
-      ]
-    }
-  },
-  {
-    "name": "gemini-cli",
+    "name": "crush",
     "installed": false,
     "version": null,
-    "compat": "incompatible",
-    "regime": "apikey",
-    "provisioned": null
-  },
-  {
-    "name": "opencode",
-    "installed": false,
-    "version": null,
-    "compat": "incompatible",
-    "regime": "apikey",
-    "provisioned": null
+    "compat": null,
+    "regime": null,
+    "provisioned": null,
+    "recent_projects": []
   }
 ]

@@ -1,4 +1,9 @@
 {
   "status": "not_started",
+  "head": {
+    "seq": 0,
+    "hash": "",
+    "checkpoint_seq": 0
+  },
   "checkpoints": []
 }

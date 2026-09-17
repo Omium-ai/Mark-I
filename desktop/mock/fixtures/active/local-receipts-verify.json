@@ -1,5 +1,14 @@
 {
   "ok": true,
-  "checked_checkpoints": 3,
-  "defect": null
+  "checked": {
+    "receipts": 1042,
+    "checkpoints": 3,
+    "inclusion_proofs": 1042,
+    "witness_heads": 1
+  },
+  "intact_prefix_seq": 1042,
+  "intact_prefix_hash": "ab7e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71ad",
+  "last_good_seq": 1042,
+  "last_good_hash": "ab7e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71ad",
+  "defects": []
 }

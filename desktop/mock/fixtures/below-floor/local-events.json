@@ -5,7 +5,7 @@
     "data": {
       "task_id": null,
       "session_id": "ses_9a1",
-      "agent": "claude-code",
+      "agent": "claudecode",
       "project": "/Users/dev/myrepo"
     }
   },

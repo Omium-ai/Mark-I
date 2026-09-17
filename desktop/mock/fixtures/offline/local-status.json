@@ -5,7 +5,7 @@
   "since": "2026-09-10T14:32:00.000Z",
   "agents_live": [
     {
-      "agent": "claude-code",
+      "agent": "claudecode",
       "project": "/Users/dev/myrepo",
       "session_id": "ses_9a1",
       "tokens": 28400

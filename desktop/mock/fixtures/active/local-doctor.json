@@ -1,69 +1,201 @@
 {
+  "ok": true,
   "agents": [
     {
-      "name": "claude-code",
-      "status": "ok",
-      "detail": "provisioned lines verified"
+      "name": "claudecode",
+      "installed": true,
+      "version": "2.1.251",
+      "compat": "pinned",
+      "regime": "apikey",
+      "provisioned": {
+        "mechanism": "B",
+        "files": [
+          {
+            "path": "/Users/dev/.claude/settings.json",
+            "lines_added": 9,
+            "byte_equal_revert": true
+          }
+        ],
+        "notes": []
+      },
+      "recent_projects": [
+        "/Users/dev/myrepo",
+        "/Users/dev/api-service"
+      ]
     },
     {
       "name": "codex",
-      "status": "ok",
-      "detail": "provisioned lines verified"
+      "installed": true,
+      "version": "0.44.0",
+      "compat": "pinned",
+      "regime": "apikey",
+      "provisioned": {
+        "mechanism": "A/B",
+        "files": [
+          {
+            "path": "/Users/dev/.codex/hooks.json",
+            "lines_added": 4,
+            "byte_equal_revert": true
+          }
+        ],
+        "notes": [
+          "hooks: USER-EDITED",
+          "fragment intact; the rest of the file changed since apply"
+        ]
+      },
+      "recent_projects": []
+    },
+    {
+      "name": "gemini",
+      "installed": false,
+      "version": null,
+      "compat": null,
+      "regime": "subscription",
+      "provisioned": null,
+      "recent_projects": []
+    },
+    {
+      "name": "opencode",
+      "installed": false,
+      "version": null,
+      "compat": null,
+      "regime": "subscription",
+      "provisioned": null,
+      "recent_projects": []
+    },
+    {
+      "name": "copilot",
+      "installed": true,
+      "version": "1.9.2",
+      "compat": "pinned",
+      "regime": "apikey",
+      "provisioned": {
+        "mechanism": "A",
+        "files": [
+          {
+            "path": "/Users/dev/.copilot/hooks/mark1.json",
+            "lines_added": 1,
+            "byte_equal_revert": true
+          }
+        ],
+        "notes": []
+      },
+      "recent_projects": []
     },
     {
       "name": "cursor",
-      "status": "ok",
-      "detail": "provisioned lines verified"
+      "installed": true,
+      "version": "1.2.0",
+      "compat": "pinned",
+      "regime": "apikey",
+      "provisioned": {
+        "mechanism": "A/B",
+        "files": [],
+        "notes": [
+          "observe/gate only, no proxy"
+        ]
+      },
+      "recent_projects": []
     },
     {
-      "name": "github-copilot-cli",
-      "status": "ok",
-      "detail": "provisioned lines verified"
+      "name": "crush",
+      "installed": false,
+      "version": null,
+      "compat": null,
+      "regime": null,
+      "provisioned": null,
+      "recent_projects": []
     }
   ],
   "fragments": [
     {
-      "path": "~/.claude/settings.json",
-      "status": "ok"
+      "agent": "claudecode",
+      "fragment": "hooks",
+      "mechanism": "B",
+      "manifest": "/Users/dev/.omium/mark1/provisioned/claudecode/hooks.manifest.json",
+      "target": "/Users/dev/.claude/settings.json",
+      "state": "OK",
+      "detail": "",
+      "lines": [
+        {
+          "pointer": "/hooks/Stop/0",
+          "value": "{\"matcher\": \"\", \"hooks\": [{\"type\": \"command\", \"command\": \"~/.omium/mark1/bin/mark1-hookshim\", \"timeout\": 30}], \"_mark1\": \"v1\"}"
+        }
+      ]
     },
     {
-      "path": "~/.codex/config.toml",
-      "status": "ok"
+      "agent": "codex",
+      "fragment": "hooks",
+      "mechanism": "A/B",
+      "manifest": "/Users/dev/.omium/mark1/provisioned/codex/hooks.manifest.json",
+      "target": "/Users/dev/.codex/hooks.json",
+      "state": "USER-EDITED",
+      "detail": "fragment intact; the rest of the file changed since apply",
+      "lines": [
+        {
+          "pointer": "/hooks/0",
+          "value": "{\"command\": \"~/.omium/mark1/bin/mark1-hookshim\", \"_mark1\": \"v1\"}"
+        }
+      ]
     }
   ],
   "anchors": [
     {
-      "id": "anc_ruff",
-      "status": "ok"
+      "id": "ruff@cat-1",
+      "tool": "ruff",
+      "version": "0.8.2",
+      "side_effect": "static",
+      "consented": true,
+      "exec_hash": "9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e",
+      "last_run": "2026-09-16T14:12:00Z",
+      "latency_class": "fast"
     },
     {
-      "id": "anc_eslint",
-      "status": "ok"
+      "id": "eslint@cat-1",
+      "tool": "eslint",
+      "version": "9.11.0",
+      "side_effect": "static",
+      "consented": true,
+      "exec_hash": "2b7ec1471adc40e92b7ec1471adc40e92b7ec1471adc40e92b7ec1471adc40e9",
+      "last_run": "2026-09-16T13:47:00Z",
+      "latency_class": "fast"
     },
     {
-      "id": "anc_tsc",
-      "status": "ok"
+      "id": "tsc@cat-1",
+      "tool": "tsc",
+      "version": "5.6.2",
+      "side_effect": "static",
+      "consented": true,
+      "exec_hash": "71adf30c40e9b1c271adf30c40e9b1c271adf30c40e9b1c271adf30c40e9b1c2",
+      "last_run": "2026-09-16T13:47:00Z",
+      "latency_class": "fast"
     },
     {
-      "id": "anc_pytest",
-      "status": "ok"
+      "id": "pytest@cat-1",
+      "tool": "pytest",
+      "version": "8.3.2",
+      "side_effect": "test",
+      "consented": true,
+      "exec_hash": "c40e9b1c271adf30c40e9b1c271adf30c40e9b1c271adf30c40e9b1c271adf30",
+      "last_run": "2026-09-16T12:32:00Z",
+      "latency_class": "slow"
     }
   ],
   "health": [
     {
-      "check": "daemon",
-      "status": "ok",
-      "detail": "mark1d running"
+      "name": "off",
+      "ok": true,
+      "detail": "inactive"
     },
     {
-      "check": "cortexd",
-      "status": "ok",
-      "detail": "cortexd running"
+      "name": "disk_hard_stop",
+      "ok": true,
+      "detail": "spool below the 95 % hard stop (07 §6)"
     },
     {
-      "check": "proxy",
-      "status": "ok",
-      "detail": "mark1-proxy reachable"
+      "name": "anchor_candidates",
+      "ok": true,
+      "detail": "daemon has published candidates"
     }
   ]
 }

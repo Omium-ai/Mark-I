@@ -3,7 +3,7 @@
     "path": "/Users/dev/myrepo",
     "enabled_at": "2026-09-10T14:32:00.000Z",
     "agents_seen": [
-      "claude-code",
+      "claudecode",
       "codex"
     ],
     "tests_enabled": true,
@@ -13,7 +13,7 @@
     "path": "/Users/dev/api-service",
     "enabled_at": "2026-09-12T14:32:00.000Z",
     "agents_seen": [
-      "claude-code"
+      "claudecode"
     ],
     "tests_enabled": true,
     "ignore_present": false

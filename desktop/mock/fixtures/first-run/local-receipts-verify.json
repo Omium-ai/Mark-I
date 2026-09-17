@@ -1,8 +1,20 @@
 {
   "ok": false,
-  "checked_checkpoints": 0,
-  "defect": {
-    "kind": "no_chain",
-    "detail": "no checkpoints sealed yet"
-  }
+  "checked": {
+    "receipts": 0,
+    "checkpoints": 0,
+    "inclusion_proofs": 0,
+    "witness_heads": 0
+  },
+  "intact_prefix_seq": 0,
+  "intact_prefix_hash": "",
+  "last_good_seq": 0,
+  "last_good_hash": "",
+  "defects": [
+    {
+      "seq": 0,
+      "kind": "empty_chain",
+      "detail": "no receipts exported yet"
+    }
+  ]
 }

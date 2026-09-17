@@ -56,6 +56,46 @@ Numbers are internally consistent: `tokens_saved.total` = the sum of its
 `arrests`/`re_exploration_avoided`/`routing` parts, and `tvo` = tokens ÷
 verified outcomes.
 
+## What the local fixtures are held to
+
+`go/mark1d/internal/control/conformance_test.go` runs every `local-*.json`
+row of `LOCAL_ROUTES` against the real daemon and fails on any structural
+difference (key sets, JSON types, first array element), so these shapes are
+the daemon's, not a sketch of §7.1:
+
+- Agent names are the daemon's catalog names (`claudecode`, `codex`,
+  `gemini`, `opencode`, `copilot`, `cursor`, `crush`), the same strings
+  `SessionStart.agent` carries on the wire. Every `/v1/agents` row has all
+  keys; `version`/`compat`/`provisioned` are `null` until known, `regime` is
+  `null` for an unimplemented slot. `byte_equal_revert` is true iff the
+  fragment's target is byte-identical to what Mark 1 wrote (state `OK`).
+  `recent_projects` are the cwds an agent's own session trees name (Claude
+  Code only so far; `[]` for the others).
+- `receipted_transition_id` on `pause`/`resume`/`DELETE /v1/projects` is
+  `null`: the daemon journals the transition and its coverage drain receipts
+  it a few seconds later, so no id exists at response time.
+- Anchors carry `side_effect: static|test` (the FR-VERIFY-003 tier axis)
+  and no `tier`; `last_run` is the newest anchor vote this daemon boot saw,
+  `null` before one.
+- `/v1/optins.consents` is the Step-4 record (`e1`, `cloud_judge`,
+  `training`), all `false` until the user consents; `PUT` merges a partial
+  object. `tests_by_project` is writable the same way.
+- `/v1/receipts` is the local chain view: `{status: not_started|sealed,
+  head:{seq, hash, checkpoint_seq}, checkpoints:[{seq, time,
+  events_covered, merkle_root, key_id}]}` newest first, `?before=<seq>`
+  pages back. Countersignatures and witnesses are the cloud export's.
+- `POST /v1/receipts/verify` relays the offline verifier's own `Report`
+  (`tools/verifier`). An empty body verifies the enrolled server's export
+  with its key manifest; `{chain, keys, witness?}` names local snapshots.
+- `/v1/verify/events` rows are `{type: arrest|verdict|tamper, id, time,
+  task_id, session_id, …}`: arrests add `attempt, p_lcb, v, c_n,
+  inequality, evidence_ref` (numbers `null` when the knee was not
+  evaluable), verdicts `verdict, state, certificate_id`, tampers
+  `anchor_id`.
+- `GET /v1/events` data objects here are illustrative; the daemon streams
+  protojson `m1p.v1.Event` frames, except `arrest`, which is the same row
+  `/v1/verify/events` holds.
+
 TBD shapes (spec marks these unfrozen) are listed in `TBD.md`.
 
 ## Test it
