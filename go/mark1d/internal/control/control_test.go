@@ -273,6 +273,7 @@ func fakeHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("PATH", t.TempDir())
 	for _, v := range []string{"CODEX_HOME", "GEMINI_CLI_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "COPILOT_HOME", "ANTHROPIC_API_KEY"} {
 		t.Setenv(v, "")
