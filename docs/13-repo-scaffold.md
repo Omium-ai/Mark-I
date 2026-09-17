@@ -1330,7 +1330,7 @@ Dialect parsers version independently *inside* the edge version: each `mark1-fra
 ### 9.3 Release process
 
 1. **Cloud:** merge to `main` → CI green → image built + pushed as `<sha7>` → GitOps PR bumps `imageTag` (staging values first, prod by promote-by-SHA). No tags, no ceremonies; migrations ride the Argo PreSync Job (05 §7).
-2. **Edge:** tag `edge/vX.Y.Z` → `release.yml` builds the five-triple matrix, runs the full gate set including benches at 12's thresholds, signs/notarizes per §8.4, emits SBOM + SLSA (§8.5), publishes artifacts + detached signatures to the release CDN, and opens a PR editing `deploy/packaging/manifest/` to point **ring 0** at the new version. Ring promotions (0 → dogfood, 1 → consenting canary tenants, 2 → GA) are subsequent reviewed manifest commits (09 §11.2).
+2. **Edge:** tag `edge/vX.Y.Z` → `release.yml` requires a green `ci.yml` run on the tagged commit (the full gate set, 16 parallel jobs from a clean checkout; the release waits for one in flight and refuses a commit that has none), runs the benches at 12's thresholds on the pinned runner, builds the five-triple matrix, signs/notarizes per §8.4, emits SBOM + SLSA (§8.5), publishes artifacts + detached signatures to the release CDN, and opens a PR editing `deploy/packaging/manifest/` to point **ring 0** at the new version. Ring promotions (0 → dogfood, 1 → consenting canary tenants, 2 → GA) are subsequent reviewed manifest commits (09 §11.2).
 3. **Rollback:** cloud = GitOps revert to the previous `<sha7>`; edge = a *new, higher-seq* manifest pointing at the previous artifacts — monotonic seq means a downgrade is always a signed forward decision, never a replay.
 
 ### 9.4 Update channels

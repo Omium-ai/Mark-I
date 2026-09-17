@@ -1,6 +1,6 @@
 # omium-mark1 release — tag-triggered edge release (13 §9.3.2).
 #
-#   tag edge/vX.Y.Z  ->  full gate set + MANDATORY benchmarks  ->  five-triple build
+#   tag edge/vX.Y.Z  ->  green ci run on that SHA + MANDATORY benchmarks  ->  five-triple build
 #                    ->  sign/notarize per OS (13 §8.4, 09 §11.1)
 #                    ->  CycloneDX SBOM + SLSA provenance per artifact (13 §8.5)
 #                    ->  publish + open the ring-0 manifest PR (09 §11.2)
@@ -29,72 +29,40 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # A release re-runs the whole gate set from a clean checkout. Nothing is inherited
-  # from the PR that produced the commit.
+  # The gate set runs on the TAGGED COMMIT, from a clean checkout — in ci.yml, on the main push
+  # that produced it, as 16 parallel jobs. Re-running the same recipes here serially in one job
+  # took 50 minutes and proved nothing ci.yml had not (it only found the ways one job's
+  # environment differed from sixteen). So `verify` is the proof that ci.yml ran on exactly this
+  # SHA and went green; it waits for a run still in flight and refuses a commit that has none.
+  # Nothing is inherited from a PR: the run must be the push to main of this very commit.
   # ---------------------------------------------------------------------------
   verify:
     name: verify
     runs-on: ubuntu-24.04
-    env:
-      CGO_ENABLED: "0"       # ci.yml's go job builds the same way; a cgo-linked test binary is a different artifact
-      M1_REQUIRE_STORES: "1"
-      # Same store contract as ci.yml's `integration` job and the justfile's defaults; see there.
-      M1_TEST_PG_DSN: postgres://mark1:mark1@127.0.0.1:5432/mark1_test
-      M1_MIGRATE_PG_DSN: postgres://m1_bootstrap@127.0.0.1:5432/mark1_test
-      M1_TEST_CH_DSN: http://127.0.0.1:8123/?database=default
-      M1_TEST_S3_ENDPOINT: http://127.0.0.1:9002
-      CLICKHOUSE_HOST: "127.0.0.1"
-      CLICKHOUSE_CLIENT: ".stores/bin/clickhouse client --host 127.0.0.1 --port 9000"
+    permissions:
+      actions: read
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      # A tag checkout is detached with no local `main`; `just lint-proto` diffs against `.git#branch=main`.
-      - run: git branch -f main origin/main
-      - uses: dtolnay/rust-toolchain@nightly   # `just ci` includes the fuzz smoke
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-      - uses: astral-sh/setup-uv@v5
-      - uses: bufbuild/buf-setup-action@v1
-        with:
-          version: ${{ env.BUF_VERSION }}
-          github_token: ${{ github.token }}
-      - uses: extractions/setup-just@v2
-      - run: |
-          # 0.20.2, matching ci.yml: 0.16.4 cannot PARSE the current advisory DB — it dies on a
-          # TOML error in RUSTSEC-2026-0066.md before checking a single crate.
-          cargo install cargo-deny --locked --version 0.20.2
-          cargo install cargo-fuzz --locked --version 0.12.0
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
-          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-          uv tool install "pip-audit==2.9.0"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      # cmd/phase2_gate_test.go needs a real anchor (ruff) on PATH and fails loudly without one under
-      # M1_REQUIRE_STORES=1; ci.yml's go job resolves it from uv.lock the same way.
-      - run: |
-          uv sync --frozen --all-packages
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-      # `just ci` in ONE job (Rust debug + release + fuzz builds, Go caches, native stores) outgrows the
-      # ~14 GB free on a hosted runner; the spool's 95 % disk hard stop then blocks a billing-class
-      # append inside its own tests — correct daemon behaviour, a hung job (run 35244900369).
-      - name: Free disk (the gate set builds ~20 GB; the image ships ~25 GB of SDKs we never use)
+      - name: The tagged commit carries a green ci run
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
-          sudo docker image prune -af >/dev/null 2>&1 || true
-          df -h / | tail -1
-      - run: just stores-up
-      - run: just migrate "$M1_MIGRATE_PG_DSN"
-      # Same kernel knob ci.yml's gates and go jobs lift: verifier_offline_gate's blackhole runs the
-      # verifier under `unshare -rn`, which the 24.04 image restricts through AppArmor (PARTIAL = FAIL under $CI).
-      - name: Allow unprivileged user namespaces for the offline-verifier blackhole
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          unshare -rn true
-      - run: just ci
-      - if: always()
-        run: df -h / | tail -1
+          set -euo pipefail
+          q="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&per_page=1"
+          for attempt in $(seq 1 90); do
+            run=$(gh api "$q" --jq '.workflow_runs[0] // empty | "\(.id) \(.status) \(.conclusion // "-") \(.html_url)"')
+            if [ -z "$run" ]; then
+              [ "$attempt" -ge 6 ] && { echo "::error title=No ci run for this commit::$GITHUB_SHA was never pushed to main (ci.yml runs there). Tag a main commit."; exit 1; }
+              echo "no ci run yet for $GITHUB_SHA (attempt $attempt); waiting"; sleep 10; continue
+            fi
+            set -- $run
+            case "$2:$3" in
+              completed:success) echo "ci run $1 is green on $GITHUB_SHA: $4"; exit 0 ;;
+              completed:*) echo "::error title=ci is not green on this commit::run $1 concluded '$3': $4"; exit 1 ;;
+              *) echo "ci run $1 is $2 (attempt $attempt/90); waiting 40s"; sleep 40 ;;
+            esac
+          done
+          echo "::error title=ci did not finish::gave up waiting for ci on $GITHUB_SHA after an hour"; exit 1
 
   # ---------------------------------------------------------------------------
   # Benchmarks, MANDATORY and with no fallback.
@@ -174,6 +142,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.triple }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: edge-${{ matrix.triple }}
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
