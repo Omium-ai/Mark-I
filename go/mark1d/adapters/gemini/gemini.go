@@ -140,7 +140,7 @@ func (a *Adapter) regime() adapters.Regime {
 // Detect sniffs installation, version (`gemini --version` → "X.Y.Z") and regime.
 func (a *Adapter) Detect() (adapters.Detection, error) {
 	d := adapters.Detection{Regime: a.regime()}
-	bin, err := exec.LookPath("gemini")
+	bin, err := adapters.LookPath("gemini", a.Home)
 	if err != nil {
 		return d, nil
 	}

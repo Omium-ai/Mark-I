@@ -119,7 +119,7 @@ func (a *Adapter) regime() adapters.Regime {
 // Detect sniffs installation, version (`codex --version` → "codex-cli X.Y.Z") and regime.
 func (a *Adapter) Detect() (adapters.Detection, error) {
 	d := adapters.Detection{Regime: a.regime()}
-	bin, err := exec.LookPath("codex")
+	bin, err := adapters.LookPath("codex", a.Home)
 	if err != nil {
 		return d, nil
 	}

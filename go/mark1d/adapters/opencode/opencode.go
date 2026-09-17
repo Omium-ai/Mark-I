@@ -175,7 +175,7 @@ func (a *Adapter) regime() adapters.Regime {
 // Detect sniffs installation, version (`opencode --version` → "X.Y.Z") and regime.
 func (a *Adapter) Detect() (adapters.Detection, error) {
 	d := adapters.Detection{Regime: a.regime()}
-	bin, err := exec.LookPath("opencode")
+	bin, err := adapters.LookPath("opencode", a.Home)
 	if err != nil {
 		return d, nil
 	}

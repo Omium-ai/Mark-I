@@ -179,7 +179,7 @@ func (a *Adapter) regime() adapters.Regime {
 // Detect sniffs installation, version (`copilot --version` → "GitHub Copilot CLI X.Y.Z.") and regime.
 func (a *Adapter) Detect() (adapters.Detection, error) {
 	d := adapters.Detection{Regime: a.regime()}
-	bin, err := exec.LookPath("copilot")
+	bin, err := adapters.LookPath("copilot", a.Home)
 	if err != nil {
 		return d, nil
 	}

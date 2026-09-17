@@ -90,7 +90,7 @@ var ErrWireNoGo = errors.New(CodeNotEligible + ": not proxy-eligible in any regi
 func (a *Adapter) Detect() (adapters.Detection, error) {
 	d := adapters.Detection{Regime: adapters.RegimeSubscription}
 	for _, name := range []string{"cursor-agent", "cursor"} {
-		bin, err := exec.LookPath(name)
+		bin, err := adapters.LookPath(name, a.Home)
 		if err != nil {
 			continue
 		}

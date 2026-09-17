@@ -94,7 +94,7 @@ func (a *Adapter) Detect() (adapters.Detection, error) {
 	if apiKeyCredential() != "" {
 		d.Regime = adapters.RegimeAPIKey
 	}
-	bin, err := exec.LookPath("claude")
+	bin, err := adapters.LookPath("claude", a.Home)
 	if err != nil {
 		return d, nil
 	}
