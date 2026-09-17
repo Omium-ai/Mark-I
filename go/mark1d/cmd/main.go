@@ -369,6 +369,9 @@ func run(ctx context.Context, log *slog.Logger, cfg config) error {
 		cfg.offPoll = time.Second
 	}
 
+	if err := supervise.InstallShim(cfg.stateDir, log); err != nil {
+		log.Error("mark1d: could not install the packaged mark1-hookshim", "err", err)
+	}
 	ctl, err := control.Listen(control.Config{StateDir: cfg.stateDir, SpoolDir: cfg.spoolDir, SpoolCap: cfg.spoolCap, Version: version, Log: log})
 	if err != nil {
 		return err

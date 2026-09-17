@@ -22,6 +22,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
@@ -267,7 +268,20 @@ func (r *recorder) admit(_ context.Context, ev *m1pv1.Event) error {
 	return nil
 }
 
+// fakeHome makes every provisioning route hermetic: a scratch HOME, an empty PATH and no vendor overrides, so a test can never edit the developer's own agent config.
+func fakeHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	for _, v := range []string{"CODEX_HOME", "GEMINI_CLI_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "COPILOT_HOME", "ANTHROPIC_API_KEY"} {
+		t.Setenv(v, "")
+	}
+	return home
+}
+
 func TestProjectsLifecycle(t *testing.T) {
+	fakeHome(t)
 	s, dir := newServer(t)
 	repo := t.TempDir()
 	root, _ := canonical(repo)
@@ -281,15 +295,20 @@ func TestProjectsLifecycle(t *testing.T) {
 	resp, body := call(t, s, http.MethodPost, "/v1/projects", map[string]string{"path": filepath.Join(repo, "sub", "..")})
 	want(t, resp, body, http.StatusOK, "")
 	var p struct {
-		Path          string   `json:"path"`
-		EnabledAt     string   `json:"enabled_at"`
-		AgentsSeen    []string `json:"agents_seen"`
-		TestsEnabled  bool     `json:"tests_enabled"`
-		IgnorePresent bool     `json:"ignore_present"`
+		Path              string              `json:"path"`
+		EnabledAt         string              `json:"enabled_at"`
+		AgentsSeen        []string            `json:"agents_seen"`
+		TestsEnabled      bool                `json:"tests_enabled"`
+		IgnorePresent     bool                `json:"ignore_present"`
+		AgentsProvisioned []string            `json:"agents_provisioned"`
+		AgentsRefused     []provision.Refusal `json:"agents_refused"`
 	}
 	decodeTo(t, body, &p)
 	if p.Path != root || !p.TestsEnabled || p.IgnorePresent || p.AgentsSeen == nil || len(p.AgentsSeen) != 0 {
 		t.Fatalf("project %s", body)
+	}
+	if len(p.AgentsProvisioned) != 0 || len(p.AgentsRefused) != 1 || p.AgentsRefused[0].Agent != "claudecode" || p.AgentsRefused[0].Code != claudecode.CodeNoTarget {
+		t.Fatalf("with no ~/.claude/settings.json the enable is an M1E-7101 refusal row, never an invented file: %s", body)
 	}
 	if _, err := time.Parse(time.RFC3339, p.EnabledAt); err != nil {
 		t.Fatal(err)
@@ -305,9 +324,11 @@ func TestProjectsLifecycle(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("re-enable must be idempotent: %s", body)
 	}
-	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 1 || !strings.Contains(lines[0], `"workspace":`+jsonString(root)) {
+	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 1 || !strings.Contains(lines[0], `"workspace":`+jsonString(root)) || !strings.Contains(lines[0], `"agents_provisioned":[]`) {
 		t.Fatalf("consent.jsonl %v", lines)
 	}
+	resp, body = call(t, s, http.MethodPost, "/v1/projects", map[string]any{"path": repo, "agents": []string{"crush"}})
+	want(t, resp, body, http.StatusBadRequest, "M1E-2001")
 
 	resp, body = call(t, s, http.MethodPost, "/v1/projects", map[string]string{"path": filepath.Join(repo, "nope")})
 	want(t, resp, body, http.StatusBadRequest, "M1E-2001")
@@ -322,7 +343,7 @@ func TestProjectsLifecycle(t *testing.T) {
 
 	resp, body = call(t, s, http.MethodDelete, "/v1/projects", map[string]string{"path": repo})
 	want(t, resp, body, http.StatusOK, "")
-	if strings.TrimSpace(string(body)) != `{"path":`+jsonString(root)+`,"receipted_transition_id":null,"removed":true}` {
+	if strings.TrimSpace(string(body)) != `{"byte_equality":true,"not_reverted":[],"path":`+jsonString(root)+`,"receipted_transition_id":null,"removed":true,"reverted":[]}` {
 		t.Fatalf("remove %s (the receipt is minted by the coverage drain later, so the id is null, never invented)", body)
 	}
 	resp, body = call(t, s, http.MethodDelete, "/v1/projects", map[string]string{"path": repo})
@@ -1065,5 +1086,142 @@ func TestSessionsAttributeToTheRootTheirTranscriptNames(t *testing.T) {
 	decodeTo(t, body, &agents)
 	if agents[0].Name != "claudecode" || !slices.Equal(agents[0].RecentProjects, []string{root, "/elsewhere"}) && !slices.Equal(agents[0].RecentProjects, []string{"/elsewhere", root}) {
 		t.Fatalf("recent_projects are the cwds the transcripts name, not the munged dir names: %s", body)
+	}
+}
+
+// TestEnableProvisionsThroughTheControlAPI: POST /v1/projects is `mark1 enable` — the 08 §8 fragment lands, the manifest records it, the consent line names it, a re-POST reconciles, and the per-agent routes repair and revert it byte-equal.
+func TestEnableProvisionsThroughTheControlAPI(t *testing.T) {
+	home := fakeHome(t)
+	s, dir := newServer(t)
+	settings := filepath.Join(home, ".claude", "settings.json")
+	original := "{\n  \"model\": \"opus\",\n  \"hooks\": {\"Stop\": [ {\"matcher\": \"\", \"hooks\": [{\"type\": \"command\", \"command\": \"/usr/bin/mine.sh\"}]} ]}\n}\n"
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repoA, repoB := t.TempDir(), t.TempDir()
+	type added struct {
+		AgentsProvisioned []string            `json:"agents_provisioned"`
+		AgentsRefused     []provision.Refusal `json:"agents_refused"`
+	}
+	enable := func(repo string, agents []string) added {
+		t.Helper()
+		body := map[string]any{"path": repo}
+		if agents != nil {
+			body["agents"] = agents
+		}
+		resp, b := call(t, s, http.MethodPost, "/v1/projects", body)
+		want(t, resp, b, http.StatusOK, "")
+		var a added
+		decodeTo(t, b, &a)
+		return a
+	}
+	fragmentPresent := func() bool { return strings.Contains(string(b0(t, settings)), "_mark1_managed") }
+
+	a := enable(repoA, nil)
+	if strings.Join(a.AgentsProvisioned, ",") != "claudecode" || len(a.AgentsRefused) != 0 || !fragmentPresent() || !strings.Contains(string(b0(t, settings)), "/usr/bin/mine.sh") {
+		t.Fatalf("enable %+v; settings:\n%s", a, b0(t, settings))
+	}
+	m, err := claudecode.LoadManifest(dir)
+	if err != nil || m.TargetPath != settings {
+		t.Fatalf("manifest %+v %v", m, err)
+	}
+	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 1 || !strings.Contains(lines[0], `"agents_provisioned":["claudecode"]`) {
+		t.Fatalf("consent.jsonl %v", lines)
+	}
+
+	if _, err := claudecode.Revert(dir); err != nil || fragmentPresent() {
+		t.Fatalf("setup: off-style revert %v", err)
+	}
+	if a := enable(repoA, nil); strings.Join(a.AgentsProvisioned, ",") != "claudecode" || !fragmentPresent() {
+		t.Fatalf("re-POST of an enabled root must reconcile the fragment: %+v", a)
+	}
+	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 1 {
+		t.Fatalf("a reconcile is not a second consent: %v", lines)
+	}
+
+	edited := strings.Replace(string(b0(t, settings)), `"timeout": 30`, `"timeout": 90`, 1)
+	if err := os.WriteFile(settings, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if a := enable(repoA, nil); len(a.AgentsProvisioned) != 0 || len(a.AgentsRefused) != 1 || a.AgentsRefused[0].Code != claudecode.CodeDamaged || string(b0(t, settings)) != edited {
+		t.Fatalf("a hand-edited fence is an M1E-7102 refusal, never overwritten by enable: %+v", a)
+	}
+	resp, body := call(t, s, http.MethodPost, "/v1/agents/claudecode/provision", nil)
+	want(t, resp, body, http.StatusOK, "")
+	var fixed struct {
+		Agent       string              `json:"agent"`
+		Provisioned bool                `json:"provisioned"`
+		Changed     bool                `json:"changed"`
+		Refused     []provision.Refusal `json:"refused"`
+		Fragments   []fragment          `json:"fragments"`
+	}
+	decodeTo(t, body, &fixed)
+	if fixed.Agent != "claudecode" || !fixed.Provisioned || !fixed.Changed || len(fixed.Refused) != 0 || len(fixed.Fragments) != 1 || fixed.Fragments[0].State != string(claudecode.StateOK) || len(fixed.Fragments[0].Lines) != 9 {
+		t.Fatalf("repair %s", body)
+	}
+	if m2, err := claudecode.LoadManifest(dir); err != nil || m2.PreImageHash != m.PreImageHash {
+		t.Fatalf("repair re-snapshotted the pre-image: %v %+v", err, m2)
+	}
+	resp, body = call(t, s, http.MethodPost, "/v1/agents/claudecode/provision", nil)
+	want(t, resp, body, http.StatusOK, "")
+	decodeTo(t, body, &fixed)
+	if fixed.Changed {
+		t.Fatalf("a second repair over an OK fence is the idempotent no-op: %s", body)
+	}
+
+	resp, body = call(t, s, http.MethodPost, "/v1/agents/claudecode/disable", nil)
+	want(t, resp, body, http.StatusOK, "")
+	var off struct {
+		Agent        string               `json:"agent"`
+		Reverted     []provision.Reverted `json:"reverted"`
+		NotReverted  []string             `json:"not_reverted"`
+		ByteEquality bool                 `json:"byte_equality"`
+	}
+	decodeTo(t, body, &off)
+	if off.Agent != "claudecode" || len(off.Reverted) != 1 || off.Reverted[0].Kind != "verbatim" || off.Reverted[0].Target != settings || !off.ByteEquality || len(off.NotReverted) != 0 {
+		t.Fatalf("disable %s", body)
+	}
+	if string(b0(t, settings)) != original {
+		t.Fatalf("not byte-equal after disable:\n%s", b0(t, settings))
+	}
+	if _, err := os.Stat(claudecode.ManifestPath(dir)); !os.IsNotExist(err) {
+		t.Fatalf("manifest survives the revert: %v", err)
+	}
+	if roots, err := tailers.LoadWorkspacesFile(filepath.Join(dir, "workspaces.json")); err != nil || len(roots) != 1 {
+		t.Fatalf("disabling an agent must keep the workspace: %v %v", roots, err)
+	}
+	resp, body = call(t, s, http.MethodPost, "/v1/agents/claudecode/disable", nil)
+	want(t, resp, body, http.StatusOK, "")
+	if !strings.Contains(string(body), `"reverted":[]`) {
+		t.Fatalf("disable twice succeeds twice: %s", body)
+	}
+
+	resp, body = call(t, s, http.MethodPost, "/v1/agents/crush/provision", nil)
+	want(t, resp, body, http.StatusNotFound, "M1E-2001")
+	resp, body = call(t, s, http.MethodPost, "/v1/agents/codex/provision", nil)
+	want(t, resp, body, http.StatusConflict, "M1E-2001")
+	if a := enable(repoA, []string{"codex"}); len(a.AgentsProvisioned) != 0 || len(a.AgentsRefused) != 0 || fragmentPresent() {
+		t.Fatalf("agents:[codex] must not walk claudecode: %+v", a)
+	}
+
+	enable(repoA, nil)
+	enable(repoB, nil)
+	resp, body = call(t, s, http.MethodDelete, "/v1/projects", map[string]string{"path": repoA})
+	want(t, resp, body, http.StatusOK, "")
+	if !strings.Contains(string(body), `"reverted":[]`) || !fragmentPresent() {
+		t.Fatalf("removing one of two projects must leave the other's hooks in place: %s", body)
+	}
+	resp, body = call(t, s, http.MethodDelete, "/v1/projects", map[string]string{"path": repoB})
+	want(t, resp, body, http.StatusOK, "")
+	var removed struct {
+		Reverted     []provision.Reverted `json:"reverted"`
+		ByteEquality bool                 `json:"byte_equality"`
+	}
+	decodeTo(t, body, &removed)
+	if len(removed.Reverted) != 1 || removed.Reverted[0].Kind != "verbatim" || !removed.ByteEquality || string(b0(t, settings)) != original {
+		t.Fatalf("removing the last project reverts as `mark1 off` does: %s\n%s", body, b0(t, settings))
 	}
 }

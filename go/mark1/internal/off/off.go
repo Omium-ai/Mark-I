@@ -13,16 +13,10 @@ import (
 	"io"
 	"os"
 	"os/user"
-	"path/filepath"
 	"time"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/copilot"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 )
 
 type Options struct {
@@ -55,12 +49,7 @@ type Result struct {
 }
 
 // Reverted is one fragment taken back out, in 08 §8.4's own vocabulary.
-type Reverted struct {
-	Agent        string `json:"agent"`
-	Target       string `json:"target"`
-	Kind         string `json:"kind"` // verbatim | surgical | target-absent
-	ByteEquality bool   `json:"byte_equality"`
-}
+type Reverted = provision.Reverted
 
 // marker is what lands in <state>/OFF. The daemon and shim only stat the
 // file (existence IS the switch), so the content is free — it makes the off
@@ -117,7 +106,7 @@ func Run(env *cli.Env, opts Options) error {
 	// not the off mechanism: the shim hits the marker check and no-ops
 	// regardless (08 §8.4 note), which is why a failed revert does not stop
 	// the marker from landing above.
-	res.Reverted, res.NotReverted = revertFragments(env)
+	res.Reverted, res.NotReverted = provision.Revert(env.StateDir)
 	// FR-POLICY-006: a paused install must not block; the exploration sibling (D-EF) is a contract, not an arming, and stays.
 	res.StopGate = "not_opted_in"
 	was := env.ReadOptIn().StopGate
@@ -194,66 +183,6 @@ func verifyDaemonObserved(socket string, wasReachable bool, grace time.Duration)
 		time.Sleep(100 * time.Millisecond)
 	}
 	return "still capturing"
-}
-
-// revertFragments runs 08 §8.4 for every agent this build can revert, then
-// lists whatever manifest is STILL on disk afterwards. The leftover scan is
-// the honest catch-all: a fragment whose revert failed and a fragment written
-// by an agent no longer in this build are the same problem to the user — a
-// block of ours in their config that `mark1 off` did not take out — and both
-// have to make exit 1.
-func revertFragments(env *cli.Env) (done []Reverted, notReverted []string) {
-	// Base-URL BEFORE hooks, and the order is load-bearing. Both fragments fence
-	// the same settings.json, so reverting hooks first restores a whole-file
-	// pre-image that predates the base-URL fragment — putting the proxy pointer
-	// back after we removed it. This order also leaves the file matching the
-	// hooks manifest's post_image, which is what makes the hooks revert take its
-	// verbatim (byte-equal) path instead of the surgical one.
-	// A retained pointer is deliberately NOT listed as done. It keeps its
-	// manifest (D-CR), so the leftover scan below picks it up and makes exit 1
-	// — which is the same road every other unfinished revert travels. Listing
-	// it here as `surgical, byte_equality: false` would file "your API key is
-	// still routed at a loopback port" under the same line as "you edited your
-	// settings after we provisioned".
-	if res, err := claudecode.RevertBaseURL(env.StateDir); err == nil && res.Kind != "not-provisioned" && len(res.Retained) == 0 {
-		done = append(done, Reverted{"claudecode/baseurl", res.Target, res.Kind, res.ByteEquality})
-	}
-
-	res, err := claudecode.Revert(env.StateDir)
-	switch {
-	case err != nil:
-		// Left for the leftover scan below to list; RefusalCode's states
-		// (a hand-edited fence, an unreadable manifest) travel the same road
-		// as a genuine I/O failure here, because in both cases our lines are
-		// still in the user's file.
-	case res.Kind != "not-provisioned":
-		done = append(done, Reverted{"claudecode", res.Target, res.Kind, res.ByteEquality})
-	}
-
-	if res, err := codex.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" {
-		done = append(done, Reverted{"codex", res.Target, res.Kind, res.ByteEquality})
-	}
-	if res, err := gemini.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" {
-		done = append(done, Reverted{"gemini", res.Target, res.Kind, res.ByteEquality})
-	}
-	// A hand-edited plugin is retained with its manifest (fragment-damaged), so the leftover scan lists it.
-	if res, err := opencode.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" && len(res.Retained) == 0 {
-		done = append(done, Reverted{"opencode", res.Target, res.Kind, res.ByteEquality})
-	}
-	// Same owned-file rule for copilot's hooks/mark1.json.
-	if res, err := copilot.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" && len(res.Retained) == 0 {
-		done = append(done, Reverted{"copilot", res.Target, res.Kind, res.ByteEquality})
-	}
-	// And for the BYOK env pointer, a separate owned file reverted independently of the hooks fragment.
-	if res, err := copilot.RevertEnvPointer(env.StateDir); err == nil && res.Kind != "not-provisioned" && len(res.Retained) == 0 {
-		done = append(done, Reverted{"copilot/env", res.Target, res.Kind, res.ByteEquality})
-	}
-	if res, err := cursor.Revert(env.StateDir); err == nil && res.Kind != "not-provisioned" {
-		done = append(done, Reverted{"cursor", res.Target, res.Kind, res.ByteEquality})
-	}
-
-	matches, _ := filepath.Glob(filepath.Join(env.ProvisionedDir(), "*", "*.manifest.json"))
-	return done, matches
 }
 
 // On is §7.6's inverse (`mark1 on`): remove the marker, journal the enable

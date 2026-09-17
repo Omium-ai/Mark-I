@@ -5,25 +5,18 @@ package enable
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/user"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/copilot"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
-	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 )
 
 type Options struct {
@@ -100,11 +93,7 @@ type Result struct {
 
 // Refusal is one agent whose fragment could not be applied, with the M1E code
 // the user can look up.
-type Refusal struct {
-	Agent  string `json:"agent"`
-	Code   string `json:"code"`
-	Detail string `json:"detail"`
-}
+type Refusal = provision.Refusal
 
 func Run(env *cli.Env, opts Options) error {
 	if _, err := env.LoadEnrollment(); err != nil {
@@ -153,10 +142,13 @@ func Run(env *cli.Env, opts Options) error {
 	// It runs BEFORE the root lands in the allow-list so the consent record
 	// below can name what was provisioned, and so a provisioning I/O failure
 	// (exit 1) leaves nothing half-enabled for the re-run to skip.
-	wrote, err := provision(env, opts, &res)
+	pr, err := provision.Apply(provision.Options{Home: opts.Home, StateDir: env.StateDir})
 	if err != nil {
-		return err
+		return cli.Failf(cli.ExitRuntime, "", "%v", err)
 	}
+	wrote := pr.Changed
+	res.AgentsProvisioned, res.AgentsRefused = pr.Provisioned, pr.Refused
+	res.ProxyPointer, res.CopilotPointer, res.CopilotSourceLine = pr.ProxyPointer, pr.CopilotPointer, pr.CopilotSourceLine
 	res.Changed = added || wrote
 
 	if added {
@@ -475,138 +467,6 @@ func candidatesFor(env *cli.Env, opts Options, root string) ([]cli.AnchorCandida
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-}
-
-// provision applies the 08 §8 config fragments and reports whether anything
-// was actually written. claudecode, codex, gemini, opencode, copilot and cursor
-// are the built adapters (adapters.Roster carries crush as declared-but-unbuilt,
-// and `mark1 doctor` prints the whole roster); calling each directly beats a
-// loop with a type switch inside it.
-func provision(env *cli.Env, opts Options, res *Result) (wrote bool, err error) {
-	a := &claudecode.Adapter{Home: opts.Home, StateDir: env.StateDir}
-	applied, err := a.Apply()
-	switch code := claudecode.RefusalCode(err); {
-	case err == nil:
-		res.AgentsProvisioned = append(res.AgentsProvisioned, a.Name())
-		wrote = applied.Changed
-	case code != "":
-		res.AgentsRefused = append(res.AgentsRefused, Refusal{a.Name(), code, err.Error()})
-	default:
-		return false, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", a.Name(), err)
-	}
-
-	// The base-URL fragment is provisioned only for a detected API-key
-	// credential and only when a proxy is actually listening; every other answer
-	// is ErrNotEligible and is a normal outcome, not a refusal to show the user.
-	pointer, perr := a.ApplyProxyPointer()
-	switch code := claudecode.RefusalCode(perr); {
-	case perr == nil:
-		res.ProxyPointer = "provisioned"
-		wrote = wrote || pointer.Changed
-	case errors.Is(perr, claudecode.ErrNotEligible):
-		res.ProxyPointer = "not-eligible"
-	case code != "":
-		res.ProxyPointer = code
-		res.AgentsRefused = append(res.AgentsRefused, Refusal{a.Name() + "/baseurl", code, perr.Error()})
-	default:
-		return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s base URL: %v", a.Name(), perr)
-	}
-
-	// Codex, gemini, opencode, copilot and cursor only when installed: an owned file (A) would otherwise be planted for an agent the user does not run, and a fence (B) refused for one they never configured.
-	cx := &codex.Adapter{Home: opts.Home, StateDir: env.StateDir}
-	if d, _ := cx.Detect(); d.Installed {
-		applied, err := cx.Apply()
-		switch code := codex.RefusalCode(err); {
-		case err == nil:
-			res.AgentsProvisioned = append(res.AgentsProvisioned, cx.Name())
-			wrote = wrote || applied.Changed
-		case code != "":
-			res.AgentsRefused = append(res.AgentsRefused, Refusal{cx.Name(), code, err.Error()})
-		default:
-			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", cx.Name(), err)
-		}
-	}
-
-	gm := &gemini.Adapter{Home: opts.Home, StateDir: env.StateDir}
-	if d, _ := gm.Detect(); d.Installed {
-		applied, err := gm.Apply()
-		var syntax *json.SyntaxError
-		switch code := gemini.RefusalCode(err); {
-		case err == nil:
-			res.AgentsProvisioned = append(res.AgentsProvisioned, gm.Name())
-			wrote = wrote || applied.Changed
-		case code != "":
-			res.AgentsRefused = append(res.AgentsRefused, Refusal{gm.Name(), code, err.Error()})
-		case errors.As(err, &syntax):
-			// Gemini itself reads JSONC; a settings.json Mark 1 cannot parse is the user's to keep, not a failure of ours.
-			res.AgentsRefused = append(res.AgentsRefused, Refusal{gm.Name(), "", "~/.gemini/settings.json is not strict JSON (comments?), so mechanism B cannot fence it: " + err.Error()})
-		default:
-			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", gm.Name(), err)
-		}
-	}
-
-	oc := &opencode.Adapter{Home: opts.Home, StateDir: env.StateDir}
-	if d, _ := oc.Detect(); d.Installed {
-		applied, err := oc.Apply()
-		switch code := opencode.RefusalCode(err); {
-		case err == nil:
-			res.AgentsProvisioned = append(res.AgentsProvisioned, oc.Name())
-			wrote = wrote || applied.Changed
-		case code != "":
-			res.AgentsRefused = append(res.AgentsRefused, Refusal{oc.Name(), code, err.Error()})
-		default:
-			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", oc.Name(), err)
-		}
-	}
-
-	cp := &copilot.Adapter{Home: opts.Home, StateDir: env.StateDir}
-	if d, _ := cp.Detect(); d.Installed {
-		applied, err := cp.Apply()
-		switch code := copilot.RefusalCode(err); {
-		case err == nil:
-			res.AgentsProvisioned = append(res.AgentsProvisioned, cp.Name())
-			wrote = wrote || applied.Changed
-		case code != "":
-			res.AgentsRefused = append(res.AgentsRefused, Refusal{cp.Name(), code, err.Error()})
-		default:
-			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", cp.Name(), err)
-		}
-
-		// The BYOK env pointer is provisioned only for an eligible API-key
-		// credential and only when a proxy answers the guard probe; every other
-		// answer is ErrNotEligible (08 §5.5, 10 §3.3) and a normal outcome, not
-		// a refusal to show the user. Never written into the user's own profile
-		// (CON-003) — only the source line is printed below.
-		pointer, perr := cp.ApplyEnvPointer()
-		switch code := copilot.RefusalCode(perr); {
-		case perr == nil:
-			res.CopilotPointer = "provisioned"
-			res.CopilotSourceLine = copilot.SourceLine(env.StateDir, runtime.GOOS)
-			wrote = wrote || pointer.Changed
-		case errors.Is(perr, copilot.ErrNotEligible):
-			res.CopilotPointer = "not-eligible"
-		case code != "":
-			res.CopilotPointer = code
-			res.AgentsRefused = append(res.AgentsRefused, Refusal{cp.Name() + "/env", code, perr.Error()})
-		default:
-			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s env pointer: %v", cp.Name(), perr)
-		}
-	}
-
-	cu := &cursor.Adapter{Home: opts.Home, StateDir: env.StateDir}
-	if d, _ := cu.Detect(); d.Installed {
-		applied, err := cu.Apply()
-		switch code := cursor.RefusalCode(err); {
-		case err == nil:
-			res.AgentsProvisioned = append(res.AgentsProvisioned, cu.Name())
-			wrote = wrote || applied.Changed
-		case code != "":
-			res.AgentsRefused = append(res.AgentsRefused, Refusal{cu.Name(), code, err.Error()})
-		default:
-			return wrote, cli.Failf(cli.ExitRuntime, "", "provisioning %s: %v", cu.Name(), err)
-		}
-	}
-	return wrote, nil
 }
 
 // copilotGuardGapNote: the guard admits the key by fingerprint now; what still fails is routing (supervise passes no --upstream).

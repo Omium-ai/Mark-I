@@ -28,6 +28,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
@@ -42,6 +43,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", s.status)
 	mux.HandleFunc("GET /v1/agents", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, s.agents()) })
+	mux.HandleFunc("POST /v1/agents/{name}/provision", s.provisionAgent)
+	mux.HandleFunc("POST /v1/agents/{name}/disable", s.disableAgent)
 	mux.HandleFunc("GET /v1/projects", s.getProjects)
 	mux.HandleFunc("POST /v1/projects", s.postProject)
 	mux.HandleFunc("DELETE /v1/projects", s.deleteProject)
@@ -491,9 +494,18 @@ func (s *Server) getProjects(w http.ResponseWriter, _ *http.Request) {
 }
 
 type projectBody struct {
-	Path string `json:"path"`
+	Path   string   `json:"path"`
+	Agents []string `json:"agents,omitempty"`
 }
 
+func refusals(r []provision.Refusal) []provision.Refusal {
+	if r == nil {
+		return []provision.Refusal{}
+	}
+	return r
+}
+
+// postProject is `mark1 enable` (08 §7.2): the same provision.Apply walk, run BEFORE the allow-list write so the consent line names what was written and an I/O failure leaves nothing half-enabled; a re-POST of an enabled root reconciles the fragments and records no second consent.
 func (s *Server) postProject(w http.ResponseWriter, r *http.Request) {
 	var body projectBody
 	if !decode(w, r, &body) {
@@ -513,6 +525,12 @@ func (s *Server) postProject(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusConflict, "M1E-2001", root+"/.mark1ignore opts this repository out of Mark 1")
 		return
 	}
+	for _, a := range body.Agents {
+		if !slices.Contains(provision.Names, a) {
+			refuse(w, http.StatusBadRequest, "M1E-2001", "agents: no such provisionable agent "+a)
+			return
+		}
+	}
 	s.files.Lock()
 	defer s.files.Unlock()
 	ws, err := s.workspaces()
@@ -520,9 +538,19 @@ func (s *Server) postProject(w http.ResponseWriter, r *http.Request) {
 		internal(w, err)
 		return
 	}
+	pr, err := provision.Apply(provision.Options{StateDir: s.cfg.StateDir, Only: body.Agents})
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	respond := func(e workspaceEntry) {
+		out := s.project(e)
+		out["agents_provisioned"], out["agents_refused"] = pr.Provisioned, refusals(pr.Refused)
+		writeJSON(w, out)
+	}
 	for _, e := range ws.Workspaces {
 		if e.Path == root {
-			writeJSON(w, s.project(e))
+			respond(e)
 			return
 		}
 	}
@@ -536,12 +564,74 @@ func (s *Server) postProject(w http.ResponseWriter, r *http.Request) {
 	name, uid := osUser()
 	if err := errors.Join(
 		appendJSONL(coverage.JournalPath(s.cfg.StateDir), map[string]any{"ts": ts.Format(time.RFC3339), "kind": "enable", "reason": coverage.ReasonUserEnable, "workspace": root}),
-		appendJSONL(filepath.Join(s.cfg.StateDir, "consent.jsonl"), map[string]any{"ts": ts.Format(time.RFC3339), "user": name, "uid": uid, "workspace": root, "agents_provisioned": []string{}}),
+		appendJSONL(filepath.Join(s.cfg.StateDir, "consent.jsonl"), map[string]any{"ts": ts.Format(time.RFC3339), "user": name, "uid": uid, "workspace": root, "agents_provisioned": pr.Provisioned}),
 	); err != nil {
 		internal(w, err)
 		return
 	}
-	writeJSON(w, s.project(e))
+	respond(e)
+}
+
+func agentName(w http.ResponseWriter, r *http.Request) (string, bool) {
+	name := r.PathValue("name")
+	if !slices.Contains(provision.Names, name) {
+		refuse(w, http.StatusNotFound, "M1E-2001", "no such provisionable agent")
+		return "", false
+	}
+	return name, true
+}
+
+// provisionAgent is the app's repair / re-provision action (desktop spec §5.9): the enable walk for one agent with the `doctor --fix` bit set, so a FRAGMENT-DAMAGED fence is rewritten and a MISSING one re-applied; the pre-image already on file is never re-snapshotted (08 §8.3).
+func (s *Server) provisionAgent(w http.ResponseWriter, r *http.Request) {
+	name, ok := agentName(w, r)
+	if !ok {
+		return
+	}
+	s.files.Lock()
+	pr, err := provision.Apply(provision.Options{StateDir: s.cfg.StateDir, Only: []string{name}, Repair: true})
+	s.files.Unlock()
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	if len(pr.Provisioned) == 0 && len(pr.Refused) == 0 {
+		refuse(w, http.StatusConflict, "M1E-2001", name+" is not installed (binary not on mark1d's PATH)")
+		return
+	}
+	frags := []fragment{}
+	for _, f := range s.fragments() {
+		if f.Agent == name {
+			frags = append(frags, f)
+		}
+	}
+	writeJSON(w, map[string]any{"agent": name, "provisioned": len(pr.Provisioned) > 0, "changed": pr.Changed, "refused": refusals(pr.Refused), "fragments": frags})
+}
+
+// disableAgent is `mark1 off` step 2 (08 §7.6, §8.4) for one agent: its fragments come out byte-equal where the post-image still matches, surgically otherwise; the workspace allow-list is untouched.
+func (s *Server) disableAgent(w http.ResponseWriter, r *http.Request) {
+	name, ok := agentName(w, r)
+	if !ok {
+		return
+	}
+	s.files.Lock()
+	done, notReverted := provision.Revert(s.cfg.StateDir, name)
+	s.files.Unlock()
+	writeJSON(w, revertReport(map[string]any{"agent": name}, done, notReverted))
+}
+
+func revertReport(out map[string]any, done []provision.Reverted, notReverted []string) map[string]any {
+	eq := len(notReverted) == 0
+	for _, d := range done {
+		eq = eq && d.ByteEquality
+	}
+	if done == nil {
+		done = []provision.Reverted{}
+	}
+	if notReverted == nil {
+		notReverted = []string{}
+	}
+	out["reverted"], out["not_reverted"], out["byte_equality"] = done, notReverted, eq
+	return out
 }
 
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
@@ -583,8 +673,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		internal(w, err)
 		return
 	}
+	// Fragments are user-scoped, not per-root: they come out (08 §8.4, as `mark1 off` step 2) only when this was the last enabled project, or the others would go silently uncaptured.
+	var done []provision.Reverted
+	var notReverted []string
+	if len(kept) == 0 {
+		done, notReverted = provision.Revert(s.cfg.StateDir)
+	}
 	// receipted_transition_id is null: the journal line is receipted by the daemon's coverage drain (cmd/main.go drainCoverageJournal), not at response time.
-	writeJSON(w, map[string]any{"removed": true, "path": root, "receipted_transition_id": nil})
+	writeJSON(w, revertReport(map[string]any{"removed": true, "path": root, "receipted_transition_id": nil}, done, notReverted))
 }
 
 func anchorRow(c anchors.Candidate, lastRun map[string]string) map[string]any {
