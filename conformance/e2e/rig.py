@@ -571,6 +571,8 @@ class Rig:
             "S3_DISABLE_SSEKMS": "1",
             "AUTH_TOKEN_ED25519_SEED": os.urandom(32).hex(),
             "SERVER_CHAIN_ED25519_SEED": os.urandom(32).hex(),
+            # Deployed in prod; without it no tenant gets its bootstrap bundle at enrollment.
+            "BUNDLE_SECTION_ED25519_SEED": os.urandom(32).hex(),
             "PUBLIC_BASE_URL": self.controld_url,
         }
         self._spawn("controld", [str(self.bins["controld"])], env)
@@ -688,12 +690,12 @@ class Rig:
             )
 
     # ---- mark1d ----------------------------------------------------------
-    def _mark1d(self) -> None:
+    def _mark1d(self, *extra: str) -> None:
         env = self._cli_env()
         # Started the way a customer's supervisor unit starts it (04 §9.3): --state-dir only.
         # Token, tenant, device, tenant root and the ingest endpoint all come from the
         # enrollment.json `mark1 enroll` just wrote; the DEV SEAM flags stay unset.
-        cmd = [str(self.bins["mark1d"]), "--state-dir", str(self.state)]
+        cmd = [str(self.bins["mark1d"]), "--state-dir", str(self.state), *extra]
         self._spawn("mark1d", cmd, env)
         sock = self.tmp / "run" / "omium-mark1" / "m1p.sock"
         deadline = time.monotonic() + 30
@@ -716,8 +718,9 @@ class Rig:
         for h in HOOKS_AFTER_TRANSCRIPTS:
             self._fire_hook(h)
 
-    def _fire_hook(self, event: str) -> None:
-        body = (CORPUS / "hooks" / f"{event}.json").read_bytes()
+    def _fire_hook(self, event: str, body: bytes | None = None) -> HookRun:
+        if body is None:
+            body = (CORPUS / "hooks" / f"{event}.json").read_bytes()
         cmd = self.settings_hooks[event]
         t0 = time.monotonic()
         p = self._sh(
@@ -736,6 +739,7 @@ class Rig:
                 f"{event}: the shim exited {p.returncode} (08 §5.1: every exit is 0): "
                 f"{p.stderr.decode(errors='replace')[-500:]}"
             )
+        return run
 
     def _lay_transcripts(self) -> None:
         """~/.claude/projects/<munged cwd>/ (08 §5.1), files whole and newline-terminated so the

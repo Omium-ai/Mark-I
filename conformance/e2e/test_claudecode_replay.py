@@ -180,7 +180,14 @@ def test_e2e_receipt_chain_first_batch_sealed_by_enrolled_key(rig: Rig) -> None:
     chain = _chain(rig)
     assert chain, "no checkpoint on the chain at all"
     first = chain[0]
-    assert (first["seq"], first["checkpoint_seq"]) == (1, 1), first
+    # seq 1 is the tenant's bundle_publication receipt (05 §4.1): enrollment publishes the
+    # bootstrap bundle before any batch can seal, so the first checkpoint follows it.
+    publication = rig.pg(
+        "SELECT seq FROM m1_receipts WHERE tenant_id = $1 AND record_type = 'bundle_publication'",
+        rig.tenant_id,
+    )
+    assert [r["seq"] for r in publication] == [1], publication
+    assert (first["seq"], first["checkpoint_seq"]) == (2, 1), first
     assert first["device_key_id"] == rig.device_key_id, first
     assert first["server_key_id"], first
     emitted = {int(c["checkpoint_seq"]): int(c["leaf_count"]) for c in _emitted_checkpoints(rig)}
