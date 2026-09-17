@@ -110,6 +110,7 @@ func DefaultStateDir() (string, error) {
 func (e *Env) OffMarkerPath() string  { return filepath.Join(e.StateDir, "OFF") }
 func (e *Env) EnrollmentPath() string { return filepath.Join(e.StateDir, "enrollment.json") }
 func (e *Env) DeviceKeyPath() string  { return filepath.Join(e.StateDir, "device.key") }
+func (e *Env) PinnedKeysPath() string { return filepath.Join(e.StateDir, "policy", "keys.json") } // mark1d bundle/client.go keysFile
 func (e *Env) WorkspacesPath() string { return filepath.Join(e.StateDir, "workspaces.json") }
 func (e *Env) CoveragePath() string {
 	return filepath.Join(e.StateDir, "coverage", "transitions.jsonl")

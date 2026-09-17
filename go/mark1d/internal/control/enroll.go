@@ -56,6 +56,36 @@ type activeBody struct {
 	Endpoints      endpoints `json:"endpoints"`
 	KeyManifestURI string    `json:"key_manifest_uri"`
 	TenantRootHex  string    `json:"tenant_root_hex"`
+	// BundleSectionKeys is 08 §3.5's bundle_section_keys list, delivered by controld's enroll module; it becomes the daemon's pinned ring (bundle/client.go keysFile).
+	BundleSectionKeys json.RawMessage `json:"bundle_section_keys,omitempty"`
+}
+
+func (s *Server) pinnedKeysPath() string { return filepath.Join(s.cfg.StateDir, "policy", "keys.json") }
+
+// pinKeys writes the trust file the bundle client loads (bundle.trustFile shape); an absent or empty list pins nothing and leaves any prior pin in place.
+func (s *Server) pinKeys(keys json.RawMessage) error {
+	var list []json.RawMessage
+	if len(keys) == 0 || json.Unmarshal(keys, &list) != nil || len(list) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(s.pinnedKeysPath()), 0o700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(map[string]json.RawMessage{"bundle_section_keys": keys})
+	if err != nil {
+		return err
+	}
+	return writeAtomic(s.pinnedKeysPath(), b)
+}
+
+// purgePolicy drops the pinned ring and last-known-good on sign-out: both are the old tenant's, and a bundle from the next tenant must not lose to the old one's seq.
+func (s *Server) purgePolicy() error {
+	for _, name := range []string{"keys.json", "lkg.cbor", "lkg.json"} {
+		if err := os.Remove(filepath.Join(s.cfg.StateDir, "policy", name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) enrollmentPath() string { return filepath.Join(s.cfg.StateDir, "enrollment.json") }
@@ -220,6 +250,9 @@ func (s *Server) postEnroll(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = writeAtomic(s.enrollmentPath(), b)
 	}
+	if err == nil {
+		err = s.pinKeys(body.BundleSectionKeys)
+	}
 	if err != nil {
 		internal(w, err)
 		return
@@ -259,6 +292,10 @@ func (s *Server) deleteEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	default:
 		if err := appendJSONL(coverage.JournalPath(s.cfg.StateDir), map[string]any{"ts": now(), "kind": "disable", "reason": coverage.ReasonMark1Off, "scope": "all"}); err != nil {
+			internal(w, err)
+			return
+		}
+		if err := s.purgePolicy(); err != nil {
 			internal(w, err)
 			return
 		}

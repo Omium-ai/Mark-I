@@ -106,6 +106,9 @@ func enrollStub(t *testing.T, pendings int) (*httptest.Server, *atomic.Int32) {
 			"tenant_root_hex": stubTenantRoot,
 			"server_min_edge": "1.0.0",
 			"endpoints":       map[string]string{"ingest": "https://ingest.example"},
+			"bundle_section_keys": []map[string]string{
+				{"section": "verify", "key_id": "ed25519:stub", "pubkey_hex": stubTenantRoot},
+			},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -132,6 +135,40 @@ func TestEnrollPersistsTenantRoot(t *testing.T) {
 	raw, err := os.ReadFile(env.EnrollmentPath())
 	if err != nil || !bytes.Contains(raw, []byte(`"tenant_root_hex": "`+stubTenantRoot+`"`)) {
 		t.Fatalf("enrollment.json lacks the wire key tenant_root_hex:\n%s", raw)
+	}
+}
+
+// TestEnrollPinsBundleKeys: the ACTIVE body's bundle_section_keys land in <state>/policy/keys.json, the 0600 trust file mark1d's bundle client verifies every bundle against (04 §2.6) — pinned at enrollment, never fetched from the server it checks.
+func TestEnrollPinsBundleKeys(t *testing.T) {
+	srv, _ := enrollStub(t, 0)
+	env, _ := testEnv(t, srv.URL)
+	if err := Run(context.Background(), env, Options{Tenant: testTenant}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(env.PinnedKeysPath())
+	if err != nil {
+		t.Fatalf("policy/keys.json not written: %v", err)
+	}
+	if fi, _ := os.Stat(env.PinnedKeysPath()); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Fatalf("keys.json mode %o", fi.Mode().Perm())
+	}
+	var tf struct {
+		BundleSectionKeys []struct {
+			Section   string `json:"section"`
+			PubkeyHex string `json:"pubkey_hex"`
+		} `json:"bundle_section_keys"`
+	}
+	if err := json.Unmarshal(raw, &tf); err != nil || len(tf.BundleSectionKeys) != 1 || tf.BundleSectionKeys[0].Section != "verify" || tf.BundleSectionKeys[0].PubkeyHex != stubTenantRoot {
+		t.Fatalf("keys.json %s (%v)", raw, err)
+	}
+	if err := pinBundleKeys(env, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := pinBundleKeys(env, json.RawMessage(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := os.ReadFile(env.PinnedKeysPath()); !bytes.Equal(again, raw) {
+		t.Fatal("an absent or empty list must leave the existing pin alone")
 	}
 }
 

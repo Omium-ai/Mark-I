@@ -12,6 +12,7 @@ package bundle
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -148,6 +149,7 @@ type cp struct {
 	headN    int
 	ackN     int
 	condSeen []string // If-None-Match values observed, in order
+	sizeSeen []string // ?tree_size values observed on the keys route, in order
 }
 
 func (s *cp) set(fn func(*cp)) {
@@ -183,12 +185,16 @@ func (s *cp) handler() http.Handler {
 		w.Header().Set("Content-Type", "application/cbor")
 		w.Header().Set("ETag", s.etag)
 		w.Header().Set("X-Mark1-Bundle-Seq", s.seq)
+		if s.head != nil { // the controld echo: base64 JSON of the in-map proof, tree_size included
+			w.Header().Set("X-Mark1-Tlog-Proof", base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`{"tree_size":%d,"leaf_index":0,"path":[],"root":"%s"}`, s.head.TreeSize, s.head.RootHex))))
+		}
 		_, _ = w.Write(s.body)
 	})
-	mux.HandleFunc(pathKeys, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(pathKeys, func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.headN++
+		s.sizeSeen = append(s.sizeSeen, r.URL.Query().Get("tree_size"))
 		if s.keysStatus != 0 {
 			w.WriteHeader(s.keysStatus)
 			return
@@ -918,5 +924,138 @@ func TestClientGatesFollowsFreshness(t *testing.T) {
 	h.now = h.now.Add(-2 * time.Second)
 	if g := c.Gates(); g != want {
 		t.Fatalf("back inside max_age: Gates() = %+v, want %+v", g, want)
+	}
+}
+
+// TestClientAsksForTheHeadTheProofTargets: the keys read carries the served proof's tree_size (05 §4.4 keeps the head history; the log grows past every bundle), and a missing echo asks for the newest.
+func TestClientAsksForTheHeadTheProofTargets(t *testing.T) {
+	h := newHarness(t)
+	c := h.client()
+	h.applyChain(c)
+	h.cp.mu.Lock()
+	sizes := append([]string(nil), h.cp.sizeSeen...)
+	h.cp.mu.Unlock()
+	if len(sizes) != 2 || sizes[0] != "1" || sizes[1] != "3" {
+		t.Fatalf("tree_size asked for = %v, want [1 3] (the frozen vectors' proofs)", sizes)
+	}
+	if proofTreeSize("") != 0 || proofTreeSize("!!") != 0 || proofTreeSize(base64.StdEncoding.EncodeToString([]byte(`{"tree_size":7}`))) != 7 {
+		t.Fatal("proofTreeSize: absent/garbage ⇒ 0 (newest); a valid echo ⇒ its tree_size")
+	}
+}
+
+// TestClientRefusesAnotherTenantsBundle: with TenantID set, a bundle for any other tenant is M1E-3001 and never applied; the frozen vectors carry tenant 0x0101…
+func TestClientRefusesAnotherTenantsBundle(t *testing.T) {
+	h := newHarness(t)
+	h.serve("full", `"t7-stable-000001"`, "1")
+	other, err := New(Config{
+		StateDir: h.state, BaseURL: h.srv.URL, Token: "dev", TenantID: "0191a000-0000-7000-8000-000000000001",
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), HTTPClient: h.srv.Client(),
+		Now: func() time.Time { return h.now }, Rand: func() float64 { return 0.5 }, Poll: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !other.tick(context.Background()) || other.lkg != nil {
+		t.Fatal("a foreign tenant's bundle must be refused, not applied")
+	}
+	acks, _ := h.cp.snapshot()
+	if len(acks) != 1 || acks[0].Result != "rejected" || acks[0].RejectCode != "M1E-3001" {
+		t.Fatalf("acks = %+v, want one rejected M1E-3001", acks)
+	}
+	raw, _ := os.ReadFile(filepath.Join(vectorsDir, "full.cbor"))
+	b, _ := policy.VerifyAndDecode(raw, other.keys, nil, &policy.TlogHead{TreeSize: 1, Root: [32]byte(mustHexT(t, h.m.vec(t, "full").TlogHead.RootHex))})
+	mine, err := New(Config{
+		StateDir: t.TempDir(), TenantID: uuidOf(b.TenantID), Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := mine.callerChecks(b); code != "" {
+		t.Fatalf("the enrolled tenant's own bundle refused: %s", code)
+	}
+	if _, err := New(Config{StateDir: t.TempDir(), TenantID: "nope"}); err == nil {
+		t.Fatal("a malformed TenantID must refuse New")
+	}
+}
+
+func uuidOf(id [16]byte) string {
+	h := hex.EncodeToString(id[:])
+	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
+}
+
+func mustHexT(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestClientRunFetchesAtOnceWithoutCustody: a virgin edge's first poll is immediate (enrollment is when its bundle exists); an edge with custody keeps the jittered cadence.
+func TestClientRunFetchesAtOnceWithoutCustody(t *testing.T) {
+	for _, withCustody := range []bool{false, true} {
+		h := newHarness(t)
+		h.serve("full", `"t7-stable-000001"`, "1")
+		if withCustody {
+			c := h.client()
+			h.applyChain(c)
+		}
+		c := h.client()
+		var mu sync.Mutex
+		var delays []time.Duration
+		c.after = func(d time.Duration) <-chan time.Time {
+			mu.Lock()
+			delays = append(delays, d)
+			mu.Unlock()
+			return make(chan time.Time) // never fires: only the requested delays matter
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { defer close(done); c.Run(ctx) }()
+		waitUntil(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(delays) >= 2 })
+		cancel()
+		<-done
+		mu.Lock()
+		first := delays[1] // delays[0] is the freshness ticker
+		mu.Unlock()
+		if withCustody && first == 0 {
+			t.Fatal("an edge with custody must keep the jittered cadence")
+		}
+		if !withCustody && first != 0 {
+			t.Fatalf("a virgin edge's first poll waited %s, want an immediate fetch", first)
+		}
+	}
+}
+
+func waitUntil(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition never met")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestClientApplyGatesFollowsApply: the gates section reaches the hook on apply and the zero section past max_age — the gate arms without a restart.
+func TestClientApplyGatesFollowsApply(t *testing.T) {
+	h := newHarness(t)
+	c := h.client()
+	var got []policy.GatesSection
+	c.ApplyGates = func(g policy.GatesSection) { got = append(got, g) }
+	h.serve("full", `"t7-stable-000001"`, "1")
+	if !c.tick(context.Background()) {
+		t.Fatal("seq 1 did not apply")
+	}
+	want := policy.GatesSection{StopGateEnabled: true, MaxConsecutiveBlocks: 3, HourlyBlockCeiling: 20}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("ApplyGates saw %+v, want [%+v]", got, want)
+	}
+	h.now = h.now.Add(time.Duration(c.lkg.b.MaxAgeS)*time.Second + time.Second)
+	c.publish()
+	if len(got) != 2 || got[1] != (policy.GatesSection{}) {
+		t.Fatalf("past max_age ApplyGates saw %+v, want the zero section (gates open)", got)
 	}
 }

@@ -8,12 +8,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/policy"
@@ -37,7 +39,21 @@ type fetchResult struct {
 	body        []byte
 	etag        string
 	seq         string // X-Mark1-Bundle-Seq — an unauthenticated transport echo
+	proof       string // X-Mark1-Tlog-Proof — the same echo; only its tree_size is read, to ask for the head the proof targets
 	notModified bool
+}
+
+// proofTreeSize reads tree_size off the proof echo; 0 (absent, garbage) asks for the newest head. Not a verification input: the root still comes from the key surface, and a lie here only fetches a head the proof cannot reproduce.
+func proofTreeSize(header string) uint64 {
+	raw, err := base64.StdEncoding.DecodeString(header)
+	if err != nil {
+		return 0
+	}
+	var p struct {
+		TreeSize uint64 `json:"tree_size"`
+	}
+	_ = json.Unmarshal(raw, &p)
+	return p.TreeSize
 }
 
 func (c *Client) request(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
@@ -84,9 +100,10 @@ func (c *Client) getBundle(ctx context.Context) (*fetchResult, error) {
 		return nil, err
 	}
 	return &fetchResult{
-		body: raw,
-		etag: resp.Header.Get("ETag"),
-		seq:  resp.Header.Get("X-Mark1-Bundle-Seq"),
+		body:  raw,
+		etag:  resp.Header.Get("ETag"),
+		seq:   resp.Header.Get("X-Mark1-Bundle-Seq"),
+		proof: resp.Header.Get("X-Mark1-Tlog-Proof"),
 	}, nil
 }
 
@@ -102,11 +119,13 @@ type keyManifest struct {
 	} `json:"tlog"`
 }
 
-// getHead reads the pinned log head. A missing `tlog.head` is not an error —
-// a deployment with no transparency log serves only bundle zero, whose
-// inclusion is structurally waived (D-P).
-func (c *Client) getHead(ctx context.Context) (*policy.TlogHead, error) {
-	req, err := c.request(ctx, http.MethodGet, pathKeys, nil)
+// getHead reads the pinned log head at treeSize (the log grows past every bundle's proof; 05 §4.4 keeps the history), newest when 0; a missing `tlog.head` is bundle zero's D-P waiver, not an error.
+func (c *Client) getHead(ctx context.Context, treeSize uint64) (*policy.TlogHead, error) {
+	path := pathKeys
+	if treeSize > 0 {
+		path += "?tree_size=" + strconv.FormatUint(treeSize, 10)
+	}
+	req, err := c.request(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}

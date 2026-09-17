@@ -54,8 +54,7 @@ type Gate struct {
 	blocks   *verdict.Blocks
 	stateDir string
 	// HourlyCeiling is LOWERED from the bundle's gates section by ApplyGates;
-	// zero means DefaultHourlyCeiling. Read and written atomically: ApplyGates
-	// now also runs from the bundle client's apply goroutine while Answer serves.
+	// zero means DefaultHourlyCeiling. Atomic access: ApplyGates also runs from the bundle client's apply goroutine while Answer serves.
 	HourlyCeiling uint32
 	// consecutiveCap is the same for max_consecutive_blocks; zero means
 	// maxConsecutiveBlocks. Unexported: only ApplyGates' clamp writes it.

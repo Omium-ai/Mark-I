@@ -51,6 +51,8 @@ type pollResponse struct {
 		PolicyStream string `json:"policy_stream"`
 	} `json:"endpoints"`
 	KeyManifestURI string `json:"key_manifest_uri"`
+	// BundleSectionKeys: 08 §3.5's list on the ACTIVE body — pinned as the daemon's bundle ring (mark1d bundle/client.go keysFile), never fetched from the server it verifies.
+	BundleSectionKeys json.RawMessage `json:"bundle_section_keys"`
 }
 
 // Result is §7.1's --json shape.
@@ -185,12 +187,28 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 	if err := env.SaveEnrollment(doc); err != nil {
 		return cli.Failf(cli.ExitRuntime, "", "persisting enrollment: %v", err)
 	}
+	if err := pinBundleKeys(env, poll.BundleSectionKeys); err != nil {
+		return cli.Failf(cli.ExitRuntime, "", "pinning bundle keys: %v", err)
+	}
 
 	return env.Emit(Result{OK: true, DeviceID: poll.DeviceID, TenantID: poll.TenantID,
 		State: cli.StateActive, ExpiresIn: poll.ExpiresIn},
 		func(w io.Writer) {
 			_, _ = fmt.Fprintf(w, "enrolled: device %s (tenant %s)\n", poll.DeviceID, poll.TenantID)
 		})
+}
+
+// pinBundleKeys writes <state>/policy/keys.json byte-compatibly with mark1d's control/enroll.go pinKeys; an absent or empty list pins nothing.
+func pinBundleKeys(env *cli.Env, keys json.RawMessage) error {
+	var list []json.RawMessage
+	if len(keys) == 0 || json.Unmarshal(keys, &list) != nil || len(list) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(map[string]json.RawMessage{"bundle_section_keys": keys})
+	if err != nil {
+		return err
+	}
+	return cli.WriteFileAtomic(env.PinnedKeysPath(), b, 0o600)
 }
 
 // pollUntilActive honors §3.1's cadence contract exactly: poll at

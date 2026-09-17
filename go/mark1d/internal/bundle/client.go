@@ -79,6 +79,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/policy"
@@ -115,6 +117,8 @@ type Config struct {
 	BaseURL string
 	// Channel per 08 §3.2; empty defaults to "stable".
 	Channel string
+	// TenantID is the enrolled tenant (enrollment.json); set, a bundle for any other tenant is refused (M1E-3001). Empty leaves it unchecked.
+	TenantID string
 	// Token is the bearer device token. DEV SEAM, same as the uplink's:
 	// enrollment (08 §3.1) issues the real ≤24 h one.
 	Token       string
@@ -150,6 +154,7 @@ type Client struct {
 	dir         string
 	baseURL     string
 	channel     string
+	tenant      []byte
 	token       string
 	edgeVersion string
 	keys        *policy.SectionKeys
@@ -171,6 +176,8 @@ type Client struct {
 	// ApplyRanker publishes the applied bundle's cortex learned_ranker (nil
 	// when absent or stale) under the same rules as Apply; cortex.Plane.SetRanker.
 	ApplyRanker func(*policy.LearnedRanker)
+	// ApplyGates publishes the applied bundle's gates section (Gates()) under the same rules; fabric.Gate.ApplyGates, so a bundle fetched after boot arms or opens the gate without a restart.
+	ApplyGates func(policy.GatesSection)
 	// OnJudgeRequest receives the data of every `event: judge_request` block
 	// (ADR-0008, 06 §6.2 step 2: a protojson m1p.v1.JudgeRequest) under the
 	// same set-before-Run rule as Apply; internal/judge.Runner.Handle. It must
@@ -217,6 +224,13 @@ func New(cfg Config) (*Client, error) {
 	if c.channel == "" {
 		c.channel = "stable"
 	}
+	if cfg.TenantID != "" {
+		id, err := uuid.Parse(cfg.TenantID)
+		if err != nil {
+			return nil, fmt.Errorf("bundle: TenantID: %w", err)
+		}
+		c.tenant = id[:]
+	}
 	if c.log == nil {
 		c.log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
@@ -256,6 +270,10 @@ func New(cfg Config) (*Client, error) {
 		c.log.Warn("mark1d: no pinned bundle signing keys; policy stays on built-in defaults (FR-POLICY-005)", "path", filepath.Join(c.dir, keysFile))
 	} else {
 		c.lkg = c.loadLKG()
+	}
+	if c.lkg != nil && c.tenant != nil && !bytes.Equal(c.lkg.b.TenantID[:], c.tenant) {
+		c.log.Error("mark1d: last-known-good bundle belongs to another tenant; ignoring it", "bundle_tenant", uuid.UUID(c.lkg.b.TenantID).String())
+		c.lkg = nil
 	}
 	c.boot, c.published.seq, c.published.stale = c.posture()
 	c.report()
@@ -312,7 +330,12 @@ func (c *Client) Run(ctx context.Context) {
 		go c.stream(ctx)
 	}
 	fresh := c.after(c.freshEvery)
-	poll := c.after(c.nextPoll())
+	// A virgin edge fetches at once — enrollment is the moment its tenant's bundle exists (FR-POLICY-004); an edge with custody keeps the jittered cadence.
+	first := c.nextPoll()
+	if c.lkg == nil {
+		first = 0
+	}
+	poll := c.after(first)
 
 	attempt := 0
 	for {
@@ -370,7 +393,7 @@ func (c *Client) tick(ctx context.Context) bool {
 	// A head we cannot fetch is not evidence that the bundle is bad — it is a
 	// missing input. Treating it as retryable keeps M1E-3003 meaning "the
 	// proof did not check out" instead of "our network hiccuped".
-	head, err := c.getHead(ctx)
+	head, err := c.getHead(ctx, proofTreeSize(res.proof))
 	if err != nil {
 		c.log.Warn("mark1d: tlog head unavailable; deferring bundle apply", "err", err)
 		return false
@@ -412,6 +435,9 @@ func (c *Client) tick(ctx context.Context) bool {
 // in the caller's LKG state") and 08 §3.2's per-(tenant, channel) sequencing.
 // Both land in the M1E-3001 family per 05 §4.6's table.
 func (c *Client) callerChecks(b *policy.Bundle) (code, why string) {
+	if c.tenant != nil && !bytes.Equal(b.TenantID[:], c.tenant) {
+		return "M1E-3001", "bundle tenant " + uuid.UUID(b.TenantID).String() + " is not the enrolled tenant"
+	}
 	if b.Channel != c.channel {
 		// seq is monotonic per (tenant, CHANNEL). Applying another channel's
 		// bundle would advance our anti-rollback floor against a sequence that
@@ -489,6 +515,9 @@ func (c *Client) publish() {
 	}
 	if c.ApplyRanker != nil {
 		c.ApplyRanker(c.Cortex().LearnedRanker)
+	}
+	if c.ApplyGates != nil {
+		c.ApplyGates(c.Gates())
 	}
 	switch {
 	case stale && !wasStale:

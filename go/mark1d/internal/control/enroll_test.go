@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -380,4 +381,69 @@ func TestServerOfRecoversTheControlPlaneBase(t *testing.T) {
 			t.Errorf("serverOf(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+// TestEnrollPinsTheBundleRingAndSignOutPurgesIt: the ACTIVE body's bundle_section_keys become <state>/policy/keys.json in the bundle client's trustFile shape (04 §2.6 pinned keys, delivered at enrollment); a body without them pins nothing; DELETE drops the pin and the last-known-good with the enrollment.
+func TestEnrollPinsTheBundleRingAndSignOutPurgesIt(t *testing.T) {
+	s, dir := newServer(t)
+	resp, body := call(t, s, http.MethodPost, "/v1/enroll/keygen", nil)
+	want(t, resp, body, http.StatusOK, "")
+	var kg struct {
+		KeyID string `json:"key_id"`
+	}
+	decodeTo(t, body, &kg)
+	pin := filepath.Join(dir, "policy", "keys.json")
+
+	bare := activeFor(tenantA, deviceA, kg.KeyID)
+	resp, body = call(t, s, http.MethodPost, "/v1/enroll", bare)
+	want(t, resp, body, http.StatusOK, "")
+	if _, err := os.Stat(pin); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a body without bundle_section_keys pinned something: %v", err)
+	}
+	pub := strings.Repeat("ab", 32)
+	keys := []map[string]any{}
+	for _, section := range []string{"verify", "route", "memory", "cortex", "gates", "agent_maps"} {
+		keys = append(keys, map[string]any{"section": section, "key_id": "ed25519:x", "pubkey_hex": pub})
+	}
+	active := activeFor(tenantA, deviceA, kg.KeyID)
+	active["bundle_section_keys"] = keys
+	resp, body = call(t, s, http.MethodPost, "/v1/enroll", active)
+	want(t, resp, body, http.StatusOK, "")
+	raw, err := os.ReadFile(pin)
+	if err != nil {
+		t.Fatalf("keys.json not written: %v", err)
+	}
+	if fi, _ := os.Stat(pin); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Fatalf("keys.json mode %o", fi.Mode().Perm())
+	}
+	var tf struct {
+		BundleSectionKeys []struct {
+			Section   string `json:"section"`
+			PubkeyHex string `json:"pubkey_hex"`
+		} `json:"bundle_section_keys"`
+	}
+	if err := json.Unmarshal(raw, &tf); err != nil || len(tf.BundleSectionKeys) != 6 || tf.BundleSectionKeys[4].Section != "gates" || tf.BundleSectionKeys[4].PubkeyHex != pub {
+		t.Fatalf("keys.json %s (%v) is not the bundle client's trustFile", raw, err)
+	}
+	empty := activeFor(tenantA, deviceA, kg.KeyID)
+	empty["bundle_section_keys"] = []any{}
+	resp, body = call(t, s, http.MethodPost, "/v1/enroll", empty)
+	want(t, resp, body, http.StatusOK, "")
+	if again, _ := os.ReadFile(pin); !bytes.Equal(again, raw) {
+		t.Fatalf("an empty list overwrote the pin: %s", again)
+	}
+	for _, name := range []string{"lkg.cbor", "lkg.json"} {
+		if err := os.WriteFile(filepath.Join(dir, "policy", name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, body = call(t, s, http.MethodDelete, "/v1/enroll", nil)
+	want(t, resp, body, http.StatusOK, "")
+	for _, name := range []string{"keys.json", "lkg.cbor", "lkg.json"} {
+		if _, err := os.Stat(filepath.Join(dir, "policy", name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("sign-out left policy/%s behind (%v): the next tenant's bundle would lose to the old seq", name, err)
+		}
+	}
+	resp, body = call(t, s, http.MethodDelete, "/v1/enroll", nil)
+	want(t, resp, body, http.StatusOK, "")
 }
