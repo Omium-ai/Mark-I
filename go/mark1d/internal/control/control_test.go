@@ -11,15 +11,19 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
+	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
@@ -195,10 +199,11 @@ func TestStatusFields(t *testing.T) {
 		Since      string `json:"since"`
 		AgentsLive []struct {
 			Agent     string `json:"agent"`
+			Project   string `json:"project"`
 			SessionID string `json:"session_id"`
 			Tokens    uint64 `json:"tokens"`
 		} `json:"agents_live"`
-		ProjectsEnabled int `json:"projects_enabled"`
+		ProjectsEnabled []string `json:"projects_enabled"`
 		Spool           struct {
 			Bytes    int64 `json:"bytes"`
 			Cap      int64 `json:"cap"`
@@ -207,14 +212,14 @@ func TestStatusFields(t *testing.T) {
 	}
 	_, body := call(t, s, http.MethodGet, "/v1/status", nil)
 	decodeTo(t, body, &st)
-	if !st.Running || st.Paused || st.Version != "test" || st.ProjectsEnabled != 2 || st.Spool.Bytes != 64 || st.Spool.Cap != 1<<20 || !st.Spool.HardStop {
+	if !st.Running || st.Paused || st.Version != "test" || !slices.Equal(st.ProjectsEnabled, []string{"/w/a", "/w/b"}) || st.Spool.Bytes != 64 || st.Spool.Cap != 1<<20 || !st.Spool.HardStop {
 		t.Fatalf("status %s", body)
 	}
 	if _, err := time.Parse(time.RFC3339, st.Since); err != nil {
 		t.Fatalf("since %q: %v", st.Since, err)
 	}
-	if len(st.AgentsLive) != 1 || st.AgentsLive[0].Agent != "claudecode" || st.AgentsLive[0].Tokens != 20 || st.AgentsLive[0].SessionID != "01000000000000000000000000000000" {
-		t.Fatalf("agents_live %+v", st.AgentsLive)
+	if len(st.AgentsLive) != 1 || st.AgentsLive[0].Agent != "claudecode" || st.AgentsLive[0].Tokens != 20 || st.AgentsLive[0].SessionID != "01000000000000000000000000000000" || st.AgentsLive[0].Project != "" {
+		t.Fatalf("agents_live %+v (no transcript names this session, so project is unattributed, not guessed)", st.AgentsLive)
 	}
 	if err := os.WriteFile(off.Marker(dir), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -247,13 +252,14 @@ func TestProjectsLifecycle(t *testing.T) {
 	resp, body := call(t, s, http.MethodPost, "/v1/projects", map[string]string{"path": filepath.Join(repo, "sub", "..")})
 	want(t, resp, body, http.StatusOK, "")
 	var p struct {
-		Path          string `json:"path"`
-		EnabledAt     string `json:"enabled_at"`
-		TestsEnabled  bool   `json:"tests_enabled"`
-		IgnorePresent bool   `json:"ignore_present"`
+		Path          string   `json:"path"`
+		EnabledAt     string   `json:"enabled_at"`
+		AgentsSeen    []string `json:"agents_seen"`
+		TestsEnabled  bool     `json:"tests_enabled"`
+		IgnorePresent bool     `json:"ignore_present"`
 	}
 	decodeTo(t, body, &p)
-	if p.Path != root || !p.TestsEnabled || p.IgnorePresent {
+	if p.Path != root || !p.TestsEnabled || p.IgnorePresent || p.AgentsSeen == nil || len(p.AgentsSeen) != 0 {
 		t.Fatalf("project %s", body)
 	}
 	if _, err := time.Parse(time.RFC3339, p.EnabledAt); err != nil {
@@ -286,7 +292,10 @@ func TestProjectsLifecycle(t *testing.T) {
 	want(t, resp, body, http.StatusBadRequest, "M1E-2001")
 
 	resp, body = call(t, s, http.MethodDelete, "/v1/projects", map[string]string{"path": repo})
-	want(t, resp, body, http.StatusNoContent, "")
+	want(t, resp, body, http.StatusOK, "")
+	if strings.TrimSpace(string(body)) != `{"path":`+jsonString(root)+`,"receipted_transition_id":null,"removed":true}` {
+		t.Fatalf("remove %s (the receipt is minted by the coverage drain later, so the id is null, never invented)", body)
+	}
 	resp, body = call(t, s, http.MethodDelete, "/v1/projects", map[string]string{"path": repo})
 	want(t, resp, body, http.StatusNotFound, "M1E-2001")
 	if roots, _ := tailers.LoadWorkspacesFile(filepath.Join(dir, "workspaces.json")); len(roots) != 0 {
@@ -342,10 +351,13 @@ func TestAnchorsConsentGoesThroughTheDaemonsReconcile(t *testing.T) {
 	if row["id"] != "ruff@cat-1" || row["tool"] != "ruff" || row["version"] != "0.9.1" || row["latency_class"] != "slow" || row["side_effect"] != "static" || row["consented"] != false || len(execHash) != 64 {
 		t.Fatalf("row %s", body)
 	}
-	for _, k := range []string{"tier", "last_run", "consented_at", "argv"} {
+	for _, k := range []string{"tier", "consented_at", "argv"} {
 		if _, ok := row[k]; ok {
 			t.Fatalf("%s has no source in the daemon and must be absent, not invented: %s", k, body)
 		}
+	}
+	if lr, ok := row["last_run"]; !ok || lr != nil {
+		t.Fatalf("last_run is null until this boot sees a vote, never invented: %s", body)
 	}
 	_, body = call(t, s, http.MethodGet, "/v1/anchors?project="+t.TempDir(), nil)
 	if strings.TrimSpace(string(body)) != "[]" {
@@ -383,6 +395,32 @@ func TestAnchorsConsentGoesThroughTheDaemonsReconcile(t *testing.T) {
 	if !anchors.Reconcile(derived[repo], mustConsent(t, dir)).Enabled[0].ConsentedAt.After(time.Time{}) {
 		t.Fatal("the store must hold the consent the daemon's Reconcile arms")
 	}
+
+	vote := sessionEvent(1, &m1pv1.AnchorVote{AnchorId: "ruff@cat-1", Vote: m1pv1.Verdict_VERDICT_SATISFIED})
+	vote.OccurredAt = timestamppb.New(time.Date(2026, 9, 16, 14, 12, 0, 0, time.UTC))
+	s.Hub().Publish(vote)
+	resp, body = call(t, s, http.MethodPost, "/v1/anchors/consent", map[string]any{"id": "ruff@cat-1", "consented": false})
+	want(t, resp, body, http.StatusOK, "")
+	decodeTo(t, body, &row)
+	if row["consented"] != false || row["last_run"] != "2026-09-16T14:12:00Z" || steps != 2 {
+		t.Fatalf("revoked row %s steps %d", body, steps)
+	}
+	if recs, err := anchors.LoadConsent(anchors.ConsentPath(dir)); err != nil || len(recs) != 0 {
+		t.Fatalf("revoke must empty the store the runner's stillConsented reads: %v %v", recs, err)
+	}
+	if len(readLines(t, anchors.ApprovalsPath(dir))) != 1 {
+		t.Fatal("a revoke writes no approval line")
+	}
+	resp, body = call(t, s, http.MethodPost, "/v1/anchors/consent", map[string]any{"id": "ruff@cat-1", "consented": true})
+	want(t, resp, body, http.StatusOK, "")
+	decodeTo(t, body, &row)
+	if row["consented"] != true || row["exec_hash"] != execHash {
+		t.Fatalf("re-consent without exec_hash must bind to the catalog's current hash: %s", body)
+	}
+	resp, body = call(t, s, http.MethodPost, "/v1/anchors/consent", map[string]any{"id": "nope@cat-1", "consented": true})
+	want(t, resp, body, http.StatusConflict, "M1E-2001")
+	resp, body = call(t, s, http.MethodPost, "/v1/anchors/consent", map[string]any{"id": "ruff@cat-1", "project": t.TempDir(), "consented": true})
+	want(t, resp, body, http.StatusConflict, "M1E-2001")
 }
 
 func mustConsent(t *testing.T, dir string) []anchors.ConsentRecord {
@@ -401,18 +439,39 @@ func TestOptInsDriveTheGateReaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	var o struct {
-		StopGate       bool            `json:"stop_gate"`
-		Exploration    bool            `json:"exploration"`
-		TestsByProject map[string]bool `json:"tests_by_project"`
-		Consents       *map[string]any `json:"consents"`
+		StopGate       bool              `json:"stop_gate"`
+		Exploration    bool              `json:"exploration"`
+		TestsByProject map[string]bool   `json:"tests_by_project"`
+		Consents       consents.Consents `json:"consents"`
 	}
 	_, body := call(t, s, http.MethodGet, "/v1/optins", nil)
 	decodeTo(t, body, &o)
-	if o.StopGate || o.Exploration || o.TestsByProject[repo] || o.Consents != nil {
-		t.Fatalf("defaults %s", body)
+	if o.StopGate || o.Exploration || o.TestsByProject[repo] || o.Consents != (consents.Consents{}) || !strings.Contains(string(body), `"consents":{"e1":false,"cloud_judge":false,"training":false}`) {
+		t.Fatalf("defaults are false until the user consents: %s", body)
 	}
+	resp, body := call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"training": true}})
+	want(t, resp, body, http.StatusOK, "")
+	decodeTo(t, body, &o)
+	if o.Consents != (consents.Consents{Training: true}) || consents.Read(dir) != (consents.Consents{Training: true}) {
+		t.Fatalf("partial consents update %s", body)
+	}
+	_, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"e1": true, "cloud_judge": true}})
+	decodeTo(t, body, &o)
+	if o.Consents != (consents.Consents{E1: true, CloudJudge: true, Training: true}) {
+		t.Fatalf("merge keeps the untouched field %s", body)
+	}
+	_, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"training": false}})
+	decodeTo(t, body, &o)
+	if o.Consents.Training || !o.Consents.E1 {
+		t.Fatalf("withdraw %s", body)
+	}
+	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 3 || !strings.Contains(lines[2], `"consents":{"e1":true,"cloud_judge":true,"training":false}`) {
+		t.Fatalf("every consent change is journalled: %v", lines)
+	}
+	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"nope": true}})
+	want(t, resp, body, http.StatusBadRequest, "M1E-2001")
 	tr := true
-	resp, body := call(t, s, http.MethodPut, "/v1/optins", map[string]*bool{"stop_gate": &tr})
+	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]*bool{"stop_gate": &tr})
 	want(t, resp, body, http.StatusOK, "")
 	decodeTo(t, body, &o)
 	if !o.StopGate || o.Exploration {
@@ -436,9 +495,28 @@ func TestOptInsDriveTheGateReaders(t *testing.T) {
 	if !o.StopGate || !o.Exploration || fabric.ExplorationEpsilon(dir, 0.5) != 0.5 {
 		t.Fatalf("exploration put %s", body)
 	}
-	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 2 || !strings.Contains(lines[1], `"exploration":true`) {
+	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 5 || !strings.Contains(lines[4], `"exploration":true`) {
 		t.Fatalf("consent.jsonl %v", lines)
 	}
+	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"tests_by_project": map[string]bool{repo: true}})
+	want(t, resp, body, http.StatusOK, "")
+	decodeTo(t, body, &o)
+	if !o.TestsByProject[repo] || !anchors.TestsOptedIn(repo) {
+		t.Fatalf("tests opt-in must land where anchors.TestsOptedIn reads: %s", body)
+	}
+	if err := os.WriteFile(anchors.RepoOptInPath(repo), []byte(`{"tests":true,"keep":1}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"tests_by_project": map[string]bool{repo: false}})
+	decodeTo(t, body, &o)
+	if o.TestsByProject[repo] || anchors.TestsOptedIn(repo) {
+		t.Fatalf("tests opt-out %s", body)
+	}
+	if b, _ := os.ReadFile(anchors.RepoOptInPath(repo)); !strings.Contains(string(b), `"keep": 1`) {
+		t.Fatalf("read-modify-write must keep the repo's other keys: %s", b)
+	}
+	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"tests_by_project": map[string]bool{t.TempDir(): true}})
+	want(t, resp, body, http.StatusBadRequest, "M1E-2001")
 	f := false
 	_, body = call(t, s, http.MethodPut, "/v1/optins", map[string]*bool{"stop_gate": &f, "exploration": &f})
 	decodeTo(t, body, &o)
@@ -448,8 +526,11 @@ func TestOptInsDriveTheGateReaders(t *testing.T) {
 	if _, err := os.Stat(fabric.OptInPath(dir)); !os.IsNotExist(err) {
 		t.Fatal("both false must remove the artifact, as cli.UpdateOptIn does")
 	}
-	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 2 {
+	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 5 {
 		t.Fatalf("opting out records no consent: %v", lines)
+	}
+	if consents.Read(dir) != (consents.Consents{E1: true, CloudJudge: true}) {
+		t.Fatal("clearing the gate opt-ins must not touch the consent record")
 	}
 }
 
@@ -484,7 +565,7 @@ func TestPauseIsTheOffSwitchEveryGateChecksFirst(t *testing.T) {
 
 	resp, body := call(t, s, http.MethodPost, "/v1/pause", nil)
 	want(t, resp, body, http.StatusOK, "")
-	if strings.TrimSpace(string(body)) != `{"paused":true}` {
+	if strings.TrimSpace(string(body)) != `{"paused":true,"receipted_transition_id":null}` {
 		t.Fatalf("pause %s", body)
 	}
 	if !off.Off(dir) {
@@ -502,19 +583,19 @@ func TestPauseIsTheOffSwitchEveryGateChecksFirst(t *testing.T) {
 	if marker.Scope != "all" || marker.WrittenAt == "" {
 		t.Fatalf("marker %s must carry the CLI's shape", b)
 	}
-	if _, body := call(t, s, http.MethodPost, "/v1/pause", nil); strings.TrimSpace(string(body)) != `{"paused":true}` {
+	if _, body := call(t, s, http.MethodPost, "/v1/pause", nil); strings.TrimSpace(string(body)) != `{"paused":true,"receipted_transition_id":null}` {
 		t.Fatalf("pause twice %s", body)
 	}
 
 	resp, body = call(t, s, http.MethodPost, "/v1/resume", nil)
 	want(t, resp, body, http.StatusOK, "")
-	if strings.TrimSpace(string(body)) != `{"paused":false}` || off.Off(dir) {
+	if strings.TrimSpace(string(body)) != `{"paused":false,"receipted_transition_id":null}` || off.Off(dir) {
 		t.Fatalf("resume %s off=%v", body, off.Off(dir))
 	}
 	if v := g.Answer(q, session); v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_BLOCK {
 		t.Fatalf("resumed gate must gate again, got %v %q", v.GetDecision(), v.GetReason())
 	}
-	if _, body := call(t, s, http.MethodPost, "/v1/resume", nil); strings.TrimSpace(string(body)) != `{"paused":false}` {
+	if _, body := call(t, s, http.MethodPost, "/v1/resume", nil); strings.TrimSpace(string(body)) != `{"paused":false,"receipted_transition_id":null}` {
 		t.Fatalf("resume twice %s", body)
 	}
 
@@ -594,36 +675,59 @@ func TestEventsStreamWithin100ms(t *testing.T) {
 	if data.SessionID != "AQAAAAAAAAAAAAAAAAAAAA==" || data.SessionStart.Agent != "claudecode" || data.SessionStart.AgentVersion != "2.1.0" {
 		t.Fatalf("frame %q", f)
 	}
-	s.Hub().Publish(sessionEvent(1, &m1pv1.VerdictEvent{Verdict: m1pv1.Verdict_VERDICT_VIOLATED}))
+	ve := sessionEvent(1, &m1pv1.VerdictEvent{Verdict: m1pv1.Verdict_VERDICT_VIOLATED, NoiseCertId: "cert_1", Certification: m1pv1.CertificationStatus_CERTIFICATION_STATUS_BOOTSTRAPPING})
+	ve.EventId, ve.TaskId = bytes.Repeat([]byte{2}, 16), bytes.Repeat([]byte{3}, 16)
+	ve.OccurredAt = timestamppb.New(time.Date(2026, 9, 16, 14, 14, 0, 0, time.UTC))
+	s.Hub().Publish(ve)
 	if f := next(); !strings.HasPrefix(f, "event: verdict\n") {
 		t.Fatalf("frame %q", f)
 	}
 	ev := &m1pv1.Event{SessionId: make([]byte, 16), Body: &m1pv1.Event_GuardDecision{GuardDecision: &m1pv1.GuardDecision{ReasonCode: "x"}}}
 	ev.SessionId[0] = 1
 	s.Hub().Publish(ev)
-	if f := next(); !strings.HasPrefix(f, "event: arrest\n") {
-		t.Fatalf("frame %q", f)
-	}
 	select {
 	case f := <-frames:
-		t.Fatalf("unlisted family leaked: %q", f)
+		t.Fatalf("a proxy credential refusal is not a knee arrest; unlisted family leaked: %q", f)
 	case <-time.After(30 * time.Millisecond):
 	}
+	s.Hub().Arrest([16]byte{1}, [16]byte{3}, verdict.KneeState{N: 3, PLCB: 0.18, VTask: 6000, CostN: 2900, Stop: true, Evaluable: true}, "ev_3")
+	f = next()
+	if !strings.HasPrefix(f, "event: arrest\ndata: ") {
+		t.Fatalf("frame %q", f)
+	}
+	var arrest map[string]any
+	decodeTo(t, []byte(strings.TrimPrefix(f, "event: arrest\ndata: ")), &arrest)
+	if arrest["type"] != "arrest" || arrest["attempt"] != 3.0 || arrest["p_lcb"] != 0.18 || arrest["v"] != 6000.0 || arrest["c_n"] != 2900.0 || arrest["inequality"] != "0.180 * 6000.00 <= 2900.00" || arrest["evidence_ref"] != "ev_3" || arrest["session_id"] != "01000000000000000000000000000000" || arrest["task_id"] != "03000000000000000000000000000000" {
+		t.Fatalf("arrest %v", arrest)
+	}
+	s.Hub().Arrest([16]byte{1}, [16]byte{3}, verdict.KneeState{N: 1}, "")
+	decodeTo(t, []byte(strings.TrimPrefix(next(), "event: arrest\ndata: ")), &arrest)
+	if arrest["p_lcb"] != nil || arrest["inequality"] != nil || arrest["evidence_ref"] != nil {
+		t.Fatalf("an unevaluable knee carries no numbers (D-Z): %v", arrest)
+	}
 
-	var rows []map[string]json.RawMessage
+	var rows []map[string]any
 	_, body := call(t, s, http.MethodGet, "/v1/verify/events?project=/w", nil)
 	decodeTo(t, body, &rows)
-	if len(rows) != 3 {
-		t.Fatalf("verify/events must hold tamper + verdict + arrest: %s", body)
+	if len(rows) != 4 {
+		t.Fatalf("verify/events must hold tamper + verdict + 2 arrests, never the guard refusal: %s", body)
 	}
-	if _, ok := rows[0]["anchor_vote"]; !ok {
-		t.Fatalf("tamper vote missing: %s", body)
+	if rows[0]["type"] != "tamper" || rows[0]["anchor_id"] != "ruff@cat-1" || rows[0]["session_id"] != "01000000000000000000000000000000" {
+		t.Fatalf("tamper row %v", rows[0])
 	}
-	if _, ok := rows[1]["verdict_event"]; !ok {
-		t.Fatalf("verdict missing: %s", body)
+	if rows[1]["type"] != "verdict" || rows[1]["verdict"] != "violated" || rows[1]["state"] != "bootstrapping" || rows[1]["certificate_id"] != "cert_1" || rows[1]["id"] != "02020202020202020202020202020202" || rows[1]["task_id"] != "03030303030303030303030303030303" || rows[1]["time"] != "2026-09-16T14:14:00Z" {
+		t.Fatalf("verdict row %v", rows[1])
 	}
-	if _, ok := rows[2]["guard_decision"]; !ok {
-		t.Fatalf("arrest missing: %s", body)
+	if rows[2]["type"] != "arrest" || rows[3]["type"] != "arrest" {
+		t.Fatalf("arrest rows %v", rows[2:])
+	}
+	plain := sessionEvent(1, &m1pv1.VerdictEvent{})
+	s.Hub().Publish(plain)
+	_ = next()
+	_, body = call(t, s, http.MethodGet, "/v1/verify/events", nil)
+	decodeTo(t, body, &rows)
+	if last := rows[len(rows)-1]; last["state"] != "uncertified" || last["certificate_id"] != nil || last["verdict"] != "unspecified" {
+		t.Fatalf("unspecified certification reads uncertified and an empty cert id is null: %v", last)
 	}
 }
 
@@ -639,15 +743,20 @@ func TestAgentsAndDoctorReadTheAdapterEngine(t *testing.T) {
 		t.Fatalf("agents %s", body)
 	}
 	for _, a := range agents {
-		if _, ok := a["provisioned"]; ok {
-			t.Fatalf("nothing is provisioned yet: %s", body)
+		for _, k := range []string{"provisioned", "version", "compat"} {
+			if v, ok := a[k]; !ok || v != nil {
+				t.Fatalf("%s is null, never absent, until known: %s", k, body)
+			}
+		}
+		if rp, ok := a["recent_projects"].([]any); !ok || len(rp) != 0 {
+			t.Fatalf("recent_projects is an empty list when nothing is installed: %s", body)
 		}
 	}
 	if r := agents[0]["regime"]; r != "subscription" && r != "apikey" {
 		t.Fatalf("regime %v", r)
 	}
-	if _, ok := agents[6]["regime"]; ok {
-		t.Fatalf("unimplemented slot must carry no sniff: %s", body)
+	if r, ok := agents[6]["regime"]; !ok || r != nil {
+		t.Fatalf("unimplemented slot carries a null regime, no sniff: %s", body)
 	}
 
 	settings := filepath.Join(t.TempDir(), "settings.json")
@@ -667,11 +776,24 @@ func TestAgentsAndDoctorReadTheAdapterEngine(t *testing.T) {
 	if prov["mechanism"] != "B" || len(files) != 1 || files[0].(map[string]any)["path"] != settings || files[0].(map[string]any)["lines_added"].(float64) < 1 {
 		t.Fatalf("provisioned %v", prov)
 	}
-	if _, ok := prov["notes"]; ok {
-		t.Fatalf("an OK fragment has no notes: %v", prov)
+	if notes, ok := prov["notes"].([]any); !ok || len(notes) != 0 {
+		t.Fatalf("an OK fragment has an empty notes list: %v", prov)
 	}
-	if _, ok := files[0].(map[string]any)["byte_equal_revert"]; ok {
-		t.Fatal("byte_equal_revert has no source and must be absent")
+	if files[0].(map[string]any)["byte_equal_revert"] != true {
+		t.Fatalf("an OK fragment reverts verbatim (08 §8.4 step 2): %v", prov)
+	}
+	post := b0(t, settings)
+	if err := os.WriteFile(settings, append(append([]byte{}, post...), "\n\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, body = call(t, s, http.MethodGet, "/v1/agents", nil)
+	decodeTo(t, body, &agents)
+	prov = agents[0]["provisioned"].(map[string]any)
+	if prov["files"].([]any)[0].(map[string]any)["byte_equal_revert"] != false || len(prov["notes"].([]any)) != 2 {
+		t.Fatalf("a user-edited target reverts surgically, not byte-equal: %v", prov)
+	}
+	if err := os.WriteFile(settings, post, 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	var doc struct {
@@ -683,7 +805,7 @@ func TestAgentsAndDoctorReadTheAdapterEngine(t *testing.T) {
 	}
 	_, body = call(t, s, http.MethodGet, "/v1/doctor", nil)
 	decodeTo(t, body, &doc)
-	if doc.OK || len(doc.Fragments) != 1 || doc.Fragments[0].State != "OK" || doc.Fragments[0].Target != settings || len(doc.Agents) != 7 {
+	if doc.OK || len(doc.Fragments) != 1 || doc.Fragments[0].State != "OK" || doc.Fragments[0].Target != settings || len(doc.Agents) != 7 || len(doc.Fragments[0].Lines) == 0 {
 		t.Fatalf("doctor %s", body)
 	}
 	byName := map[string]check{}
@@ -735,26 +857,51 @@ func TestAgentsAndDoctorReadTheAdapterEngine(t *testing.T) {
 func TestReceiptsAndVerifier(t *testing.T) {
 	s, dir := newServer(t)
 	_, body := call(t, s, http.MethodGet, "/v1/receipts", nil)
-	if strings.TrimSpace(string(body)) != "{}" {
+	if strings.TrimSpace(string(body)) != `{"checkpoints":[],"head":{"checkpoint_seq":0,"hash":"","seq":0},"status":"not_started"}` {
 		t.Fatalf("no local head: %s", body)
 	}
 	if err := writeAtomic(filepath.Join(dir, "receipt", "last-head"), []byte(`{"seq":92,"hash":"ab","checkpoint_seq":4}`)); err != nil {
 		t.Fatal(err)
 	}
-	var head struct {
-		Seq           int64  `json:"seq"`
-		Hash          string `json:"hash"`
-		CheckpointSeq int64  `json:"checkpoint_seq"`
+	for i, n := range []uint32{10, 20, 30} {
+		cp := &m1pv1.Event{OccurredAt: timestamppb.New(time.Date(2026, 9, 16, 12+i, 0, 0, 0, time.UTC)), Body: &m1pv1.Event_ReceiptCheckpoint{ReceiptCheckpoint: &m1pv1.ReceiptCheckpoint{CheckpointSeq: uint64(i + 2), MerkleRoot: bytes.Repeat([]byte{byte(i)}, 32), LeafCount: n, KeyId: "ed25519:k"}}}
+		s.Hub().Publish(cp)
+	}
+	var view struct {
+		Status string `json:"status"`
+		Head   struct {
+			Seq           int64  `json:"seq"`
+			Hash          string `json:"hash"`
+			CheckpointSeq int64  `json:"checkpoint_seq"`
+		} `json:"head"`
+		Checkpoints []struct {
+			Seq           uint64 `json:"seq"`
+			Time          string `json:"time"`
+			EventsCovered uint32 `json:"events_covered"`
+			MerkleRoot    string `json:"merkle_root"`
+			KeyID         string `json:"key_id"`
+		} `json:"checkpoints"`
 	}
 	_, body = call(t, s, http.MethodGet, "/v1/receipts", nil)
-	decodeTo(t, body, &head)
-	if head.Seq != 92 || head.Hash != "ab" || head.CheckpointSeq != 4 {
+	decodeTo(t, body, &view)
+	if view.Status != "sealed" || view.Head.Seq != 92 || view.Head.Hash != "ab" || view.Head.CheckpointSeq != 4 {
 		t.Fatalf("head %s", body)
 	}
+	if len(view.Checkpoints) != 3 || view.Checkpoints[0].Seq != 4 || view.Checkpoints[2].Seq != 2 || view.Checkpoints[0].EventsCovered != 30 || view.Checkpoints[0].Time != "2026-09-16T14:00:00Z" || view.Checkpoints[2].MerkleRoot != strings.Repeat("00", 32) || view.Checkpoints[0].KeyID != "ed25519:k" {
+		t.Fatalf("checkpoints newest first %s", body)
+	}
+	_, body = call(t, s, http.MethodGet, "/v1/receipts?before=4", nil)
+	decodeTo(t, body, &view)
+	if len(view.Checkpoints) != 2 || view.Checkpoints[0].Seq != 3 {
+		t.Fatalf("?before pages back %s", body)
+	}
 
-	resp, body := call(t, s, http.MethodPost, "/v1/receipts/verify", map[string]string{"chain": "/c"})
-	want(t, resp, body, http.StatusBadRequest, "M1E-2001")
+	t.Setenv("PATH", t.TempDir())
+	resp, body := call(t, s, http.MethodPost, "/v1/receipts/verify", map[string]string{"chain": "/c", "keys": "/k"})
+	want(t, resp, body, http.StatusServiceUnavailable, "M1E-9500")
 	t.Setenv("MARK1_VERIFIER", filepath.Join(t.TempDir(), "absent"))
+	resp, body = call(t, s, http.MethodPost, "/v1/receipts/verify", map[string]string{"chain": "/c"})
+	want(t, resp, body, http.StatusBadGateway, "M1E-1002") // no keys ⇒ the enrolled server's export path, and this daemon is not enrolled
 	resp, body = call(t, s, http.MethodPost, "/v1/receipts/verify", map[string]string{"chain": "/c", "keys": "/k"})
 	want(t, resp, body, http.StatusInternalServerError, "M1E-9500")
 	if runtime.GOOS == "windows" {
@@ -783,4 +930,111 @@ func TestReceiptsAndVerifier(t *testing.T) {
 func jsonString(v string) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+func b0(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestSessionsAttributeToTheRootTheirTranscriptNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub for claude")
+	}
+	bin, home := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\necho '2.1.251 (Claude Code)'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("HOME", home)
+	s, dir := newServer(t)
+	root, _ := canonical(t.TempDir())
+	if err := writeAtomic(filepath.Join(dir, "workspaces.json"), []byte(`{"version":1,"workspaces":[{"path":`+jsonString(root)+`,"enabled_at":"2026-09-16T00:00:00Z"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".mark1ignore"), []byte("vendor/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	txDir, err := (&claudecode.Adapter{}).TranscriptDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(txDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcript := func(sid byte, cwd string) {
+		id := [16]byte{sid}
+		if err := os.MkdirAll(txDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(txDir, uuid.UUID(id).String()+".jsonl"), []byte("{\"type\":\"summary\"}\n{\"cwd\":"+jsonString(cwd)+"}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transcript(1, root)
+	transcript(2, "/elsewhere")
+	transcript(4, filepath.Join(root, "vendor"))
+	for sid, agent := range map[byte]string{1: "claudecode", 2: "claudecode", 3: "codex", 4: "claudecode"} {
+		s.Hub().Publish(sessionEvent(sid, &m1pv1.SessionStart{Agent: agent}))
+	}
+	var st struct {
+		AgentsLive []struct {
+			Agent     string `json:"agent"`
+			Project   string `json:"project"`
+			SessionID string `json:"session_id"`
+		} `json:"agents_live"`
+	}
+	_, body := call(t, s, http.MethodGet, "/v1/status", nil)
+	decodeTo(t, body, &st)
+	got := map[string]string{}
+	for _, ls := range st.AgentsLive {
+		got[ls.SessionID[:2]] = ls.Project
+	}
+	if got["01"] != root || got["02"] != "" || got["03"] != "" || got["04"] != "" {
+		t.Fatalf("attribution %v: only a transcript whose cwd the root's oracle admits names a project (02 is outside, 04 is .mark1ignore'd, 03 is not claudecode)", got)
+	}
+	var projects []struct {
+		Path       string   `json:"path"`
+		AgentsSeen []string `json:"agents_seen"`
+	}
+	_, body = call(t, s, http.MethodGet, "/v1/projects", nil)
+	decodeTo(t, body, &projects)
+	if len(projects) != 1 || !slices.Equal(projects[0].AgentsSeen, []string{"claudecode"}) {
+		t.Fatalf("agents_seen %s", body)
+	}
+	s.Hub().Publish(sessionEvent(1, &m1pv1.SessionEnd{}))
+	_, body = call(t, s, http.MethodGet, "/v1/projects", nil)
+	decodeTo(t, body, &projects)
+	if !slices.Equal(projects[0].AgentsSeen, []string{"claudecode"}) {
+		t.Fatalf("the on-disk transcript still says claudecode worked here: %s", body)
+	}
+	if err := os.RemoveAll(txDir); err != nil {
+		t.Fatal(err)
+	}
+	_, body = call(t, s, http.MethodGet, "/v1/projects", nil)
+	decodeTo(t, body, &projects)
+	if len(projects[0].AgentsSeen) != 0 {
+		t.Fatalf("nothing observed ⇒ nothing claimed: %s", body)
+	}
+	var agents []struct {
+		Name           string   `json:"name"`
+		RecentProjects []string `json:"recent_projects"`
+	}
+	transcript(1, root)
+	other, _ := (&claudecode.Adapter{}).TranscriptDir("/elsewhere")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, uuid.UUID([16]byte{7}).String()+".jsonl"), []byte("{\"cwd\":\"/elsewhere\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, body = call(t, s, http.MethodGet, "/v1/agents", nil)
+	decodeTo(t, body, &agents)
+	if agents[0].Name != "claudecode" || !slices.Equal(agents[0].RecentProjects, []string{root, "/elsewhere"}) && !slices.Equal(agents[0].RecentProjects, []string{"/elsewhere", root}) {
+		t.Fatalf("recent_projects are the cwds the transcripts name, not the munged dir names: %s", body)
+	}
 }

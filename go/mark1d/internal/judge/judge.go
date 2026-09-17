@@ -254,7 +254,7 @@ func (r *Runner) judge(ctx context.Context, req *m1pv1.JudgeRequest) (m1pv1.Verd
 	}
 	var tid [16]byte
 	copy(tid[:], req.GetTaskId())
-	// ponytail: E0 only -- E1 needs redaction-receipted hunk assembly and a local tier consent; E2 the vpc|selfhost profile. tier_used says so.
+	// ponytail: E0 only -- E1 needs redaction-receipted hunk assembly and consents.Read(stateDir).E1 (the control API's Step-4 record); E2 the vpc|selfhost profile. tier_used says so.
 	evidence := r.cfg.Evidence(verdict.TaskID(tid))
 	if evidence == "" {
 		return m1pv1.Verdict_VERDICT_REFUSED, "no typed evidence on this device"

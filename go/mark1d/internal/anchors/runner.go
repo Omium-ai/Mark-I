@@ -464,6 +464,7 @@ func (r *Runner) signVote(av *m1pv1.AnchorVote) {
 func (r *Runner) EmitExcerpt(ctx context.Context, session, task [16]byte, x *m1pv1.EvidenceExcerpt) error {
 	switch x.GetTier() {
 	case m1pv1.EvidenceTier_EVIDENCE_TIER_E1:
+		// ponytail: consents.Read(stateDir).E1 (the Step-4 record the control API writes) is not checked here yet; the first caller gives Runner a state dir and refuses when it is false.
 		if len(x.GetRedactionReceiptId()) == 0 {
 			return fmt.Errorf("%w: E1 excerpt without redaction_receipt_id (FR-VERIFY-016)", ErrRefused)
 		}

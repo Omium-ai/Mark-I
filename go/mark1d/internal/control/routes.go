@@ -8,13 +8,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
@@ -24,9 +29,11 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/tailers"
 )
 
 const maxBody = 1 << 16
@@ -92,26 +99,104 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 			}
 		}
 	}
+	enabled := make([]string, 0, len(roots.Workspaces))
+	for _, e := range roots.Workspaces {
+		enabled = append(enabled, e.Path)
+	}
 	writeJSON(w, map[string]any{
 		"running":          true,
 		"paused":           off.Off(s.cfg.StateDir),
 		"version":          s.cfg.Version,
 		"since":            s.since.UTC().Format(time.RFC3339),
-		"agents_live":      s.hub.live(),
-		"projects_enabled": len(roots.Workspaces),
+		"agents_live":      s.hub.live(s.projectOf(enabled)),
+		"projects_enabled": enabled,
 		"spool":            map[string]any{"bytes": spoolBytes, "cap": s.cfg.SpoolCap, "hard_stop": s.hardStop.Load()},
 	})
 }
 
+// projectOf joins a live session to the enabled root whose Claude Code transcript names it: the hookshim's SessionStart carries no cwd, the transcript head does (08 §5.1).
+// ponytail: claudecode only — its session id IS the transcript file name; the other adapters derive session ids from a shared vendor tree and need the tailer's own session→cwd table (tailers.Manager) wired in.
+func (s *Server) projectOf(roots []string) func(agent string, sid [16]byte) string {
+	return func(agent string, sid [16]byte) string {
+		if agent != "claudecode" {
+			return ""
+		}
+		name := uuid.UUID(sid).String() + ".jsonl"
+		for _, root := range roots {
+			dir, err := (&claudecode.Adapter{}).TranscriptDir(root)
+			if err != nil {
+				continue
+			}
+			if cwd, ok := streamCwd(filepath.Join(dir, name)); ok && within(root, cwd) {
+				return root
+			}
+		}
+		return ""
+	}
+}
+
+// within is the tailer's own containment oracle (enabled root + .mark1ignore), so attribution never claims a stream capture would refuse.
+func within(root, cwd string) bool {
+	set, err := tailers.NewWorkspaceSet(root)
+	return err == nil && set.Allowed(cwd)
+}
+
+// streamCwd reads a transcript head for its first cwd, as tailers.peekCwd does for discovery.
+func streamCwd(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for n := 0; sc.Scan() && n < 64; n++ {
+		var l struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal(sc.Bytes(), &l) == nil && l.Cwd != "" {
+			return l.Cwd, true
+		}
+	}
+	return "", false
+}
+
+// agentsSeen is what the daemon has observed working in root: live sessions attributed there, plus Claude Code's on-disk transcripts for it. Never inferred from provisioning.
+func (s *Server) agentsSeen(root string) []string {
+	seen := map[string]bool{}
+	for _, ls := range s.hub.live(s.projectOf([]string{root})) {
+		if ls.Project == root {
+			seen[ls.Agent] = true
+		}
+	}
+	if dir, err := (&claudecode.Adapter{}).TranscriptDir(root); err == nil {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if e.IsDir() || filepath.Ext(e.Name()) != ".jsonl" {
+				continue
+			}
+			if cwd, ok := streamCwd(filepath.Join(dir, e.Name())); ok && within(root, cwd) {
+				seen["claudecode"] = true
+				break
+			}
+		}
+	}
+	out := slices.Sorted(maps.Keys(seen))
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
 type fragment struct {
 	Agent     string            `json:"agent"`
-	Fragment  string            `json:"fragment,omitempty"`
-	Mechanism string            `json:"mechanism,omitempty"`
+	Fragment  string            `json:"fragment"`
+	Mechanism string            `json:"mechanism"`
 	Manifest  string            `json:"manifest"`
 	Target    string            `json:"target"`
 	State     string            `json:"state"`
-	Detail    string            `json:"detail,omitempty"`
-	Lines     []json.RawMessage `json:"lines,omitempty"`
+	Detail    string            `json:"detail"`
+	Lines     []json.RawMessage `json:"lines"`
 }
 
 // fragments classifies every provisioned fragment through the adapter engine that wrote it (08 §7.4).
@@ -127,6 +212,9 @@ func (s *Server) fragments() []fragment {
 		_ = json.Unmarshal(b, &f)
 		if err != nil {
 			f.State, f.Detail = "FRAGMENT-DAMAGED", err.Error()
+		}
+		if f.Lines == nil {
+			f.Lines = []json.RawMessage{}
 		}
 		out = append(out, f)
 	}
@@ -166,7 +254,7 @@ func (s *Server) agents() []map[string]any {
 	frags := s.fragments()
 	out := make([]map[string]any, 0, len(adapters.Roster))
 	for _, slot := range adapters.Roster {
-		row := map[string]any{"name": slot.Name, "installed": false}
+		row := map[string]any{"name": slot.Name, "installed": false, "version": nil, "compat": nil, "regime": nil, "provisioned": nil, "recent_projects": []string{}}
 		det, ok := detect[slot.Name]
 		if !ok {
 			out = append(out, row)
@@ -175,26 +263,28 @@ func (s *Server) agents() []map[string]any {
 		dt, compat := det()
 		row["installed"] = dt.Installed
 		if dt.Installed {
-			row["version"] = dt.Version
 			row["compat"] = compat(dt.Version)
+			if dt.Version != "" {
+				row["version"] = dt.Version
+			}
+			if slot.Name == "claudecode" {
+				row["recent_projects"] = claudeRecentProjects()
+			}
 		}
 		row["regime"] = "subscription"
 		if dt.Regime == adapters.RegimeAPIKey {
 			row["regime"] = "apikey"
 		}
 		var files []map[string]any
-		var notes []string
+		notes := []string{}
 		mechanism := ""
 		for _, f := range frags {
 			if f.Agent != slot.Name {
 				continue
 			}
 			mechanism = f.Mechanism
-			file := map[string]any{"path": f.Target}
-			if f.Lines != nil {
-				file["lines_added"] = len(f.Lines)
-			}
-			files = append(files, file)
+			// byte_equal_revert is Revert's verbatim path: the post-image still matches, so the pre-image comes back byte-for-byte (08 §8.4 step 2).
+			files = append(files, map[string]any{"path": f.Target, "lines_added": len(f.Lines), "byte_equal_revert": f.State == string(claudecode.StateOK)})
 			if f.State != string(claudecode.StateOK) {
 				notes = append(notes, f.Fragment+": "+f.State)
 			}
@@ -203,11 +293,7 @@ func (s *Server) agents() []map[string]any {
 			}
 		}
 		if files != nil {
-			prov := map[string]any{"mechanism": mechanism, "files": files}
-			if notes != nil {
-				prov["notes"] = notes
-			}
-			row["provisioned"] = prov
+			row["provisioned"] = map[string]any{"mechanism": mechanism, "files": files, "notes": notes}
 		}
 		out = append(out, row)
 	}
@@ -215,6 +301,42 @@ func (s *Server) agents() []map[string]any {
 }
 
 func must(d adapters.Detection, _ error) adapters.Detection { return d }
+
+// claudeRecentProjects reads the cwd each ~/.claude/projects/<munged> tree's transcripts name, newest tree first — the munge is lossy, so the head line is the only honest root.
+// ponytail: claudecode only; codex/gemini/opencode/copilot keep their Format.Cwd readers unexported — export one RecentProjects() per adapter to extend.
+func claudeRecentProjects() []string {
+	out := []string{}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return out
+	}
+	base := filepath.Join(home, ".claude", "projects")
+	entries, _ := os.ReadDir(base)
+	type dir struct {
+		path string
+		mod  time.Time
+	}
+	dirs := make([]dir, 0, len(entries))
+	for _, e := range entries {
+		if fi, err := e.Info(); err == nil && e.IsDir() {
+			dirs = append(dirs, dir{filepath.Join(base, e.Name()), fi.ModTime()})
+		}
+	}
+	slices.SortFunc(dirs, func(a, b dir) int { return b.mod.Compare(a.mod) })
+	for _, d := range dirs {
+		files, _ := os.ReadDir(d.path)
+		for _, f := range files {
+			if f.IsDir() || filepath.Ext(f.Name()) != ".jsonl" {
+				continue
+			}
+			if cwd, ok := streamCwd(filepath.Join(d.path, f.Name())); ok && !slices.Contains(out, cwd) {
+				out = append(out, cwd)
+				break
+			}
+		}
+	}
+	return out
+}
 
 // claudeCompat memoizes per version: an unpinned version costs a transcript scan (compat.go probe), seconds on a real ~/.claude.
 func (s *Server) claudeCompat(cc *claudecode.Adapter) func(string) string {
@@ -348,6 +470,7 @@ func (s *Server) project(e workspaceEntry) map[string]any {
 	return map[string]any{
 		"path":           e.Path,
 		"enabled_at":     e.EnabledAt.UTC().Format(time.RFC3339),
+		"agents_seen":    s.agentsSeen(e.Path),
 		"tests_enabled":  anchors.TestsOptedIn(e.Path),
 		"ignore_present": ignErr == nil,
 	}
@@ -459,14 +582,19 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		internal(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	// receipted_transition_id is null: the journal line is receipted by the daemon's coverage drain (cmd/main.go drainCoverageJournal), not at response time.
+	writeJSON(w, map[string]any{"removed": true, "path": root, "receipted_transition_id": nil})
 }
 
-func anchorRow(c anchors.Candidate) map[string]any {
-	return map[string]any{
+func anchorRow(c anchors.Candidate, lastRun map[string]string) map[string]any {
+	row := map[string]any{
 		"id": c.ID, "tool": c.Tool, "version": c.ToolVersion, "side_effect": c.SideEffect,
-		"consented": c.Consented, "exec_hash": c.ExecHash, "latency_class": c.Class,
+		"consented": c.Consented, "exec_hash": c.ExecHash, "latency_class": c.Class, "last_run": nil,
 	}
+	if at, ok := lastRun[c.ID]; ok {
+		row["last_run"] = at
+	}
+	return row
 }
 
 func (s *Server) candidates() (anchors.Candidates, error) {
@@ -487,12 +615,13 @@ func (s *Server) anchorRows(project string) ([]map[string]any, error) {
 		return nil, err
 	}
 	rows := []map[string]any{}
+	lastRun := s.hub.lastRuns()
 	for _, ws := range c.Workspaces {
 		if project != "" && ws.Path != project {
 			continue
 		}
 		for _, a := range ws.Anchors {
-			rows = append(rows, anchorRow(a))
+			rows = append(rows, anchorRow(a, lastRun))
 		}
 	}
 	return rows, nil
@@ -518,40 +647,53 @@ func (s *Server) getAnchors(w http.ResponseWriter, r *http.Request) {
 }
 
 type consentBody struct {
-	Project  string `json:"project"`
-	ID       string `json:"id"`
-	ExecHash string `json:"exec_hash"`
+	Project   string `json:"project"`
+	ID        string `json:"id"`
+	ExecHash  string `json:"exec_hash"`
+	Consented *bool  `json:"consented"`
 }
 
-// postConsent appends the same approvals.jsonl line `mark1 enable` writes; the daemon's reconcile step applies it.
+// postConsent appends the same approvals.jsonl line `mark1 enable` writes and the daemon's reconcile step applies it; consented:false revokes in the store directly.
+// ponytail: a revoke races the daemon's own Approve on catalog.json (both tmp+rename); a lost approve replays from approvals.jsonl at the next boot.
 func (s *Server) postConsent(w http.ResponseWriter, r *http.Request) {
 	var body consentBody
 	if !decode(w, r, &body) {
 		return
 	}
-	if body.ID == "" || body.ExecHash == "" {
-		refuse(w, http.StatusBadRequest, "M1E-2001", "id and exec_hash are required")
+	if body.ID == "" {
+		refuse(w, http.StatusBadRequest, "M1E-2001", "id is required")
 		return
 	}
-	project, _ := canonical(body.Project)
+	project := ""
+	if body.Project != "" {
+		project, _ = canonical(body.Project)
+	}
 	c, err := s.candidates()
 	if err != nil {
 		refuse(w, http.StatusConflict, "M1E-2001", "daemon has not published candidates: "+err.Error())
 		return
 	}
-	found := false
+	execHash := ""
 	for _, ws := range c.Workspaces {
 		for _, a := range ws.Anchors {
-			found = found || (a.ID == body.ID && a.ExecHash == body.ExecHash && (project == "" || ws.Path == project))
+			if a.ID == body.ID && (body.ExecHash == "" || a.ExecHash == body.ExecHash) && (project == "" || ws.Path == project) && execHash == "" {
+				execHash = a.ExecHash
+			}
 		}
 	}
-	if !found {
+	if execHash == "" {
 		refuse(w, http.StatusConflict, "M1E-2001", "no current candidate binds this (id, exec_hash); consent binds to the exact exec_hash")
 		return
 	}
-	name, uid := osUser()
-	a := anchors.Approval{TS: now(), User: name, UID: uid, Workspace: project, ID: body.ID, ExecHash: body.ExecHash}
-	if err := appendJSONL(anchors.ApprovalsPath(s.cfg.StateDir), a); err != nil {
+	s.files.Lock()
+	if body.Consented != nil && !*body.Consented {
+		err = anchors.Revoke(anchors.ConsentPath(s.cfg.StateDir), body.ID)
+	} else {
+		name, uid := osUser()
+		err = appendJSONL(anchors.ApprovalsPath(s.cfg.StateDir), anchors.Approval{TS: now(), User: name, UID: uid, Workspace: project, ID: body.ID, ExecHash: execHash})
+	}
+	s.files.Unlock()
+	if err != nil {
 		internal(w, err)
 		return
 	}
@@ -567,12 +709,12 @@ func (s *Server) postConsent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, row := range rows {
-		if row["id"] == body.ID && row["exec_hash"] == body.ExecHash {
+		if row["id"] == body.ID && row["exec_hash"] == execHash {
 			writeJSON(w, row)
 			return
 		}
 	}
-	writeJSON(w, map[string]any{"id": body.ID, "exec_hash": body.ExecHash, "consented": false})
+	refuse(w, http.StatusConflict, "M1E-2001", "candidate vanished during reconcile; re-read GET /v1/anchors")
 }
 
 type optIn struct {
@@ -599,7 +741,7 @@ func (s *Server) optIns() (map[string]any, error) {
 		tests[e.Path] = anchors.TestsOptedIn(e.Path)
 	}
 	a := s.readOptIn()
-	return map[string]any{"stop_gate": a.StopGate, "exploration": a.Exploration, "tests_by_project": tests}, nil
+	return map[string]any{"stop_gate": a.StopGate, "exploration": a.Exploration, "tests_by_project": tests, "consents": consents.Read(s.cfg.StateDir)}, nil
 }
 
 func (s *Server) getOptIns(w http.ResponseWriter, _ *http.Request) {
@@ -611,9 +753,65 @@ func (s *Server) getOptIns(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, out)
 }
 
+type consentsPatch struct {
+	E1         *bool `json:"e1"`
+	CloudJudge *bool `json:"cloud_judge"`
+	Training   *bool `json:"training"`
+}
+
 type optInBody struct {
-	StopGate    *bool `json:"stop_gate"`
-	Exploration *bool `json:"exploration"`
+	StopGate       *bool           `json:"stop_gate"`
+	Exploration    *bool           `json:"exploration"`
+	TestsByProject map[string]bool `json:"tests_by_project"`
+	Consents       *consentsPatch  `json:"consents"`
+}
+
+// setConsents merges a partial consents object into gates/consents.json and journals the change in consent.jsonl like every other consent this API records.
+func (s *Server) setConsents(patch *consentsPatch) error {
+	if patch == nil {
+		return nil
+	}
+	was := consents.Read(s.cfg.StateDir)
+	c := was
+	for _, f := range []struct {
+		dst *bool
+		src *bool
+	}{{&c.E1, patch.E1}, {&c.CloudJudge, patch.CloudJudge}, {&c.Training, patch.Training}} {
+		if f.src != nil {
+			*f.dst = *f.src
+		}
+	}
+	if c == was {
+		return nil
+	}
+	if err := consents.Write(s.cfg.StateDir, c); err != nil {
+		return err
+	}
+	name, uid := osUser()
+	return appendJSONL(filepath.Join(s.cfg.StateDir, "consent.jsonl"), map[string]any{
+		"ts": now(), "user": name, "uid": uid, "workspace": "", "agents_provisioned": []string{}, "consents": c,
+	})
+}
+
+// setTestsOptIn read-modify-writes <root>/.mark1/anchors.json, the file anchors.TestsOptedIn reads (FR-VERIFY-003); only an enabled root may be written.
+func (s *Server) setTestsOptIn(root string, on bool) error {
+	ws, err := s.workspaces()
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(ws.Workspaces, func(e workspaceEntry) bool { return e.Path == root }) {
+		return fmt.Errorf("%s is not an enabled project", root)
+	}
+	doc := map[string]any{}
+	if b, err := os.ReadFile(anchors.RepoOptInPath(root)); err == nil && json.Unmarshal(b, &doc) != nil {
+		return fmt.Errorf("%s is corrupt; fix it by hand", anchors.RepoOptInPath(root))
+	}
+	doc["tests"] = on
+	b, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeAtomic(anchors.RepoOptInPath(root), append(b, '\n'))
 }
 
 // putOptIns writes gates/opt-in.json exactly as cli.UpdateOptIn does: both false removes the file.
@@ -624,6 +822,20 @@ func (s *Server) putOptIns(w http.ResponseWriter, r *http.Request) {
 	}
 	s.files.Lock()
 	defer s.files.Unlock()
+	if err := s.setConsents(body.Consents); err != nil {
+		internal(w, err)
+		return
+	}
+	for p, on := range body.TestsByProject {
+		root, err := canonical(p)
+		if err == nil {
+			err = s.setTestsOptIn(root, on)
+		}
+		if err != nil {
+			refuse(w, http.StatusBadRequest, "M1E-2001", "tests_by_project: "+err.Error())
+			return
+		}
+	}
 	was := s.readOptIn()
 	a := was
 	if body.StopGate != nil {
@@ -682,7 +894,7 @@ func (s *Server) setOff(w http.ResponseWriter, paused bool) {
 		internal(w, err)
 		return
 	}
-	writeJSON(w, map[string]any{"paused": off.Off(s.cfg.StateDir)})
+	writeJSON(w, map[string]any{"paused": off.Off(s.cfg.StateDir), "receipted_transition_id": nil})
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
@@ -712,30 +924,30 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 
 // ponytail: ?project= is accepted but unapplied — no wire event carries a workspace id yet (hookshim emit.rs sends it empty, capture does not stamp it).
 func (s *Server) verifyEvents(w http.ResponseWriter, _ *http.Request) {
-	rows := s.hub.verifyEvents()
-	out := make([]json.RawMessage, 0, len(rows))
-	for _, f := range rows {
-		out = append(out, f.data)
-	}
-	writeJSON(w, out)
+	writeJSON(w, s.hub.verifyEvents())
 }
 
-func (s *Server) receipts(w http.ResponseWriter, _ *http.Request) {
+// receipts is the local chain view: the last head the sealer persisted plus every checkpoint this boot admitted (newest first, ?before=<seq> pages back). Countersignatures and witnesses are the server's to show.
+func (s *Server) receipts(w http.ResponseWriter, r *http.Request) {
+	head := map[string]any{"seq": 0, "hash": "", "checkpoint_seq": 0}
 	b, err := os.ReadFile(filepath.Join(s.cfg.StateDir, "receipt", "last-head"))
-	if errors.Is(err, os.ErrNotExist) {
-		writeJSON(w, map[string]any{})
-		return
-	}
-	if err != nil {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
 		internal(w, err)
 		return
+	default:
+		if err := json.Unmarshal(b, &head); err != nil {
+			internal(w, err)
+			return
+		}
 	}
-	var head map[string]any
-	if err := json.Unmarshal(b, &head); err != nil {
-		internal(w, err)
-		return
+	status := "not_started"
+	if seq, _ := head["seq"].(float64); seq > 0 {
+		status = "sealed"
 	}
-	writeJSON(w, head)
+	before, _ := strconv.ParseUint(r.URL.Query().Get("before"), 10, 64)
+	writeJSON(w, map[string]any{"status": status, "head": head, "checkpoints": s.hub.checkpointsBefore(before)})
 }
 
 type verifyBody struct {
@@ -744,14 +956,13 @@ type verifyBody struct {
 	Witness string `json:"witness"`
 }
 
-// verifyReceipts runs tools/verifier exactly as `mark1 verify-receipts --offline` does (08 §7.7): its --json stdout is the result, exit 5 the defect verdict.
+// verifyReceipts runs tools/verifier exactly as `mark1 verify-receipts` does (08 §7.7): local snapshots when the body names them, else the enrolled server's export + key manifest fetched with the device token; its --json stdout is the result, exit 5 the defect verdict.
 func (s *Server) verifyReceipts(w http.ResponseWriter, r *http.Request) {
 	var body verifyBody
-	if !decode(w, r, &body) {
-		return
-	}
-	if body.Chain == "" || body.Keys == "" {
-		refuse(w, http.StatusBadRequest, "M1E-2001", "chain and keys (local snapshots) are required; the verifier is offline by design")
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		refuse(w, http.StatusBadRequest, "M1E-2001", "body: "+err.Error())
 		return
 	}
 	verifier := os.Getenv("MARK1_VERIFIER")
@@ -762,12 +973,24 @@ func (s *Server) verifyReceipts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	if body.Chain == "" || body.Keys == "" {
+		tmp, err := os.MkdirTemp("", "mark1-verify-*")
+		if err != nil {
+			internal(w, err)
+			return
+		}
+		defer func() { _ = os.RemoveAll(tmp) }()
+		if body.Chain, body.Keys, err = s.fetchChain(ctx, tmp); err != nil {
+			refuse(w, http.StatusBadGateway, "M1E-1002", "fetching the chain export with the device token: "+err.Error())
+			return
+		}
+	}
 	args := []string{"verify", "--chain", body.Chain, "--keys", body.Keys, "--json"}
 	if body.Witness != "" {
 		args = append(args, "--witness", body.Witness)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, verifier, args...) //nolint:gosec // G204: MARK1_VERIFIER or LookPath, args as a slice, no shell
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -782,4 +1005,69 @@ func (s *Server) verifyReceipts(w http.ResponseWriter, r *http.Request) {
 	default:
 		internal(w, fmt.Errorf("running mark1-verifier: %w", err))
 	}
+}
+
+const exportPage = 5000
+
+// fetchChain lands GET /api/v1/receipts/export (paged, since_seq exclusive) and /api/v1/receipts/keys as the verifier's two input files, bytes verbatim — the same default network path verifyreceipts.fetchChain takes.
+func (s *Server) fetchChain(ctx context.Context, dir string) (chain, keys string, err error) {
+	doc, err := s.readEnrollment()
+	if err != nil {
+		return "", "", fmt.Errorf("not enrolled: %w", err)
+	}
+	get := func(url string) ([]byte, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+doc.DeviceToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+		if err == nil && resp.StatusCode != http.StatusOK {
+			err = fmt.Errorf("%s: HTTP %d", url, resp.StatusCode)
+		}
+		return b, err
+	}
+	chain, keys = filepath.Join(dir, "chain.jsonl"), filepath.Join(dir, "keys.json")
+	var out bytes.Buffer
+	for since := uint64(0); ; {
+		page, err := get(fmt.Sprintf("%s/api/v1/receipts/export?since_seq=%d&limit=%d", doc.Server, since, exportPage))
+		if err != nil {
+			return "", "", err
+		}
+		lines := bytes.Split(bytes.TrimSpace(page), []byte{'\n'})
+		if len(bytes.TrimSpace(page)) == 0 {
+			break
+		}
+		out.Write(page)
+		if page[len(page)-1] != '\n' {
+			out.WriteByte('\n')
+		}
+		var row struct {
+			Seq json.Number `json:"seq"`
+		}
+		last, perr := uint64(0), json.Unmarshal(lines[len(lines)-1], &row)
+		if perr == nil {
+			last, perr = strconv.ParseUint(row.Seq.String(), 10, 64)
+		}
+		if len(lines) < exportPage {
+			break
+		}
+		if perr != nil || last <= since {
+			return "", "", fmt.Errorf("export page made no seq progress (since_seq=%d)", since)
+		}
+		since = last
+	}
+	if err := os.WriteFile(chain, out.Bytes(), 0o600); err != nil {
+		return "", "", err
+	}
+	kb, err := get(doc.Server + "/api/v1/receipts/keys")
+	if err != nil {
+		return "", "", err
+	}
+	return chain, keys, os.WriteFile(keys, kb, 0o600)
 }
