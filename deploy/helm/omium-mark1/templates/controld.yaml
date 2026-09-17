@@ -121,6 +121,8 @@ spec:
         {{- with .Values.config.s3.witnessBucket }}
         - name: WITNESS_BUCKET
           value: {{ . | quote }}
+        - name: WITNESS_RETAIN
+          value: {{ $c.witnessRetain | quote }}
         {{- end }}
         {{- with .Values.tenants }}
         - name: WITNESS_TENANTS

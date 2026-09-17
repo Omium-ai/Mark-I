@@ -122,7 +122,7 @@ locals {
       policy_json     = data.aws_iam_policy_document.controld.json
     }
     intel = {
-      service_account = "mark1-intel"
+      service_account = "intel"
       description     = "IRSA: mark1-intel -> corpus read/write, replay read on the ingest log, pooled KMS via S3"
       policy_json     = data.aws_iam_policy_document.intel.json
     }

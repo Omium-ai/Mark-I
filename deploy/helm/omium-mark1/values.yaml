@@ -56,6 +56,7 @@ controld:
   metricsPort: 9092                # METRICS_PORT — /metrics /healthz /readyz
   postgresRole: controld_app
   serverMinEdge: "0.0.0"           # SERVER_MIN_EDGE; set at the first edge release
+  witnessRetain: "17520h"    # WITNESS_RETAIN per object; the witness bucket is COMPLIANCE-locked for two years
   userJwksPinned: ""               # OMIUM_USER_JWKS_PINNED — deploy/keys/mark1-user-token-jwks.prod.json verbatim (string)
   resources:
     requests: { cpu: 250m, memory: 256Mi }
