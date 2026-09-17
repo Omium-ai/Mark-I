@@ -71,6 +71,11 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           uv tool install "pip-audit==2.9.0"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # cmd/phase2_gate_test.go needs a real anchor (ruff) on PATH and fails loudly without one under
+      # M1_REQUIRE_STORES=1; ci.yml's go job resolves it from uv.lock the same way.
+      - run: |
+          uv sync --frozen --all-packages
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - run: just stores-up
       - run: just migrate "$M1_MIGRATE_PG_DSN"
       # Same kernel knob ci.yml's gates and go jobs lift: verifier_offline_gate's blackhole runs the
