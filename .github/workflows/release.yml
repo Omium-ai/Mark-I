@@ -36,6 +36,7 @@ jobs:
     name: verify
     runs-on: ubuntu-24.04
     env:
+      CGO_ENABLED: "0"       # ci.yml's go job builds the same way; a cgo-linked test binary is a different artifact
       M1_REQUIRE_STORES: "1"
       # Same store contract as ci.yml's `integration` job and the justfile's defaults; see there.
       M1_TEST_PG_DSN: postgres://mark1:mark1@127.0.0.1:5432/mark1_test
@@ -72,6 +73,12 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: just stores-up
       - run: just migrate "$M1_MIGRATE_PG_DSN"
+      # Same kernel knob ci.yml's gates and go jobs lift: verifier_offline_gate's blackhole runs the
+      # verifier under `unshare -rn`, which the 24.04 image restricts through AppArmor (PARTIAL = FAIL under $CI).
+      - name: Allow unprivileged user namespaces for the offline-verifier blackhole
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare -rn true
       - run: just ci
 
   # ---------------------------------------------------------------------------
