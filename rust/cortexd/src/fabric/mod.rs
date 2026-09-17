@@ -35,14 +35,8 @@ use m1p_wire::pb;
 
 use crate::session::{Shared, PENDING_CAP};
 
-// The deadlines, the endpoint list and their two imports feed the `#[cfg(unix)]` `push`
-// only; on Windows the named-pipe lane is still the `Unsupported` stub at the bottom of
-// this file, so under `-D warnings` each ungated one is a dead-code ERROR there and a
-// clean build here. Same shape as mark1-proxy's fabric.rs.
 /// 08 §4.4 deadlines, verbatim.
-#[cfg(unix)]
 const CONNECT_DEADLINE: Duration = Duration::from_millis(100);
-#[cfg(unix)]
 const WRITE_DEADLINE: Duration = Duration::from_millis(250);
 
 /// How often `flush_loop` re-reads the session file while pushes are held.
@@ -241,38 +235,64 @@ pub fn spawn_root_push(shared: &Arc<Shared>, root_hash: [u8; 32], index_clock: u
     spawn_push(shared, ev);
 }
 
-#[cfg(unix)]
 async fn push(sid: [u8; 16], event: &pb::Event) -> Result<(), PushError> {
     let mut frame = Vec::new();
     m1p_wire::encode_frame(event, &mut frame)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    let stream = connect().await?;
+    // Handshake and event share ONE budget. Re-spending the write
+    // deadline per step is how the hookshim sibling overran the
+    // deadline it had itself stated.
+    tokio::time::timeout(WRITE_DEADLINE, deliver(stream, sid, &frame))
+        .await
+        .unwrap_or_else(|_| Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into()))
+}
+
+#[cfg(unix)]
+async fn connect() -> std::io::Result<tokio::net::UnixStream> {
     let mut last = std::io::Error::from(std::io::ErrorKind::NotFound);
     for path in endpoints() {
         let connect = tokio::net::UnixStream::connect(&path);
         match tokio::time::timeout(CONNECT_DEADLINE, connect).await {
             // A daemon that answered is the daemon; a refusal from it is an
             // answer, not a reason to try the fallback endpoint.
-            Ok(Ok(stream)) => {
-                // Handshake and event share ONE budget. Re-spending the write
-                // deadline per step is how the hookshim sibling overran the
-                // deadline it had itself stated.
-                return tokio::time::timeout(WRITE_DEADLINE, deliver(stream, sid, &frame))
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
-                    });
-            }
+            Ok(Ok(stream)) => return Ok(stream),
             Ok(Err(e)) => last = e,
             Err(_) => last = std::io::Error::from(std::io::ErrorKind::TimedOut),
         }
     }
-    Err(last.into())
+    Err(last)
+}
+
+/// 07 §5's named pipe. ERROR_PIPE_BUSY is the daemon between accepts (go-winio
+/// listens only while an Accept is pending), retried inside the connect budget.
+#[cfg(windows)]
+async fn connect() -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    open_pipe(&mark1_harden::fabric_pipe_name()?).await
+}
+
+#[cfg(windows)]
+async fn open_pipe(
+    name: &str,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+    let deadline = tokio::time::Instant::now() + CONNECT_DEADLINE;
+    loop {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(name) {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {}
+            r => return r,
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
 }
 
 /// Hello → HelloAck → event on one connection (08 §4.3 steps 2-4).
-#[cfg(unix)]
-async fn deliver(
-    mut stream: tokio::net::UnixStream,
+async fn deliver<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    mut stream: S,
     sid: [u8; 16],
     event_frame: &[u8],
 ) -> Result<(), PushError> {
@@ -323,15 +343,6 @@ async fn deliver(
             _ => Err(std::io::Error::from(std::io::ErrorKind::InvalidData).into()),
         };
     }
-}
-
-/// Windows has no fabric yet, so every push takes the counted-drop path, which
-/// is exactly the specified degraded state (fabric_unavailable, DIAGNOSTIC).
-/// The deferral is unsanctioned: 04 §11.1 assigns no phase and 02:613 makes
-/// NFR-PORTABILITY-002 Phase-1 green-required (D-CA/D-CD).
-#[cfg(not(unix))]
-async fn push(_sid: [u8; 16], _event: &pb::Event) -> Result<(), PushError> {
-    Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into())
 }
 
 #[cfg(test)]
@@ -391,6 +402,77 @@ mod tests {
             "5 serve records past the cap"
         );
         assert_eq!(shared.fabric_handshake_refused.load(Ordering::Relaxed), 0);
+    }
+
+    /// 07 §5's Windows endpoint: Hello, HelloAck, then the CortexInjection lands on a
+    /// byte-mode pipe, decoded server-side with the production decoder.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn deliver_lands_on_a_named_pipe() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let name = format!(r"\\.\pipe\omium-mark1-test-{}", uuid::Uuid::now_v7());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        let srv = tokio::spawn(async move {
+            server.connect().await.unwrap();
+            let mut server = server;
+            let mut dec = m1p_wire::FrameDecoder::new();
+            let mut buf = [0u8; 1024];
+            let mut got = Vec::new();
+            while got.len() < 2 {
+                let n = server.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0);
+                for f in dec.feed_frames(&buf[..n]).unwrap() {
+                    got.push(f);
+                    if got.len() == 1 {
+                        let mut ack = Vec::new();
+                        m1p_wire::encode_control(
+                            &pb::FabricFrame {
+                                kind: Some(pb::fabric_frame::Kind::HelloAck(pb::HelloAck {
+                                    accepted: true,
+                                    max_frame: m1p_wire::M1PL_MAX_FRAME,
+                                    want_ver: 1,
+                                })),
+                            },
+                            &mut ack,
+                        )
+                        .unwrap();
+                        server.write_all(&ack).await.unwrap();
+                    }
+                }
+            }
+            got
+        });
+        let ev = cortex_injection_event([4u8; 32], 9, 2000, 10, pb::InjectionChannel::McpPull);
+        let mut frame = Vec::new();
+        m1p_wire::encode_frame(&ev, &mut frame).unwrap();
+        deliver(open_pipe(&name).await.unwrap(), [6u8; 16], &frame)
+            .await
+            .unwrap();
+        let got = srv.await.unwrap();
+        assert!(
+            matches!(&got[0].kind, Some(pb::fabric_frame::Kind::Hello(h)) if h.component == "cortexd" && h.session_id == [6u8; 16])
+        );
+        assert!(
+            matches!(&got[1].kind, Some(pb::fabric_frame::Kind::Event(e)) if e.event_id == ev.event_id)
+        );
+    }
+
+    /// Nobody listening on the pipe is Unavailable within the budget, the counted drop.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn absent_pipe_is_a_counted_drop_not_a_hang() {
+        let started = std::time::Instant::now();
+        let absent = format!(r"\\.\pipe\omium-mark1-test-{}", uuid::Uuid::now_v7());
+        assert_eq!(
+            open_pipe(&absent).await.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::NotFound)
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     #[cfg(unix)]

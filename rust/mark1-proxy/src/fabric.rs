@@ -15,23 +15,16 @@
 //! never a wait on the hot path.
 
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::time::Duration;
 
 use m1p_wire::pb;
-#[cfg(unix)]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::tee::spill;
 
-// Everything below feeds the `#[cfg(unix)]` `send` only; on Windows the named-pipe
-// lane is still the `Unsupported` stub, so `-D warnings` promotes each to an error.
 /// 08 §4.4.
-#[cfg(unix)]
 const CONNECT_DEADLINE: Duration = Duration::from_millis(100);
-#[cfg(unix)]
 const WRITE_DEADLINE: Duration = Duration::from_millis(250);
-#[cfg(unix)]
 const ACK_DEADLINE: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
@@ -151,26 +144,16 @@ impl Fabric {
     }
 }
 
-#[cfg(unix)]
 async fn send(base: &Path, session_id: &[u8; 16], frame: &[u8]) -> std::io::Result<()> {
-    use tokio::net::UnixStream;
+    deliver(connect(base).await?, session_id, frame).await
+}
 
-    let mut last = std::io::Error::from(std::io::ErrorKind::NotFound);
-    let mut stream = None;
-    for path in endpoints(base) {
-        match tokio::time::timeout(CONNECT_DEADLINE, UnixStream::connect(&path)).await {
-            Ok(Ok(s)) => {
-                stream = Some(s);
-                break;
-            }
-            Ok(Err(e)) => last = e,
-            Err(_) => last = std::io::Error::from(std::io::ErrorKind::TimedOut),
-        }
-    }
-    let Some(mut stream) = stream else {
-        return Err(last);
-    };
-
+/// Hello, HelloAck, then the frame, on any stream (08 §4.3 steps 2-4).
+async fn deliver<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    session_id: &[u8; 16],
+    frame: &[u8],
+) -> std::io::Result<()> {
     let mut hello = Vec::new();
     m1p_wire::encode_control(
         &pb::FabricFrame {
@@ -198,7 +181,49 @@ async fn send(base: &Path, session_id: &[u8; 16], frame: &[u8]) -> std::io::Resu
 }
 
 #[cfg(unix)]
-async fn accepted(stream: &mut tokio::net::UnixStream) -> std::io::Result<bool> {
+async fn connect(base: &Path) -> std::io::Result<tokio::net::UnixStream> {
+    use tokio::net::UnixStream;
+
+    let mut last = std::io::Error::from(std::io::ErrorKind::NotFound);
+    for path in endpoints(base) {
+        match tokio::time::timeout(CONNECT_DEADLINE, UnixStream::connect(&path)).await {
+            Ok(Ok(s)) => return Ok(s),
+            Ok(Err(e)) => last = e,
+            Err(_) => last = std::io::Error::from(std::io::ErrorKind::TimedOut),
+        }
+    }
+    Err(last)
+}
+
+/// 07 §5's named pipe. ERROR_PIPE_BUSY is the daemon between accepts (go-winio
+/// listens only while an Accept is pending), retried inside the connect budget.
+#[cfg(windows)]
+async fn connect(
+    _base: &Path,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    open_pipe(&mark1_harden::fabric_pipe_name()?).await
+}
+
+#[cfg(windows)]
+async fn open_pipe(
+    name: &str,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+    let deadline = tokio::time::Instant::now() + CONNECT_DEADLINE;
+    loop {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(name) {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {}
+            r => return r,
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+async fn accepted<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> std::io::Result<bool> {
     let mut dec = m1p_wire::FrameDecoder::new();
     let mut buf = [0u8; 1024];
     let deadline = tokio::time::Instant::now() + ACK_DEADLINE;
@@ -229,17 +254,6 @@ async fn accepted(stream: &mut tokio::net::UnixStream) -> std::io::Result<bool> 
         }
         dec.push(&buf[..n]);
     }
-}
-
-/// Windows has no fabric yet, so every frame takes the spill path — portable, and already a
-/// fully-specified state. What is NOT true is that this is scheduled: 04 §11.1 specifies the
-/// named pipe as a peer of UDS and assigns it no phase, and §11's own preamble says CI runs on
-/// all three "from day one". 02 §9.6 scopes NFR-PORTABILITY-002 to **Phase 1** and lists it
-/// green-required at 02:613. This deferral is unsanctioned by any document (D-CA, D-CD) and is
-/// a founder decision, not a lane.
-#[cfg(not(unix))]
-async fn send(_base: &Path, _session_id: &[u8; 16], _frame: &[u8]) -> std::io::Result<()> {
-    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
 }
 
 /// 07 §5: `$XDG_RUNTIME_DIR/omium-mark1/m1p.sock`, fallback `<base>/m1p.sock`.
@@ -277,6 +291,114 @@ mod tests {
         let f = Fabric::new("/nonexistent");
         assert_ne!(f.session_id(), &[0u8; 16]);
         assert_eq!(uuid::Uuid::from_bytes(*f.session_id()).get_version_num(), 7);
+    }
+
+    /// 07 §5's Windows endpoint, end to end: the frame lands on a byte-mode pipe after the
+    /// handshake, decoded server-side with the production decoder.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn deliver_lands_on_a_named_pipe() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let name = format!(r"\\.\pipe\omium-mark1-test-{}", uuid::Uuid::now_v7());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        let srv = tokio::spawn(async move {
+            server.connect().await.unwrap();
+            let mut server = server;
+            let mut dec = m1p_wire::FrameDecoder::new();
+            let mut buf = [0u8; 1024];
+            let mut got = Vec::new();
+            while got.len() < 2 {
+                let n = server.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0);
+                for f in dec.feed_frames(&buf[..n]).unwrap() {
+                    got.push(f);
+                    if got.len() == 1 {
+                        let mut ack = Vec::new();
+                        m1p_wire::encode_control(
+                            &pb::FabricFrame {
+                                kind: Some(pb::fabric_frame::Kind::HelloAck(pb::HelloAck {
+                                    accepted: true,
+                                    max_frame: m1p_wire::M1PL_MAX_FRAME,
+                                    want_ver: 1,
+                                })),
+                            },
+                            &mut ack,
+                        )
+                        .unwrap();
+                        server.write_all(&ack).await.unwrap();
+                    }
+                }
+            }
+            got
+        });
+        let sid = [5u8; 16];
+        let mut frame = Vec::new();
+        m1p_wire::encode_frame(
+            &pb::Event {
+                session_id: sid.to_vec(),
+                ..Default::default()
+            },
+            &mut frame,
+        )
+        .unwrap();
+        deliver(open_pipe(&name).await.unwrap(), &sid, &frame)
+            .await
+            .unwrap();
+        let got = srv.await.unwrap();
+        assert!(
+            matches!(&got[0].kind, Some(pb::fabric_frame::Kind::Hello(h)) if h.component == "mark1-proxy" && h.session_id == sid)
+        );
+        assert!(matches!(
+            &got[1].kind,
+            Some(pb::fabric_frame::Kind::Event(_))
+        ));
+    }
+
+    /// The one instance is held: ERROR_PIPE_BUSY is retried inside the connect budget, and
+    /// nobody listening is NotFound, not a hang.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn busy_pipe_is_retried_and_absent_pipe_is_not_found() {
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let name = format!(r"\\.\pipe\omium-mark1-test-{}", uuid::Uuid::now_v7());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .max_instances(1)
+            .create(&name)
+            .unwrap();
+        let first = open_pipe(&name).await.unwrap();
+        server.connect().await.unwrap();
+        let name2 = name.clone();
+        let second = tokio::spawn(async move {
+            let started = tokio::time::Instant::now();
+            (open_pipe(&name2).await.map(|_| ()), started.elapsed())
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        drop(first);
+        server.disconnect().unwrap();
+        let relisten = tokio::spawn(async move { server.connect().await });
+        let (r, waited) = tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .expect("second open never returned")
+            .unwrap();
+        r.unwrap();
+        assert!(
+            waited >= Duration::from_millis(25),
+            "did not wait: {waited:?}"
+        );
+        relisten.await.unwrap().unwrap();
+
+        let absent = format!(r"\\.\pipe\omium-mark1-test-{}", uuid::Uuid::now_v7());
+        assert_eq!(
+            open_pipe(&absent).await.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::NotFound)
+        );
     }
 
     /// Emitting with no daemon and no reactor must not panic and must not block. The frame

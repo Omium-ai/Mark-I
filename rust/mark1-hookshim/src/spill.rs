@@ -125,7 +125,6 @@ pub fn count_flush_timeout(home: Option<&Path>) {
 /// (08 §4.3 steps 2-3). Same sidecar shape, because the alternative is what
 /// this was before: a fleet-wide refusal after a bad rollout, every event
 /// spilling, and no signal anywhere that the handshake is the reason.
-#[cfg(unix)] // its only caller is the unix connector (fabric.rs)
 pub fn count_handshake_refused(home: Option<&Path>) {
     count(home, "hookshim.handshake_refused");
 }

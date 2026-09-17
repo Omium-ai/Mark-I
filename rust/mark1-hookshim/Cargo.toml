@@ -33,6 +33,10 @@ libc = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
 
+# Win32_System_IO: ConnectNamedPipe for the test pipe server in fabric.rs's windows_tests only.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_IO"] }
+
 # Integration tests replay the conformance hook fixtures against the spawned
 # binary; a bin-only crate's tests see only dev-dependencies, so the crates
 # needed to decode frames and unseal the spill ring are restated here.

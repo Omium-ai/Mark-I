@@ -15,5 +15,9 @@
 //! crate already in both token-path closures, not a new crate, so no closure grows by it.
 
 mod harden;
+#[cfg(windows)]
+mod pipe;
 
 pub use harden::apply;
+#[cfg(windows)]
+pub use pipe::{fabric_pipe_name, user_sid};
