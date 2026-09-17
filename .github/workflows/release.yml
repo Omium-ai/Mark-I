@@ -162,14 +162,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.triple }}
+      # rust-toolchain.toml pins the channel (1.91), and cargo obeys it over whatever the action
+      # installed — so the cross target has to be added to THAT toolchain, from inside the repo.
+      - run: rustup target add ${{ matrix.triple }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: edge-${{ matrix.triple }}
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go/*/go.sum
       - name: Cross linker for aarch64 linux
         if: matrix.triple == 'aarch64-unknown-linux-gnu'
         run: |
