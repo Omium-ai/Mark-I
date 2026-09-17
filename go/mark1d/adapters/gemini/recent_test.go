@@ -82,6 +82,7 @@ func TestStartTailFillsTheSessionTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = mgr.CloseFlush(context.Background()) })
 	mgr.Sweep(context.Background())
 	got := mgr.Sessions()
 	main := uuid.MustParse("6f1e2d3c-0000-4000-8000-00000000aa01")

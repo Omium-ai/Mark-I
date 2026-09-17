@@ -84,6 +84,7 @@ func TestStartTailFillsTheSessionTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = mgr.CloseFlush(context.Background()) })
 	mgr.Sweep(context.Background())
 	got := mgr.Sessions()
 	if s := got[uuid.MustParse("c0910000-0000-4000-8000-00000000aa01")]; len(got) != 2 || s.Agent != "copilot" || s.Root != acme || s.Cwd != acme {
