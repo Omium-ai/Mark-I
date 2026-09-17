@@ -453,10 +453,20 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#edge/v}"
-          gh release create "$GITHUB_REF_NAME" \
-            --title "mark1 edge v${VERSION}" \
-            --notes "Edge binaries for five triples. Verify with \`mark1 verify-release\`: it checks the detached signature AND the SLSA provenance (repo, workflow, commit) before executing anything." \
-            dist/pkg/* dist/sbom/*
+          # Draft, one asset at a time with retries, then publish: uploads.github.com drops ~15 MB
+          # tarballs with stray 5xx often enough that one-shot creation lost edge/v0.1.1's first run.
+          gh release view "$GITHUB_REF_NAME" --json isDraft >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --draft \
+              --title "mark1 edge v${VERSION}" \
+              --notes "Edge binaries for five triples. Verify with \`mark1 verify-release\`: it checks the detached signature AND the SLSA provenance (repo, workflow, commit) before executing anything."
+          for f in dist/pkg/* dist/sbom/*; do
+            for attempt in 1 2 3 4 5; do
+              gh release upload "$GITHUB_REF_NAME" "$f" --clobber && break
+              [ "$attempt" = 5 ] && { echo "::error title=Upload failed::$f failed 5 times"; exit 1; }
+              echo "upload of $f failed (attempt $attempt/5); retrying in 20s"; sleep 20
+            done
+          done
+          gh release edit "$GITHUB_REF_NAME" --draft=false
       - name: Open the ring-0 manifest PR (09 §11.2 — a ring promotion is a reviewed commit)
         env:
           GH_TOKEN: ${{ github.token }}
