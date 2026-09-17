@@ -199,6 +199,8 @@ jobs:
   package-macos:
     name: package-macos
     needs: build-edge
+    # Signed .pkg only once the Developer ID is set as a repo variable (mark1-signing-accounts.md §1) and deploy/packaging/macos exists; the raw tarball ships regardless.
+    if: ${{ !cancelled() && needs.build-edge.result == 'success' && vars.APPLE_DEVELOPER_ID_APPLICATION != '' }}
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -251,6 +253,7 @@ jobs:
   package-windows:
     name: package-windows
     needs: build-edge
+    if: ${{ !cancelled() && needs.build-edge.result == 'success' && vars.AZURE_TRUSTED_SIGNING_ENDPOINT != '' }}
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -290,6 +293,8 @@ jobs:
   package-linux:
     name: package-linux
     needs: build-edge
+    # deb/rpm + GPG once deploy/packaging/linux/nfpm.yaml and the GPG key exist (repo variable LINUX_PACKAGING=1); the raw tarball ships regardless.
+    if: ${{ !cancelled() && needs.build-edge.result == 'success' && vars.LINUX_PACKAGING != '' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -376,7 +381,9 @@ jobs:
   # ---------------------------------------------------------------------------
   publish:
     name: publish
-    needs: [package-macos, package-windows, package-linux, images]
+    needs: [build-edge, package-macos, package-windows, package-linux, images]
+    # The raw per-triple tarballs publish as soon as build-edge and the image checks pass; a skipped signed package is not a failure.
+    if: ${{ !cancelled() && needs.build-edge.result == 'success' && needs.images.result == 'success' && !contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
