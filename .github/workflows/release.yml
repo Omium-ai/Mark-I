@@ -24,7 +24,6 @@ env:
   CARGO_TERM_COLOR: always
   GO_VERSION: "1.25.14"
   SYFT_VERSION: "v1.20.0"
-  TRIVY_VERSION: "0.58.2"
   NFPM_VERSION: "v2.41.1"
 
 jobs:
@@ -329,51 +328,46 @@ jobs:
           path: dist/pkg/
 
   # ---------------------------------------------------------------------------
-  # Cloud images. Tagged <sha7> and nothing else — on an IMMUTABLE ECR repository a floating
-  # tag is a permanent pin, not a pointer (13 §9.5). trivy blocks the release (12 §11.3).
+  # Cloud images. ci.yml's `cloud-images` job builds, scans, pushes and attests
+  # omium/mark1-<svc>:<sha7> on every main push; the ECR repos are IMMUTABLE, so a release-time
+  # rebuild of the same tag would be rejected (13 §9.5). This lane therefore verifies what exists:
+  # the image for the tagged commit must be present, its build provenance must verify against this
+  # repo, and it must still pass trivy at release time (12 §11.3). Any of the three red = no release.
   # ---------------------------------------------------------------------------
   images:
     name: images
     needs: verify
     runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false
       matrix:
-        include:
-          # controld is the only cloud service with source in the tree today. A matrix leg whose
-          # Dockerfile does not exist fails the leg, and `publish` needs all of them — so the
-          # adjudicator and intel legs land in the same PR as their service skeletons
-          # (14 §1.10 `mark1-intel`, §2.5 `adjudicator-svc`), not before.
-          - { name: controld, dockerfile: go/controld/Dockerfile }
+        name: [controld, intel, adjudicator]
     steps:
-      - uses: actions/checkout@v4
-      - id: sha7
-        run: echo "tag=$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
       - uses: aws-actions/amazon-ecr-login@v2
         id: ecr
-      - uses: docker/build-push-action@v6
-        id: build
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          push: true
-          provenance: false      # provenance is attested below by attest-build-provenance
-          tags: ${{ steps.ecr.outputs.registry }}/omium/mark1-${{ matrix.name }}:${{ steps.sha7.outputs.tag }}
-      - name: trivy
+      - id: ref
         run: |
           set -euo pipefail
-          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-            | tar -xz -C /usr/local/bin trivy
-          trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
-            "${{ steps.ecr.outputs.registry }}/omium/mark1-${{ matrix.name }}:${{ steps.sha7.outputs.tag }}"
-      - uses: actions/attest-build-provenance@v2
+          ref="${{ steps.ecr.outputs.registry }}/omium/mark1-${{ matrix.name }}:${GITHUB_SHA::7}"
+          docker manifest inspect "$ref" > /dev/null || {
+            echo "::error title=No cloud image for this commit::$ref is not in ECR. ci.yml's cloud-images job pushes it on every main push (with AWS_RELEASE_ROLE_ARN set); tag a main commit that was built."
+            exit 1
+          }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Verify build provenance (the builder attested; this lane checks)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify "oci://${{ steps.ref.outputs.ref }}" --repo "$GITHUB_REPOSITORY"
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
-          subject-name: ${{ steps.ecr.outputs.registry }}/omium/mark1-${{ matrix.name }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+          image-ref: ${{ steps.ref.outputs.ref }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
 
   # ---------------------------------------------------------------------------
   # SBOM + SLSA + publish. NFR-SECURITY-004: a release without an SBOM does not publish, and

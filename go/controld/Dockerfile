@@ -5,7 +5,8 @@
 # a floating base tag is the exact class of pin the estate retired for image tags on 2026-08-13.
 
 # ---------- builder ----------
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.25.14-bookworm AS builder
+ENV GOTOOLCHAIN=local GOFLAGS=-mod=readonly
 WORKDIR /build
 
 # Generated contracts module first (the `replace` target) — layer-cache friendly.
@@ -24,7 +25,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w" -o /build/contr
 # ---------- runtime ----------
 # distroless/static (not cc): a CGO_ENABLED=0 Go binary needs no libc at all.
 FROM gcr.io/distroless/static-debian12:nonroot
+ARG REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/Omium-ai/Mark-I" \
+      org.opencontainers.image.revision="$REVISION"
 COPY --from=builder /build/controld /usr/local/bin/controld
-EXPOSE 8443 9092
+EXPOSE 8080 9092
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/controld"]

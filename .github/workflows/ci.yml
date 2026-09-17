@@ -11,7 +11,7 @@
 # settings page that no run will ever satisfy.
 #
 # required-checks: gen, contracts, python, gates, trace-check, fuzz-smoke, integration,
-#                  security, bench-gate, platform-gate
+#                  security, bench-gate, platform-gate, cloud-images
 name: ci
 
 on:
@@ -459,3 +459,61 @@ jobs:
             exit 1
           fi
           echo "Benchmarks deferred to the mandatory pre-release run in release.yml."
+
+  # Every main commit -> omium/mark1-{controld,intel,adjudicator}:<sha7> in prod ECR (13 §9.3.1); trivy
+  # gates the loaded image BEFORE the push; the builder attests, release.yml verifies. On PRs the
+  # job-level `if` reports Skipped = passing.
+  cloud-images:
+    name: cloud-images
+    if: github.event_name == 'push' && vars.AWS_RELEASE_ROLE_ARN != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: controld,    dockerfile: go/controld/Dockerfile }
+          - { name: intel,       dockerfile: python/intel/Dockerfile }
+          - { name: adjudicator, dockerfile: python/adjudicator/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - id: ref
+        run: echo "ref=${{ steps.ecr.outputs.registry }}/omium/mark1-${{ matrix.name }}:${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          push: false
+          provenance: false
+          build-args: REVISION=${{ github.sha }}
+          tags: ${{ steps.ref.outputs.ref }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.ref.outputs.ref }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - id: push
+        run: |
+          set -euo pipefail
+          docker push "${{ steps.ref.outputs.ref }}"
+          echo "digest=$(docker inspect --format '{{index .RepoDigests 0}}' "${{ steps.ref.outputs.ref }}" | cut -d@ -f2)" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.ecr.outputs.registry }}/omium/mark1-${{ matrix.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
