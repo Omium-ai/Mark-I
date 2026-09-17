@@ -110,7 +110,7 @@ func (h *Hub) Publish(ev *m1pv1.Event) {
 func (h *Hub) Arrest(session, task [16]byte, k verdict.KneeState, evidenceRef string) {
 	row := map[string]any{
 		"type": "arrest", "id": uuid.NewString(), "time": time.Now().UTC().Format(time.RFC3339),
-		"task_id": hex.EncodeToString(task[:]), "session_id": hex.EncodeToString(session[:]),
+		"task_id": uuid.UUID(task).String(), "session_id": uuid.UUID(session).String(),
 		"attempt": k.N, "p_lcb": nil, "v": nil, "c_n": nil, "inequality": nil, "evidence_ref": nullable(evidenceRef),
 	}
 	if k.Evaluable {
@@ -126,11 +126,19 @@ func (h *Hub) Arrest(session, task [16]byte, k verdict.KneeState, evidenceRef st
 
 func (h *Hub) verifyRow(ev *m1pv1.Event, kind string, fields map[string]any) {
 	row := map[string]any{
-		"type": kind, "id": hex.EncodeToString(ev.GetEventId()), "time": eventTime(ev),
-		"task_id": hex.EncodeToString(ev.GetTaskId()), "session_id": hex.EncodeToString(ev.GetSessionId()),
+		"type": kind, "id": idString(ev.GetEventId()), "time": eventTime(ev),
+		"task_id": idString(ev.GetTaskId()), "session_id": idString(ev.GetSessionId()),
 	}
 	maps.Copy(row, fields)
 	h.verify = ring(append(h.verify, row), verifyRing)
+}
+
+// idString is the canonical dashed UUID every app-facing surface renders a 16-byte id as; anything else (an absent task id) stays bare hex.
+func idString(b []byte) string {
+	if id, err := uuid.FromBytes(b); err == nil {
+		return id.String()
+	}
+	return hex.EncodeToString(b)
 }
 
 func (h *Hub) fanout(f frame) {
@@ -193,7 +201,7 @@ func (h *Hub) track(ev *m1pv1.Event) {
 	copy(sid[:], ev.GetSessionId())
 	switch b := ev.GetBody().(type) {
 	case *m1pv1.Event_SessionStart:
-		h.sessions[sid] = &LiveSession{Agent: b.SessionStart.GetAgent(), SessionID: hex.EncodeToString(sid[:]), started: time.Now()}
+		h.sessions[sid] = &LiveSession{Agent: b.SessionStart.GetAgent(), SessionID: uuid.UUID(sid).String(), started: time.Now()}
 		for len(h.sessions) > maxLiveSessions {
 			var oldest [16]byte
 			var at time.Time

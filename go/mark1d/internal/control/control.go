@@ -41,6 +41,7 @@ type Server struct {
 	mu        sync.Mutex
 	reconcile func()
 	enrolled  func()
+	shutdown  func()
 	compat    map[string]string
 	files     sync.Mutex // ponytail: serializes this process's read-modify-writes only; a concurrent `mark1 enable` races exactly as two CLIs do today
 }
@@ -97,6 +98,13 @@ func (s *Server) SetReconcile(fn func()) {
 func (s *Server) SetEnrolled(fn func()) {
 	s.mu.Lock()
 	s.enrolled = fn
+	s.mu.Unlock()
+}
+
+// SetShutdown: the graceful stop SIGTERM takes, for the app on Windows where no SIGTERM exists (desktop spec §2); nil (unwired) refuses the route.
+func (s *Server) SetShutdown(fn func()) {
+	s.mu.Lock()
+	s.shutdown = fn
 	s.mu.Unlock()
 }
 

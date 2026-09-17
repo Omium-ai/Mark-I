@@ -150,6 +150,35 @@ func TestWallRefusals(t *testing.T) {
 	want(t, resp, body, http.StatusNotFound, "M1E-2001")
 }
 
+func TestShutdownRouteRunsTheStopHook(t *testing.T) {
+	s, _ := newServer(t)
+	resp, body := call(t, s, http.MethodPost, "/v1/shutdown", nil)
+	want(t, resp, body, http.StatusServiceUnavailable, "M1E-9500")
+	stopped := make(chan struct{})
+	s.SetShutdown(func() { close(stopped) })
+	resp, body = call(t, s, http.MethodPost, "/v1/shutdown", nil, func(r *http.Request) { r.Header.Del("Authorization") })
+	want(t, resp, body, http.StatusUnauthorized, "M1E-1002")
+	select {
+	case <-stopped:
+		t.Fatal("an unauthenticated POST stopped the daemon")
+	default:
+	}
+	resp, body = call(t, s, http.MethodPost, "/v1/shutdown", nil)
+	want(t, resp, body, http.StatusOK, "")
+	var got struct {
+		OK bool `json:"ok"`
+	}
+	decodeTo(t, body, &got)
+	if !got.OK {
+		t.Fatalf("body %s", body)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("stop hook did not run")
+	}
+}
+
 func sessionEvent(sid byte, body any) *m1pv1.Event {
 	id := make([]byte, 16)
 	id[0] = sid
@@ -218,7 +247,7 @@ func TestStatusFields(t *testing.T) {
 	if _, err := time.Parse(time.RFC3339, st.Since); err != nil {
 		t.Fatalf("since %q: %v", st.Since, err)
 	}
-	if len(st.AgentsLive) != 1 || st.AgentsLive[0].Agent != "claudecode" || st.AgentsLive[0].Tokens != 20 || st.AgentsLive[0].SessionID != "01000000000000000000000000000000" || st.AgentsLive[0].Project != "" {
+	if len(st.AgentsLive) != 1 || st.AgentsLive[0].Agent != "claudecode" || st.AgentsLive[0].Tokens != 20 || st.AgentsLive[0].SessionID != "01000000-0000-0000-0000-000000000000" || st.AgentsLive[0].Project != "" {
 		t.Fatalf("agents_live %+v (no transcript names this session, so project is unattributed, not guessed)", st.AgentsLive)
 	}
 	if err := os.WriteFile(off.Marker(dir), nil, 0o600); err != nil {
@@ -697,7 +726,7 @@ func TestEventsStreamWithin100ms(t *testing.T) {
 	}
 	var arrest map[string]any
 	decodeTo(t, []byte(strings.TrimPrefix(f, "event: arrest\ndata: ")), &arrest)
-	if arrest["type"] != "arrest" || arrest["attempt"] != 3.0 || arrest["p_lcb"] != 0.18 || arrest["v"] != 6000.0 || arrest["c_n"] != 2900.0 || arrest["inequality"] != "0.180 * 6000.00 <= 2900.00" || arrest["evidence_ref"] != "ev_3" || arrest["session_id"] != "01000000000000000000000000000000" || arrest["task_id"] != "03000000000000000000000000000000" {
+	if arrest["type"] != "arrest" || arrest["attempt"] != 3.0 || arrest["p_lcb"] != 0.18 || arrest["v"] != 6000.0 || arrest["c_n"] != 2900.0 || arrest["inequality"] != "0.180 * 6000.00 <= 2900.00" || arrest["evidence_ref"] != "ev_3" || arrest["session_id"] != "01000000-0000-0000-0000-000000000000" || arrest["task_id"] != "03000000-0000-0000-0000-000000000000" {
 		t.Fatalf("arrest %v", arrest)
 	}
 	s.Hub().Arrest([16]byte{1}, [16]byte{3}, verdict.KneeState{N: 1}, "")
@@ -712,10 +741,10 @@ func TestEventsStreamWithin100ms(t *testing.T) {
 	if len(rows) != 4 {
 		t.Fatalf("verify/events must hold tamper + verdict + 2 arrests, never the guard refusal: %s", body)
 	}
-	if rows[0]["type"] != "tamper" || rows[0]["anchor_id"] != "ruff@cat-1" || rows[0]["session_id"] != "01000000000000000000000000000000" {
+	if rows[0]["type"] != "tamper" || rows[0]["anchor_id"] != "ruff@cat-1" || rows[0]["session_id"] != "01000000-0000-0000-0000-000000000000" {
 		t.Fatalf("tamper row %v", rows[0])
 	}
-	if rows[1]["type"] != "verdict" || rows[1]["verdict"] != "violated" || rows[1]["state"] != "bootstrapping" || rows[1]["certificate_id"] != "cert_1" || rows[1]["id"] != "02020202020202020202020202020202" || rows[1]["task_id"] != "03030303030303030303030303030303" || rows[1]["time"] != "2026-09-16T14:14:00Z" {
+	if rows[1]["type"] != "verdict" || rows[1]["verdict"] != "violated" || rows[1]["state"] != "bootstrapping" || rows[1]["certificate_id"] != "cert_1" || rows[1]["id"] != "02020202-0202-0202-0202-020202020202" || rows[1]["task_id"] != "03030303-0303-0303-0303-030303030303" || rows[1]["time"] != "2026-09-16T14:14:00Z" {
 		t.Fatalf("verdict row %v", rows[1])
 	}
 	if rows[2]["type"] != "arrest" || rows[3]["type"] != "arrest" {

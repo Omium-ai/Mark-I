@@ -374,6 +374,9 @@ func run(ctx context.Context, log *slog.Logger, cfg config) error {
 		return err
 	}
 	defer func() { _ = ctl.Close() }()
+	ctx, shutdown := context.WithCancel(ctx)
+	defer shutdown()
+	ctl.SetShutdown(shutdown)
 	go func() {
 		if err := ctl.Serve(); err != nil {
 			log.Error("control API", "err", err)

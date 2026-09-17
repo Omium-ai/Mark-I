@@ -52,6 +52,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/pause", func(w http.ResponseWriter, _ *http.Request) { s.setOff(w, true) })
 	mux.HandleFunc("POST /v1/resume", func(w http.ResponseWriter, _ *http.Request) { s.setOff(w, false) })
 	mux.HandleFunc("GET /v1/doctor", s.doctor)
+	mux.HandleFunc("POST /v1/shutdown", s.postShutdown)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("GET /v1/receipts", s.receipts)
 	mux.HandleFunc("POST /v1/receipts/verify", s.verifyReceipts)
@@ -895,6 +896,21 @@ func (s *Server) setOff(w http.ResponseWriter, paused bool) {
 		return
 	}
 	writeJSON(w, map[string]any{"paused": off.Off(s.cfg.StateDir), "receipted_transition_id": nil})
+}
+
+func (s *Server) postShutdown(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	stop := s.shutdown
+	s.mu.Unlock()
+	if stop == nil {
+		refuse(w, http.StatusServiceUnavailable, "M1E-9500", "shutdown not wired: this daemon was started without a stop hook")
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush() // the answer leaves before the stop path closes this listener
+	}
+	stop()
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {

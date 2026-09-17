@@ -141,6 +141,7 @@ func seedConformance(t *testing.T) seeded {
 		publish()
 	})
 
+	s.SetShutdown(func() {})
 	writeFile(t, fabric.OptInPath(dir), []byte(`{"stop_gate":true,"ts":"2026-09-16T00:00:00Z","user":"test"}`), 0o600)
 	writeFile(t, filepath.Join(dir, "spool", "seg-0000000000000001.m1s"), make([]byte, 64), 0o600)
 	writeFile(t, filepath.Join(dir, "receipt", "last-head"), []byte(`{"seq":92,"hash":"`+strings.Repeat("ab", 32)+`","checkpoint_seq":4}`), 0o600)
