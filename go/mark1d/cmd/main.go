@@ -179,7 +179,7 @@ func main() {
 	flag.StringVar(&cfg.stateDir, "state-dir", stateDefault, "mark1d state root (epoch counter, tailer cursors, OFF marker)")
 	flag.StringVar(&cfg.spoolDir, "spool-dir", "", "spool directory (default <state-dir>/spool)")
 	flag.Int64Var(&cfg.spoolCap, "spool-cap", spool.DefaultCap, "spool byte cap (07 §6): past it diagnostics shed, accounted, and billing-grade blocks; below one 64 MiB segment the spool can never free space")
-	flag.StringVar(&cfg.socket, "socket", "", "fabric UDS path (default per 07 §5: $XDG_RUNTIME_DIR/omium-mark1/m1p.sock, else ~/.omium/mark1/m1p.sock)")
+	flag.StringVar(&cfg.socket, "socket", "", "fabric endpoint (07 §5): unix socket path, default $XDG_RUNTIME_DIR/omium-mark1/m1p.sock else ~/.omium/mark1/m1p.sock; on Windows the named pipe \\\\.\\pipe\\omium-mark1-<user-SID>")
 	flag.StringVar(&cfg.workspace, "workspace", "", "additive workspace root to tail besides <state-dir>/workspaces.json (mark1 enable writes the file)")
 	flag.StringVar(&cfg.saltHex, "tenant-salt", "", "hex tenant HMAC root for Usage idem_key derivation; DEV SEAM — overrides enrollment.json's tenant_root_hex (04 §2.9)")
 	flag.StringVar(&cfg.ingestURL, "ingest-url", "", "full URL of POST /m1p/v1/ingest; overrides enrollment.json's endpoints.ingest; empty with no document leaves the uplink off (capture-local-only)")

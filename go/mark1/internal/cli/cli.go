@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -576,35 +575,6 @@ func appendJSONL(path string, rec any) (err error) {
 	}
 	_, err = f.Write(append(line, '\n'))
 	return err
-}
-
-// SocketPath mirrors 07 §5's transport endpoint (the resolution mark1d's
-// fabric.Listen binds): $XDG_RUNTIME_DIR/omium-mark1/m1p.sock, else
-// ~/.omium/mark1/m1p.sock. Restated here because mark1d/internal is
-// module-private; the string, not the code, is the contract.
-// ponytail: unix only — the Windows named pipe rides mark1d's own row.
-func SocketPath() (string, error) {
-	if rd := os.Getenv("XDG_RUNTIME_DIR"); rd != "" {
-		return filepath.Join(rd, "omium-mark1", "m1p.sock"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".omium", "mark1", "m1p.sock"), nil
-}
-
-// DaemonReachable answers "is mark1d accepting on the fabric right now?" —
-// the only live read surface the daemon exposes today (its counter/gauge
-// query frame is a later row; 04 §2.11). A dial, not a handshake: connect
-// then close is enough to distinguish running from gone.
-func DaemonReachable(socket string) bool {
-	conn, err := net.DialTimeout("unix", socket, 300*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }
 
 // Emit prints the one-JSON-object-on-stdout contract (08 §7 global) when

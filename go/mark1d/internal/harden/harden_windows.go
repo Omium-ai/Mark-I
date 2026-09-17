@@ -40,7 +40,7 @@ func Apply() error {
 	if err := werAddExcludedApplication.Find(); err != nil {
 		return fmt.Errorf("harden: %w", err)
 	}
-	hr, _, _ := werAddExcludedApplication.Call(uintptr(unsafe.Pointer(name)), 0)
+	hr, _, _ := werAddExcludedApplication.Call(uintptr(unsafe.Pointer(name)), 0) //nolint:gosec // G103: syscall argument; name outlives the call
 	if int32(hr) < 0 {
 		return fmt.Errorf("harden: WerAddExcludedApplication failed: HRESULT %#010x", uint32(hr))
 	}
