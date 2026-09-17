@@ -42,11 +42,15 @@ jobs:
     permissions:
       actions: read
       contents: read
+    outputs:
+      # The commit whose ci run proved this tag — also the <sha7> ci.yml built and attested the cloud images under.
+      sha: ${{ steps.ci.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: The tagged commit carries a green ci run
+        id: ci
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -61,7 +65,7 @@ jobs:
             if [ -n "$run" ]; then
               set -- $run
               case "$2:$3" in
-                completed:success) echo "ci run $1 is green on $sha ($hops release-only commit(s) above it): $4"; exit 0 ;;
+                completed:success) echo "ci run $1 is green on $sha ($hops release-only commit(s) above it): $4"; echo "sha=$sha" >> "$GITHUB_OUTPUT"; exit 0 ;;
                 completed:*) echo "::error title=ci is not green on this commit::run $1 on $sha concluded '$3': $4"; exit 1 ;;
               esac
             fi
@@ -381,7 +385,9 @@ jobs:
       - id: ref
         run: |
           set -euo pipefail
-          ref="${{ steps.ecr.outputs.registry }}/omium/mark1-${{ matrix.name }}:${GITHUB_SHA::7}"
+          # The images live under the sha7 of the commit verify proved (ci.yml built them there).
+          proven="${{ needs.verify.outputs.sha }}"
+          ref="${{ steps.ecr.outputs.registry }}/omium/mark1-${{ matrix.name }}:${proven::7}"
           docker manifest inspect "$ref" > /dev/null || {
             echo "::error title=No cloud image for this commit::$ref is not in ECR. ci.yml's cloud-images job pushes it on every main push (with AWS_RELEASE_ROLE_ARN set); tag a main commit that was built."
             exit 1
