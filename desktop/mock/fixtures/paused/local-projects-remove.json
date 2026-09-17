@@ -1,5 +1,8 @@
 {
   "removed": true,
   "path": "/Users/dev/api-service",
-  "receipted_transition_id": null
+  "receipted_transition_id": null,
+  "reverted": [],
+  "not_reverted": [],
+  "byte_equality": true
 }

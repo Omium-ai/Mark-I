@@ -1,0 +1,13 @@
+{
+  "agent": "claudecode",
+  "reverted": [
+    {
+      "agent": "claudecode",
+      "target": "/Users/dev/.claude/settings.json",
+      "kind": "verbatim",
+      "byte_equality": true
+    }
+  ],
+  "not_reverted": [],
+  "byte_equality": true
+}

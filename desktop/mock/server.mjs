@@ -27,6 +27,9 @@ export const LOCAL_ROUTES = [
   ['POST', '/v1/enroll', 'local-enroll'],
   ['GET', '/v1/enroll', 'local-enroll-state'],
   ['DELETE', '/v1/enroll', 'local-enroll-signout'],
+  // {name} routes carry a literal agent, as the cloud sessions detail does; last, because the daemon's disable really reverts the fragment the rows above show.
+  ['POST', '/v1/agents/claudecode/provision', 'local-agents-provision'],
+  ['POST', '/v1/agents/claudecode/disable', 'local-agents-disable'],
 ];
 
 export const CLOUD_ROUTES = [

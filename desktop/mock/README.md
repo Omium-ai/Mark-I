@@ -99,6 +99,25 @@ the daemon's, not a sketch of §7.1:
 - `receipted_transition_id` on `pause`/`resume`/`DELETE /v1/projects` is
   `null`: the daemon journals the transition and its coverage drain receipts
   it a few seconds later, so no id exists at response time.
+- `POST /v1/projects` is `mark1 enable`: it provisions every installed
+  agent's hook fragment (08 §8) before the root lands in the allow-list, and
+  answers the project row plus `agents_provisioned:[name…]` and
+  `agents_refused:[{agent, code, detail}]` (M1E-7101 when the agent's
+  settings file does not exist — mechanism B never creates one). The body
+  may carry `agents:[name…]` to restrict the walk; a re-POST of an enabled
+  root re-verifies the fragments and records no second consent.
+  `DELETE /v1/projects` adds `reverted:[{agent, target, kind, byte_equality}]`,
+  `not_reverted:[manifest…]` and `byte_equality`: fragments are user-scoped,
+  so they come out only when the last enabled project is removed.
+- `POST /v1/agents/{name}/provision` (`local-agents-provision`, the route
+  literal names `claudecode`) is repair / re-provision for one agent — the
+  same walk with the `doctor --fix` bit, so a `FRAGMENT-DAMAGED` fence is
+  rewritten and a `MISSING` one re-applied; it answers `{agent, provisioned,
+  changed, refused, fragments}` with the agent's doctor fragment rows, `404`
+  for a name outside the six built adapters and `409` for one not installed.
+  `POST /v1/agents/{name}/disable` (`local-agents-disable`) reverts that
+  agent's fragments byte-equal (08 §8.4) and keeps the workspace:
+  `{agent, reverted, not_reverted, byte_equality}`.
 - Anchors carry `side_effect: static|test` (the FR-VERIFY-003 tier axis)
   and no `tier`; `last_run` is the newest anchor vote this daemon boot saw,
   `null` before one.

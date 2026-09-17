@@ -1,0 +1,23 @@
+{
+  "agent": "claudecode",
+  "provisioned": true,
+  "changed": false,
+  "refused": [],
+  "fragments": [
+    {
+      "agent": "claudecode",
+      "fragment": "hooks",
+      "mechanism": "B",
+      "manifest": "/Users/dev/.omium/mark1/provisioned/claudecode/hooks.manifest.json",
+      "target": "/Users/dev/.claude/settings.json",
+      "state": "OK",
+      "detail": "",
+      "lines": [
+        {
+          "pointer": "/hooks/Stop/0",
+          "value": "{\"matcher\": \"\", \"hooks\": [{\"type\": \"command\", \"command\": \"~/.omium/mark1/bin/mark1-hookshim\", \"timeout\": 30}], \"_mark1\": \"v1\"}"
+        }
+      ]
+    }
+  ]
+}
