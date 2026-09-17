@@ -1,33 +1,45 @@
-// The Windows half of 07 §5's transport endpoint, and it is a refusal.
-//
-// 07 §5 specifies a named pipe at \\.\pipe\omium-mark1-<user-SID> with a
-// security descriptor granting only that SID. That is not a rename of the unix
-// path: it needs the caller's SID, an explicitly-constructed DACL, and a pipe
-// server that re-listens per connection. Approximating it — a TCP loopback
-// listener, a pipe with a default descriptor — would put the fabric's whole
-// threat model (other users on the same machine) on a control nobody wrote,
-// while reporting success. So this refuses, which is the house rule the anchor
-// registry already states: an unimplemented kind is refused, never faked.
-//
-// The refusal is what lets the windows-2022 CI leg stay armed. Before this
-// file, the package simply did not compile there, so the leg was red for a
-// reason that had already been decided and the OTHER portability regressions
-// it exists to catch could not surface behind it.
+// 07 §5 / 04 §11.1 on Windows: named pipe \\.\pipe\omium-mark1-<user-SID>, DACL owner-SID-only, byte mode.
 package fabric
 
 import (
-	"errors"
+	"fmt"
 	"net"
+
+	"github.com/Microsoft/go-winio"
+	"golang.org/x/sys/windows"
 )
 
-// ErrNoWindowsFabric is what every entry point here returns, exported so a
-// caller can tell "not built yet on this platform" apart from "your machine is
-// misconfigured" — the two deserve different words in `mark1 doctor`.
-var ErrNoWindowsFabric = errors.New(
-	"fabric: the M1PL local transport is not implemented on Windows yet — 07 §5's named pipe " +
-		"(\\\\.\\pipe\\omium-mark1-<user-SID>) needs a per-SID security descriptor, and mark1d will not " +
-		"substitute a weaker listener for it; run mark1d under WSL2 or on Linux/macOS")
+const pipePrefix = `\\.\pipe\omium-mark1-`
 
-func SocketPath() (string, error) { return "", ErrNoWindowsFabric }
+// SocketPath is the per-user pipe name; rust/mark1-harden derives the same string from the same token call.
+func SocketPath() (string, error) {
+	sid, err := userSID()
+	if err != nil {
+		return "", err
+	}
+	return pipePrefix + sid, nil
+}
 
-func Listen(string) (net.Listener, error) { return nil, ErrNoWindowsFabric }
+func userSID() (string, error) {
+	u, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return "", fmt.Errorf("fabric: token user: %w", err)
+	}
+	return u.User.Sid.String(), nil
+}
+
+// sddl is the whole boundary: one allow ACE, generic-all, the owner's SID, no inheritance.
+func sddl(sid string) string { return "D:P(A;;GA;;;" + sid + ")" }
+
+// Listen binds the pipe; go-winio takes FILE_FLAG_FIRST_PIPE_INSTANCE, so a held name is a refusal, never a shared endpoint.
+func Listen(path string) (net.Listener, error) {
+	sid, err := userSID()
+	if err != nil {
+		return nil, err
+	}
+	l, err := winio.ListenPipe(path, &winio.PipeConfig{SecurityDescriptor: sddl(sid), MessageMode: false})
+	if err != nil {
+		return nil, fmt.Errorf("fabric: listen %s: %w", path, err)
+	}
+	return l, nil
+}

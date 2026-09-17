@@ -3,6 +3,7 @@ module github.com/Omium-ai/omium-mark1/go/mark1d
 go 1.25.14
 
 require (
+	github.com/Microsoft/go-winio v0.6.2 // 07 §5 Windows named pipe: ListenPipe with an SDDL DACL (fabric)
 	github.com/Omium-ai/omium-mark1/proto/gen/go v0.0.0
 	github.com/fsnotify/fsnotify v1.9.0 // transcript discovery watchers (04 §2.1)
 	github.com/google/uuid v1.6.0 // UUIDv7 (RFC 9562)
