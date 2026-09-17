@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
@@ -41,6 +44,17 @@ type Config struct {
 	Now          func() time.Time // injectable clock for the quiesce debounce
 	// Format is the vendor stream layout; the zero value is claudecode's.
 	Format Format
+	// Agent names the vendor in Sessions(); Roots (the oracle's enabled roots) lets each session carry the root that admitted it. Both optional.
+	Agent string
+	Roots func() []string
+}
+
+// SessionInfo is one admitted session as the control API needs it: the vendor, the enabled root its cwd fell under, and when this manager first opened one of its streams.
+type SessionInfo struct {
+	Agent   string
+	Root    string
+	Cwd     string
+	Started time.Time
 }
 
 // Format is one vendor's stream format: how streams are found under Dir, where
@@ -63,6 +77,85 @@ type Manager struct {
 	ts     map[string]*Tailer // by path
 	cwds   map[string]string  // open stream -> the cwd its admission was granted on
 	denied map[string]bool    // cwd resolved outside the read surface — final per path
+
+	mu       sync.Mutex // sessions only: written on the Run goroutine, read by Resolve on the control API's
+	sessions map[uuid.UUID]SessionInfo
+}
+
+// fleet is every Manager inside Run, the table Resolve reads.
+// ponytail: process-wide so main.go wires the control hub in one line; thread a fleet value through StartTail if two daemons ever share a process.
+var fleet = struct {
+	sync.Mutex
+	m map[*Manager]struct{}
+}{m: map[*Manager]struct{}{}}
+
+// Resolve answers session -> (agent, root) across every running Manager: the control hub's first stop for agents_live, ahead of the Claude Code transcript-head fallback, because a derived (UUIDv5) session id is known only to its vendor's tailer.
+func Resolve(id uuid.UUID) (agent, root string, ok bool) {
+	fleet.Lock()
+	defer fleet.Unlock()
+	for m := range fleet.m {
+		m.mu.Lock()
+		s, hit := m.sessions[id]
+		m.mu.Unlock()
+		if hit {
+			return s.Agent, s.Root, true
+		}
+	}
+	return "", "", false
+}
+
+// Sessions is the read-only session table: every session with an admitted stream since the last CloseFlush, keyed by the PARENT session id.
+func (m *Manager) Sessions() map[uuid.UUID]SessionInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return maps.Clone(m.sessions)
+}
+
+// enclosingRoot is the innermost enabled root containing cwd, canonicalized the way rootSet.Allowed canonicalizes, "" when none (an oracle-admitted cwd always has one).
+func enclosingRoot(roots []string, cwd string) string {
+	if abs, err := filepath.Abs(cwd); err == nil {
+		cwd = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
+	best := ""
+	for _, r := range roots {
+		if (cwd == r || strings.HasPrefix(cwd, r+string(filepath.Separator))) && len(r) > len(best) {
+			best = r
+		}
+	}
+	return best
+}
+
+// RecentCwds is the adapters' recent_projects reader: the cwd each stream head names, newest file first, de-duplicated, only directories still on disk; limit <= 0 is unbounded.
+func RecentCwds(paths []string, cwdOf func([]byte) string, limit int) []string {
+	type file struct {
+		path string
+		mod  time.Time
+	}
+	files := make([]file, 0, len(paths))
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil {
+			files = append(files, file{p, fi.ModTime()})
+		}
+	}
+	slices.SortFunc(files, func(a, b file) int { return b.mod.Compare(a.mod) })
+	out := []string{}
+	for _, f := range files {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		cwd, ok := peekCwd(f.path, cwdOf)
+		if !ok || slices.Contains(out, cwd) {
+			continue
+		}
+		if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
+			continue
+		}
+		out = append(out, cwd)
+	}
+	return out
 }
 
 func NewManager(cfg Config) (*Manager, error) {
@@ -83,7 +176,7 @@ func NewManager(cfg Config) (*Manager, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Manager{cfg: cfg, ts: map[string]*Tailer{}, cwds: map[string]string{}, denied: map[string]bool{}}, nil
+	return &Manager{cfg: cfg, ts: map[string]*Tailer{}, cwds: map[string]string{}, denied: map[string]bool{}, sessions: map[uuid.UUID]SessionInfo{}}, nil
 }
 
 // Run follows the directory until ctx ends, then drains: every pending Usage
@@ -94,6 +187,14 @@ func NewManager(cfg Config) (*Manager, error) {
 // per-stream goroutines — same observable behavior; split if one giant
 // transcript's backlog ever delays siblings measurably.
 func (m *Manager) Run(ctx context.Context) error {
+	fleet.Lock()
+	fleet.m[m] = struct{}{}
+	fleet.Unlock()
+	defer func() {
+		fleet.Lock()
+		delete(fleet.m, m)
+		fleet.Unlock()
+	}()
 	w, werr := fsnotify.NewWatcher()
 	var events chan fsnotify.Event
 	if werr == nil {
@@ -177,6 +278,9 @@ func (m *Manager) revoke() {
 		t.close()
 		delete(m.ts, path)
 		delete(m.cwds, path)
+		m.mu.Lock()
+		delete(m.sessions, t.str.session)
+		m.mu.Unlock()
 		m.cfg.Log.Warn("tailers: stream left the consented read surface mid-session; closed, pending dropped (04 §2.1)",
 			"path", path)
 	}
@@ -201,6 +305,9 @@ func (m *Manager) CloseFlush(ctx context.Context) error {
 	}
 	m.ts = map[string]*Tailer{}
 	m.cwds = map[string]string{}
+	m.mu.Lock()
+	m.sessions = map[uuid.UUID]SessionInfo{}
+	m.mu.Unlock()
 	return firstErr
 }
 
@@ -289,6 +396,16 @@ func (m *Manager) open(path string, role Role, session uuid.UUID) {
 	}
 	m.ts[path] = t
 	m.cwds[path] = cwd
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, dup := m.sessions[session]; dup && role != RoleParent {
+		return // a subagent stream rides its parent's row, whichever was discovered first
+	}
+	root := ""
+	if m.cfg.Roots != nil {
+		root = enclosingRoot(m.cfg.Roots(), cwd)
+	}
+	m.sessions[session] = SessionInfo{Agent: m.cfg.Agent, Root: root, Cwd: cwd, Started: m.cfg.Now()}
 }
 
 // peekCwd bounds for the containment gate: v2.1.251 stamps cwd on every line

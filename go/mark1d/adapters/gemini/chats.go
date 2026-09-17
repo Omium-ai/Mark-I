@@ -39,6 +39,28 @@ type chats struct {
 // keeps ONE tmp tree for every project, so the marker is the containment
 // evidence a directory name cannot be.
 func (c *chats) discover(dir string, open func(path string, role tailers.Role, session uuid.UUID)) {
+	slugs(dir, func(marker, chatsDir string) {
+		if !sameDir(marker, c.root) {
+			return
+		}
+		c.hashes[projectHash(marker)] = marker
+		parents, _ := filepath.Glob(filepath.Join(chatsDir, "session-*.jsonl"))
+		for _, p := range parents {
+			if id, ok := c.head(p); ok {
+				open(p, tailers.RoleParent, id)
+			}
+		}
+		subs, _ := filepath.Glob(filepath.Join(chatsDir, "*", "*.jsonl"))
+		for _, s := range subs {
+			if parent, err := uuid.Parse(filepath.Base(filepath.Dir(s))); err == nil {
+				open(s, tailers.RoleSubagent, parent)
+			}
+		}
+	})
+}
+
+// slugs visits every project slug under the tmp tree that carries a .project_root marker.
+func slugs(dir string, visit func(marker, chatsDir string)) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -52,25 +74,20 @@ func (c *chats) discover(dir string, open func(path string, role tailers.Role, s
 		if err != nil {
 			continue
 		}
-		marker := strings.TrimSpace(string(raw))
-		if !sameDir(marker, c.root) {
-			continue
-		}
-		c.hashes[projectHash(marker)] = marker
-		chatsDir := filepath.Join(slug, "chats")
-		parents, _ := filepath.Glob(filepath.Join(chatsDir, "session-*.jsonl"))
-		for _, p := range parents {
-			if id, ok := c.head(p); ok {
-				open(p, tailers.RoleParent, id)
-			}
-		}
-		subs, _ := filepath.Glob(filepath.Join(chatsDir, "*", "*.jsonl"))
-		for _, s := range subs {
-			if parent, err := uuid.Parse(filepath.Base(filepath.Dir(s))); err == nil {
-				open(s, tailers.RoleSubagent, parent)
-			}
-		}
+		visit(strings.TrimSpace(string(raw)), filepath.Join(slug, "chats"))
 	}
+}
+
+// recentProjects reads every slug's marker into one hash table, then resolves each main chat's projectHash through it, newest chat first.
+func recentProjects(tmp string, limit int) []string {
+	c := &chats{hashes: map[string]string{}}
+	var paths []string
+	slugs(tmp, func(marker, chatsDir string) {
+		c.hashes[projectHash(marker)] = marker
+		p, _ := filepath.Glob(filepath.Join(chatsDir, "session-*.jsonl"))
+		paths = append(paths, p...)
+	})
+	return tailers.RecentCwds(paths, c.cwd, limit)
 }
 
 // projectHash is utils/paths.ts getProjectHash: sha256 hex of the root string.

@@ -48,6 +48,14 @@ type Hub struct {
 	verify      []map[string]any  // GET /v1/verify/events rows, arrival order
 	checkpoints []map[string]any  // GET /v1/receipts rows, arrival order
 	lastRun     map[string]string // anchor id -> occurred_at of its newest vote since boot
+	resolver    func(id uuid.UUID) (agent, root string, ok bool)
+}
+
+// SetSessionResolver installs the tailer fleet's session table (tailers.Resolve): live consults it before the transcript-head fallback, since a derived session id's cwd is known only to its vendor's tailer.
+func (h *Hub) SetSessionResolver(f func(id uuid.UUID) (agent, root string, ok bool)) {
+	h.mu.Lock()
+	h.resolver = f
+	h.mu.Unlock()
 }
 
 func NewHub() *Hub {
@@ -234,7 +242,7 @@ func (h *Hub) subscribe() (<-chan frame, func()) {
 	}
 }
 
-// live resolves each unattributed session's project through resolve (the wire carries no cwd), outside the lock the admitter's Tap takes, and caches a hit.
+// live resolves each unattributed session's project (the wire carries no cwd) outside the lock the admitter's Tap takes, and caches a hit: the fleet resolver first, then resolve (the transcript-head fallback).
 func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSession {
 	h.mu.Lock()
 	out := make([]LiveSession, 0, len(h.sessions))
@@ -243,19 +251,30 @@ func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSessio
 		out = append(out, *s)
 		ids = append(ids, id)
 	}
+	resolver := h.resolver
 	h.mu.Unlock()
 	for i := range out {
-		if out[i].Project != "" || resolve == nil {
+		if out[i].Project != "" {
 			continue
 		}
-		if p := resolve(out[i].Agent, ids[i]); p != "" {
-			out[i].Project = p
-			h.mu.Lock()
-			if s := h.sessions[ids[i]]; s != nil {
-				s.Project = p
+		p := ""
+		if resolver != nil {
+			if agent, root, ok := resolver(ids[i]); ok && (agent == "" || agent == out[i].Agent) {
+				p = root
 			}
-			h.mu.Unlock()
 		}
+		if p == "" && resolve != nil {
+			p = resolve(out[i].Agent, ids[i])
+		}
+		if p == "" {
+			continue
+		}
+		out[i].Project = p
+		h.mu.Lock()
+		if s := h.sessions[ids[i]]; s != nil {
+			s.Project = p
+		}
+		h.mu.Unlock()
 	}
 	return out
 }

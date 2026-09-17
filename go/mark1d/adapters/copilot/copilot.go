@@ -317,5 +317,17 @@ func (a *Adapter) StartTail(ws adapters.Workspace, set tailers.WorkspaceSet, cfg
 		Emit:         cfg.Emit,
 		Log:          cfg.Log,
 		Format:       eventsFormat(cfg),
+		Agent:        a.Name(),
+		Roots:        set.Roots,
 	})
+}
+
+// RecentProjects is the context.cwd each session.start names, newest events.jsonl first (recent_projects on GET /v1/agents); limit <= 0 is unbounded.
+func (a *Adapter) RecentProjects(limit int) []string {
+	dir, err := a.SessionStateDir()
+	if err != nil {
+		return []string{}
+	}
+	paths, _ := filepath.Glob(filepath.Join(dir, "*", "events.jsonl"))
+	return tailers.RecentCwds(paths, startCwd, limit)
 }

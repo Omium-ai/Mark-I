@@ -281,5 +281,7 @@ func (a *Adapter) StartTail(ws adapters.Workspace, set tailers.WorkspaceSet, cfg
 		Observe:      cfg.Observe,
 		Emit:         cfg.Emit,
 		Log:          cfg.Log,
+		Agent:        "claudecode",
+		Roots:        set.Roots,
 	})
 }

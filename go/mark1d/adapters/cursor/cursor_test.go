@@ -371,3 +371,9 @@ func TestRefusals(t *testing.T) {
 		t.Fatalf("corrupt manifest must refuse: %v", err)
 	}
 }
+
+func TestRecentProjectsIsAnEmptyListWithoutASessionTree(t *testing.T) {
+	if got := (&Adapter{Home: t.TempDir()}).RecentProjects(0); got == nil || len(got) != 0 {
+		t.Fatalf("cursor has no local session tree; recent_projects must be [] not null: %v", got)
+	}
+}

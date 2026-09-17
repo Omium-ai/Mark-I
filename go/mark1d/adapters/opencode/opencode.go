@@ -298,5 +298,17 @@ func (a *Adapter) StartTail(ws adapters.Workspace, set tailers.WorkspaceSet, cfg
 		Emit:         cfg.Emit,
 		Log:          cfg.Log,
 		Format:       captureFormat(),
+		Agent:        a.Name(),
+		Roots:        set.Roots,
 	})
+}
+
+// RecentProjects is the path.cwd each capture's first assistant message.updated names, newest capture first (recent_projects on GET /v1/agents); limit <= 0 is unbounded.
+func (a *Adapter) RecentProjects(limit int) []string {
+	dir, err := a.CaptureDir()
+	if err != nil {
+		return []string{}
+	}
+	paths, _ := filepath.Glob(filepath.Join(dir, "ses_*.jsonl"))
+	return tailers.RecentCwds(paths, assistantCwd, limit)
 }

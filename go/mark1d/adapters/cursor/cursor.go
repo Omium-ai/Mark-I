@@ -160,6 +160,9 @@ func (a *Adapter) paths() (target, state string, err error) {
 	return filepath.Join(dir, "hooks.json"), state, nil
 }
 
+// RecentProjects is always empty: Cursor keeps no local session tree (Surfaces is hooks only), so no head names a cwd.
+func (a *Adapter) RecentProjects(int) []string { return []string{} }
+
 // Surfaces: hooks only. state.vscdb's tokenCount is context occupancy, the
 // CLI's stream-json is a process's stdout rather than a file, and the enterprise
 // OTLP export is customer infrastructure — none is a durable local Usage surface.

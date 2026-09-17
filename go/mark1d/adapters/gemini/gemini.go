@@ -256,5 +256,16 @@ func (a *Adapter) StartTail(ws adapters.Workspace, set tailers.WorkspaceSet, cfg
 		Emit:         cfg.Emit,
 		Log:          cfg.Log,
 		Format:       chatsFormat(root),
+		Agent:        a.Name(),
+		Roots:        set.Roots,
 	})
+}
+
+// RecentProjects is the .project_root marker each main chat's projectHash resolves to, newest chat first (recent_projects on GET /v1/agents); limit <= 0 is unbounded.
+func (a *Adapter) RecentProjects(limit int) []string {
+	tmp, err := a.TmpDir()
+	if err != nil {
+		return []string{}
+	}
+	return recentProjects(tmp, limit)
 }

@@ -254,7 +254,19 @@ func (a *Adapter) StartTail(ws adapters.Workspace, set tailers.WorkspaceSet, cfg
 		Observe:      cfg.Observe,
 		Log:          cfg.Log,
 		Format:       rolloutFormat(),
+		Agent:        a.Name(),
+		Roots:        set.Roots,
 	})
+}
+
+// RecentProjects is the cwd each rollout's session_meta names, newest rollout first (recent_projects on GET /v1/agents); limit <= 0 is unbounded.
+func (a *Adapter) RecentProjects(limit int) []string {
+	dir, err := a.SessionsDir()
+	if err != nil {
+		return []string{}
+	}
+	paths, _ := filepath.Glob(filepath.Join(dir, "*", "*", "*", "rollout-*.jsonl"))
+	return tailers.RecentCwds(paths, sessionMetaCwd, limit)
 }
 
 // TailExec is reader (b): wrap a `codex exec --json` stdout for workspace cwd.
