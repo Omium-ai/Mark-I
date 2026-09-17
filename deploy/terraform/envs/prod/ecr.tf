@@ -1,5 +1,5 @@
 resource "aws_ecr_repository" "mark1" {
-  for_each = toset(["controld", "intel", "adjudicator"])
+  for_each = toset(["controld", "intel", "adjudicator", "migrate"])
 
   name                 = "omium/mark1-${each.value}"
   image_tag_mutability = "IMMUTABLE"

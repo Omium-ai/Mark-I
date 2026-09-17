@@ -479,6 +479,7 @@ jobs:
           - { name: controld,    dockerfile: go/controld/Dockerfile }
           - { name: intel,       dockerfile: python/intel/Dockerfile }
           - { name: adjudicator, dockerfile: python/adjudicator/Dockerfile }
+          - { name: migrate,     dockerfile: deploy/helm/omium-mark1/migrate/Dockerfile }
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/configure-aws-credentials@v4
