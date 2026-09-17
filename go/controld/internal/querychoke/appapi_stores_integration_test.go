@@ -238,35 +238,7 @@ func plant(t *testing.T, r *appRig, tenant uuid.UUID, tokens uint64) planted {
 	idem := make([]byte, 32)
 	idem[0] = 1
 	ev := func(seq uint64, task uuid.UUID, body any) *m1pv1.Event {
-		e := &m1pv1.Event{EventId: v7b(), Seq: seq, SessionEpoch: 1, SessionId: p.session[:], OccurredAt: timestamppb.New(at.Add(time.Duration(seq) * time.Second))}
-		if task != uuid.Nil {
-			e.TaskId = task[:]
-		}
-		switch b := body.(type) {
-		case *m1pv1.SessionStart:
-			e.Body = &m1pv1.Event_SessionStart{SessionStart: b}
-		case *m1pv1.TaskOpen:
-			e.Body = &m1pv1.Event_TaskOpen{TaskOpen: b}
-		case *m1pv1.TaskClose:
-			e.Body = &m1pv1.Event_TaskClose{TaskClose: b}
-		case *m1pv1.Usage:
-			e.Body = &m1pv1.Event_Usage{Usage: b}
-		case *m1pv1.VerdictEvent:
-			e.Body = &m1pv1.Event_VerdictEvent{VerdictEvent: b}
-		case *m1pv1.AnchorVote:
-			e.Body = &m1pv1.Event_AnchorVote{AnchorVote: b}
-		case *m1pv1.MemoryInjection:
-			e.Body = &m1pv1.Event_MemoryInjection{MemoryInjection: b}
-		case *m1pv1.RouteDecision:
-			e.Body = &m1pv1.Event_RouteDecision{RouteDecision: b}
-		case *m1pv1.GuardDecision:
-			e.Body = &m1pv1.Event_GuardDecision{GuardDecision: b}
-		case *m1pv1.ReceiptCheckpoint:
-			e.Body = &m1pv1.Event_ReceiptCheckpoint{ReceiptCheckpoint: b}
-		default:
-			t.Fatalf("unhandled body %T", body)
-		}
-		return e
+		return evFor(t, p.session, at, seq, task, body)
 	}
 	artifact := uuid.New()
 	batch := &m1pv1.Batch{
@@ -305,6 +277,125 @@ func plant(t *testing.T, r *appRig, tenant uuid.UUID, tokens uint64) planted {
 func v7b() []byte {
 	id := uuid.Must(uuid.NewV7())
 	return id[:]
+}
+
+func evFor(t *testing.T, session uuid.UUID, at time.Time, seq uint64, task uuid.UUID, body any) *m1pv1.Event {
+	t.Helper()
+	e := &m1pv1.Event{EventId: v7b(), Seq: seq, SessionEpoch: 1, SessionId: session[:], OccurredAt: timestamppb.New(at.Add(time.Duration(seq) * time.Second))}
+	if task != uuid.Nil {
+		e.TaskId = task[:]
+	}
+	switch b := body.(type) {
+	case *m1pv1.SessionStart:
+		e.Body = &m1pv1.Event_SessionStart{SessionStart: b}
+	case *m1pv1.TaskOpen:
+		e.Body = &m1pv1.Event_TaskOpen{TaskOpen: b}
+	case *m1pv1.TaskClose:
+		e.Body = &m1pv1.Event_TaskClose{TaskClose: b}
+	case *m1pv1.Usage:
+		e.Body = &m1pv1.Event_Usage{Usage: b}
+	case *m1pv1.VerdictEvent:
+		e.Body = &m1pv1.Event_VerdictEvent{VerdictEvent: b}
+	case *m1pv1.AnchorVote:
+		e.Body = &m1pv1.Event_AnchorVote{AnchorVote: b}
+	case *m1pv1.MemoryInjection:
+		e.Body = &m1pv1.Event_MemoryInjection{MemoryInjection: b}
+	case *m1pv1.RouteDecision:
+		e.Body = &m1pv1.Event_RouteDecision{RouteDecision: b}
+	case *m1pv1.GuardDecision:
+		e.Body = &m1pv1.Event_GuardDecision{GuardDecision: b}
+	case *m1pv1.ReceiptCheckpoint:
+		e.Body = &m1pv1.Event_ReceiptCheckpoint{ReceiptCheckpoint: b}
+	default:
+		t.Fatalf("unhandled body %T", body)
+	}
+	return e
+}
+
+// The agent every app surface reports is the SESSION's (its SessionStart), not whichever batch-level SdkInfo.agent chproj happened to stamp on the row: a codex session whose SessionStart landed in an earlier batch than its moments, on a device whose SdkInfo says claudecode, reads codex everywhere; a session with no SessionStart in the window keeps its stamped agent rather than going blank.
+func TestIntegrationAgentIsTheSessionsNotTheBatchStamp(t *testing.T) {
+	r := setupApp(t)
+	ctx := context.Background()
+	tenant, device := uuid.New(), uuid.New()
+	at := time.Now().UTC().Add(-2 * time.Hour)
+	codex, orphan := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	taskC, taskO := uuid.New(), uuid.New()
+	idem := make([]byte, 32)
+	idem[0] = 9
+	agentCol := 0
+	for i, c := range chproj.Columns {
+		if c == "agent" {
+			agentCol = i
+		}
+	}
+	land := func(sdkAgent string, legacy bool, events ...*m1pv1.Event) [][]any {
+		t.Helper()
+		rows := chproj.RowsFromBatch(&m1pv1.Batch{BatchId: v7b(), SessionId: events[0].SessionId, Sdk: &m1pv1.SdkInfo{Agent: sdkAgent}, SentAt: timestamppb.New(at), Events: events}, tenant, device, at)
+		for _, row := range rows {
+			if legacy {
+				row[agentCol] = ""
+			}
+		}
+		if err := r.ingest.InsertRows(ctx, chproj.Table, chproj.Columns, rows); err != nil {
+			t.Fatalf("projection insert: %v", err)
+		}
+		return rows
+	}
+	land("claudecode", false,
+		evFor(t, codex, at, 1, uuid.Nil, &m1pv1.SessionStart{Agent: "codex", CapturePaths: []m1pv1.CapturePath{m1pv1.CapturePath_CAPTURE_PATH_HOOKS}}),
+		evFor(t, codex, at, 2, taskC, &m1pv1.TaskOpen{TaskSegVersion: "task_seg.v1"}))
+	later := land("claudecode", false,
+		evFor(t, codex, at, 3, taskC, &m1pv1.RouteDecision{DecisionId: v7b(), Action: "mid", Candidates: []string{"small", "mid"}, Propensity: 1, Fidelity: m1pv1.RouteFidelity_ROUTE_FIDELITY_WIRE_ENFORCED, BundleSeq: 1}),
+		evFor(t, codex, at, 4, taskC, &m1pv1.Usage{IdemKey: idem, Model: "mid", InputTokens: 7, OutputTokens: 1}),
+		evFor(t, codex, at, 5, taskC, &m1pv1.GuardDecision{Outcome: m1pv1.GuardOutcome_GUARD_OUTCOME_REFUSED, SampleRate: 1, ReasonCode: "knee_arrest"}),
+		evFor(t, codex, at, 6, taskC, &m1pv1.MemoryInjection{ArtifactIds: [][]byte{v7b()}, Channel: m1pv1.InjectionChannel_INJECTION_CHANNEL_HOOK_CONTEXT, TokensUsed: 1}))
+	for _, row := range later {
+		if row[agentCol] != "claudecode" {
+			t.Fatalf("precondition: the later batch's rows carry the device stamp, got %v", row[agentCol])
+		}
+	}
+	land("gemini", false,
+		evFor(t, orphan, at, 1, taskO, &m1pv1.TaskOpen{TaskSegVersion: "task_seg.v1"}),
+		evFor(t, orphan, at, 2, taskO, &m1pv1.RouteDecision{DecisionId: v7b(), Action: "small", Candidates: []string{"small"}, Propensity: 1, Fidelity: m1pv1.RouteFidelity_ROUTE_FIDELITY_CONFIG_STEERED, BundleSeq: 1}),
+		evFor(t, orphan, at, 3, taskO, &m1pv1.GuardDecision{Outcome: m1pv1.GuardOutcome_GUARD_OUTCOME_REFUSED, SampleRate: 1, ReasonCode: "knee_arrest"}))
+	// Pre-fix rows: an unarmed daemon stamped '' on every row; the SessionStart payload still names the agent.
+	legacy, taskL := uuid.Must(uuid.NewV7()), uuid.New()
+	land("", true,
+		evFor(t, legacy, at, 1, uuid.Nil, &m1pv1.SessionStart{Agent: "opencode"}),
+		evFor(t, legacy, at, 2, taskL, &m1pv1.TaskOpen{TaskSegVersion: "task_seg.v1"}),
+		evFor(t, legacy, at, 3, taskL, &m1pv1.RouteDecision{DecisionId: v7b(), Action: "small", Candidates: []string{"small"}, Propensity: 1, Fidelity: m1pv1.RouteFidelity_ROUTE_FIDELITY_CONFIG_STEERED, BundleSeq: 1}),
+		evFor(t, legacy, at, 4, taskL, &m1pv1.GuardDecision{Outcome: m1pv1.GuardOutcome_GUARD_OUTCOME_REFUSED, SampleRate: 1, ReasonCode: "knee_arrest"}))
+
+	want := map[string]string{codex.String(): "codex", orphan.String(): "gemini", legacy.String(): "opencode"}
+	check := func(path string, items []any) {
+		t.Helper()
+		seen := map[string]int{}
+		for _, it := range items {
+			m := it.(map[string]any)
+			sid := m["session_id"].(string)
+			if m["agent"] != want[sid] {
+				t.Errorf("%s: session %s reads agent %v, want %s", path, sid, m["agent"], want[sid])
+			}
+			seen[sid]++
+		}
+		if len(seen) != len(want) {
+			t.Errorf("%s: want every session, saw %v", path, seen)
+		}
+	}
+	for path, key := range map[string]string{"/api/v1/sessions?window=2d": "sessions", "/api/v1/moments?since=" + at.Add(-time.Hour).Format(time.RFC3339): "moments", "/api/v1/route/decisions?window=2d": "decisions"} {
+		code, raw := r.get(path, tenant)
+		if code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, code, raw)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatal(err)
+		}
+		check(path, body[key].([]any))
+	}
+	if _, raw := r.get("/api/v1/sessions?window=2d&agent=codex", tenant); !strings.Contains(string(raw), codex.String()) || strings.Contains(string(raw), orphan.String()) {
+		t.Fatalf("agent filter must see the SessionStart agent: %s", raw)
+	}
 }
 
 func TestIntegrationAppRoutesOverPlantedLedger(t *testing.T) {

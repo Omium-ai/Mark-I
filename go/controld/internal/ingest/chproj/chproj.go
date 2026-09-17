@@ -98,7 +98,13 @@ func RowsFromBatch(b *m1pv1.Batch, tenant, device uuid.UUID, receivedAt time.Tim
 		batchID = uuid.Nil // stage 6 guarantees this cannot happen post-ack
 	}
 	sessionID := uuidOrNil(b.GetSessionId())
-	agent := b.GetSdk().GetAgent()
+	agents := sessionAgents(b)
+	agentOf := func(session uuid.UUID) string {
+		if a, ok := agents[session]; ok {
+			return a
+		}
+		return b.GetSdk().GetAgent()
+	}
 
 	// Replay determinism: client-stamped times only, falling back to sent_at,
 	// so a §2.5 re-projection produces byte-equal ordering keys and the
@@ -119,12 +125,25 @@ func RowsFromBatch(b *m1pv1.Batch, tenant, device uuid.UUID, receivedAt time.Tim
 			unknownEventTypes.Inc()
 			continue
 		}
-		rows = append(rows, eventRow(ev, tenant, device, agent, fallbackAt))
+		rows = append(rows, eventRow(ev, tenant, device, agentOf(uuidOrNil(ev.GetSessionId())), fallbackAt))
 	}
 	for i, d := range b.GetDropped() {
-		rows = append(rows, droppedRow(d, i, batchID, tenant, device, sessionID, agent, fallbackAt))
+		rows = append(rows, droppedRow(d, i, batchID, tenant, device, sessionID, agentOf(sessionID), fallbackAt))
 	}
 	return rows
+}
+
+// sessionAgents: SessionStart.agent is the per-session truth (07 §3); SdkInfo.agent is device-wide and only the fallback.
+func sessionAgents(b *m1pv1.Batch) map[uuid.UUID]string {
+	agents := map[uuid.UUID]string{}
+	for _, ev := range b.GetEvents() {
+		if a := ev.GetSessionStart().GetAgent(); a != "" {
+			if session := uuidOrNil(ev.GetSessionId()); session != uuid.Nil {
+				agents[session] = a
+			}
+		}
+	}
+	return agents
 }
 
 func eventRow(ev *m1pv1.Event, tenant, device uuid.UUID, agent string, fallbackAt time.Time) []any {

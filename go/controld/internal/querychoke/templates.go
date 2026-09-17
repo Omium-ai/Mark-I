@@ -249,15 +249,15 @@ ORDER BY e.task_id, e.attempt_n`,
 		timeout:  timeoutReport,
 	},
 	{
-		// inputs.py decision_row over [from, to]: served_model = the FIRST later Usage in the task ('' = none observed), verdict/label_confidence from the latest stage-final verdict (NULL confidence = uncertified); one scan, (session_epoch, seq) order, never occurred_at.
+		// inputs.py decision_row over [from, to]: served_model = the FIRST later Usage in the task ('' = none observed), verdict/label_confidence from the latest stage-final verdict (NULL confidence = uncertified); one scan, (session_epoch, seq) order, never occurred_at. agent is the session's SessionStart agent when that row is in the window, else the row's own stamp.
 		name:    "ope_route_decisions",
-		version: "ope_route_decisions.v1",
+		version: "ope_route_decisions.v2",
 		body: `SELECT e.event_id AS decision_id,
        e.task_id AS task_id,
        e.session_id AS session_id,
        e.session_epoch AS session_epoch,
        e.seq AS seq,
-       e.agent AS agent,
+       if(e.start_agent != '', e.start_agent, e.agent) AS agent,
        JSONExtractString(e.payload, 'action') AS action,
        JSONExtract(e.payload, 'candidates', 'Array(String)') AS candidates,
        e.propensity AS propensity,
@@ -268,6 +268,7 @@ ORDER BY e.task_id, e.attempt_n`,
        e.cert_stage AS verdict_stage,
        if(e.cert_stage = '', NULL, e.cert_conf) AS label_confidence
 FROM (SELECT event_id, task_id, session_id, session_epoch, seq, agent, payload, propensity, fidelity, bundle_seq, event_type,
+             anyIf(JSONExtractString(payload, 'agent'), event_type = 'SessionStart') OVER (PARTITION BY session_id) AS start_agent,
              argMinIf(model, (session_epoch, seq), event_type = 'Usage' AND model != '')
                  OVER (PARTITION BY task_id ORDER BY session_epoch, seq ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS next_model,
              argMaxIf(verdict, (session_epoch, seq), verdict_stage IN ('certified', 'revised'))
@@ -282,8 +283,8 @@ FROM (SELECT event_id, task_id, session_id, session_epoch, seq, agent, payload, 
             FROM m1p_events
             WHERE {{tenant_pred}}
               AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
-              AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
-              AND event_type IN ('RouteDecision', 'Usage', 'VerdictEvent')
+              AND (task_id != toUUID('00000000-0000-0000-0000-000000000000') OR event_type = 'SessionStart')
+              AND event_type IN ('SessionStart', 'RouteDecision', 'Usage', 'VerdictEvent')
             LIMIT 1 BY event_id) AS d) AS e
 WHERE e.event_type = 'RouteDecision'
 ORDER BY e.session_epoch, e.seq, e.event_id`,

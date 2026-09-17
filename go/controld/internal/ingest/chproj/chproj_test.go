@@ -361,3 +361,52 @@ func TestStamperCacheExpiresAndErrorsFailClosed(t *testing.T) {
 		t.Fatalf("a failed regime read must fail the projection (retry, then park), not insert: err=%v rows=%v", err, rec.rows)
 	}
 }
+
+// agent is per session, from that session's SessionStart when the batch carries it, in either order; SdkInfo.agent only covers a session whose SessionStart is elsewhere (and Dropped, which files under the batch head's session).
+func TestAgentStampedPerSessionFromSessionStart(t *testing.T) {
+	tenant, device := uuid.New(), uuid.New()
+	cc, cx, orphan, batchID := v7(t), v7(t), v7(t), v7(t)
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	ev := func(session uuid.UUID, body any) *m1pv1.Event {
+		e := &m1pv1.Event{EventId: v7b(t), Seq: 1, SessionId: session[:], OccurredAt: timestamppb.New(at)}
+		switch b := body.(type) {
+		case *m1pv1.SessionStart:
+			e.Body = &m1pv1.Event_SessionStart{SessionStart: b}
+		case *m1pv1.Usage:
+			e.Body = &m1pv1.Event_Usage{Usage: b}
+		case *m1pv1.RouteDecision:
+			e.Body = &m1pv1.Event_RouteDecision{RouteDecision: b}
+		}
+		return e
+	}
+	b := &m1pv1.Batch{
+		BatchId: batchID[:], SessionId: orphan[:], Sdk: &m1pv1.SdkInfo{Agent: "claudecode"},
+		Events: []*m1pv1.Event{
+			ev(cc, &m1pv1.SessionStart{Agent: "claudecode"}),
+			ev(cx, &m1pv1.Usage{Model: "gpt-5"}),
+			ev(cx, &m1pv1.SessionStart{Agent: "codex"}),
+			ev(cc, &m1pv1.Usage{Model: "claude-test-1"}),
+			ev(cx, &m1pv1.RouteDecision{Action: "mid"}),
+			ev(orphan, &m1pv1.Usage{Model: "gemini-pro"}),
+			ev(orphan, &m1pv1.SessionStart{}),
+		},
+		Dropped: []*m1pv1.Dropped{{Quantity: 1}},
+	}
+	rows := RowsFromBatch(b, tenant, device, at)
+	want := []string{"claudecode", "codex", "codex", "claudecode", "codex", "claudecode", "claudecode", "claudecode"}
+	if len(rows) != len(want) {
+		t.Fatalf("want %d rows, got %d", len(want), len(rows))
+	}
+	for i, w := range want {
+		if got := rows[i][col(t, "agent")]; got != w {
+			t.Errorf("row %d (%v): agent %q, want %q", i, rows[i][col(t, "event_type")], got, w)
+		}
+	}
+	b.Sdk = nil
+	if got := RowsFromBatch(b, tenant, device, at)[5][col(t, "agent")]; got != "" {
+		t.Errorf("no SessionStart and no SdkInfo: agent %q, want empty", got)
+	}
+	if got := RowsFromBatch(b, tenant, device, at)[2][col(t, "agent")]; got != "codex" {
+		t.Errorf("SessionStart beats a missing SdkInfo: agent %q", got)
+	}
+}

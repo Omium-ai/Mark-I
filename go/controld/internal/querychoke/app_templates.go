@@ -7,9 +7,9 @@ var appTemplates = []template{
 	{
 		// appapi GET /sessions (desktop spec §5.2): one row per session over [from, to]; project = SessionStart.workspace_id hex, capture_paths the protojson enum names; arrests are task-bearing GuardDecision rows (the `interventions` reading). ponytail: agent/project/cursor filters are applied by the handler over this window scan; push them into the template when a tenant's window outgrows the row limit.
 		name:    "app_sessions",
-		version: "app_sessions.v1",
+		version: "app_sessions.v2",
 		body: `SELECT e.session_id AS session_id,
-       any(e.agent) AS agent,
+       coalesce(nullIf(anyIf(JSONExtractString(e.payload, 'agent'), e.event_type = 'SessionStart'), ''), anyIf(e.agent, e.agent != '')) AS agent,
        hex(base64Decode(maxIf(JSONExtractString(e.payload, 'workspace_id'), e.event_type = 'SessionStart'))) AS project,
        anyIf(JSONExtract(e.payload, 'capture_paths', 'Array(String)'), e.event_type = 'SessionStart') AS capture_paths,
        min(e.occurred_at) AS started_at,
@@ -61,17 +61,23 @@ LIMIT 1 BY event_id`,
 		timeout:  timeoutReport,
 	},
 	{
-		// appapi GET /moments (desktop spec §5.1): arrests (task-bearing GuardDecision), injections and route decisions over [from, to], newest first; the handler cuts at ?since.
+		// appapi GET /moments (desktop spec §5.1): arrests (task-bearing GuardDecision), injections and route decisions over [from, to], newest first; the handler cuts at ?since. agent is the session's SessionStart agent when that row is in the window, else the row's own stamp (chproj: SdkInfo.agent when the SessionStart was in an earlier batch).
 		name:    "app_moments",
-		version: "app_moments.v1",
-		body: `SELECT event_id, occurred_at, session_id, task_id, agent, event_type, propensity, fidelity, bundle_seq, payload
-FROM m1p_events
-WHERE {{tenant_pred}}
-  AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
-  AND event_type IN ('GuardDecision', 'MemoryInjection', 'RouteDecision')
-  AND (event_type != 'GuardDecision' OR task_id != toUUID('00000000-0000-0000-0000-000000000000'))
-ORDER BY occurred_at DESC, event_id DESC
-LIMIT 1 BY event_id`,
+		version: "app_moments.v2",
+		body: `SELECT e.event_id AS event_id, e.occurred_at AS occurred_at, e.session_id AS session_id, e.task_id AS task_id,
+       if(e.start_agent != '', e.start_agent, e.agent) AS agent,
+       e.event_type AS event_type, e.propensity AS propensity, e.fidelity AS fidelity, e.bundle_seq AS bundle_seq, e.payload AS payload
+FROM (SELECT event_id, occurred_at, session_id, task_id, agent, event_type, propensity, fidelity, bundle_seq, payload,
+             anyIf(JSONExtractString(payload, 'agent'), event_type = 'SessionStart') OVER (PARTITION BY session_id) AS start_agent
+      FROM (SELECT event_id, occurred_at, session_id, task_id, agent, event_type, propensity, fidelity, bundle_seq, payload
+            FROM m1p_events
+            WHERE {{tenant_pred}}
+              AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
+              AND event_type IN ('SessionStart', 'GuardDecision', 'MemoryInjection', 'RouteDecision')
+              AND (event_type != 'GuardDecision' OR task_id != toUUID('00000000-0000-0000-0000-000000000000'))
+            LIMIT 1 BY event_id) AS d) AS e
+WHERE e.event_type != 'SessionStart'
+ORDER BY e.occurred_at DESC, e.event_id DESC`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},
 		rowLimit: 10_000,

@@ -265,7 +265,9 @@ func TestIntelReadTemplatesServeTheirConsumers(t *testing.T) {
 			"if(e.cert_stage = '', NULL, e.cert_conf) AS label_confidence", // uncertified ⇒ NULL, never zero-filled
 			"verdict_stage IN ('certified', 'revised')",
 			"WHERE e.event_type = 'RouteDecision'",
-			"event_type IN ('RouteDecision', 'Usage', 'VerdictEvent')",
+			"event_type IN ('SessionStart', 'RouteDecision', 'Usage', 'VerdictEvent')",
+			"anyIf(JSONExtractString(payload, 'agent'), event_type = 'SessionStart') OVER (PARTITION BY session_id) AS start_agent", // agent is the session's, not the row's stamp
+			"if(e.start_agent != '', e.start_agent, e.agent) AS agent",
 			closedWindow,
 		}},
 		"corpus_candidates": {params: dayDay, terms: []string{
@@ -663,5 +665,41 @@ func TestServiceCredentialSeam(t *testing.T) {
 	}
 	if _, err := FromServiceJob(cred, uuid.New()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The app surfaces read a session's agent from its SessionStart (the per-session truth), never from whichever row's chproj stamp happened to be first; the fallback keeps a stamped agent for a session whose SessionStart is outside the window.
+func TestAppTemplatesReadTheSessionsAgent(t *testing.T) {
+	reg, err := LoadTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, terms := range map[string][]string{
+		"app_sessions": {
+			"coalesce(nullIf(anyIf(JSONExtractString(e.payload, 'agent'), e.event_type = 'SessionStart'), ''), anyIf(e.agent, e.agent != '')) AS agent",
+		},
+		"app_moments": {
+			"anyIf(JSONExtractString(payload, 'agent'), event_type = 'SessionStart') OVER (PARTITION BY session_id) AS start_agent",
+			"if(e.start_agent != '', e.start_agent, e.agent) AS agent",
+			"event_type IN ('SessionStart', 'GuardDecision', 'MemoryInjection', 'RouteDecision')",
+			"WHERE e.event_type != 'SessionStart'",
+			"LIMIT 1 BY event_id",
+		},
+	} {
+		tpl, err := reg.Lookup(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(tpl.Version(), ".v2") {
+			t.Errorf("%s: version %s, the agent read changed the row contract", name, tpl.Version())
+		}
+		for _, w := range terms {
+			if !strings.Contains(tpl.t.body, w) {
+				t.Errorf("%s lost its agent contract term %q:\n%s", name, w, tpl.t.body)
+			}
+		}
+		if strings.Contains(tpl.t.body, "any(e.agent)") {
+			t.Errorf("%s reads the first stamped row's agent, not the session's", name)
+		}
 	}
 }
