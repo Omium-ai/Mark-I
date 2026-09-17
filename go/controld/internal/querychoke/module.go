@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -156,6 +157,7 @@ func (m *Module) run(w http.ResponseWriter, r *http.Request, q Query) (*Rows, bo
 			writeErr(w, http.StatusServiceUnavailable, "M1E-9500", "query concurrency limit; retry")
 			return nil, false
 		}
+		slog.Error("querychoke: query failed", "template", q.tpl.name, "err", err)
 		writeErr(w, http.StatusInternalServerError, "M1E-9500", "query execution failed")
 		return nil, false
 	}

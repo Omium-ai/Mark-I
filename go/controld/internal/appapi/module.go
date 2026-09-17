@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -136,6 +137,7 @@ func (m *Module) query(w http.ResponseWriter, r *http.Request, tid querychoke.Te
 			writeErr(w, http.StatusServiceUnavailable, "M1E-9500", "query concurrency limit; retry")
 			return nil, false
 		}
+		slog.Error("appapi: query failed", "template", name, "err", err)
 		writeErr(w, http.StatusInternalServerError, "M1E-9500", "query execution failed")
 		return nil, false
 	}
