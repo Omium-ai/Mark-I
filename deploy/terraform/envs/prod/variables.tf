@@ -23,9 +23,11 @@ variable "namespace" {
 }
 
 variable "github_release_subjects" {
-  description = "GitHub OIDC sub claims allowed to assume the release role: main pushes (ci.yml image build) and edge/v* tags (release.yml). Add ref patterns per workflow; never a bare *."
+  description = "GitHub OIDC sub claims allowed to assume the release role: main pushes (ci.yml image build) and edge/v* tags (release.yml). Mark-I issues the immutable subject (owner@id/repo@id — GET /repos/Omium-ai/Mark-I/actions/oidc/customization/sub); the plain form is kept for a repo whose template changes. Never a bare *."
   type        = list(string)
   default = [
+    "repo:Omium-ai@215824412/Mark-I@1349603249:ref:refs/heads/main",
+    "repo:Omium-ai@215824412/Mark-I@1349603249:ref:refs/tags/edge/v*",
     "repo:Omium-ai/Mark-I:ref:refs/heads/main",
     "repo:Omium-ai/Mark-I:ref:refs/tags/edge/v*",
   ]
