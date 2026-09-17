@@ -19,7 +19,7 @@
           "at": { "type": ["string", "null"], "format": "date-time", "description": "from the UUIDv7 decision id; null for a non-v7 id" },
           "task_id": { "type": "string", "format": "uuid" },
           "session_id": { "type": "string", "format": "uuid" },
-          "agent": { "type": "string" },
+          "agent": { "$ref": "sessions.json#/$defs/agent" },
           "action": { "type": "string" },
           "candidates": { "type": "array", "items": { "type": "string" } },
           "propensity": { "type": "number", "minimum": 0, "maximum": 1 },

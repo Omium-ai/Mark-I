@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/receipts_export.json",
+  "title": "GET /api/v1/receipts/export (one JSONL line)",
+  "description": "The receipts module's verifier-food export: application/x-ndjson, one signed receipt per line in chain order from ?since_seq, exactly tools/verifier's ExportRow. payload is the canonical text that was signed (a checkpoint's carries checkpoint_seq, merkle_root, leaf_count, device_key_id, issued_at); receipt_hash_hex of the newest line is the local chain view's head.hash. Witness heads are GET /api/v1/receipts/witness, not a per-line field.",
+  "type": "object",
+  "required": ["seq", "payload", "receipt_hash_hex", "server_key_id", "server_signature_hex"],
+  "additionalProperties": false,
+  "properties": {
+    "seq": { "type": "integer", "minimum": 1 },
+    "payload": { "type": "string" },
+    "receipt_hash_hex": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "device_key_id": { "type": "string", "pattern": "^ed25519:[0-9a-f]{16}$", "description": "present on device-originated receipts (checkpoints, redactions)" },
+    "device_signature_hex": { "type": "string", "pattern": "^[0-9a-f]{128}$" },
+    "server_key_id": { "type": "string", "pattern": "^ed25519:[0-9a-f]{16}$" },
+    "server_signature_hex": { "type": "string", "pattern": "^[0-9a-f]{128}$" }
+  }
+}

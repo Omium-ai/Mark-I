@@ -13,6 +13,7 @@
     "honesty": { "$ref": "honesty.json" }
   },
   "$defs": {
+    "agent": { "type": "string", "enum": ["claudecode", "codex", "gemini", "opencode", "copilot", "cursor", "crush"], "description": "the daemon's catalog name, the string SdkInfo.agent and SessionStart.agent carry on the wire (desktop spec §7.1); the m1p_events.agent column is written verbatim from it" },
     "window": {
       "type": "object",
       "required": ["from", "to"],
@@ -28,7 +29,7 @@
       "additionalProperties": false,
       "properties": {
         "session_id": { "type": "string", "format": "uuid" },
-        "agent": { "type": "string" },
+        "agent": { "$ref": "#/$defs/agent" },
         "project": { "type": "string", "description": "hex of HMAC_tenant(workspace root); empty when no SessionStart landed. Never a path.", "pattern": "^([0-9a-f]{64})?$" },
         "started_at": { "type": "string", "format": "date-time" },
         "ended_at": { "type": "string", "format": "date-time" },

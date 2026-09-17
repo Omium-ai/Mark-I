@@ -20,7 +20,7 @@
           "event_id": { "type": "string", "format": "uuid" },
           "session_id": { "type": "string", "format": "uuid" },
           "task_id": { "type": ["string", "null"], "format": "uuid" },
-          "agent": { "type": "string" },
+          "agent": { "$ref": "sessions.json#/$defs/agent" },
           "arrest": {
             "type": "object",
             "required": ["bundle_seq", "tokens_saved_estimate"],
