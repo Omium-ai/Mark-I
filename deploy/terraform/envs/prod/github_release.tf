@@ -21,7 +21,7 @@ data "aws_iam_policy_document" "gha_release_assume" {
 
 resource "aws_iam_role" "gha_release" {
   name               = "omium-mark1-gha-release"
-  description        = "GitHub Actions (Omium-ai/Mark-I) release role: push omium/mark1-* images to ECR via OIDC"
+  description        = "GitHub Actions (Omium-ai/Mark-I) release role: push omium/mark1-* images to ECR and start the bench runner via OIDC"
   assume_role_policy = data.aws_iam_policy_document.gha_release_assume.json
 
   tags = {
@@ -53,6 +53,18 @@ data "aws_iam_policy_document" "gha_release" {
       "ecr:PutImage",
     ]
     resources = [for r in aws_ecr_repository.mark1 : r.arn]
+  }
+  statement {
+    sid       = "BenchRunnerPower"
+    effect    = "Allow"
+    actions   = ["ec2:StartInstances", "ec2:StopInstances"]
+    resources = [aws_instance.bench_runner.arn]
+  }
+  statement {
+    sid       = "BenchRunnerDescribe"
+    effect    = "Allow"
+    actions   = ["ec2:DescribeInstances", "ec2:DescribeInstanceStatus"]
+    resources = ["*"]
   }
 }
 

@@ -92,13 +92,22 @@ jobs:
           echo "::error title=No pinned bench runner::12 §7.1's budgets gate this release and can only be measured on the pinned runner class (bench/RUNNER.md). Provision it and set MARK1_BENCH_RUNNER."
           exit 1
 
+  # The pinned box is stopped between runs; bench-runner.yml starts it (release role, OIDC).
+  bench-wake:
+    name: bench-wake
+    if: vars.MARK1_BENCH_RUNNER != ''
+    uses: ./.github/workflows/bench-runner.yml
+    permissions:
+      id-token: write
+      contents: read
+
   bench:
     name: bench
-    needs: [bench-preflight]
+    needs: [bench-preflight, bench-wake]
     # A skipped `needs` skips its dependents unless the condition carries a status function, and
     # bench-preflight is skipped exactly when the runner IS configured — which is when bench must
     # run. Hence !cancelled() rather than a bare variable test.
-    if: ${{ !cancelled() && vars.MARK1_BENCH_RUNNER != '' }}
+    if: ${{ !cancelled() && vars.MARK1_BENCH_RUNNER != '' && needs.bench-wake.result == 'success' }}
     runs-on: [self-hosted, "${{ vars.MARK1_BENCH_RUNNER }}"]
     timeout-minutes: 90
     steps:

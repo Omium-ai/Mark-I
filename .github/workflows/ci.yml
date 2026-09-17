@@ -404,9 +404,20 @@ jobs:
   # liveness of one unowned box. Set the repo variable MARK1_BENCH_RUNNER to the runner's label
   # to arm the gating lane; clear it to disarm.
   # ---------------------------------------------------------------------------
+  # Main pushes only: the pinned box is started through the release role, whose OIDC trust
+  # covers main and edge/v* tags and nothing else — a PR cannot wake it, so a PR defers.
+  bench-wake:
+    name: bench-wake
+    if: vars.MARK1_BENCH_RUNNER != '' && github.event_name == 'push'
+    uses: ./.github/workflows/bench-runner.yml
+    permissions:
+      id-token: write
+      contents: read
+
   bench:
     name: bench
-    if: vars.MARK1_BENCH_RUNNER != ''
+    needs: [bench-wake]
+    if: ${{ !cancelled() && vars.MARK1_BENCH_RUNNER != '' && github.event_name == 'push' && needs.bench-wake.result == 'success' }}
     runs-on: [self-hosted, "${{ vars.MARK1_BENCH_RUNNER }}"]
     timeout-minutes: 45
     steps:
@@ -417,17 +428,18 @@ jobs:
 
   bench-deferred:
     name: bench-deferred
-    if: vars.MARK1_BENCH_RUNNER == ''
+    if: vars.MARK1_BENCH_RUNNER == '' || github.event_name != 'push'
     runs-on: ubuntu-24.04
     steps:
       - name: Announce the deferral loudly
         run: |
           set -eu
-          MSG="BENCHMARKS DEFERRED: no pinned bench runner is configured (repo variable
-          MARK1_BENCH_RUNNER is empty). 12 §7.1's latency/throughput budgets are NOT checked on
-          this PR. They WILL be checked, mandatorily and without a fallback, by the 'bench'
-          job in release.yml before any artifact is published — a regression cannot ship, it
-          can only merge and then block the release."
+          MSG="BENCHMARKS DEFERRED: the pinned bench runner runs on main pushes and releases only
+          (repo variable MARK1_BENCH_RUNNER is '${{ vars.MARK1_BENCH_RUNNER }}', event is
+          ${{ github.event_name }}). 12 §7.1's latency/throughput budgets are NOT checked on
+          this PR. They WILL be checked, mandatorily and without a fallback, on the main push
+          and by the 'bench' job in release.yml before any artifact is published — a regression
+          cannot ship, it can only merge and then block the release."
           echo "::warning title=Benchmarks deferred to release::${MSG}"
           {
             echo "### :hourglass: Benchmarks deferred"
@@ -444,16 +456,20 @@ jobs:
   bench-gate:
     name: bench-gate
     runs-on: ubuntu-24.04
-    needs: [bench, bench-deferred]
+    needs: [bench-wake, bench, bench-deferred]
     if: always()
     steps:
       - run: |
           set -eu
-          echo "bench=${{ needs.bench.result }} bench-deferred=${{ needs.bench-deferred.result }}"
+          echo "bench-wake=${{ needs.bench-wake.result }} bench=${{ needs.bench.result }} bench-deferred=${{ needs.bench-deferred.result }}"
           case "${{ needs.bench.result }}" in
             success) echo "Benchmarks ran on the pinned runner and met 12 §7.1's budgets."; exit 0 ;;
             failure) echo "::error title=Benchmark regression::A gated benchmark exceeded its budget. There is no perf-waiver label (12 §7.3): raise the budget in 02 and 12 in its own PR, or fix the regression."; exit 1 ;;
           esac
+          if [ "${{ needs.bench-wake.result }}" = "failure" ]; then
+            echo "::error title=Bench runner did not start::bench-runner.yml could not start the pinned instance (bench/RUNNER.md); the budgets were not measured."
+            exit 1
+          fi
           if [ "${{ needs.bench-deferred.result }}" != "success" ]; then
             echo "::error title=Bench stage did not run::Neither the pinned-runner bench nor the deferral notice completed. The stage must never be silently absent."
             exit 1

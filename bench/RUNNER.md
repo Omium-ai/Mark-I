@@ -28,18 +28,31 @@ regression fits inside it — the gate stops failing and stops meaning anything.
 `bench/history/` accumulates one result set per release tag; the nightly drift check compares
 against it, which only works if the samples come from the same hardware.
 
-## Registering it
+## The machine we have
 
-1. Provision the class above. Nothing else may run on it — a co-tenant build is the noise source
-   this whole file exists to remove.
-2. Add it as a repo-level self-hosted runner with a distinct label, e.g. `mark1-bench-c7i2xl`.
-3. Set the repo variable: `gh variable set MARK1_BENCH_RUNNER --body mark1-bench-c7i2xl`.
+`deploy/terraform/envs/prod/bench_runner.tf`: one c7i.2xlarge (Ubuntu 24.04, 100 GiB encrypted gp3
+root — EBS on Nitro, not instance store; the baseline is measured on exactly this) in the prod VPC's
+first private subnet, egress-only, instance profile with SSM only. Nothing else runs on it.
+
+It is **stopped between runs**. `bench-runner.yml` starts it through `omium-mark1-gha-release`
+(OIDC; trusts `main` and `edge/v*` tags only) before every `bench` job on a main push or a release,
+and the box stops itself after 20 idle minutes (`runner-idle-stop.timer`). A weekly scheduled run
+keeps it registered — GitHub deletes a runner that has been offline 14 days. PRs never wake it; they
+get `bench-deferred`, and the main push after merge measures.
+
+First boot (`bench_runner_cloud_init.sh`) reads a 1-hour registration token from SSM parameter
+`/omium/mark1/bench-runner/registration-token` (written just before `terraform apply`, deleted after)
+and installs the runner as a systemd service under `/opt/runner`, label `mark1-bench-c7i2xl`.
+
+Repo variables: `MARK1_BENCH_RUNNER=mark1-bench-c7i2xl`, `MARK1_BENCH_INSTANCE_ID=<terraform output
+bench_runner_instance_id>`. To rebuild the box: `terraform taint aws_instance.bench_runner`, write a
+fresh token, apply, then delete the stale runner in repo settings.
 
 ## What the variable controls
 
 | `MARK1_BENCH_RUNNER` | `ci.yml` | `release.yml` |
 |---|---|---|
-| set | `bench` runs on the pinned runner; `bench-gate` is red on a regression | `bench` runs; a regression blocks the release |
+| set | main pushes: `bench-wake` starts the box, `bench` runs on it; `bench-gate` is red on a regression or a box that would not start. PRs: `bench-deferred` | `bench-wake` then `bench`; a regression blocks the release |
 | empty | `bench-deferred` posts a loud warning; `bench-gate` passes *as deferred*, not as measured | `bench-preflight` **fails the release** |
 
 That asymmetry is deliberate: an unowned machine must not block every merge in the repo, but

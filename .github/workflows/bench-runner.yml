@@ -1,0 +1,37 @@
+# Starts the pinned bench runner (bench/RUNNER.md) — a stopped EC2 instance that registers itself
+# as a self-hosted runner on boot and shuts itself down after 20 idle minutes.
+#
+# Called by ci.yml (main pushes) and release.yml before their `bench` jobs; the weekly schedule is a
+# keepalive, because GitHub deletes a self-hosted runner that has been offline for 14 days.
+# The OIDC subject is the CALLER's ref, so this only works from main and edge/v* tags — the
+# release role trusts nothing else, which is also why PR benches stay deferred.
+name: bench-runner
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  wake:
+    name: bench-runner wake
+    if: vars.MARK1_BENCH_RUNNER != '' && vars.MARK1_BENCH_INSTANCE_ID != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Start the instance
+        env:
+          ID: ${{ vars.MARK1_BENCH_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+          aws ec2 start-instances --instance-ids "$ID" --query 'StartingInstances[0].CurrentState.Name' --output text
+          aws ec2 wait instance-running --instance-ids "$ID"
+          echo "bench runner $ID is running; the runner service registers within a minute and the bench job queues on label ${{ vars.MARK1_BENCH_RUNNER }}"
