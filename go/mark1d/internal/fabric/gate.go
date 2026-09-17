@@ -86,6 +86,8 @@ type Gate struct {
 	// Health counts answers and the read latency SLO-7 is judged on; nil is
 	// legal — an unwired gauge must never change what the gate answers.
 	Health *obs.Health
+	// OnArrest observes every knee stop the gate actually told the human about (the control API's arrest row); nil is legal.
+	OnArrest func(session, task [16]byte, k verdict.KneeState, evidenceRef string)
 }
 
 func NewGate(r verdict.Reader, blocks *verdict.Blocks, stateDir string) *Gate {
@@ -347,8 +349,12 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		// 08 §5.1 Stop row at the knee: the human is told, never the model — and only where a BLOCK was otherwise due.
 		if e.Verdict.GetVerdict() == m1pv1.Verdict_VERDICT_VIOLATED && g.armed() {
 			v.SystemMessage = "mark1 stop-gate: retry loop arrested at the knee — verdict violated; " + v.Reason
-			if ev := g.evidence(task); ev != "" {
+			ev := g.evidence(task)
+			if ev != "" {
 				v.SystemMessage += "; evidence: " + ev
+			}
+			if g.OnArrest != nil {
+				g.OnArrest(session, task, e.Knee, ev)
 			}
 		}
 	}

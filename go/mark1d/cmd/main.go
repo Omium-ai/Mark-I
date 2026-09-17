@@ -809,6 +809,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	gate := fabric.NewGate(eng.Reader(), blocks, cfg.stateDir)
 	gate.Evidence = votes.Evidence // FR-VERIFY-011: evidence_ref on BLOCK
 	gate.Corrections = eng.TakeCorrections
+	gate.OnArrest = ctl.Hub().Arrest
 	if cfg.matrices == nil {
 		gate.ApplyGates(bc.Gates())
 	}

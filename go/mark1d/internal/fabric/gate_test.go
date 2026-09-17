@@ -3,8 +3,10 @@ package fabric
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -751,8 +753,15 @@ func TestGateKneeCarriesSystemMessage(t *testing.T) {
 		}
 		return ""
 	}
+	var arrests []string
+	g.OnArrest = func(session, task [16]byte, k verdict.KneeState, evidenceRef string) {
+		arrests = append(arrests, fmt.Sprintf("%x task %x n=%d stop=%v %s", session[:2], task[:1], k.N, k.Stop, evidenceRef))
+	}
 
 	v := g.Answer(query(1, 5000), testSession)
+	if want := []string{fmt.Sprintf("%x task 01 n=2 stop=true %s", testSession[:2], ref)}; !reflect.DeepEqual(arrests, want) {
+		t.Fatalf("OnArrest saw %q, want %q", arrests, want)
+	}
 	if v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || v.GetEvidenceRef() != "" {
 		t.Fatalf("knee answered %v evidence_ref %q, want ALLOW with none (the shim reads evidence_ref on BLOCK only)", v.GetDecision(), v.GetEvidenceRef())
 	}
@@ -767,6 +776,9 @@ func TestGateKneeCarriesSystemMessage(t *testing.T) {
 		if v := g.Answer(query(task, 5000), testSession); v.GetSystemMessage() != "" {
 			t.Fatalf("%s: system_message %q, want empty", name, v.GetSystemMessage())
 		}
+	}
+	if len(arrests) != 1 {
+		t.Fatalf("OnArrest fired %d times over the non-arrest answers, want exactly the one knee stop", len(arrests))
 	}
 	// No evidence seam: the message still surfaces the verdict and the knee.
 	g.Evidence = nil
