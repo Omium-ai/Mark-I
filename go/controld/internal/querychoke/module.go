@@ -385,7 +385,7 @@ func guaranteeRefusals(coverageLower float64, verified uint64, costBasis string,
 		out = append(out, "cost basis unresolved: no pinned model_prices row for usd (06 §8.4)")
 	}
 	if verified == 0 {
-		out = append(out, "zero verified outcomes in window — TVO denominator unmeasured")
+		out = append(out, "zero verified outcomes in window, TVO denominator unmeasured")
 	}
 	return out
 }

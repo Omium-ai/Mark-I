@@ -7,7 +7,7 @@
     "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
     "project": "/Users/dev/myrepo",
     "agent": "claudecode",
-    "summary": "Mark 1 stopped a retry loop on payments.py — saved ~4,200 tokens",
+    "summary": "Mark 1 stopped a retry loop on payments.py, saved ~4,200 tokens",
     "tokens_saved": 4200
   },
   {

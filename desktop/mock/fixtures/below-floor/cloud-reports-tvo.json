@@ -30,6 +30,6 @@
   "price_table_version": "pt_2026_09_01",
   "guarantee_grade": "indicative",
   "refusal": {
-    "reason": "coverage 0.82 is below the 0.95 floor — enable the proxy for API-key sessions to raise coverage"
+    "reason": "coverage 0.82 is below the 0.95 floor. Enable the proxy for API-key sessions to raise coverage"
   }
 }
