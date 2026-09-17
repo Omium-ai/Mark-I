@@ -48,6 +48,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # A tag checkout is detached with no local `main`; `just lint-proto` diffs against `.git#branch=main`.
+      - run: git branch -f main origin/main
       - uses: dtolnay/rust-toolchain@nightly   # `just ci` includes the fuzz smoke
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-go@v5
@@ -437,6 +439,12 @@ jobs:
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#edge/v}"
           BRANCH="release/manifest-${VERSION}"
+          # Announced, not silent: the manifest tooling (deploy/packaging/manifest) has not landed, and the
+          # repo does not let Actions open PRs. Until both exist, ring 0 is promoted by hand.
+          if [ ! -x deploy/packaging/manifest/bump.sh ]; then
+            echo "::warning title=Ring-0 manifest not bumped::deploy/packaging/manifest/bump.sh does not exist yet; the release is published, ring-0 promotion for edge/v${VERSION} is a manual commit (09 §11.2)."
+            exit 0
+          fi
           git config user.name  "omium-release-bot"
           git config user.email "release@omium.ai"
           git checkout -b "$BRANCH"
