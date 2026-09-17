@@ -1,0 +1,90 @@
+{{- if .Values.migrate.enabled }}
+{{- $m := .Values.migrate }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mark1-db-migrate
+  namespace: {{ include "mark1.ns" . }}
+  annotations:
+    # Sync hook, not PreSync: the ClickHouse lane needs the wave-0 StatefulSet up first (omium-gitops prod/db-migrate-job.yaml convention).
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: mark1-db-migrate
+spec:
+  backoffLimit: {{ $m.backoffLimit }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: mark1-db-migrate
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      {{- include "omium.podSecurityContext" (dict "root" $ "svc" "migrate") | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: migrate
+        {{- include "omium.containerSecurityContext" (dict "root" $ "svc" "migrate") | nindent 8 }}
+        image: {{ include "mark1.image" (dict "root" $ "name" "mark1-migrate" "tag" $m.imageTag "key" "migrate.imageTag") }}
+        env:
+        - name: HOME
+          value: /tmp
+        - name: PGHOST
+          value: {{ required "config.postgresql.host is required" .Values.config.postgresql.host | quote }}
+        - name: PGPORT
+          value: {{ .Values.config.postgresql.port | quote }}
+        - name: PGSSLMODE
+          value: require
+        - name: PGUSER
+          valueFrom: { secretKeyRef: { name: {{ .Values.secrets.postgresMaster }}, key: username } }
+        - name: PGPASSWORD
+          valueFrom: { secretKeyRef: { name: {{ .Values.secrets.postgresMaster }}, key: password } }
+        - name: MARK1_DB
+          value: {{ .Values.config.postgresql.database | quote }}
+        - name: CLICKHOUSE_HOST
+          value: "clickhouse.{{ include "mark1.ns" . }}.svc.cluster.local"
+        - name: CLICKHOUSE_USER
+          value: m1p_ddl
+        - name: CLICKHOUSE_PASSWORD
+          valueFrom: { secretKeyRef: { name: {{ .Values.secrets.clickhouse }}, key: ddl_password } }
+        {{- range $role := list .Values.controld.postgresRole .Values.adjudicator.postgresRole .Values.intel.postgresRole "mark1_federation_worker" }}
+        - name: PW_{{ $role }}
+          valueFrom: { secretKeyRef: { name: {{ $.Values.secrets.dbServiceCredentials }}, key: {{ $role | quote }} } }
+        {{- end }}
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -eu
+            if [ "$(psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$MARK1_DB'")" != "1" ]; then
+              echo "creating database $MARK1_DB"
+              psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$MARK1_DB\""
+            fi
+            export DATABASE_URL="host=$PGHOST port=$PGPORT dbname=$MARK1_DB user=$PGUSER sslmode=require"
+            export CLICKHOUSE_CLIENT="clickhouse-client --host $CLICKHOUSE_HOST --port 9000"
+            for lane in m1 adj in; do
+              /opt/mark1/migrate-db.sh /opt/mark1/migrations/$lane $lane
+            done
+            # m1_060 creates the runtime roles passwordless; the password is injected here, never committed (07_service_roles convention).
+            for role in {{ .Values.controld.postgresRole }} {{ .Values.adjudicator.postgresRole }} {{ .Values.intel.postgresRole }} mark1_federation_worker; do
+              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<SQL
+            \getenv pw PW_$role
+            ALTER ROLE $role LOGIN PASSWORD :'pw';
+            SQL
+              echo "password set for $role"
+            done
+            echo "mark1 migrations applied"
+        resources:
+          {{- toYaml $m.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
+{{- end }}

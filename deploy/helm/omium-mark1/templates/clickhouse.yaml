@@ -1,0 +1,113 @@
+{{- if .Values.clickhouse.enabled }}
+{{- $c := .Values.clickhouse }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: {{ include "mark1.ns" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  clusterIP: None
+  selector:
+    app: clickhouse
+  ports:
+  - { port: 9000, targetPort: native, protocol: TCP, name: native }
+  - { port: 8123, targetPort: http, protocol: TCP, name: http }
+  - { port: 9363, targetPort: metrics, protocol: TCP, name: metrics }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: {{ include "mark1.ns" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/clickhouse-configmap.yaml") . | sha256sum | trunc 16 }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9363"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 60
+      {{- include "omium.podSecurityContext" (dict "root" $ "svc" "clickhouse") | nindent 6 }}
+      initContainers:
+      - name: render-users
+        {{- include "omium.containerSecurityContext" (dict "root" $ "svc" "clickhouse") | nindent 8 }}
+        image: {{ $c.image }}:{{ $c.tag }}
+        command: ["bash", "/scripts/render-users.sh"]
+        env:
+        - name: INGEST_PASSWORD
+          valueFrom: { secretKeyRef: { name: {{ .Values.secrets.clickhouse }}, key: ingest_password } }
+        - name: QUERY_PASSWORD
+          valueFrom: { secretKeyRef: { name: {{ .Values.secrets.clickhouse }}, key: query_password } }
+        - name: OFFBOARD_PASSWORD
+          valueFrom: { secretKeyRef: { name: {{ .Values.secrets.clickhouse }}, key: offboard_password } }
+        - name: DDL_PASSWORD
+          valueFrom: { secretKeyRef: { name: {{ .Values.secrets.clickhouse }}, key: ddl_password } }
+        resources:
+          requests: { cpu: 10m, memory: 32Mi }
+          limits: { cpu: 100m, memory: 64Mi }
+        volumeMounts:
+        - { name: scripts, mountPath: /scripts, readOnly: true }
+        - { name: users-d, mountPath: /users.d }
+      containers:
+      - name: clickhouse
+        {{- include "omium.containerSecurityContext" (dict "root" $ "svc" "clickhouse") | nindent 8 }}
+        image: {{ $c.image }}:{{ $c.tag }}
+        ports:
+        - { containerPort: 9000, name: native }
+        - { containerPort: 8123, name: http }
+        - { containerPort: 9363, name: metrics }
+        resources:
+          {{- toYaml $c.resources | nindent 10 }}
+        livenessProbe:
+          httpGet: { path: /ping, port: http }
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 6
+        readinessProbe:
+          httpGet: { path: /ping, port: http }
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - { name: data, mountPath: /var/lib/clickhouse }
+        - { name: config-d, mountPath: /etc/clickhouse-server/config.d, readOnly: true }
+        - { name: users-d, mountPath: /etc/clickhouse-server/users.d }
+        - { name: logs, mountPath: /var/log/clickhouse-server }
+        - { name: tmp, mountPath: /tmp }
+      volumes:
+      - name: scripts
+        configMap:
+          name: clickhouse-config
+          items: [{ key: render-users.sh, path: render-users.sh }]
+      - name: config-d
+        configMap:
+          name: clickhouse-config
+          items: [{ key: mark1.xml, path: mark1.xml }]
+      - name: users-d
+        emptyDir: { sizeLimit: 1Mi }
+      - name: logs
+        emptyDir: { sizeLimit: 256Mi }
+      - name: tmp
+        emptyDir: { sizeLimit: 64Mi }
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ReadWriteOnce]
+      storageClassName: {{ $c.storageClassName }}
+      resources:
+        requests:
+          storage: {{ $c.storageSize }}
+{{- end }}

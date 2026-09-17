@@ -1,0 +1,192 @@
+{{- if .Values.controld.enabled }}
+{{- $c := .Values.controld }}
+{{- if and .Values.config.s3.witnessBucket (not .Values.tenants) }}
+{{- fail "config.s3.witnessBucket is set but tenants is empty: controld refuses to boot (WITNESS_BUCKET without WITNESS_TENANTS, config.go R1)" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controld
+  namespace: {{ include "mark1.ns" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  replicas: {{ $c.replicas }}
+  progressDeadlineSeconds: 900
+  selector:
+    matchLabels:
+      app: controld
+  template:
+    metadata:
+      labels:
+        app: controld
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $c.metricsPort | quote }}
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: controld
+      terminationGracePeriodSeconds: 30
+      {{- include "omium.podSecurityContext" (dict "root" $ "svc" "controld") | nindent 6 }}
+      {{- include "omium.spread" (dict "root" $ "svc" "controld" "app" "controld") | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: controld
+        {{- include "omium.containerSecurityContext" (dict "root" $ "svc" "controld") | nindent 8 }}
+        image: {{ include "mark1.image" (dict "root" $ "name" "mark1-controld" "tag" $c.imageTag "key" "controld.imageTag") }}
+        ports:
+        - containerPort: {{ $c.port }}
+          name: http
+        - containerPort: {{ $c.metricsPort }}
+          name: metrics
+        env:
+        - name: CONTROLD_PORT
+          value: {{ $c.port | quote }}
+        - name: METRICS_PORT
+          value: {{ $c.metricsPort | quote }}
+        - name: POSTGRES_HOST
+          value: {{ required "config.postgresql.host is required" .Values.config.postgresql.host | quote }}
+        - name: POSTGRES_PORT
+          value: {{ .Values.config.postgresql.port | quote }}
+        - name: POSTGRES_DB
+          value: {{ .Values.config.postgresql.database | quote }}
+        - name: POSTGRES_APP_USER
+          value: {{ $c.postgresRole | quote }}
+        - name: POSTGRES_APP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.dbServiceCredentials }}
+              key: {{ $c.postgresRole | quote }}
+        - name: CLICKHOUSE_ADDR
+          value: "clickhouse.{{ include "mark1.ns" . }}.svc.cluster.local:9000"
+        - name: CLICKHOUSE_DATABASE
+          value: {{ .Values.clickhouse.database | quote }}
+        - name: CLICKHOUSE_INGEST_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.clickhouse }}
+              key: ingest_password
+        - name: CLICKHOUSE_QUERY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.clickhouse }}
+              key: query_password
+        - name: CLICKHOUSE_OFFBOARD_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.clickhouse }}
+              key: offboard_password
+              optional: true
+        - name: S3_INGEST_BUCKET
+          value: {{ required "config.s3.ingestBucket is required" .Values.config.s3.ingestBucket | quote }}
+        - name: AWS_REGION
+          value: {{ .Values.global.region | quote }}
+        - name: AUTH_TOKEN_ED25519_SEED
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.signingSeeds }}
+              key: device_token_seed
+        - name: SERVER_CHAIN_ED25519_SEED
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.signingSeeds }}
+              key: server_chain_seed
+        - name: BUNDLE_SECTION_ED25519_SEED
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.signingSeeds }}
+              key: bundle_section_seed
+              optional: true
+        - name: TENANT_HMAC_PEPPER
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.hmacPepper }}
+              key: pepper
+        - name: OMIUM_USER_ISSUER
+          value: {{ .Values.config.userIssuer | quote }}
+        - name: OMIUM_USER_JWKS_PINNED
+          value: {{ required "controld.userJwksPinned is required (deploy/keys/mark1-user-token-jwks.prod.json verbatim)" $c.userJwksPinned | quote }}
+        - name: INTEL_SERVICE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.serviceToken }}
+              key: token
+        {{- if .Values.intel.enabled }}
+        - name: INTEL_BASE_URL
+          value: {{ include "mark1.svcUrl" (dict "root" $ "name" "mark1-intel" "port" .Values.intel.port) | quote }}
+        {{- end }}
+        {{- with .Values.config.s3.witnessBucket }}
+        - name: WITNESS_BUCKET
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.tenants }}
+        - name: WITNESS_TENANTS
+          value: {{ join "," . | quote }}
+        {{- end }}
+        - name: PUBLIC_BASE_URL
+          value: {{ .Values.config.publicBaseUrl | quote }}
+        - name: SERVER_MIN_EDGE
+          value: {{ $c.serverMinEdge | quote }}
+        resources:
+          {{- toYaml $c.resources | nindent 10 }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: controld
+  namespace: {{ include "mark1.ns" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  selector:
+    app: controld
+  ports:
+  - port: {{ $c.port }}
+    targetPort: http
+    protocol: TCP
+    name: http
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: controld
+  namespace: {{ include "mark1.ns" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: controld
+  minReplicas: {{ $c.minReplicas }}
+  maxReplicas: {{ $c.maxReplicas }}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+{{- end }}

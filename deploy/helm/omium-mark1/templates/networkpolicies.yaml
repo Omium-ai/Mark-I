@@ -1,0 +1,61 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $ns := include "mark1.ns" . }}
+{{- $np := .Values.networkPolicy }}
+{{- $pgPorts := list (dict "protocol" "TCP" "port" .Values.config.postgresql.port) }}
+{{- $rds := list }}
+{{- range $np.postgresCidrs }}{{ $rds = append $rds (dict "ipBlock" (dict "cidr" .)) }}{{ end }}
+{{- $egressPg := dict "to" $rds "ports" $pgPorts }}
+{{- $egressHttps := dict "to" (list (dict "ipBlock" (dict "cidr" "0.0.0.0/0" "except" (list "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "169.254.0.0/16")))) "ports" (list (dict "protocol" "TCP" "port" 443)) }}
+{{- $sel := dict
+  "controld" (dict "podSelector" (dict "matchLabels" (dict "app" "controld")))
+  "intel" (dict "podSelector" (dict "matchExpressions" (list (dict "key" "app" "operator" "In" "values" (list "mark1-intel" "mark1-intel-jobs")))))
+  "adjudicator" (dict "podSelector" (dict "matchExpressions" (list (dict "key" "app" "operator" "In" "values" (list "adjudicator" "adjudicator-jobs")))))
+  "clickhouse" (dict "podSelector" (dict "matchLabels" (dict "app" "clickhouse")))
+  "migrate" (dict "podSelector" (dict "matchLabels" (dict "app" "mark1-db-migrate")))
+  "kong" (dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" $np.kongNamespace)) "podSelector" (dict "matchLabels" (dict "app" "kong")))
+}}
+{{- $port := dict
+  "controld" (list (dict "protocol" "TCP" "port" .Values.controld.port))
+  "intel" (list (dict "protocol" "TCP" "port" .Values.intel.port))
+  "adjudicator" (list (dict "protocol" "TCP" "port" .Values.adjudicator.port))
+  "clickhouse" (list (dict "protocol" "TCP" "port" 9000))
+}}
+{{- $policies := list
+  (dict "name" "default-deny-all" "spec" (dict "podSelector" (dict) "policyTypes" (list "Ingress" "Egress")))
+  (dict "name" "allow-dns-egress" "spec" (dict "podSelector" (dict) "policyTypes" (list "Egress") "egress" (list (dict
+      "to" (list (dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" "kube-system")) "podSelector" (dict "matchLabels" (dict "k8s-app" "kube-dns"))))
+      "ports" (list (dict "protocol" "UDP" "port" 53) (dict "protocol" "TCP" "port" 53))))))
+  (dict "name" "allow-metrics-from-monitoring" "spec" (dict "podSelector" (dict) "policyTypes" (list "Ingress") "ingress" (list (dict
+      "from" (list (dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" "monitoring"))))))))
+  (dict "name" "controld" "spec" (dict "podSelector" (get $sel.controld "podSelector") "policyTypes" (list "Ingress" "Egress")
+      "ingress" (list (dict "from" (list $sel.kong $sel.intel $sel.adjudicator) "ports" $port.controld))
+      "egress" (list $egressPg $egressHttps
+        (dict "to" (list $sel.clickhouse) "ports" $port.clickhouse)
+        (dict "to" (list $sel.intel) "ports" $port.intel))))
+  (dict "name" "mark1-intel" "spec" (dict "podSelector" (get $sel.intel "podSelector") "policyTypes" (list "Ingress" "Egress")
+      "ingress" (list (dict "from" (list $sel.controld) "ports" $port.intel))
+      "egress" (list $egressPg $egressHttps
+        (dict "to" (list $sel.controld) "ports" $port.controld)
+        (dict "to" (list $sel.adjudicator) "ports" $port.adjudicator))))
+  (dict "name" "adjudicator" "spec" (dict "podSelector" (get $sel.adjudicator "podSelector") "policyTypes" (list "Ingress" "Egress")
+      "ingress" (list (dict "from" (list $sel.intel) "ports" $port.adjudicator))
+      "egress" (list $egressPg $egressHttps
+        (dict "to" (list $sel.controld) "ports" $port.controld))))
+  (dict "name" "clickhouse" "spec" (dict "podSelector" (get $sel.clickhouse "podSelector") "policyTypes" (list "Ingress" "Egress")
+      "ingress" (list (dict "from" (list $sel.controld $sel.migrate) "ports" $port.clickhouse))))
+  (dict "name" "mark1-db-migrate" "spec" (dict "podSelector" (get $sel.migrate "podSelector") "policyTypes" (list "Egress")
+      "egress" (list $egressPg (dict "to" (list $sel.clickhouse) "ports" $port.clickhouse))))
+}}
+{{- range $p := $policies }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $p.name }}
+  namespace: {{ $ns }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  {{- toYaml $p.spec | nindent 2 }}
+{{- end }}
+{{- end }}

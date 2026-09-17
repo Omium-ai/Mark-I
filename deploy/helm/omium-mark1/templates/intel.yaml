@@ -1,0 +1,76 @@
+{{- if .Values.intel.enabled }}
+{{- $c := .Values.intel }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mark1-intel
+  namespace: {{ include "mark1.ns" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  replicas: {{ $c.replicas }}
+  progressDeadlineSeconds: 900
+  selector:
+    matchLabels:
+      app: mark1-intel
+  template:
+    metadata:
+      labels:
+        app: mark1-intel
+    spec:
+      serviceAccountName: intel
+      {{- include "omium.podSecurityContext" (dict "root" $ "svc" "intel") | nindent 6 }}
+      {{- include "omium.spread" (dict "root" $ "svc" "intel" "app" "mark1-intel") | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: intel
+        {{- include "omium.containerSecurityContext" (dict "root" $ "svc" "intel") | nindent 8 }}
+        image: {{ include "mark1.image" (dict "root" $ "name" "mark1-intel" "tag" $c.imageTag "key" "intel.imageTag") }}
+        command: {{ toJson $c.command }}
+        ports:
+        - containerPort: {{ $c.port }}
+          name: http
+        env:
+        {{- include "mark1.intelEnv" . | nindent 8 }}
+        resources:
+          {{- toYaml $c.resources | nindent 10 }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: {{ $c.tmpSizeLimit }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mark1-intel
+  namespace: {{ include "mark1.ns" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  selector:
+    app: mark1-intel
+  ports:
+  - port: {{ $c.port }}
+    targetPort: http
+    protocol: TCP
+    name: http
+  type: ClusterIP
+{{- end }}

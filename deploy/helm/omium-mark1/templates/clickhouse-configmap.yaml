@@ -1,0 +1,90 @@
+{{- if .Values.clickhouse.enabled }}
+{{- $c := .Values.clickhouse }}
+{{- $q := $c.queryProfile }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-config
+  namespace: {{ include "mark1.ns" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+data:
+  mark1.xml: |
+    <clickhouse>
+      <listen_host>0.0.0.0</listen_host>
+      <logger>
+        <level>information</level>
+        <console>1</console>
+        <log remove="remove"/>
+        <errorlog remove="remove"/>
+      </logger>
+      <mysql_port remove="remove"/>
+      <postgresql_port remove="remove"/>
+      <interserver_http_port remove="remove"/>
+      <prometheus>
+        <endpoint>/metrics</endpoint>
+        <port>9363</port>
+        <metrics>true</metrics>
+        <events>true</events>
+        <asynchronous_metrics>true</asynchronous_metrics>
+      </prometheus>
+    </clickhouse>
+  # Config-defined users cannot be modified by SQL GRANT (m1_ch_001 header), so the four principals
+  # are rendered into users.d at pod start from the synced Secret; hashes never leave the pod.
+  render-users.sh: |
+    set -eu
+    h() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+    cat > /users.d/m1p-users.xml <<EOF
+    <clickhouse>
+      <profiles>
+        <m1p_ingest>
+          <async_insert>1</async_insert>
+          <wait_for_async_insert>1</wait_for_async_insert>
+        </m1p_ingest>
+        <m1p_query>
+          <readonly>2</readonly>
+          <max_execution_time>{{ $q.maxExecutionTime }}</max_execution_time>
+          <max_result_rows>{{ $q.maxResultRows }}</max_result_rows>
+          <max_rows_to_read>{{ $q.maxRowsToRead }}</max_rows_to_read>
+          <max_bytes_to_read>{{ $q.maxBytesToRead }}</max_bytes_to_read>
+          <max_memory_usage>{{ $q.maxMemoryUsage }}</max_memory_usage>
+          <constraints>
+            <max_execution_time><max>{{ $q.maxExecutionTime }}</max></max_execution_time>
+            <max_result_rows><max>{{ $q.maxResultRows }}</max></max_result_rows>
+          </constraints>
+        </m1p_query>
+      </profiles>
+      <users>
+        <default remove="remove"/>
+        <m1p_ingest>
+          <password_sha256_hex>$(h "$INGEST_PASSWORD")</password_sha256_hex>
+          <networks><ip>::/0</ip></networks>
+          <profile>m1p_ingest</profile>
+          <quota>default</quota>
+          <grants><query>GRANT INSERT, SELECT ON {{ $c.database }}.*</query></grants>
+        </m1p_ingest>
+        <m1p_query>
+          <password_sha256_hex>$(h "$QUERY_PASSWORD")</password_sha256_hex>
+          <networks><ip>::/0</ip></networks>
+          <profile>m1p_query</profile>
+          <quota>default</quota>
+          <grants><query>GRANT SELECT ON {{ $c.database }}.*</query></grants>
+        </m1p_query>
+        <m1p_offboard>
+          <password_sha256_hex>$(h "$OFFBOARD_PASSWORD")</password_sha256_hex>
+          <networks><ip>::/0</ip></networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <grants><query>GRANT SELECT, ALTER DELETE ON {{ $c.database }}.*</query></grants>
+        </m1p_offboard>
+        <m1p_ddl>
+          <password_sha256_hex>$(h "$DDL_PASSWORD")</password_sha256_hex>
+          <networks><ip>::/0</ip></networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <grants><query>GRANT ALL ON {{ $c.database }}.*</query></grants>
+        </m1p_ddl>
+      </users>
+    </clickhouse>
+    EOF
+{{- end }}

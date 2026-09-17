@@ -1,0 +1,161 @@
+# omium-mark1 chart defaults. Everything environment-specific lives in the gitops overlay
+# (omium-gitops/helm/values.prod.mark1.yaml); values.prod.example.yaml is its worked example.
+# `# required` = no safe default exists; render fails until the overlay sets it.
+
+global:
+  environment: prod
+  region: us-east-1
+  namespace: ""               # defaults to .Release.Namespace
+  imagePullSecrets: []        # nodes pull same-account ECR via the node role
+
+imageRegistry:
+  url: 965384155704.dkr.ecr.us-east-1.amazonaws.com
+  organization: omium
+
+# The one dogfood/pilot tenant list. Drives WITNESS_TENANTS, the canary rollout controller, the
+# quarantine sweep and every CronJob's --tenant (05 §7.3: no sanctioned cross-tenant lister yet).
+# Empty ⇒ witness/rollout/sweep loops stay off (controld logs it) and the CronJobs are suspended.
+# ponytail: static list; a values PR per tenant until a lister exists.
+tenants: []
+
+config:
+  postgresql:
+    host: ""                  # required — RDS endpoint (pilot: the shared omium-prod-postgres)
+    port: 5432
+    database: mark1
+  s3:
+    ingestBucket: ""          # required — S3_INGEST_BUCKET (R6 probe + HeadBucket readiness)
+    corpusBucket: ""          # INTEL_CORPUS_ROOT_URI = s3://<corpusBucket>; empty ⇒ corpus.export parks
+    witnessBucket: ""         # WITNESS_BUCKET; needs tenants non-empty (boot refusal R1 otherwise)
+  publicBaseUrl: https://api.omium.ai   # PUBLIC_BASE_URL (enrollment advertises base + /m1p/v1/ingest)
+  userIssuer: https://api.omium.ai      # OMIUM_USER_ISSUER (auth-service MARK1_TOKEN_ISSUER)
+
+# k8s Secret names, all synced by ExternalSecrets in the gitops tree (SM omium/prod/mark1-*).
+# The chart only references them; keys are the SM JSON keys.
+secrets:
+  dbServiceCredentials: mark1-db-service-credentials   # keys: controld_app adjudicator_app intel_app mark1_federation_worker
+  postgresMaster: mark1-postgres-credentials           # keys: username password (the rds!db-* managed secret)
+  clickhouse: mark1-clickhouse                         # keys: ingest_password query_password offboard_password ddl_password
+  signingSeeds: mark1-signing-seeds                    # keys: device_token_seed server_chain_seed bundle_section_seed
+  hmacPepper: mark1-hmac-pepper                        # key: pepper
+  serviceToken: mark1-service-token                    # key: token
+  anthropic: mark1-anthropic                           # key: api_key (optional; memory.extract needs it)
+
+serviceAccounts:
+  controld: { roleArn: "" }        # required in prod — IRSA role with s3/kms on the ingest+witness buckets
+  intel: { roleArn: "" }           # required in prod — s3 on the corpus bucket
+  adjudicator: { roleArn: "" }     # no AWS calls today; annotation omitted when empty
+
+controld:
+  enabled: true
+  imageTag: ""                     # required — <sha7>; never latest
+  replicas: 2
+  minReplicas: 2
+  maxReplicas: 6
+  port: 8080                       # CONTROLD_PORT — the Kong upstream port
+  metricsPort: 9092                # METRICS_PORT — /metrics /healthz /readyz
+  postgresRole: controld_app
+  serverMinEdge: "0.0.0"           # SERVER_MIN_EDGE; set at the first edge release
+  userJwksPinned: ""               # OMIUM_USER_JWKS_PINNED — deploy/keys/mark1-user-token-jwks.prod.json verbatim (string)
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits: { cpu: 1000m, memory: 512Mi }
+
+intel:
+  enabled: true
+  imageTag: ""                     # required
+  replicas: 2
+  port: 8000
+  command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+  postgresRole: intel_app
+  tmpSizeLimit: 2Gi                # DuckDB/pyarrow scratch
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { cpu: 2000m, memory: 4Gi }
+
+adjudicator:
+  enabled: true
+  imageTag: ""                     # required
+  replicas: 2
+  port: 8000
+  command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+  postgresRole: adjudicator_app
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: 1000m, memory: 1Gi }
+
+clickhouse:
+  enabled: true
+  image: clickhouse/clickhouse-server
+  tag: "26.7"                      # deploy/compose/compose.yaml pin
+  database: mark1
+  storageClassName: gp3
+  storageSize: 50Gi
+  queryProfile:                    # m1p_query server-side guards (05 §6.5); strings: Go templates float-format big ints
+    maxExecutionTime: "30"
+    maxResultRows: "100000"
+    maxRowsToRead: "5000000000"
+    maxBytesToRead: "53687091200"
+    maxMemoryUsage: "4000000000"   # ponytail: 05 says 10 GiB on a 16 GiB box; sized to the pod limit below
+  resources:
+    requests: { cpu: 1000m, memory: 4Gi }
+    limits: { cpu: 2000m, memory: 8Gi }
+
+migrate:
+  enabled: true
+  imageTag: ""                     # required — omium/mark1-migrate:<sha7> (migrate/Dockerfile)
+  backoffLimit: 6
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+
+cronJobs:
+  intelHourly: "5 * * * *"         # tvo.rollup_verify
+  intelNightly: "0 2 * * *"        # memory.extract → memory.admit → policy_compiler.compile, ope.score, corpus.export
+  adjudicatorNightly: "0 3 * * *"  # gold.refresh, spectral.estimate → certs.recompute, readjudicate.run → promotion.step
+  activeDeadlineSeconds: 10800
+
+networkPolicy:
+  enabled: true                    # inert until the vpc-cni network-policy agent is on; shipped for parity
+  postgresCidrs:                   # the RDS subnet group (omium-prod-db-*)
+    - 10.0.21.0/24
+    - 10.0.22.0/24
+    - 10.0.23.0/24
+  kongNamespace: omium
+
+monitoring:
+  prometheusRule: true
+  ruleLabels:
+    release: kube-prometheus-stack # the live Prometheus ruleSelector
+
+# Vendored from Omium-platform/infrastructure/helm/omium-platform/values.yaml (security + availability).
+security:
+  enabled: true
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    privileged: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  overrides:
+    clickhouse:                    # the official image runs as uid 101
+      podSecurityContext:
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+
+availability:
+  enabled: true
+  pdb: true
+  whenUnsatisfiable: ScheduleAnyway
+  overrides:
+    controld:
+      whenUnsatisfiable: DoNotSchedule   # the sole ingest ack path (09 §2.2)

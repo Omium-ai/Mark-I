@@ -1,0 +1,22 @@
+{{- $av := (default (dict) .Values.availability) -}}
+{{- if and (ne (toString (default true $av.enabled)) "false") (ne (toString (default true $av.pdb)) "false") }}
+{{- range $key, $app := dict "controld" "controld" "intel" "mark1-intel" "adjudicator" "adjudicator" }}
+{{- if (index $.Values $key).enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $app }}
+  namespace: {{ include "mark1.ns" $ }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app: {{ $app }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: {{ $app }}
+{{- end }}
+{{- end }}
+{{- end }}

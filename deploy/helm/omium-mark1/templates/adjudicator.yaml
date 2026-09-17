@@ -1,0 +1,76 @@
+{{- if .Values.adjudicator.enabled }}
+{{- $c := .Values.adjudicator }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adjudicator
+  namespace: {{ include "mark1.ns" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  replicas: {{ $c.replicas }}
+  progressDeadlineSeconds: 900
+  selector:
+    matchLabels:
+      app: adjudicator
+  template:
+    metadata:
+      labels:
+        app: adjudicator
+    spec:
+      serviceAccountName: adjudicator
+      {{- include "omium.podSecurityContext" (dict "root" $ "svc" "adjudicator") | nindent 6 }}
+      {{- include "omium.spread" (dict "root" $ "svc" "adjudicator" "app" "adjudicator") | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: adjudicator
+        {{- include "omium.containerSecurityContext" (dict "root" $ "svc" "adjudicator") | nindent 8 }}
+        image: {{ include "mark1.image" (dict "root" $ "name" "mark1-adjudicator" "tag" $c.imageTag "key" "adjudicator.imageTag") }}
+        command: {{ toJson $c.command }}
+        ports:
+        - containerPort: {{ $c.port }}
+          name: http
+        env:
+        {{- include "mark1.adjEnv" . | nindent 8 }}
+        resources:
+          {{- toYaml $c.resources | nindent 10 }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adjudicator
+  namespace: {{ include "mark1.ns" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  selector:
+    app: adjudicator
+  ports:
+  - port: {{ $c.port }}
+    targetPort: http
+    protocol: TCP
+    name: http
+  type: ClusterIP
+{{- end }}

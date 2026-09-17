@@ -1,0 +1,60 @@
+# PROD overlay shape for omium-gitops/helm/values.prod.mark1.yaml (account 965384155704, ns omium-mark1).
+# <sha7> pins come from the Mark-I images job; role ARNs and bucket names from the Mark 1 Terraform outputs.
+global:
+  environment: prod
+  region: us-east-1
+  namespace: omium-mark1
+
+imageRegistry:
+  url: 965384155704.dkr.ecr.us-east-1.amazonaws.com
+  organization: omium
+
+# Filled after the founder's first desktop sign-in (SELECT id FROM m1_tenants); empty until then.
+tenants: []
+#  - 00000000-0000-0000-0000-000000000000
+
+config:
+  postgresql:
+    host: omium-prod-postgres.cghy8ugy2nuw.us-east-1.rds.amazonaws.com
+    port: 5432
+    database: mark1
+  s3:
+    ingestBucket: omium-mark1-ingest-prod-965384155704
+    corpusBucket: omium-mark1-corpus-prod-965384155704
+    witnessBucket: ""            # omium-mark1-witness-prod-965384155704 once tenants is non-empty
+  publicBaseUrl: https://api.omium.ai
+  userIssuer: https://api.omium.ai
+
+serviceAccounts:
+  controld: { roleArn: "arn:aws:iam::965384155704:role/omium-prod-mark1-controld-irsa" }
+  intel: { roleArn: "arn:aws:iam::965384155704:role/omium-prod-mark1-intel-irsa" }
+  adjudicator: { roleArn: "" }
+
+controld:
+  imageTag: "0000000"
+  userJwksPinned: |
+    {
+      "keys": [
+        {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "drOcICBnP2aHTDoyMcWwZuhwDnw9LwsGQG3W-AtgChg",
+          "y": "6dd2uoN1xDSzUyeS44z4CqvITsKIZbR3WdiuDQyJ_G4",
+          "use": "sig",
+          "alg": "ES256",
+          "kid": "8DagfTCA4rt34IW7Oo2JKQ16Lh7zeX3jBTgcgnJfOxg"
+        }
+      ]
+    }
+
+intel:
+  imageTag: "0000000"
+
+adjudicator:
+  imageTag: "0000000"
+
+migrate:
+  imageTag: "0000000"
+
+clickhouse:
+  storageSize: 50Gi
