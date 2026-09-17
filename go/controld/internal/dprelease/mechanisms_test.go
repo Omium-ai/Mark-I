@@ -107,15 +107,17 @@ func TestReleaseNoisesTheOrgCountNotTheTenantCount(t *testing.T) {
 	for i := range rs {
 		rs[i].OrgID = rs[i%3].OrgID
 	}
+	// ε = 0.25 ⇒ discrete Laplace scale 4 (σ ≈ 5.7): 2000 draws put the mean's standard error at ≈ 0.13, so ±2 around 3 never fires by chance and 25 is unreachable.
+	const draws = 2000
 	var sum float64
-	for i := 0; i < 200; i++ {
+	for i := 0; i < draws; i++ {
 		s, err := Release(rs, EpsilonRelease)
 		if err != nil {
 			t.Fatal(err)
 		}
 		sum += float64(s.OrgCount)
 	}
-	if m := sum / 200; m < 2 || m > 4 {
+	if m := sum / draws; m < 1 || m > 5 {
 		t.Fatalf("mean released org count %.2f, want ≈3 (not the %d tenants)", m, K)
 	}
 }
