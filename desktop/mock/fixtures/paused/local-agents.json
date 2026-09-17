@@ -19,7 +19,8 @@
     "recent_projects": [
       "/Users/dev/myrepo",
       "/Users/dev/api-service"
-    ]
+    ],
+    "paused": false
   },
   {
     "name": "codex",
@@ -41,7 +42,10 @@
         "fragment intact; the rest of the file changed since apply"
       ]
     },
-    "recent_projects": []
+    "recent_projects": [
+      "/Users/dev/myrepo"
+    ],
+    "paused": false
   },
   {
     "name": "gemini",
@@ -50,7 +54,8 @@
     "compat": null,
     "regime": "subscription",
     "provisioned": null,
-    "recent_projects": []
+    "recent_projects": [],
+    "paused": false
   },
   {
     "name": "opencode",
@@ -59,7 +64,8 @@
     "compat": null,
     "regime": "subscription",
     "provisioned": null,
-    "recent_projects": []
+    "recent_projects": [],
+    "paused": false
   },
   {
     "name": "copilot",
@@ -78,7 +84,8 @@
       ],
       "notes": []
     },
-    "recent_projects": []
+    "recent_projects": [],
+    "paused": false
   },
   {
     "name": "cursor",
@@ -93,7 +100,8 @@
         "observe/gate only, no proxy"
       ]
     },
-    "recent_projects": []
+    "recent_projects": [],
+    "paused": false
   },
   {
     "name": "crush",
@@ -102,6 +110,7 @@
     "compat": null,
     "regime": null,
     "provisioned": null,
-    "recent_projects": []
+    "recent_projects": [],
+    "paused": false
   }
 ]

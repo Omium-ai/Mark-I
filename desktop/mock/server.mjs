@@ -30,6 +30,8 @@ export const LOCAL_ROUTES = [
   // {name} routes carry a literal agent, as the cloud sessions detail does; last, because the daemon's disable really reverts the fragment the rows above show.
   ['POST', '/v1/agents/claudecode/provision', 'local-agents-provision'],
   ['POST', '/v1/agents/claudecode/disable', 'local-agents-disable'],
+  ['POST', '/v1/agents/claudecode/pause', 'local-agents-pause'],
+  ['POST', '/v1/agents/claudecode/resume', 'local-agents-resume'],
 ];
 
 export const CLOUD_ROUTES = [
@@ -41,6 +43,12 @@ export const CLOUD_ROUTES = [
   ['GET', '/api/v1/memory/artifacts', 'cloud-memory-artifacts'],
   ['GET', '/api/v1/memory/injections', 'cloud-memory-injections'],
   ['GET', '/api/v1/memory/outcomes', 'cloud-memory-outcomes'],
+  // {id} routes carry a literal artifact (art_pit_7 in every scenario's cloud-memory-artifacts), as the sessions detail does.
+  ['POST', '/api/v1/memory/artifacts/art_pit_7/retire', 'cloud-memory-retire'],
+  ['POST', '/api/v1/memory/artifacts/art_pit_7/pin', 'cloud-memory-pin'],
+  ['POST', '/api/v1/memory/artifacts/art_pit_7/unpin', 'cloud-memory-unpin'],
+  ['POST', '/api/v1/memory/artifacts/art_pit_7/share', 'cloud-memory-share'],
+  ['POST', '/api/v1/memory/artifacts/art_pit_7/unshare', 'cloud-memory-unshare'],
   ['GET', '/api/v1/verify/certificates', 'cloud-verify-certificates'],
   ['GET', '/api/v1/route/decisions', 'cloud-route-decisions'],
   ['GET', '/api/v1/route/bundle', 'cloud-route-bundle'],
@@ -48,6 +56,7 @@ export const CLOUD_ROUTES = [
   ['GET', '/api/v1/receipts/witness', 'cloud-receipts-witness'],
   ['GET', '/api/v1/team', 'cloud-team'],
   ['POST', '/api/v1/team/invites', 'cloud-team-invites'],
+  ['PUT', '/api/v1/team', 'cloud-team-update'],
   ['GET', '/api/v1/me', 'cloud-me'],
 ];
 

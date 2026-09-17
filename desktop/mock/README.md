@@ -94,8 +94,7 @@ the daemon's, not a sketch of §7.1:
   keys; `version`/`compat`/`provisioned` are `null` until known, `regime` is
   `null` for an unimplemented slot. `byte_equal_revert` is true iff the
   fragment's target is byte-identical to what Mark 1 wrote (state `OK`).
-  `recent_projects` are the cwds an agent's own session trees name (Claude
-  Code only so far; `[]` for the others).
+  `recent_projects` are the cwds an agent's own session trees name (every adapter with a session tree: Claude Code transcripts, codex rollouts, gemini chats, opencode captures, copilot events; cursor has none and is always `[]`).
 - `receipted_transition_id` on `pause`/`resume`/`DELETE /v1/projects` is
   `null`: the daemon journals the transition and its coverage drain receipts
   it a few seconds later, so no id exists at response time.
@@ -118,6 +117,13 @@ the daemon's, not a sketch of §7.1:
   `POST /v1/agents/{name}/disable` (`local-agents-disable`) reverts that
   agent's fragments byte-equal (08 §8.4) and keeps the workspace:
   `{agent, reverted, not_reverted, byte_equality}`.
+  `POST /v1/agents/{name}/pause` · `/resume` (`local-agents-pause`,
+  `local-agents-resume`) is `/v1/pause` for one agent: the hookshim gate
+  answers allow for that agent's sessions and its tailers admit nothing
+  until resume, journalled as an `agent_pause` / `agent_resume` coverage
+  transition; `{agent, paused, receipted_transition_id}` (null, drain-minted).
+  `GET /v1/agents` rows and `status.agents_live` rows carry `paused` for
+  it; the global switch stays `status.paused` and wins.
 - Anchors carry `side_effect: static|test` (the FR-VERIFY-003 tier axis)
   and no `tier`; `last_run` is the newest anchor vote this daemon boot saw,
   `null` before one.
@@ -139,6 +145,40 @@ the daemon's, not a sketch of §7.1:
 - `GET /v1/events` data objects here are illustrative; the daemon streams
   protojson `m1p.v1.Event` frames, except `arrest`, which is the same row
   `/v1/verify/events` holds.
+
+## What the memory-action and team fixtures are held to
+
+controld now serves these routes (`internal/memory` proxies the actions and
+`GET /memory/outcomes` to mark1-intel; `internal/appapi` serves
+`GET /memory/injections` and the team rows; response shapes are the JSON
+Schemas in `go/controld/internal/appapi/schema/`), so the fixtures here mirror
+that backend where the mock can and differ where the mock's static ids cannot:
+
+- `POST /api/v1/memory/artifacts/{id}/retire` (body `{reason}`, 1..1024
+  chars) answers `{artifact_id, state: "retired", receipt_id}` — the retire is
+  chained as a `memory_admission` receipt whose payload carries `act: retire`,
+  the reason and the actor; `…/pin` · `…/unpin` answer `{artifact_id, pinned}`;
+  `…/share` · `…/unshare` answer `{artifact_id, scope}`. The route literal is
+  `art_pit_7`; the real backend takes a UUID and answers `404 M1E-2009` for a
+  malformed, unknown or another tenant's id (never 403). Artifact rows carry
+  `pinned` alongside `scope`; a pinned artifact is never auto-retired by the
+  nightly ADMIT-LCB pass (a user retire still may).
+- `GET /api/v1/memory/injections` is one row per artifact delivered by a
+  `MemoryInjection` event; `outcome` is the task's stage-final verdict at
+  close, `pending` until it has one. `GET /api/v1/memory/outcomes` is the
+  stored ADMIT-LCB evidence per artifact (`uplift_lcb` = the stored lcb,
+  `n` = `verified_outcomes` = the certified sample count). Both real routes
+  wrap their arrays (`{injections, honesty}` / `{outcomes}`); the fixtures are
+  bare arrays, the shape the GUI parses today.
+- `GET /api/v1/team` members are the tenant's principals as the schema knows
+  them (the m1_078 owner, the approvers of device enrollments, the caller)
+  plus live invites as `status: "invited"`; there is no users table, so the
+  real backend sends `name: null, email: null` on a principal, and `invite_link:
+  null` (the raw token is answered exactly once by `POST /team/invites`, whose
+  hash is what `m1_team_invites` keeps for 7 days). `PUT /api/v1/team`
+  `{shared_memory}` answers `{shared_memory}`. `POST /api/v1/team/invites`
+  `{email?}` answers `{sent: true, invite_link, invited_email, status: "sent",
+  expires_at}`; nothing is emailed.
 
 TBD shapes (spec marks these unfrozen) are listed in `TBD.md`.
 

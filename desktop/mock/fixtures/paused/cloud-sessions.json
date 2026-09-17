@@ -44,7 +44,7 @@
     "time": "2026-09-15T14:32:00.000Z",
     "agent": "claudecode",
     "project": "/Users/dev/api-service",
-    "tasks_count": 3,
+    "tasks_count": 5,
     "tokens": {
       "input": 14200,
       "output": 5300,
@@ -64,7 +64,7 @@
     "time": "2026-09-14T14:32:00.000Z",
     "agent": "codex",
     "project": "/Users/dev/api-service",
-    "tasks_count": 2,
+    "tasks_count": 4,
     "tokens": {
       "input": 7600,
       "output": 2400,

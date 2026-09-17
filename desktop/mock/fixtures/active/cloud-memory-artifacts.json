@@ -7,7 +7,8 @@
     "utility_lcb": 0.34,
     "state": "admitted",
     "scope": "mine",
-    "n": 11
+    "n": 11,
+    "pinned": false
   },
   {
     "id": "art_fix_3",
@@ -17,7 +18,8 @@
     "utility_lcb": 0.21,
     "state": "admitted",
     "scope": "team",
-    "n": 6
+    "n": 6,
+    "pinned": false
   },
   {
     "id": "art_inv_2",
@@ -27,6 +29,7 @@
     "utility_lcb": 0.12,
     "state": "extracted",
     "scope": "mine",
-    "n": 2
+    "n": 2,
+    "pinned": false
   }
 ]
