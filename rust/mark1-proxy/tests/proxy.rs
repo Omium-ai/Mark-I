@@ -319,6 +319,30 @@ struct RawResponse {
     body: Vec<u8>,
 }
 
+/// `read_to_end` for a `connection: close` exchange. A refusal answers before draining the request
+/// body, so the server's close carries unread bytes and Windows turns that into an RST: the client
+/// sees WSAECONNABORTED / reset instead of EOF although the whole response already arrived. Once
+/// a complete head is in hand, that abort IS the close.
+async fn read_until_close<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+    raw: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    match r.read_to_end(raw).await {
+        Ok(_) => Ok(()),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::UnexpectedEof
+            ) && raw.windows(4).any(|w| w == b"\r\n\r\n") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 impl RawResponse {
     fn error_code(&self) -> Option<String> {
         let v: serde_json::Value = serde_json::from_slice(&self.body).ok()?;
@@ -734,7 +758,7 @@ async fn loopback_rules_refuse_browser_and_rebound_hosts() {
     let mut sock = tokio::net::TcpStream::connect(ctx.addr).await.unwrap();
     sock.write_all(head.as_bytes()).await.unwrap();
     let mut raw = Vec::new();
-    sock.read_to_end(&mut raw).await.unwrap();
+    read_until_close(&mut sock, &mut raw).await.unwrap();
     assert!(
         String::from_utf8_lossy(&raw).contains("M1E-4004"),
         "wrong Host was accepted: {}",
@@ -1799,7 +1823,7 @@ async fn tls_request(
     tls.write_all(head.as_bytes()).await?;
     tls.write_all(body).await?;
     let mut raw = Vec::new();
-    tls.read_to_end(&mut raw).await?;
+    read_until_close(&mut tls, &mut raw).await?;
     let split = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
