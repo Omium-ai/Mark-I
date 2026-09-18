@@ -75,12 +75,16 @@ func Alive(stateDir string) (addr string, ok bool) {
 		return addr, false
 	}
 	req.Header.Set("Authorization", "Bearer "+d.Token)
-	res, err := (&http.Client{Timeout: 750 * time.Millisecond}).Do(req)
+	// A refused connection answers at once; the budget only matters for a daemon whose status walk hits a cold or scanned disk.
+	res, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
 	if err != nil {
 		return addr, false
 	}
-	_ = res.Body.Close()
-	return addr, res.StatusCode == http.StatusOK
+	defer func() { _ = res.Body.Close() }()
+	var st struct {
+		Running bool `json:"running"`
+	}
+	return addr, res.StatusCode == http.StatusOK && json.NewDecoder(res.Body).Decode(&st) == nil && st.Running
 }
 
 func Listen(cfg Config) (*Server, error) {
