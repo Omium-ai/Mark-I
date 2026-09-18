@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,12 +55,43 @@ type discovery struct {
 	Token string `json:"token"`
 }
 
+// ErrAlreadyServing: a live mark1d owns <state>/run/control.json. A second boot must leave that file alone — v0.1.1 on
+// Windows overwrote it, lost the spool lock, and deleted it on exit, orphaning a healthy daemon nobody could reach.
+var ErrAlreadyServing = errors.New("control: another mark1d is already serving this state dir")
+
+// Alive answers whether the daemon named by <state>/run/control.json still serves; a stale file is a dead daemon's.
+func Alive(stateDir string) (addr string, ok bool) {
+	b, err := os.ReadFile(Path(stateDir))
+	if err != nil {
+		return "", false
+	}
+	var d discovery
+	if json.Unmarshal(b, &d) != nil || d.Port <= 0 || d.Token == "" {
+		return "", false
+	}
+	addr = "127.0.0.1:" + strconv.Itoa(d.Port)
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/v1/status", nil)
+	if err != nil {
+		return addr, false
+	}
+	req.Header.Set("Authorization", "Bearer "+d.Token)
+	res, err := (&http.Client{Timeout: 750 * time.Millisecond}).Do(req)
+	if err != nil {
+		return addr, false
+	}
+	_ = res.Body.Close()
+	return addr, res.StatusCode == http.StatusOK
+}
+
 func Listen(cfg Config) (*Server, error) {
 	if cfg.StateDir == "" {
 		return nil, errors.New("control: StateDir required")
 	}
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
+	}
+	if addr, ok := Alive(cfg.StateDir); ok {
+		return nil, fmt.Errorf("%w (%s answers /v1/status; stop it or let the app adopt it)", ErrAlreadyServing, addr)
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -121,7 +154,10 @@ func (s *Server) Serve() error {
 func (s *Server) Close() error {
 	err := s.http.Close()
 	_ = s.l.Close()
-	_ = os.Remove(Path(s.cfg.StateDir))
+	var d discovery // only this boot's file: a later boot's discovery is theirs to keep
+	if b, rerr := os.ReadFile(Path(s.cfg.StateDir)); rerr == nil && json.Unmarshal(b, &d) == nil && d.Token == s.token {
+		_ = os.Remove(Path(s.cfg.StateDir))
+	}
 	return err
 }
 

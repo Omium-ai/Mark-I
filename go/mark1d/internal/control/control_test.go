@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"maps"
@@ -115,9 +116,24 @@ func TestControlJSONIsPrivateAndPerBoot(t *testing.T) {
 	if _, body := call(t, s, http.MethodGet, "/v1/status", nil); !strings.Contains(string(body), `"running":true`) {
 		t.Fatalf("status %s", body)
 	}
+	if _, err := Listen(Config{StateDir: dir}); !errors.Is(err, ErrAlreadyServing) {
+		t.Fatalf("a second boot beside a live daemon must refuse, got %v", err)
+	}
+	b, _ = os.ReadFile(Path(dir))
+	decodeTo(t, b, &d)
+	if d.Token != s.Token() {
+		t.Fatal("the refused boot must leave the live daemon's control.json untouched")
+	}
+	_ = s.Close()
+	if _, err := os.Stat(Path(dir)); !os.IsNotExist(err) {
+		t.Fatal("Close must remove control.json")
+	}
+	if err := os.WriteFile(Path(dir), b, 0o600); err != nil { // the dead daemon's file, as after a crash
+		t.Fatal(err)
+	}
 	s2, err := Listen(Config{StateDir: dir})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("a stale control.json must be taken over, got %v", err)
 	}
 	defer func() { _ = s2.Close() }()
 	if s2.Token() == s.Token() {
@@ -128,9 +144,10 @@ func TestControlJSONIsPrivateAndPerBoot(t *testing.T) {
 	if d.Token != s2.Token() {
 		t.Fatal("control.json must carry the newest boot's token")
 	}
-	_ = s2.Close()
-	if _, err := os.Stat(Path(dir)); !os.IsNotExist(err) {
-		t.Fatal("Close must remove control.json")
+	stale := Server{cfg: Config{StateDir: dir}, token: s.Token(), http: &http.Server{}, l: s.l}
+	_ = stale.Close()
+	if _, err := os.Stat(Path(dir)); err != nil {
+		t.Fatal("an older boot's Close must not remove a newer boot's control.json")
 	}
 }
 
