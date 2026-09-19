@@ -23,7 +23,7 @@ on the cloud API (real auth is an OAuth session, not simulated here).
 
 - **first-run** — onboarding just finished. Agents/projects are configured,
   nothing has run yet: empty sessions, empty events, no report (`guarantee_
-  grade: "indicative"` with an "not enough sessions yet" refusal).
+  grade: false` with a "not enough sessions yet" `refusal` string).
 - **active** — steady state. Live session on the tray, arrests, injections,
   route decisions, a guarantee-grade TVO report.
 - **paused** — `status.paused: true`, no live agents, no new SSE events;
@@ -32,8 +32,11 @@ on the cloud API (real auth is an OAuth session, not simulated here).
   port answers exactly as in `active`. This is how the app should tell "the
   daemon is fine, the network isn't."
 - **below-floor** — `GET /reports/tvo` has `coverage_band.observed_fraction:
-  0.82` under a `0.95` floor, `guarantee_grade: "indicative"`, and a
-  `refusal.reason` explaining why — the exact case §5.3 describes.
+  0.82` under a `0.95` floor, `guarantee_grade: false`, and a `refusal`
+  string explaining why, the exact case §5.3 describes. Grade and refusal
+  are controld's own spelling (08 §3.3 honesty fields: a boolean and the
+  stated refusals joined by `; `); `trend` is `[{day, tvo}]`, one point per
+  rollup day.
 
 ## Fixtures
 
@@ -142,8 +145,10 @@ the daemon's, not a sketch of §7.1:
   inequality, evidence_ref` (numbers `null` when the knee was not
   evaluable), verdicts `verdict, state, certificate_id`, tampers
   `anchor_id`.
-- `GET /v1/events` data objects here are illustrative; the daemon streams
-  protojson `m1p.v1.Event` frames, except `arrest`, which is the same row
+- `GET /v1/events` data objects are the daemon's frames: protojson
+  `m1p.v1.Event` with `event_id`/`session_id`/`task_id` re-spelled as dashed
+  UUIDs (the body under its family key, uint64 counts as strings, enums as
+  their prefixed names), except `arrest`, which is the same row
   `/v1/verify/events` holds.
 
 ## What the memory-action and team fixtures are held to
@@ -168,8 +173,13 @@ that backend where the mock can and differ where the mock's static ids cannot:
   close, `pending` until it has one. `GET /api/v1/memory/outcomes` is the
   stored ADMIT-LCB evidence per artifact (`uplift_lcb` = the stored lcb,
   `n` = `verified_outcomes` = the certified sample count). Both real routes
-  wrap their arrays (`{injections, honesty}` / `{outcomes}`); the fixtures are
-  bare arrays, the shape the GUI parses today.
+  wrap their arrays (`{window, injections, honesty}` / `{outcomes}`), as do
+  the fixtures; `GET /api/v1/memory/artifacts` is `{artifacts: [{artifact_id,
+  …}]}` (08 §3.7). Injection `outcome` is `pending | satisfied | violated |
+  refused | error` and `channel` the six-value INJECTION_CHANNEL suffix.
+  `fixtures/controld/cloud-*.json` are goldens written by controld's own
+  handlers (`go test ./internal/appapi -run TestAppAPIMatchesDesktopFixtures -update`) and
+  parsed by the GUI's contract test; the mock server does not serve them.
 - `GET /api/v1/team` members are the tenant's principals as the schema knows
   them (the m1_078 owner, the approvers of device enrollments, the caller)
   plus live invites as `status: "invited"`; there is no users table, so the

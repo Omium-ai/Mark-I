@@ -1,20 +1,38 @@
-[
-  {
-    "id": "inj_1",
-    "artifact_id": "art_pit_7",
-    "time": "2026-09-16T13:57:00.000Z",
-    "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
-    "channel": "hook_context",
-    "tokens_used": 180,
-    "outcome": "verified"
+{
+  "window": {
+    "from": "2026-09-16",
+    "to": "2026-09-16"
   },
-  {
-    "id": "inj_2",
-    "artifact_id": "art_fix_3",
-    "time": "2026-09-16T11:32:00.000Z",
-    "session_id": "0191c711-5b1e-7c2d-9e4f-012345678871",
-    "channel": "mcp_pull",
-    "tokens_used": 140,
-    "outcome": "verified"
+  "injections": [
+    {
+      "id": "inj_1",
+      "artifact_id": "art_pit_7",
+      "at": "2026-09-16T13:57:00.000Z",
+      "session_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a0",
+      "task_id": "0191c7a0-5b1e-7c2d-9e4f-0123456789a2",
+      "channel": "hook_context",
+      "tokens_used": 180,
+      "outcome": "satisfied"
+    },
+    {
+      "id": "inj_2",
+      "artifact_id": "art_fix_3",
+      "at": "2026-09-16T11:32:00.000Z",
+      "session_id": "0191c711-5b1e-7c2d-9e4f-012345678871",
+      "task_id": null,
+      "channel": "mcp_pull",
+      "tokens_used": 140,
+      "outcome": "satisfied"
+    }
+  ],
+  "honesty": {
+    "coverage_band": {
+      "observed_fraction": 0.97,
+      "coverage_lower": 0.96,
+      "floor": 0.95
+    },
+    "cost_basis": "usd",
+    "guarantee_grade": true,
+    "task_seg_version": "task_seg.v1"
   }
-]
+}

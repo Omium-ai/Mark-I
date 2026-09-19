@@ -34,7 +34,7 @@ const mockDir = "../../../../desktop/mock"
 
 // skippedFixtures are the local-*.json files no route exercises, each with its reason.
 var skippedFixtures = map[string]string{
-	"local-events": "SSE replay format {delayMs,event,data}: the daemon streams protojson m1p.v1.Event frames (TestEventsStreamWithin100ms covers the wire); the fixture's data objects are illustrative",
+	"local-events": "SSE replay format {delayMs,event,data}, not a route; TestEventFramesMatchDesktopFixture holds each row's data to the hub's frame",
 }
 
 var routeRe = regexp.MustCompile(`\['(GET|POST|PUT|DELETE)', '(/v1/[^']+)', '(local-[^']+)'\]`)
@@ -320,4 +320,70 @@ func kind(v any) string {
 		return "object"
 	}
 	return fmt.Sprintf("%T", v)
+}
+
+// TestEventFramesMatchDesktopFixture holds every family the hub streams to the active scenario's local-events.json rows: the same frame shape (ids as dashed UUIDs, the protojson body under its family key; arrest the verify-events row) the app's SSE readers are built against.
+func TestEventFramesMatchDesktopFixture(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(mockDir, "fixtures", "active", "local-events.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var script []struct {
+		Event string         `json:"event"`
+		Data  map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &script); err != nil {
+		t.Fatal(err)
+	}
+	hub := NewHub()
+	ch, cancel := hub.subscribe()
+	defer cancel()
+	at := timestamppb.New(time.Date(2026, 9, 16, 13, 52, 0, 0, time.UTC))
+	full := func(body any) *m1pv1.Event {
+		ev := sessionEvent(1, body)
+		ev.EventId, ev.TaskId, ev.OccurredAt = bytes.Repeat([]byte{5}, 16), bytes.Repeat([]byte{3}, 16), at
+		return ev
+	}
+	published := []*m1pv1.Event{
+		full(&m1pv1.SessionStart{Agent: "claudecode", AgentVersion: "2.1.0", CapturePaths: []m1pv1.CapturePath{m1pv1.CapturePath_CAPTURE_PATH_HOOKS}}),
+		full(&m1pv1.Turn{TurnIndex: 1, Initiator: m1pv1.Initiator_INITIATOR_HUMAN}),
+		full(&m1pv1.ToolUse{ToolName: "Edit", ToolUseId: "toolu_01", DurationMs: 120, Status: m1pv1.ToolStatus_TOOL_STATUS_OK}),
+		full(&m1pv1.Usage{Model: "claude-sonnet-4-5", InputTokens: 1800, OutputTokens: 620, CacheReadInputTokens: 4100}),
+		full(&m1pv1.VerdictEvent{Stage: m1pv1.VerdictStage_VERDICT_STAGE_PROVISIONAL, Verdict: m1pv1.Verdict_VERDICT_VIOLATED, Posterior: []float64{0.2, 0.7, 0.05, 0.05}, Certification: m1pv1.CertificationStatus_CERTIFICATION_STATUS_BOOTSTRAPPING}),
+		full(&m1pv1.MemoryInjection{ArtifactIds: [][]byte{bytes.Repeat([]byte{7}, 16)}, Channel: m1pv1.InjectionChannel_INJECTION_CHANNEL_HOOK_CONTEXT, TokensUsed: 180}),
+		full(&m1pv1.RouteDecision{DecisionId: bytes.Repeat([]byte{4}, 16), Action: "claude-haiku-4-5", Candidates: []string{"claude-haiku-4-5", "claude-sonnet-4-5"}, Propensity: 0.97, Fidelity: m1pv1.RouteFidelity_ROUTE_FIDELITY_WIRE_ENFORCED, BundleSeq: 1042}),
+		full(&m1pv1.CoverageTransition{Kind: m1pv1.CoverageKind_COVERAGE_KIND_ENABLE, ReasonCode: "project_enable"}),
+	}
+	published[0].TaskId = nil
+	published[len(published)-1].TaskId = nil
+	for _, ev := range published {
+		hub.Publish(ev)
+	}
+	hub.Arrest([16]byte{1}, [16]byte{3}, verdict.KneeState{N: 3, PLCB: 0.18, VTask: 6000, CostN: 2900, Stop: true, Evaluable: true}, "ev_task_401_3")
+	got := map[string]any{}
+	for len(got) < len(published)+1 {
+		select {
+		case f := <-ch:
+			var data any
+			if err := json.Unmarshal(f.data, &data); err != nil {
+				t.Fatal(err)
+			}
+			got[f.family] = data
+		case <-time.After(time.Second):
+			t.Fatalf("hub streamed %d families, want %d", len(got), len(published)+1)
+		}
+	}
+	for _, row := range script {
+		frame, ok := got[row.Event]
+		if !ok {
+			t.Errorf("fixture family %q is not one the hub streams", row.Event)
+			continue
+		}
+		if diffs := shapeDiff("$", row.Data, frame); len(diffs) > 0 {
+			t.Errorf("event %s diverges from the hub's frame:\n  %s", row.Event, strings.Join(diffs, "\n  "))
+		}
+		if id, _ := frame.(map[string]any)["session_id"].(string); uuid.Validate(id) != nil {
+			t.Errorf("event %s: session_id %q is not a dashed UUID", row.Event, id)
+		}
+	}
 }

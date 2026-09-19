@@ -1,0 +1,31 @@
+{
+  "cost_basis": "usd",
+  "coverage_band": {
+    "coverage_lower": 0.98,
+    "floor": 0.95,
+    "observed_fraction": 0.98
+  },
+  "guarantee_grade": false,
+  "missing_days": [
+    "2026-09-13",
+    "2026-09-14",
+    "2026-09-15",
+    "2026-09-16",
+    "2026-09-17",
+    "2026-09-18"
+  ],
+  "refusal": "M1E-5004 rollup missing for 6 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 §8.4)",
+  "task_seg_version": "task_seg.v1",
+  "trend": [
+    {
+      "day": "2026-09-19",
+      "tvo": 100
+    }
+  ],
+  "tvo": 100,
+  "waste": {
+    "over_model_tokens": 30,
+    "re_exploration_tokens": 20,
+    "retry_loop_tokens": 10
+  }
+}

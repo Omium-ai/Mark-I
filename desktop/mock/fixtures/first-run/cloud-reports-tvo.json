@@ -20,8 +20,6 @@
     "total": 0
   },
   "price_table_version": "pt_2026_09_01",
-  "guarantee_grade": "indicative",
-  "refusal": {
-    "reason": "not enough sessions yet. Your first report arrives after about a day of use"
-  }
+  "guarantee_grade": false,
+  "refusal": "not enough sessions yet. Your first report arrives after about a day of use"
 }

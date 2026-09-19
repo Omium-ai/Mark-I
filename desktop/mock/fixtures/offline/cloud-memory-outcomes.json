@@ -1,14 +1,16 @@
-[
-  {
-    "artifact_id": "art_pit_7",
-    "verified_outcomes": 11,
-    "uplift_lcb": 0.34,
-    "n": 11
-  },
-  {
-    "artifact_id": "art_fix_3",
-    "verified_outcomes": 6,
-    "uplift_lcb": 0.21,
-    "n": 6
-  }
-]
+{
+  "outcomes": [
+    {
+      "artifact_id": "art_pit_7",
+      "verified_outcomes": 11,
+      "uplift_lcb": 0.34,
+      "n": 11
+    },
+    {
+      "artifact_id": "art_fix_3",
+      "verified_outcomes": 6,
+      "uplift_lcb": 0.21,
+      "n": 6
+    }
+  ]
+}

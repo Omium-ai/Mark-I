@@ -1,0 +1,62 @@
+{
+  "honesty": {
+    "cost_basis": "usd",
+    "coverage_band": {
+      "coverage_lower": 0.98,
+      "floor": 0.95,
+      "observed_fraction": 0.98
+    },
+    "guarantee_grade": false,
+    "refusal": "M1E-5004 rollup missing for 1 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 §8.4)",
+    "task_seg_version": "task_seg.v1"
+  },
+  "moments": [
+    {
+      "agent": "claudecode",
+      "at": "2026-09-19T12:04:29.838114377Z",
+      "event_id": "01a0b98e-aa6e-71c1-a33a-134787e11598",
+      "kind": "route",
+      "route": {
+        "action": "claude-haiku-4-5",
+        "bundle_seq": 483,
+        "candidates": [
+          "claude-haiku-4-5",
+          "claude-sonnet-4-5"
+        ],
+        "fidelity": "wire_enforced",
+        "propensity": 0.97
+      },
+      "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
+      "task_id": "7cc888ef-ba14-4dfd-a34b-1a9b532b2297"
+    },
+    {
+      "agent": "claudecode",
+      "at": "2026-09-19T12:03:29.838114377Z",
+      "event_id": "01a0b98e-aa6e-7225-8a37-1cbc3a1249be",
+      "injection": {
+        "artifact_count": 1,
+        "at": "2026-09-19T12:03:29.838114377Z",
+        "channel": "mcp_pull",
+        "event_id": "01a0b98e-aa6e-7225-8a37-1cbc3a1249be",
+        "tokens_used": 40
+      },
+      "kind": "injection",
+      "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
+      "task_id": null
+    },
+    {
+      "agent": "claudecode",
+      "arrest": {
+        "bundle_seq": 483,
+        "tokens_saved_estimate": 900
+      },
+      "at": "2026-09-19T12:02:29.838114377Z",
+      "event_id": "01a0b98e-aa6e-722f-932d-48ac102112bd",
+      "kind": "arrest",
+      "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
+      "task_id": "7cc888ef-ba14-4dfd-a34b-1a9b532b2297"
+    }
+  ],
+  "next_since": "2026-09-19T12:04:29.838114377Z",
+  "since": "2026-09-18T12:05:29.860282174Z"
+}

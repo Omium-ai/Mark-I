@@ -1,0 +1,16 @@
+{
+  "knee_arrests": [
+    {
+      "bundle_seq": 7,
+      "task_id": "7cc888ef-ba14-4dfd-a34b-1a9b532b2297",
+      "tokens_saved_estimate": 1200,
+      "verdict": "satisfied"
+    },
+    {
+      "bundle_seq": 7,
+      "task_id": "04ecdd87-732a-4705-8b2a-66d691841f29",
+      "tokens_saved_estimate": 900,
+      "verdict": ""
+    }
+  ]
+}

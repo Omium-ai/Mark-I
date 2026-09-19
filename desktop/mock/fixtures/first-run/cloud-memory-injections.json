@@ -1,1 +1,17 @@
-[]
+{
+  "window": {
+    "from": "2026-09-16",
+    "to": "2026-09-16"
+  },
+  "injections": [],
+  "honesty": {
+    "coverage_band": {
+      "observed_fraction": 0.97,
+      "coverage_lower": 0.96,
+      "floor": 0.95
+    },
+    "cost_basis": "usd",
+    "guarantee_grade": true,
+    "task_seg_version": "task_seg.v1"
+  }
+}

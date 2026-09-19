@@ -1,0 +1,29 @@
+{
+  "honesty": {
+    "cost_basis": "usd",
+    "coverage_band": {
+      "coverage_lower": 0.98,
+      "floor": 0.95,
+      "observed_fraction": 0.98
+    },
+    "guarantee_grade": false,
+    "refusal": "M1E-5004 rollup missing for 6 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 §8.4)",
+    "task_seg_version": "task_seg.v1"
+  },
+  "injections": [
+    {
+      "artifact_id": "d4ba503b-f663-4954-a19a-575db65c2bf4",
+      "at": "2026-09-19T09:05:35.838046819Z",
+      "channel": "hook_context",
+      "id": "01a0b98e-aa6e-7167-a2f9-2fa0e6d08614/0",
+      "outcome": "satisfied",
+      "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
+      "task_id": "7cc888ef-ba14-4dfd-a34b-1a9b532b2297",
+      "tokens_used": 12
+    }
+  ],
+  "window": {
+    "from": "2026-09-13",
+    "to": "2026-09-19"
+  }
+}

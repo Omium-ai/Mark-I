@@ -1,0 +1,148 @@
+{
+  "checkpoint_seq": 9,
+  "honesty": {
+    "cost_basis": "usd",
+    "coverage_band": {
+      "coverage_lower": 0.98,
+      "floor": 0.95,
+      "observed_fraction": 0.98
+    },
+    "guarantee_grade": false,
+    "refusal": "M1E-5004 rollup missing for 1 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 §8.4)",
+    "task_seg_version": "task_seg.v1"
+  },
+  "session": {
+    "agent": "claudecode",
+    "arrests": 1,
+    "checkpoint_seq": 9,
+    "coverage": {
+      "capture_paths": [
+        "hooks",
+        "proxy"
+      ],
+      "dropped_billing": 3,
+      "proxy_in_path": true,
+      "transcript_tailed": false
+    },
+    "ended_at": "2026-09-19T10:05:29.838046819Z",
+    "injections": 1,
+    "project": "0f0e0d0c0b0a09080706050403020100ffeeddccbbaa99887766554433221100",
+    "route_decisions": 1,
+    "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
+    "started_at": "2026-09-19T09:05:29.838046819Z",
+    "tasks": 2,
+    "tokens": {
+      "cache_create": 5,
+      "cache_read": 50,
+      "input": 1000,
+      "output": 200
+    },
+    "verified_outcomes": 1
+  },
+  "tasks": [
+    {
+      "arrests": [
+        {
+          "at": "2026-09-19T09:05:34.838046819Z",
+          "bundle_seq": 7,
+          "event_id": "01a0b98e-aa6e-7158-9fd0-27566bee8fe6",
+          "tokens_saved_estimate": 1200
+        }
+      ],
+      "attempts": [
+        {
+          "cost_usd": 0.1,
+          "n": 1,
+          "tokens": 100,
+          "verdict": "satisfied",
+          "verdict_stage": "certified"
+        }
+      ],
+      "closed_at": "2026-09-19T09:05:37.838046819Z",
+      "evidence": [
+        {
+          "anchor_id": "ruff@1",
+          "at": "2026-09-19T09:05:33.838046819Z",
+          "category": "lint",
+          "counts": {
+            "errors": 2,
+            "files_affected": 0,
+            "warnings": 0
+          },
+          "diagnostic_code": "E501",
+          "event_id": "01a0b98e-aa6e-7102-9a3b-ed442f8d2fbc",
+          "path_role": "src",
+          "tamper": false,
+          "tool": "ruff",
+          "vote": "violated"
+        }
+      ],
+      "injections": [
+        {
+          "artifact_count": 1,
+          "at": "2026-09-19T09:05:35.838046819Z",
+          "channel": "hook_context",
+          "event_id": "01a0b98e-aa6e-7167-a2f9-2fa0e6d08614",
+          "tokens_used": 12
+        }
+      ],
+      "opened_at": "2026-09-19T09:05:30.838046819Z",
+      "resolution": "verdict",
+      "task_class": "edit.small",
+      "task_id": "7cc888ef-ba14-4dfd-a34b-1a9b532b2297",
+      "task_seg_version": "task_seg.v1",
+      "verdict_trail": [
+        {
+          "at": "2026-09-19T09:05:32.838046819Z",
+          "bundle_seq": 7,
+          "certificate_id": null,
+          "certification": "bootstrapping",
+          "event_id": "01a0b98e-aa6e-70fa-a3ee-3680447288d7",
+          "stage": "provisional",
+          "verdict": "violated"
+        },
+        {
+          "at": "2026-09-19T09:05:36.838046819Z",
+          "bundle_seq": 0,
+          "certificate_id": "7df2bd9c-3a6c-4b8d-b325-93bd1ee7e0f3",
+          "certification": "certified",
+          "event_id": "01a0b98e-aa6e-7188-822e-6de7f4b2ba1f",
+          "stage": "certified",
+          "verdict": "satisfied"
+        }
+      ]
+    },
+    {
+      "arrests": [
+        {
+          "at": "2026-09-19T09:05:39.838046819Z",
+          "bundle_seq": 7,
+          "event_id": "01a0b98e-aa6e-71b2-8eae-7427a5064c4a",
+          "tokens_saved_estimate": 900
+        }
+      ],
+      "attempts": [
+        {
+          "cost_usd": 0,
+          "n": 1,
+          "tokens": 0,
+          "verdict": "",
+          "verdict_stage": ""
+        }
+      ],
+      "closed_at": null,
+      "evidence": [],
+      "injections": [],
+      "opened_at": "2026-09-19T09:05:38.838046819Z",
+      "resolution": "",
+      "task_class": "",
+      "task_id": "04ecdd87-732a-4705-8b2a-66d691841f29",
+      "task_seg_version": "task_seg.v1",
+      "verdict_trail": []
+    }
+  ],
+  "window": {
+    "from": "2026-09-18",
+    "to": "2026-09-19"
+  }
+}

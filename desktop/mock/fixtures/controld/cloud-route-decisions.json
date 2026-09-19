@@ -1,0 +1,38 @@
+{
+  "decisions": [
+    {
+      "action": "claude-haiku-4-5",
+      "agent": "claudecode",
+      "at": "2026-09-19T12:05:29.838Z",
+      "bundle_seq": 483,
+      "candidates": [
+        "claude-haiku-4-5",
+        "claude-sonnet-4-5"
+      ],
+      "decision_id": "01a0b98e-aa6e-70c0-9efb-be9b5007168f",
+      "fidelity": "wire_enforced",
+      "label_confidence": 0.9100000262260437,
+      "propensity": 0.97,
+      "served_model": "claude-haiku-4-5",
+      "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
+      "task_id": "7cc888ef-ba14-4dfd-a34b-1a9b532b2297",
+      "verdict": "satisfied",
+      "verdict_stage": "certified"
+    }
+  ],
+  "honesty": {
+    "cost_basis": "usd",
+    "coverage_band": {
+      "coverage_lower": 0.98,
+      "floor": 0.95,
+      "observed_fraction": 0.98
+    },
+    "guarantee_grade": false,
+    "refusal": "M1E-5004 rollup missing for 6 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 §8.4)",
+    "task_seg_version": "task_seg.v1"
+  },
+  "window": {
+    "from": "2026-09-13",
+    "to": "2026-09-19"
+  }
+}

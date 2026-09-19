@@ -109,11 +109,29 @@ func (h *Hub) Publish(ev *m1pv1.Event) {
 		h.verifyRow(ev, "tamper", map[string]any{"anchor_id": ev.GetAnchorVote().GetAnchorId()})
 		return
 	}
-	data, err := marshal.Marshal(ev)
+	data, err := frameJSON(ev)
 	if err != nil {
 		return
 	}
 	h.fanout(frame{family: fam, data: data})
+}
+
+// frameJSON is the protojson Event with its three ids re-spelled as dashed UUIDs (protojson's base64 is not what any app-facing surface renders); the body stays protojson verbatim.
+func frameJSON(ev *m1pv1.Event) ([]byte, error) {
+	raw, err := marshal.Marshal(ev)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	for k, b := range map[string][]byte{"event_id": ev.GetEventId(), "session_id": ev.GetSessionId(), "task_id": ev.GetTaskId()} {
+		if len(b) > 0 {
+			m[k] = idString(b)
+		}
+	}
+	return json.Marshal(m)
 }
 
 // Arrest is the knee stop the gate answered (fabric.Gate.Answer's "retry loop arrested at the knee" row); the gate carries no event, so this is its only record.

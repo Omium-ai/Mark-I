@@ -217,6 +217,16 @@ func sessionEvent(sid byte, body any) *m1pv1.Event {
 		ev.Body = &m1pv1.Event_AnchorVote{AnchorVote: b}
 	case *m1pv1.EdgeHealth:
 		ev.Body = &m1pv1.Event_EdgeHealth{EdgeHealth: b}
+	case *m1pv1.RouteDecision:
+		ev.Body = &m1pv1.Event_RouteDecision{RouteDecision: b}
+	case *m1pv1.Turn:
+		ev.Body = &m1pv1.Event_Turn{Turn: b}
+	case *m1pv1.ToolUse:
+		ev.Body = &m1pv1.Event_ToolUse{ToolUse: b}
+	case *m1pv1.MemoryInjection:
+		ev.Body = &m1pv1.Event_MemoryInjection{MemoryInjection: b}
+	case *m1pv1.CoverageTransition:
+		ev.Body = &m1pv1.Event_CoverageTransition{CoverageTransition: b}
 	}
 	return ev
 }
@@ -743,8 +753,20 @@ func TestEventsStreamWithin100ms(t *testing.T) {
 		} `json:"session_start"`
 	}
 	decodeTo(t, []byte(strings.TrimPrefix(f, "event: session_start\ndata: ")), &data)
-	if data.SessionID != "AQAAAAAAAAAAAAAAAAAAAA==" || data.SessionStart.Agent != "claudecode" || data.SessionStart.AgentVersion != "2.1.0" {
-		t.Fatalf("frame %q", f)
+	if data.SessionID != "01000000-0000-0000-0000-000000000000" || data.SessionStart.Agent != "claudecode" || data.SessionStart.AgentVersion != "2.1.0" {
+		t.Fatalf("ids are dashed UUIDs, the body protojson: %q", f)
+	}
+	rd1 := sessionEvent(1, &m1pv1.RouteDecision{DecisionId: bytes.Repeat([]byte{4}, 16), Action: "claude-sonnet-4-5", Candidates: []string{"claude-sonnet-4-5"}, Propensity: 1, Fidelity: m1pv1.RouteFidelity_ROUTE_FIDELITY_ADVISORY})
+	rd1.EventId, rd1.TaskId = bytes.Repeat([]byte{5}, 16), bytes.Repeat([]byte{3}, 16)
+	s.Hub().Publish(rd1)
+	f = next()
+	var route map[string]any
+	decodeTo(t, []byte(strings.TrimPrefix(f, "event: route_decision\ndata: ")), &route)
+	if route["event_id"] != "05050505-0505-0505-0505-050505050505" || route["session_id"] != "01000000-0000-0000-0000-000000000000" || route["task_id"] != "03030303-0303-0303-0303-030303030303" {
+		t.Fatalf("route frame ids: %q", f)
+	}
+	if rd, _ := route["route_decision"].(map[string]any); rd["action"] != "claude-sonnet-4-5" || rd["fidelity"] != "ROUTE_FIDELITY_ADVISORY" || route["action"] != nil {
+		t.Fatalf("route decision fields stay nested under route_decision: %q", f)
 	}
 	ve := sessionEvent(1, &m1pv1.VerdictEvent{Verdict: m1pv1.Verdict_VERDICT_VIOLATED, NoiseCertId: "cert_1", Certification: m1pv1.CertificationStatus_CERTIFICATION_STATUS_BOOTSTRAPPING})
 	ve.EventId, ve.TaskId = bytes.Repeat([]byte{2}, 16), bytes.Repeat([]byte{3}, 16)

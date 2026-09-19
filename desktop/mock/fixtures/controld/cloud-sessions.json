@@ -1,0 +1,75 @@
+{
+  "honesty": {
+    "cost_basis": "usd",
+    "coverage_band": {
+      "coverage_lower": 0.98,
+      "floor": 0.95,
+      "observed_fraction": 0.98
+    },
+    "guarantee_grade": false,
+    "refusal": "M1E-5004 rollup missing for 6 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 §8.4)",
+    "task_seg_version": "task_seg.v1"
+  },
+  "next_cursor": null,
+  "sessions": [
+    {
+      "agent": "claudecode",
+      "arrests": 1,
+      "checkpoint_seq": 9,
+      "coverage": {
+        "capture_paths": [
+          "hooks",
+          "proxy"
+        ],
+        "dropped_billing": 3,
+        "proxy_in_path": true,
+        "transcript_tailed": false
+      },
+      "ended_at": "2026-09-19T10:05:29.838046819Z",
+      "injections": 1,
+      "project": "0f0e0d0c0b0a09080706050403020100ffeeddccbbaa99887766554433221100",
+      "route_decisions": 1,
+      "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
+      "started_at": "2026-09-19T09:05:29.838046819Z",
+      "tasks": 2,
+      "tokens": {
+        "cache_create": 5,
+        "cache_read": 50,
+        "input": 1000,
+        "output": 200
+      },
+      "verified_outcomes": 1
+    },
+    {
+      "agent": "codex",
+      "arrests": 1,
+      "checkpoint_seq": 9,
+      "coverage": {
+        "capture_paths": [
+          "transcript"
+        ],
+        "dropped_billing": 3,
+        "proxy_in_path": false,
+        "transcript_tailed": true
+      },
+      "ended_at": "2026-09-19T09:05:29.838046819Z",
+      "injections": 1,
+      "project": "",
+      "route_decisions": 1,
+      "session_id": "01a0b98e-aa6e-70bc-9b32-f3db70a073cb",
+      "started_at": "2026-09-19T08:05:29.838046819Z",
+      "tasks": 2,
+      "tokens": {
+        "cache_create": 5,
+        "cache_read": 50,
+        "input": 1000,
+        "output": 200
+      },
+      "verified_outcomes": 1
+    }
+  ],
+  "window": {
+    "from": "2026-09-13",
+    "to": "2026-09-19"
+  }
+}
