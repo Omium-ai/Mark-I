@@ -471,6 +471,14 @@ const REVIEWED_SINKS: &[(&str, &str, &str)] = &[
     ("mark1-proxy/src/fabric.rs", "deliver", "4a99678aa5460439"), // re-reviewed 2026-09-18: Hello + the frame to the local socket or the owner-only named pipe; `send` only connects now
     ("mark1-hookshim/src/fabric.rs", "write_frame", "eb1a5e88683f885e"), // re-reviewed 2026-09-18: one frame to the per-platform Stream below
     ("mark1-hookshim/src/fabric.rs", "write_all", "869fe8b224b21db6"), // the Stream itself: unix socket (write timeout) and the owner-only named pipe (File); local only
+    // Status-line mode (2026-09-19): Claude Code's status JSON, never an event frame. `append`
+    // files the {rate_limits, model, context_window, prompt_cache} slice to the 0600
+    // ~/.omium/mark1/claude/ratelimits.jsonl; `trim` rewrites that same file; `chain` replays
+    // stdin to the status-line command the user had before Mark 1 took the slot (a local
+    // child), or prints Mark 1's own one-liner to stdout. Nothing leaves the machine.
+    ("mark1-hookshim/src/statusline.rs", "append", "bde702fcbf93c02f"),
+    ("mark1-hookshim/src/statusline.rs", "trim", "7f6332810d04dd43"),
+    ("mark1-hookshim/src/statusline.rs", "chain", "5cfbed4c3f60f02c"),
 ];
 
 /// A write-like call, as this token walk can see it.

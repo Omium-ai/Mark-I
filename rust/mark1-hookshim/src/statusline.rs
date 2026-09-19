@@ -59,7 +59,7 @@ fn append(dir: &Path, raw: &[u8]) {
     trim(&path);
 }
 
-/// ponytail: read-then-rename; a status line appended by a concurrent session between the two is lost, and the next message refiles it.
+/// ponytail: read, truncate, rewrite in place (no rename: CON-008 cannot follow a rename); a line appended by a concurrent session between the two is lost, and the next message refiles it.
 fn trim(path: &Path) {
     let Ok(data) = std::fs::read(path) else {
         return;
@@ -81,16 +81,14 @@ fn trim(path: &Path) {
     }) else {
         return;
     };
-    let tmp = path.with_extension("jsonl.tmp");
-    let _ = std::fs::remove_file(&tmp);
-    let Ok(mut file) = open_private_append(&tmp) else {
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+    else {
         return;
     };
-    if file.write_all(&data[cut + 1..]).is_err() {
-        return;
-    }
-    drop(file);
-    let _ = std::fs::rename(&tmp, path);
+    let _ = file.write_all(&data[cut + 1..]);
 }
 
 /// Replays stdin to the user's previous status-line command, recorded by the adapter at provision (StatusLinePrevPath); nothing recorded ⇒ Mark 1's own one-liner, so the footer never goes blank.
