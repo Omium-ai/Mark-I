@@ -117,6 +117,8 @@ type config struct {
 	spoolCap  int64
 	socket    string
 	workspace string
+	// backfillWindow bounds a first tail's history import (tailers.BackfillWindow); 0 imports every line, for replays of transcripts stamped long ago.
+	backfillWindow time.Duration
 	// saltHex, deviceToken, tenantID, deviceID and ingestURL are the identity
 	// `mark1 enroll` persists in <state>/enrollment.json (08 §7.1, 04 §2.9);
 	// applyEnrollment fills them from the document at boot. The flags of the
@@ -181,6 +183,7 @@ func main() {
 	flag.Int64Var(&cfg.spoolCap, "spool-cap", spool.DefaultCap, "spool byte cap (07 §6): past it diagnostics shed, accounted, and billing-grade blocks; below one 64 MiB segment the spool can never free space")
 	flag.StringVar(&cfg.socket, "socket", "", "fabric endpoint (07 §5): unix socket path, default $XDG_RUNTIME_DIR/omium-mark1/m1p.sock else ~/.omium/mark1/m1p.sock; on Windows the named pipe \\\\.\\pipe\\omium-mark1-<user-SID>")
 	flag.StringVar(&cfg.workspace, "workspace", "", "additive workspace root to tail besides <state-dir>/workspaces.json (mark1 enable writes the file)")
+	flag.DurationVar(&cfg.backfillWindow, "backfill-window", tailers.BackfillWindow, "how much transcript history a never-tailed file imports, receipted as a history_import window; 0 imports everything")
 	flag.StringVar(&cfg.saltHex, "tenant-salt", "", "hex tenant HMAC root for Usage idem_key derivation; DEV SEAM — overrides enrollment.json's tenant_root_hex (04 §2.9)")
 	flag.StringVar(&cfg.ingestURL, "ingest-url", "", "full URL of POST /m1p/v1/ingest; overrides enrollment.json's endpoints.ingest; empty with no document leaves the uplink off (capture-local-only)")
 	flag.StringVar(&cfg.deviceToken, "device-token", "", "bearer device token for ingest and policy; DEV SEAM — overrides enrollment.json's device_token (08 §3.1)")
@@ -1419,7 +1422,7 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 		Emit:           off.Unless(cfg.stateDir, "claudecode", router.Emit),
 		Observe:        func(ev *m1pv1.Event) { seg.Observe(ev, nil) },
 		Log:            log,
-		BackfillWindow: tailers.BackfillWindow,
+		BackfillWindow: cfg.backfillWindow,
 	}
 	singles = []shared{
 		{"\x00codex", sniffCompat("codex", cx.Detect, cx.Compatibility), func(root string) (*tailers.Manager, error) {

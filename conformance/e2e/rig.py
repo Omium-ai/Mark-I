@@ -695,7 +695,16 @@ class Rig:
         # Started the way a customer's supervisor unit starts it (04 §9.3): --state-dir only.
         # Token, tenant, device, tenant root and the ingest endpoint all come from the
         # enrollment.json `mark1 enroll` just wrote; the DEV SEAM flags stay unset.
-        cmd = [str(self.bins["mark1d"]), "--state-dir", str(self.state), *extra]
+        # --backfill-window=0: the fixture transcripts carry their recording stamps (2026-08-29) and
+        # must replay as capture whatever today's date is; the 30-day default would drop them as
+        # history past 2026-09-28. The window itself is covered by mark1d's tailer unit tests.
+        cmd = [
+            str(self.bins["mark1d"]),
+            "--state-dir",
+            str(self.state),
+            "--backfill-window=0",
+            *extra,
+        ]
         self._spawn("mark1d", cmd, env)
         sock = self.tmp / "run" / "omium-mark1" / "m1p.sock"
         deadline = time.monotonic() + 30
