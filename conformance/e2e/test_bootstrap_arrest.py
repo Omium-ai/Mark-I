@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -50,8 +51,23 @@ class ArrestRig(Rig):
 
     # ---- the workspace ruff really fails ------------------------------------
     def _defect_workspace(self) -> None:
+        # A repo committed CLEAN, then the defect as the agent's uncommitted edit: the anchor's
+        # verdict is about what git says was touched (a committed defect would be the repo's
+        # baseline), and an attempt is a new state of the tree (votes.go record), so each retry
+        # below edits the tracked file while the defect stays.
         (self.workspace / "pyproject.toml").write_text("[tool.ruff]\n")
-        (self.workspace / "defect.py").write_text("import os\n")  # F401, an unused import
+        (self.workspace / "defect.py").write_text("x = 1\n")
+        for args in (
+            ["init", "-q"],
+            ["add", "."],
+            ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "clean"],
+        ):
+            r = subprocess.run(
+                ["git", *args], cwd=self.workspace, capture_output=True, text=True, check=False
+            )
+            if r.returncode != 0:
+                fail(f"git {args}: {r.stderr}")
+        self._retry(0)
         ruff = shutil.which("ruff")
         if not ruff:
             fail(
@@ -151,6 +167,10 @@ class ArrestRig(Rig):
         d.update(patch)
         return json.dumps(d).encode()
 
+    def _retry(self, n: int) -> None:
+        """The agent's n-th try: the tracked file changes, the F401 defect stays."""
+        (self.workspace / "defect.py").write_text(f"import os\n# attempt {n}\n")
+
     def _runs(self) -> int:
         """Anchor runs so far: the runner keeps one evidence directory per run (evidence.Open)."""
         return len(list((self.state / "evidence").glob("*/ruff@cat-1-*")))
@@ -162,6 +182,7 @@ class ArrestRig(Rig):
         self._fire_hook("SessionStart")
         self._fire_hook("UserPromptSubmit")  # the human turn opens the task (ADR-0002 R1)
         for n in range(1, KNEE_ATTEMPT + 1):
+            self._retry(n)
             self._fire_hook(
                 "PostToolUse",
                 self._hook_body("PostToolUse", tool_use_id=f"toolu_01E2EArrestAttempt{n:02d}"),

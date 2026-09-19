@@ -5,6 +5,7 @@ package adapters
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -88,7 +89,10 @@ func TestLookPathPrefersNativeOverWSLInterop(t *testing.T) {
 	}
 	t.Setenv("WSL_DISTRO_NAME", "Ubuntu")
 	isInterop = saved
-	if !isInterop("/mnt/c/Users/u/AppData/Roaming/npm/claude") || isInterop("/home/u/.nvm/versions/node/v24.18.0/bin/claude") || isInterop("/mnt/wsl/x") {
+	if runtime.GOOS == "linux" && (!isInterop("/mnt/c/Users/u/AppData/Roaming/npm/claude") || isInterop("/home/u/.nvm/versions/node/v24.18.0/bin/claude") || isInterop("/mnt/wsl/x")) {
 		t.Fatal("isInterop must accept /mnt/<drive>/ paths only")
+	}
+	if runtime.GOOS != "linux" && isInterop("/mnt/c/x") {
+		t.Fatal("interop is a WSL (linux) concern only")
 	}
 }

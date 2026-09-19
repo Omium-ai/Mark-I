@@ -494,7 +494,7 @@ func TestSchedulerCoalescesFastAndDefersSlow(t *testing.T) {
 	r := NewRunner(sb, em, nil, false)
 	s := NewScheduler(r, []CatalogEntry{e, slow}, consentFor(t, e, slow), wt, nil)
 	s.Debounce = 30 * time.Millisecond
-	s.IdleAfter = 120 * time.Millisecond
+	s.IdleAfter = 500 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -506,7 +506,11 @@ func TestSchedulerCoalescesFastAndDefersSlow(t *testing.T) {
 		s.NoteToolUse(testSession, testTask)
 		time.Sleep(5 * time.Millisecond)
 	}
-	time.Sleep(60 * time.Millisecond) // past debounce, before idle
+	// past the debounce, well before idle: the fast run hashes the binary twice and reads git first (a CI Windows runner takes tens of ms for that), so wait for the vote rather than sleep a fixed slice
+	first := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(first) && len(em.all()) == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
 	votes := em.all()
 	if len(votes) != 1 || votes[0].GetAnchorVote().GetAnchorId() != e.ID {
 		ids := []string{}
@@ -876,7 +880,8 @@ func TestBaselineFindingsNeverViolate(t *testing.T) {
 	if v != m1pv1.Verdict_VERDICT_ERROR || ev.GetDiagnosticCode() != "tool_error" {
 		t.Fatalf("a tool failure with no findings stays an error: %v %+v", v, ev)
 	}
-	if !touched(set, "/w", "/w/src/new.py") || touched(set, "/w", "./legacy/old.py") || !touched(set, "/w", "vendor/lib/x.py") {
+	wt := t.TempDir()
+	if !touched(set, wt, filepath.Join(wt, "src", "new.py")) || touched(set, wt, "./legacy/old.py") || !touched(set, wt, "vendor/lib/x.py") {
 		t.Fatal("touched must resolve absolute, ./-prefixed and directory-listed paths")
 	}
 }
