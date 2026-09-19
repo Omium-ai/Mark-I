@@ -819,8 +819,15 @@ func TestEventsStreamWithin100ms(t *testing.T) {
 	_ = next()
 	_, body = call(t, s, http.MethodGet, "/v1/verify/events", nil)
 	decodeTo(t, body, &rows)
-	if last := rows[len(rows)-1]; last["state"] != "uncertified" || last["certificate_id"] != nil || last["verdict"] != "unspecified" {
+	if last := rows[len(rows)-1]; last["state"] != "uncertified" || last["certificate_id"] != nil || last["verdict"] != "unspecified" || last["mode"] != nil {
 		t.Fatalf("unspecified certification reads uncertified and an empty cert id is null: %v", last)
+	}
+	s.Hub().Publish(sessionEvent(1, &m1pv1.VerdictEvent{Verdict: m1pv1.Verdict_VERDICT_REFUSED, Posterior: []float64{0.68, 0.255, 0.046, 0.019}}))
+	_ = next()
+	_, body = call(t, s, http.MethodGet, "/v1/verify/events", nil)
+	decodeTo(t, body, &rows)
+	if last := rows[len(rows)-1]; last["verdict"] != "refused" || last["mode"] != "satisfied" {
+		t.Fatalf("a bootstrap-band abstain carries its satisfied mode: %v", last)
 	}
 }
 

@@ -45,7 +45,7 @@
           }
         },
         "tasks": { "type": "integer", "minimum": 0 },
-        "verified_outcomes": { "type": "integer", "minimum": 0, "description": "tasks whose stage-final verdict is satisfied" },
+        "verified_outcomes": { "type": "integer", "minimum": 0, "description": "tasks with a verdict whose posterior mode is satisfied (every anchor passed); certification is the trail's" },
         "arrests": { "type": "integer", "minimum": 0 },
         "injections": { "type": "integer", "minimum": 0 },
         "route_decisions": { "type": "integer", "minimum": 0 },

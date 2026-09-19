@@ -220,9 +220,9 @@ func routeOf(path string) string {
 
 // planted is what one tenant's batch put in the ledger, by id.
 type planted struct {
-	session, task, decision, cert uuid.UUID
-	workspaceHex                  string
-	tokens                        uint64
+	session, task, clean, decision, cert uuid.UUID
+	workspaceHex                         string
+	tokens                               uint64
 }
 
 // plant lands one session through the production projection path: SessionStart (workspace + capture paths), a task with its verdict trail, an anchor vote with typed evidence, a memory injection, a route decision followed by the Usage that served it, a task-bearing GuardDecision and a receipt checkpoint.
@@ -231,7 +231,7 @@ func plant(t *testing.T, r *appRig, tenant uuid.UUID, tokens uint64) planted {
 	ctx := context.Background()
 	at := time.Now().UTC().Add(-2 * time.Hour)
 	device, batchID := uuid.New(), uuid.Must(uuid.NewV7())
-	p := planted{session: uuid.Must(uuid.NewV7()), task: uuid.New(), decision: uuid.Must(uuid.NewV7()), cert: uuid.New(), tokens: tokens}
+	p := planted{session: uuid.Must(uuid.NewV7()), task: uuid.New(), clean: uuid.New(), decision: uuid.Must(uuid.NewV7()), cert: uuid.New(), tokens: tokens}
 	workspace := make([]byte, 32)
 	workspace[0], workspace[31] = byte(tokens), 0x7f
 	p.workspaceHex = hex.EncodeToString(workspace)
@@ -258,6 +258,10 @@ func plant(t *testing.T, r *appRig, tenant uuid.UUID, tokens uint64) planted {
 			ev(10, p.task, &m1pv1.VerdictEvent{Stage: m1pv1.VerdictStage_VERDICT_STAGE_CERTIFIED, Verdict: m1pv1.Verdict_VERDICT_SATISFIED, Posterior: []float64{0.9, 0.05, 0.03, 0.02}, NoiseCertId: p.cert.String(), BundleSeq: 483, Certification: m1pv1.CertificationStatus_CERTIFICATION_STATUS_CERTIFIED}),
 			ev(11, p.task, &m1pv1.TaskClose{Resolution: m1pv1.Resolution_RESOLUTION_VERDICT, TurnCount: 3}),
 			ev(12, uuid.Nil, &m1pv1.ReceiptCheckpoint{CheckpointSeq: 41}),
+			// a bootstrap-band task: every anchor passed, the Chow band withholds the word (refused at mode satisfied) — it is an outcome
+			ev(13, p.clean, &m1pv1.TaskOpen{TaskSegVersion: "task_seg.v1", TaskClass: "edit.small", PromptDigest: workspace}),
+			ev(14, p.clean, &m1pv1.VerdictEvent{Stage: m1pv1.VerdictStage_VERDICT_STAGE_PROVISIONAL, Verdict: m1pv1.Verdict_VERDICT_REFUSED, Posterior: []float64{0.68, 0.255, 0.046, 0.019}}),
+			ev(15, p.clean, &m1pv1.TaskClose{Resolution: m1pv1.Resolution_RESOLUTION_UNRESOLVED_SESSION_END, TurnCount: 1}),
 		},
 	}
 	rows := chproj.RowsFromBatch(batch, tenant, device, at)
@@ -441,7 +445,7 @@ func TestIntegrationAppRoutesOverPlantedLedger(t *testing.T) {
 	if tk := s["tokens"].(map[string]any); tk["input"] != float64(1020) || tk["output"] != float64(15) {
 		t.Fatalf("tokens replay-exact: %v", tk)
 	}
-	if s["tasks"] != float64(1) || s["verified_outcomes"] != float64(1) || s["arrests"] != float64(1) || s["injections"] != float64(1) || s["route_decisions"] != float64(1) || s["checkpoint_seq"] != float64(41) {
+	if s["tasks"] != float64(2) || s["verified_outcomes"] != float64(2) || s["arrests"] != float64(1) || s["injections"] != float64(1) || s["route_decisions"] != float64(1) || s["checkpoint_seq"] != float64(41) {
 		t.Fatalf("counts: %v", s)
 	}
 	if cov := s["coverage"].(map[string]any); cov["proxy_in_path"] != true || cov["transcript_tailed"] != false {
@@ -468,10 +472,13 @@ func TestIntegrationAppRoutesOverPlantedLedger(t *testing.T) {
 	if err := json.Unmarshal(raw, &detail); err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Tasks) != 1 || detail.CheckpointSeq != 41 {
+	if len(detail.Tasks) != 2 || detail.CheckpointSeq != 41 {
 		t.Fatalf("detail: %s", raw)
 	}
 	task := detail.Tasks[0]
+	if task["task_id"] != a.task.String() {
+		task = detail.Tasks[1]
+	}
 	if task["task_id"] != a.task.String() || task["task_seg_version"] != "task_seg.v1" || task["task_class"] != "edit.small" || task["resolution"] != "verdict" {
 		t.Fatalf("task header: %v", task)
 	}

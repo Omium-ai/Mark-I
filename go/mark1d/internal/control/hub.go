@@ -103,7 +103,7 @@ func (h *Hub) Publish(ev *m1pv1.Event) {
 	case "verdict":
 		ve := ev.GetVerdictEvent()
 		h.verifyRow(ev, "verdict", map[string]any{
-			"verdict": enumWord(ve.GetVerdict().String(), "VERDICT_"), "state": certWord(ve.GetCertification()), "certificate_id": nullable(ve.GetNoiseCertId()),
+			"verdict": enumWord(ve.GetVerdict().String(), "VERDICT_"), "mode": modeWord(ve.GetPosterior()), "state": certWord(ve.GetCertification()), "certificate_id": nullable(ve.GetNoiseCertId()),
 		})
 	case "tamper":
 		h.verifyRow(ev, "tamper", map[string]any{"anchor_id": ev.GetAnchorVote().GetAnchorId()})
@@ -202,6 +202,20 @@ func certWord(c m1pv1.CertificationStatus) string {
 		return "uncertified"
 	}
 	return enumWord(c.String(), "CERTIFICATION_STATUS_")
+}
+
+// modeWord is the posterior's argmax class: the Chow band withholds the satisfied WORD below 8/9 (bootstrap rows top out near 0.7), so a task every anchor passed reads refused on the wire with its mode at satisfied — the app labels by mode and certifies by state.
+func modeWord(post []float64) any {
+	if len(post) != 4 {
+		return nil
+	}
+	best := int32(0)
+	for i, p := range post[1:] {
+		if p > post[best] {
+			best = int32(i + 1) // #nosec G115 -- 1..3
+		}
+	}
+	return enumWord(m1pv1.Verdict(best+1).String(), "VERDICT_")
 }
 
 func nullable(s string) any {

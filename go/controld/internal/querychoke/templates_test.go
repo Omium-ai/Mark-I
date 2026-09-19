@@ -690,7 +690,7 @@ func TestAppTemplatesReadTheSessionsAgent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if v := tpl.Version(); !strings.HasSuffix(v, ".v2") && !strings.HasSuffix(v, ".v3") {
+		if v := tpl.Version(); !strings.HasSuffix(v, ".v2") && !strings.HasSuffix(v, ".v3") && !strings.HasSuffix(v, ".v4") {
 			t.Errorf("%s: version %s, the agent read changed the row contract", name, v)
 		}
 		for _, w := range terms {

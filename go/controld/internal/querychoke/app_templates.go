@@ -5,9 +5,9 @@ func init() { v1Templates = append(v1Templates, appTemplates...) }
 
 var appTemplates = []template{
 	{
-		// appapi GET /sessions (desktop spec §5.2): one row per session over [from, to]; project = SessionStart.workspace_id hex, capture_paths the protojson enum names; arrests are task-bearing GuardDecision rows (the `interventions` reading); history_import marks a session the tailer imported from transcript history (its history_import CoverageTransition, stamped at import time, is kept out of started_at/ended_at). ponytail: agent/project/cursor filters are applied by the handler over this window scan; push them into the template when a tenant's window outgrows the row limit.
+		// appapi GET /sessions (desktop spec §5.2): one row per session over [from, to]; project = SessionStart.workspace_id hex, capture_paths the protojson enum names; arrests are task-bearing GuardDecision rows (the `interventions` reading); history_import marks a session the tailer imported from transcript history (its history_import CoverageTransition, stamped at import time, is kept out of started_at/ended_at). tasks_verified counts tasks with a verdict whose posterior MODE is satisfied: the Chow band withholds the satisfied WORD below 8/9 (bootstrap rows top out near 0.7, 06 §3.1), so the wire says refused for a task every anchor passed — the outcome count is the evidence, the certificate is the trail's. ponytail: agent/project/cursor filters are applied by the handler over this window scan; push them into the template when a tenant's window outgrows the row limit.
 		name:    "app_sessions",
-		version: "app_sessions.v3",
+		version: "app_sessions.v4",
 		body: `SELECT e.session_id AS session_id,
        coalesce(nullIf(anyIf(JSONExtractString(e.payload, 'agent'), e.event_type = 'SessionStart'), ''), anyIf(e.agent, e.agent != '')) AS agent,
        hex(base64Decode(maxIf(JSONExtractString(e.payload, 'workspace_id'), e.event_type = 'SessionStart'))) AS project,
@@ -20,13 +20,14 @@ var appTemplates = []template{
        sum(e.cache_read_input_tokens)     AS tokens_cache_read,
        sum(e.cache_creation_input_tokens) AS tokens_cache_create,
        uniqExactIf(e.task_id, e.event_type = 'TaskOpen') AS tasks,
-       uniqExactIf(e.task_id, e.verdict = 'satisfied' AND e.verdict_stage IN ('certified', 'revised')) AS tasks_verified,
+       uniqExactIf(e.task_id, e.event_type = 'VerdictEvent' AND e.p_satisfied > greatest(e.p_violated, e.p_refused, e.p_error)) AS tasks_verified,
        countIf(e.event_type = 'GuardDecision' AND e.task_id != toUUID('00000000-0000-0000-0000-000000000000')) AS arrests,
        countIf(e.event_type = 'MemoryInjection') AS injections,
        countIf(e.event_type = 'RouteDecision')   AS route_decisions,
        sumIf(e.dropped_quantity, e.event_type = 'Dropped' AND e.dropped_durability_class = 'billing_grade') AS dropped_billing,
        max(e.checkpoint_seq) AS checkpoint_seq
 FROM (SELECT event_id, session_id, task_id, occurred_at, event_type, agent, payload, verdict, verdict_stage,
+             p_satisfied, p_violated, p_refused, p_error,
              input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
              dropped_quantity, dropped_durability_class, checkpoint_seq
       FROM m1p_events
