@@ -56,6 +56,7 @@ type Scheduler struct {
 	lastActivity time.Time
 	timers       map[timerKey]*time.Timer // fast debounce, coalesced per (task, anchor)
 	dirty        map[taskKey]bool         // slow work owed since last idle drain
+	inflight     map[taskKey]int          // runs queued or executing, what Settle waits on
 	work         chan workItem
 }
 
@@ -83,6 +84,7 @@ func NewScheduler(r *Runner, enabled []CatalogEntry, consentPath, worktree strin
 		IdleAfter:   defaultIdleAfter,
 		timers:      map[timerKey]*time.Timer{},
 		dirty:       map[taskKey]bool{},
+		inflight:    map[taskKey]int{},
 		work:        make(chan workItem, workQueueCap),
 	}
 }
@@ -149,6 +151,28 @@ func (s *Scheduler) Stop(session, task [16]byte) {
 	}
 }
 
+// Settle is Stop with a wait: the task's owed slow anchors are enqueued and the caller blocks until nothing for the task is debouncing, queued or running — or ctx ends. The gate reads its cache after this, so a compile error the agent just wrote is in the verdict it reads (the founder's cargo-check voted 30 s after the agent had said "done").
+func (s *Scheduler) Settle(ctx context.Context, session, task [16]byte) {
+	tk := taskKey{session, task}
+	s.Stop(session, task)
+	for {
+		s.mu.Lock()
+		busy := s.inflight[tk] > 0
+		for k := range s.timers {
+			busy = busy || k.tk == tk
+		}
+		s.mu.Unlock()
+		if !busy {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
 // idleLoop drains owed slow work once the session has been tool-silent for
 // IdleAfter (04 §2.2: "no tool events for 30 s"), unless DeferSlow holds.
 func (s *Scheduler) idleLoop(ctx context.Context) {
@@ -201,8 +225,38 @@ func (s *Scheduler) enqueueSlow(tk taskKey) {
 func (s *Scheduler) enqueue(w workItem) {
 	select {
 	case s.work <- w:
+		s.mu.Lock()
+		s.inflight[w.tk]++
+		s.mu.Unlock()
 	default:
 		s.log.Warn("anchors: work queue full, run dropped", "anchor", w.entry.ID)
+	}
+}
+
+func (s *Scheduler) runItem(ctx context.Context, w workItem) {
+	defer func() {
+		s.mu.Lock()
+		if s.inflight[w.tk]--; s.inflight[w.tk] <= 0 {
+			delete(s.inflight, w.tk)
+		}
+		s.mu.Unlock()
+	}()
+	// Consent re-check at the execution point: the entry was Enabled
+	// when this Scheduler was built, but `mark1 doctor` may have
+	// revoked it since — the runner's binary-hash gate catches a
+	// swapped binary, not a withdrawn consent.
+	if !stillConsented(s.consentPath, w.entry) {
+		s.log.Warn("anchors: consent no longer held, run refused", "anchor", w.entry.ID)
+		return
+	}
+	// Fail-open per run: one anchor's failure never blocks another's
+	// schedule (04 §2.2). ErrRefused and infra errors are logged; the
+	// VERDICT_ERROR vote (when one was emitted) carries the truth.
+	s.mu.Lock()
+	worktree := s.worktree
+	s.mu.Unlock()
+	if err := s.runner.RunOne(ctx, w.entry, w.tk.session, w.tk.task, worktree); err != nil {
+		s.log.Warn("anchors: run failed", "anchor", w.entry.ID, "err", err)
 	}
 }
 
@@ -212,23 +266,7 @@ func (s *Scheduler) worker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case w := <-s.work:
-			// Consent re-check at the execution point: the entry was Enabled
-			// when this Scheduler was built, but `mark1 doctor` may have
-			// revoked it since — the runner's binary-hash gate catches a
-			// swapped binary, not a withdrawn consent.
-			if !stillConsented(s.consentPath, w.entry) {
-				s.log.Warn("anchors: consent no longer held, run refused", "anchor", w.entry.ID)
-				continue
-			}
-			// Fail-open per run: one anchor's failure never blocks another's
-			// schedule (04 §2.2). ErrRefused and infra errors are logged; the
-			// VERDICT_ERROR vote (when one was emitted) carries the truth.
-			s.mu.Lock()
-			worktree := s.worktree
-			s.mu.Unlock()
-			if err := s.runner.RunOne(ctx, w.entry, w.tk.session, w.tk.task, worktree); err != nil {
-				s.log.Warn("anchors: run failed", "anchor", w.entry.ID, "err", err)
-			}
+			s.runItem(ctx, w)
 		}
 	}
 }

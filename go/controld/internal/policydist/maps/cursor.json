@@ -31,7 +31,7 @@
     },
     "stop": {
       "kind": "turn_agent",
-      "gate": { "kind": "stop", "budget_ms": 250 },
+      "gate": { "kind": "stop", "budget_ms": 20000 },
       "fields": {}
     },
     "subagentStop": { "kind": "turn_agent", "fields": {} },

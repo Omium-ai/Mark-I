@@ -858,6 +858,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		gate.ApplyGates(bc.Gates())
 	}
 	gate.TaskFor = seg.TaskFor
+	gate.Settle = sched.Settle
 	gate.OnDropped = func(string) { adm.AccountDropped(dropGateTimeout, spool.ClassDiagnostic, 1) }
 	gate.Health = health
 	srv.Health = health

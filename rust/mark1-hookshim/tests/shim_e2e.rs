@@ -87,10 +87,15 @@ fn loose_wall_ceiling(deadline_ms: u64) -> Duration {
     5 * fail_open_ceiling(deadline_ms)
 }
 
-/// The deadline the SHIPPED map makes the shim state for `Stop`: its 250 ms
-/// gate budget minus 08 §4.4's 10 ms margin. Spelled out here so a silent map
-/// edit cannot move it in either direction.
-const STOP_DEADLINE_MS: u64 = 240;
+/// The deadline the SHIPPED map makes the shim state for `Stop`: its 20 s
+/// gate budget (the anchors the task owes run at Stop, 04 §2.2) minus 08 §4.4's
+/// 10 ms margin. Spelled out here so a silent map edit cannot move it in
+/// either direction.
+const STOP_DEADLINE_MS: u64 = 19_990;
+
+/// What a mute daemon may cost the agent at Stop: the gate handshake's own bound
+/// (`fabric::HANDSHAKE_MS`), never the budget above.
+const STOP_HANDSHAKE_MS: u64 = 250;
 
 /// The SessionEnd drain barrier's budget (`main::FLUSH_DEADLINE_MS`): the
 /// vendor's 1.5 s SessionEnd default (08 §5.1) minus 08 §4.4's 10 ms margin.
@@ -171,7 +176,10 @@ impl TestEnv {
     fn install_short_gate_map(&self, budget_ms: u32) {
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("maps/claudecode.json");
         let shipped = std::fs::read_to_string(src).unwrap();
-        let map = shipped.replace("\"budget_ms\": 250", &format!("\"budget_ms\": {budget_ms}"));
+        let map = shipped.replace(
+            "\"budget_ms\": 20000",
+            &format!("\"budget_ms\": {budget_ms}"),
+        );
         assert_ne!(map, shipped, "the shipped Stop budget moved; retarget this");
         let dir = self.home.path().join(".omium/mark1/maps");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1162,8 +1170,14 @@ fn shipped_stop_budget_bounds_a_wedged_daemon() {
     let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok);
     assert!(chatter.is_empty(), "silence is allow, not block");
-    assert_gate_timer_honored_deadline(env.timing_ms("hookshim.gate_elapsed_ms"), STOP_DEADLINE_MS);
-    assert!(wall < loose_wall_ceiling(STOP_DEADLINE_MS), "took {wall:?}");
+    assert_gate_timer_honored_deadline(
+        env.timing_ms("hookshim.gate_elapsed_ms"),
+        STOP_HANDSHAKE_MS,
+    );
+    assert!(
+        wall < loose_wall_ceiling(STOP_HANDSHAKE_MS),
+        "took {wall:?}"
+    );
     assert_eq!(
         unseal_ring(&env).len(),
         1,
@@ -1184,18 +1198,26 @@ fn gate_blocked_connect_allows_within_budget() {
     let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok, "a parked connect must still exit 0");
     assert!(chatter.is_empty());
-    assert_gate_timer_honored_deadline(env.timing_ms("hookshim.gate_elapsed_ms"), 500);
-    assert!(wall < loose_wall_ceiling(500), "took {wall:?}");
+    // a connect that never lands is the handshake bound's business (250 ms), not the 500 ms budget's
+    assert_gate_timer_honored_deadline(
+        env.timing_ms("hookshim.gate_elapsed_ms"),
+        STOP_HANDSHAKE_MS,
+    );
+    assert!(
+        wall < loose_wall_ceiling(STOP_HANDSHAKE_MS),
+        "took {wall:?}"
+    );
     assert_eq!(unseal_ring(&env).len(), 1);
     assert_eq!(env.gate_timeouts(), 1);
     drop(listener);
 }
 
-/// The double-spend. The handshake eats 1500 ms of a 2000 ms deadline and the
-/// verdict never comes: the shim gets the remaining 500 ms, not a second
-/// 2000 ms. A per-wait budget costs 3500 ms here.
+/// A handshake that takes 1500 ms of a 2000 ms budget is a wedged daemon, not a
+/// slow one: the shim gives up at the handshake bound (250 ms) and never
+/// spends the budget on it — the budget is for a daemon that is there and
+/// running the task's anchors.
 #[test]
-fn gate_silence_after_slow_handshake_spends_one_budget() {
+fn gate_silence_after_slow_handshake_costs_the_handshake_bound() {
     let env = TestEnv::new();
     env.install_spill_pubkey();
     env.install_short_gate_map(2_010);
@@ -1203,11 +1225,17 @@ fn gate_silence_after_slow_handshake_spends_one_budget() {
     let (ok, chatter, wall) = env.run(&fixture("Stop"), &[("MARK1_HOOKSHIM_TIMING", "1")]);
     assert!(ok);
     assert!(chatter.is_empty());
-    assert_gate_timer_honored_deadline(env.timing_ms("hookshim.gate_elapsed_ms"), 2_000);
-    assert!(wall < loose_wall_ceiling(2_000), "took {wall:?}");
+    assert_gate_timer_honored_deadline(
+        env.timing_ms("hookshim.gate_elapsed_ms"),
+        STOP_HANDSHAKE_MS,
+    );
     assert!(
-        wall > HELLO_DELAY,
-        "the handshake was not actually waited on: {wall:?}"
+        wall < loose_wall_ceiling(STOP_HANDSHAKE_MS),
+        "took {wall:?}"
+    );
+    assert!(
+        wall < HELLO_DELAY,
+        "the slow handshake was waited out instead of bounded: {wall:?}"
     );
     assert_eq!(unseal_ring(&env).len(), 1);
     assert_eq!(env.gate_timeouts(), 1);

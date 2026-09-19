@@ -221,13 +221,12 @@ func (f *fabricConn) vote(session [16]byte, anchor string, v m1pv1.Verdict) {
 }
 
 // gate sends a real GateQuery and returns the daemon's GateVerdict, under the
-// deadline the shipping shim actually uses: the agent map's gate.budget_ms 250
-// minus SHIM_MARGIN_MS 10 (D-AU). The previous 29_990 came from reading 08
-// §5.1's 30 s as the shim's budget, which D-AU retired — and a 30 s deadline
-// would have hidden the one failure that matters here, a daemon too slow to
-// answer inside the real budget, because in production that times out and the
-// gate fails open. The gate is a cache read; 240 ms is ~3 orders of magnitude
-// of headroom.
+// shim's gate HANDSHAKE bound (fabric.rs HANDSHAKE_MS 250 minus SHIM_MARGIN_MS
+// 10): the map's budget is 20 s now so the task's owed anchors can run at Stop,
+// but a daemon that cannot answer a no-anchor query inside the handshake bound
+// is the failure that matters here — in production a wedged daemon costs the
+// agent exactly this much and the gate fails open. The gate is a cache read;
+// 240 ms is ~3 orders of magnitude of headroom.
 func (f *fabricConn) gate() *m1pv1.GateVerdict {
 	f.t.Helper()
 	f.send(&m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_GateQuery{GateQuery: &m1pv1.GateQuery{

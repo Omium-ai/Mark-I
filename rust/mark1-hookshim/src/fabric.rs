@@ -60,7 +60,9 @@ pub fn gate_query(
     // the agent in `GateQuery.deadline_ms`; spending it again per wait is how
     // the shim overran it.
     let deadline = Instant::now() + budget;
-    let mut conn = Conn::open(session_id, deadline)?;
+    // A daemon that cannot even shake hands is wedged or absent and costs the agent the liveness window, not the budget: the budget (seconds, 04 §2.2's Stop-run anchors) is only for a daemon that is there and working.
+    let liveness = Instant::now() + Duration::from_millis(HANDSHAKE_MS);
+    let mut conn = Conn::open(session_id, deadline.min(liveness))?;
     conn.write_frame(event_frame)?;
     conn.write_control(&pb::fabric_frame::Kind::GateQuery(query))?;
     match conn.read_frame(deadline)?.kind {
@@ -105,6 +107,9 @@ pub fn flush(
         _ => Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
     }
 }
+
+/// The gate handshake's own bound (the pre-D-AU Stop budget): connect + HelloAck within this or the gate is a timeout.
+const HANDSHAKE_MS: u64 = 250;
 
 /// setsockopt reads a zero timeout as "block forever", so a budget that
 /// has rounded below a millisecond is floored rather than passed through.

@@ -21,7 +21,7 @@
     },
     "Stop": {
       "kind": "turn_agent",
-      "gate": { "kind": "stop", "budget_ms": 250 },
+      "gate": { "kind": "stop", "budget_ms": 20000 },
       "fields": { "stop_hook_active": "stop_hook_active" }
     },
     "SessionEnd": { "kind": "session_end", "fields": {} }

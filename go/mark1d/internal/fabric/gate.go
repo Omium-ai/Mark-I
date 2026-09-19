@@ -37,6 +37,8 @@ const (
 	// cacheReadBudget is 04 §2.3 D-Y(c)'s own budget, applied when the query
 	// states no deadline.
 	cacheReadBudget = 5 * time.Millisecond
+	// settleMargin is what the cache read and the shim's own margin keep out of a Settle wait.
+	settleMargin = 200 * time.Millisecond
 )
 
 // Gate error codes (08 §9): fail-open, always.
@@ -70,6 +72,8 @@ type Gate struct {
 	TaskFor func(session, want [16]byte) ([16]byte, bool)
 	// AgentFor resolves the connection's session to the agent its SessionStart named (control.Hub.AgentFor); nil or "" means no per-agent pause can match, so the query gates normally.
 	AgentFor func(session [16]byte) string
+	// Settle runs the task's owed anchors and returns when they have voted or ctx ends (anchors.Scheduler.Settle); nil reads the cache as it stands.
+	Settle func(ctx context.Context, session, task [16]byte)
 	// Now is a test seam; nil means time.Now.
 	Now func() time.Time
 	// OnDropped receives the Dropped{gate_timeout} accounting for M1E-5001
@@ -298,6 +302,14 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 	if g.now().Sub(received) >= budget {
 		g.dropped()
 		return allow(CodeGateTimeout + " gate deadline expired")
+	}
+	// 5b. The anchors the task still owes run now (04 §2.2: slow anchors at Stop) and the read below waits for them within the budget — the gate still never computes, it only reads later.
+	if g.Settle != nil {
+		if wait := budget - settleMargin - g.now().Sub(received); wait > 0 {
+			sctx, cancel := context.WithTimeout(context.Background(), wait)
+			g.Settle(sctx, session, task)
+			cancel()
+		}
 	}
 	// 6. THE cache read — a map lookup, never a computation.
 	e, ok := g.reader.Get(task)

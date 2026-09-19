@@ -240,7 +240,7 @@ mod codex_map {
         let stop = map.rule(&fixture("Stop")).unwrap();
         assert_eq!(
             stop.gate.as_ref().map(|g| (g.kind.as_str(), g.budget_ms)),
-            Some(("stop", 250))
+            Some(("stop", 20000))
         );
         for none in ["SubagentStart", "PreCompact", "PostCompact", "Interrupt"] {
             assert!(map.rule(&fixture(none)).is_some_and(|r| r.gate.is_none()));
@@ -377,7 +377,7 @@ mod gemini_map {
         let stop = map.rule(&fixture("AfterAgent")).unwrap();
         assert_eq!(
             stop.gate.as_ref().map(|g| (g.kind.as_str(), g.budget_ms)),
-            Some(("stop", 250))
+            Some(("stop", 20000))
         );
         assert_eq!(
             stop.fields.get("stop_hook_active").map(String::as_str),
@@ -534,7 +534,7 @@ mod copilot_map {
         let stop = map.rule(&fixture("Stop")).unwrap();
         assert_eq!(
             stop.gate.as_ref().map(|g| (g.kind.as_str(), g.budget_ms)),
-            Some(("stop", 250))
+            Some(("stop", 20000))
         );
         assert_eq!(
             stop.fields.get("stop_hook_active").map(String::as_str),
@@ -643,7 +643,7 @@ mod cursor_map {
         let stop = map.rule(&fixture("stop")).unwrap();
         assert_eq!(
             stop.gate.as_ref().map(|g| (g.kind.as_str(), g.budget_ms)),
-            Some(("stop", 250))
+            Some(("stop", 20000))
         );
         // No stop_hook_active on this surface: the vendor's loop_limit is the cap, and the
         // shim must not read a field the payload never carries.

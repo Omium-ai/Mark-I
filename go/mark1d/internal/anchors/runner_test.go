@@ -568,6 +568,38 @@ func TestSchedulerStopDrainsSlowNow(t *testing.T) {
 	}
 }
 
+// Settle is Stop plus the wait the gate needs: it returns once the owed slow run has voted, and no later than its ctx.
+func TestSchedulerSettleWaitsForTheOwedRun(t *testing.T) {
+	e, wt := enabledRuff(t)
+	e.Class = ClassSlow
+	sb := &fakeSandbox{run: func(RunSpec) (RunResult, error) {
+		time.Sleep(150 * time.Millisecond)
+		return RunResult{ExitCode: 0}, nil
+	}}
+	em := &fakeEmitter{}
+	s := NewScheduler(NewRunner(sb, em, nil, false), []CatalogEntry{e}, consentFor(t, e), wt, nil)
+	s.IdleAfter = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	s.NoteToolUse(testSession, testTask)
+	sctx, scancel := context.WithTimeout(ctx, 5*time.Second)
+	defer scancel()
+	s.Settle(sctx, testSession, testTask)
+	if len(em.all()) != 1 {
+		t.Fatalf("Settle returned before the owed run voted: %d votes", len(em.all()))
+	}
+	s.NoteToolUse(testSession, testTask)
+	short, shortCancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer shortCancel()
+	start := time.Now()
+	s.Settle(short, testSession, testTask)
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatal("Settle outlived its ctx")
+	}
+}
+
 // TestSchedulerConsentRevocationStopsRuns pins doc.go's "NOTHING RUNS WITHOUT
 // CONSENT" against the Scheduler's lifetime: entries are snapshotted at
 // construction, and the runner's pre-exec binary-hash gate catches a swapped
