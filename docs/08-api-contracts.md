@@ -320,6 +320,13 @@ POST /api/v1/query                                        auth: operator token
   { "template": "usage_by_session", "params": { … } }     # named templates only — no raw SQL
 → 200 { "rows": […], "template_version": "…" }
 Errors: 400 M1E-2008 (unknown template — the chokepoint refuses, it does not improvise).
+
+POST /internal/v1/query                                   auth: intel service credential (ADR-0010 §2.2)
+  { "tenant_id": "…", "template": "tvo_task_window", "params": { … } }
+→ 200 { "rows": […], "template_version": "…" }            # same registry, same write refusal; the tenant is
+                                                          # named in the body because the caller is the driver,
+                                                          # not a tenant (never routed through Kong)
+Errors: 403 M1E-1001 (credential), 400 M1E-2001 (tenant_id), 400 M1E-2008.
 ```
 
 WHY templates, not SQL: arbitrary SQL cannot be tenant-predicate-proven by construction; a closed template set can.
