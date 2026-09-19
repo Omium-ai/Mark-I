@@ -71,7 +71,19 @@ func NewSandbox(scratchRoot string) *WindowsSandbox {
 	for _, root := range toolchainRoots() {
 		_ = s.grant(root, readExecMask) // best effort: the per-run binary-dir grant is the load-bearing one
 	}
+	for _, root := range poisonedRoots() {
+		_ = s.revoke(root) // edge/v0.1.7 granted these; the ACE broke every Electron app installed there (see poisonedRoots)
+	}
 	return s
+}
+
+// poisonedRoots are the roots edge/v0.1.7 granted that must never carry the package ACE: %LOCALAPPDATA%\Programs is where per-user Electron apps (Mark 1 itself, VS Code, …) install, and a package ACE on that tree makes Chromium's sandboxed renderer and GPU children die at start (STATUS_BREAKPOINT, "GPU process isn't usable") — the founder's app would not open after the first v0.1.7 boot. WindowsApps is the Store's equivalent. A tool that lives there is granted per run on its own directory only (toolRoot).
+func poisonedRoots() []string {
+	local := os.Getenv("LOCALAPPDATA")
+	if local == "" {
+		return nil
+	}
+	return []string{filepath.Join(local, "Programs"), filepath.Join(local, "Microsoft", "WindowsApps")}
 }
 
 // appContainerSID creates the profile (per user, HKCU + %LOCALAPPDATA%\Packages, no elevation) or derives the SID of the one already there.
@@ -383,11 +395,11 @@ func toolchainRoots() []string {
 		}
 		return filepath.Join(append([]string{base}, elems...)...)
 	}
-	home, local, roaming := os.Getenv("USERPROFILE"), os.Getenv("LOCALAPPDATA"), os.Getenv("APPDATA")
+	// Never a root that holds installed applications (Program Files carries ALL APPLICATION PACKAGES already; Programs/WindowsApps are poisonedRoots): a package ACE on an app's tree breaks Chromium's sandboxed children. Only tool homes and module caches.
+	home, roaming := os.Getenv("USERPROFILE"), os.Getenv("APPDATA")
 	var out []string
 	for _, r := range []string{
-		os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"),
-		sub(local, "Programs"), sub(roaming, "npm"), sub(local, "Microsoft", "WindowsApps"),
+		sub(roaming, "npm"),
 		sub(home, ".cargo"), sub(home, "go"), sub(home, ".local", "bin"),
 		os.Getenv("GOMODCACHE"), os.Getenv("CARGO_HOME"),
 	} {
@@ -432,6 +444,41 @@ func (s *WindowsSandbox) grant(dir string, mask uint32) error {
 		return fmt.Errorf("grant on %s: %w", dir, err)
 	}
 	return nil
+}
+
+// revoke removes every ACE for the package from dir's DACL (REVOKE_ACCESS); inherited copies below it go with the propagation SetNamedSecurityInfo performs. A dir without our ACE is left untouched.
+func (s *WindowsSandbox) revoke(dir string) error {
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil || !hasExplicitPackageACE(dacl, s.sid) {
+		return err
+	}
+	ea := []windows.EXPLICIT_ACCESS{{
+		AccessMode: windows.REVOKE_ACCESS,
+		Trustee:    windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_UNKNOWN, TrusteeValue: windows.TrusteeValueFromSID(s.sid)},
+	}}
+	merged, err := windows.ACLFromEntries(ea, dacl)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, merged, nil)
+}
+
+// hasExplicitPackageACE reports an ACE for the package that dir itself owns (not inherited from a parent).
+func hasExplicitPackageACE(dacl *windows.ACL, sid *windows.SID) bool {
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(dacl, i, &ace) != nil || ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
+			continue
+		}
+		if (*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(sid) { //nolint:gosec // G103: the SID is stored inline after the ACE header
+			return true
+		}
+	}
+	return false
 }
 
 // hasPackageACE reports an effective (not inherit-only) allow ACE on dir itself that covers mask for the package, or any ALL APPLICATION PACKAGES allow ACE when only read-execute is wanted.

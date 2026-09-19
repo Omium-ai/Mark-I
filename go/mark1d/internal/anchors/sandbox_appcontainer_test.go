@@ -164,6 +164,50 @@ func TestGrantAddsOnePackageACE(t *testing.T) {
 	}
 }
 
+// TestRevokeRemovesThePackageACEFromTheTree: the edge/v0.1.7 repair — a grant on an app-install root is taken back from the root and from everything that inherited it, and a root without our ACE is left as it was.
+func TestRevokeRemovesThePackageACEFromTheTree(t *testing.T) {
+	sb := NewSandbox(t.TempDir())
+	if sb.reason != "" {
+		kernelLacks(t, sb.reason)
+	}
+	dir := t.TempDir()
+	child := filepath.Join(dir, "app")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	has := func(p string) bool {
+		sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hasPackageACE(dacl, sb.sid, readExecMask)
+	}
+	if err := sb.grant(dir, readExecMask); err != nil {
+		t.Fatal(err)
+	}
+	if !has(dir) || !has(child) {
+		t.Fatal("grant did not reach the tree")
+	}
+	if err := sb.revoke(dir); err != nil {
+		t.Fatal(err)
+	}
+	if has(dir) || has(child) {
+		t.Fatal("revoke left the package ACE on the root or its child")
+	}
+	if err := sb.revoke(dir); err != nil {
+		t.Fatalf("revoke on a clean dir: %v", err)
+	}
+	for _, r := range toolchainRoots() {
+		if strings.Contains(strings.ToLower(r), `\programs`) || strings.Contains(strings.ToLower(r), `windowsapps`) {
+			t.Fatalf("toolchainRoots grants an app-install root again: %s", r)
+		}
+	}
+}
+
 // TestWindowsSandboxRefusesWhenUnavailable: a refused profile is a named refusal, never a degraded run.
 func TestWindowsSandboxRefusesWhenUnavailable(t *testing.T) {
 	sb := NewSandbox(t.TempDir())
