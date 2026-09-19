@@ -1543,3 +1543,25 @@ func TestCheckpointRecordsAreNeverLeaves(t *testing.T) {
 		t.Fatalf("[cp, cp2] leaves = %x, want none", got)
 	}
 }
+
+// TestComposeStaysUnderTheRateLimitCapacities: controld debits a batch all-or-nothing against 05 §2.4's per-window capacities, so a batch no fresh bucket can afford is a 429 on every try (the founder's WSL spool, 2026-09-19). A backlog of 2,500 diagnostics composes as 2,000 then 500.
+func TestComposeStaysUnderTheRateLimitCapacities(t *testing.T) {
+	sp := openSpool(t)
+	session, _ := uuid.NewV7()
+	evs := make([]testEvent, 0, 2500)
+	for i := range 2500 {
+		evs = append(evs, makeEvent(t, session, uint64(i+1), spool.ClassDiagnostic))
+	}
+	appendAll(t, sp, evs...)
+	u, _, _ := newTestUplink(t, sp, &fakeIngest{respond: func(_ int, w http.ResponseWriter, bid string) { writeAck(w, http.StatusOK, bid, nil) }}, nil)
+	b, err := u.compose()
+	if err != nil || b == nil {
+		t.Fatalf("compose: %v %v", b, err)
+	}
+	if n := len(b.recs); n != categoryCap["diagnostic"] {
+		t.Fatalf("first batch carries %d diagnostics, want the window capacity %d", n, categoryCap["diagnostic"])
+	}
+	if categoryOf(evs[0].payload) != "diagnostic" || categoryOf(makeEvent(t, session, 9999, spool.ClassBilling).payload) != "usage" {
+		t.Fatal("categoryOf must read the body arm the server buckets by")
+	}
+}

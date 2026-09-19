@@ -31,6 +31,10 @@ const (
 	// controld stage 5 rejects >10_000 events per batch (05 §2.1); composing
 	// past the bound would turn a legal backlog into a 400 quarantine.
 	maxBatchEvents = 10_000
+	// Event.body arm numbers controld's rate limiter buckets by name (ingest/limits.go categoryCounts).
+	eventUsageField         = 18
+	eventVerdictEventField  = 34
+	eventRouteDecisionField = 38
 	// Event.session_id is field 3 of the Event envelope (envelope.proto).
 	eventSessionIDField = 3
 	// Event.body's receipt_checkpoint arm is field 21 (envelope.proto).
@@ -85,12 +89,19 @@ func (u *Uplink) compose() (*outBatch, error) {
 			return nil, nil
 		}
 		take, raw := 0, 0
+		cats := map[string]int{}
 		for take < len(recs) && take < maxBatchEvents {
 			// Always take at least one record: a single oversized record must
 			// move (and fail loudly server-side) rather than wedge the queue.
 			if take > 0 && raw+len(recs[take].Payload) > targetRawBytes {
 				break
 			}
+			// A batch no fresh bucket can afford is a 429 forever (controld debits all-or-nothing against 05 §2.4's per-window capacities): the founder's WSL spool sat at 12.7 MB of diagnostics answering 429 on every try. Compose under the capacities, so a backlog drains a window at a time.
+			cat := categoryOf(recs[take].Payload)
+			if take > 0 && cats[cat]+1 > categoryCap[cat] {
+				break
+			}
+			cats[cat]++
 			raw += len(recs[take].Payload)
 			take++
 		}
@@ -173,6 +184,38 @@ func (u *Uplink) encodeBatch(b *outBatch) ([]byte, error) {
 		raw = protowire.AppendBytes(raw, r.Payload)
 	}
 	return u.enc.EncodeAll(raw, make([]byte, 0, len(raw)/2)), nil
+}
+
+// categoryCap mirrors controld's per-device window capacities (ingest/limits.go deviceLimits, the M1P-Rate-Limits header); receipt checkpoints have no bucket.
+var categoryCap = map[string]int{"usage": 10_000, "verdict": 5_000, "route": 5_000, "diagnostic": 2_000, "receipt": maxBatchEvents}
+
+// categoryOf names controld's rate-limit category for one encoded Event by its body arm — a tag scan, never a decode.
+func categoryOf(payload []byte) string {
+	b := payload
+	for len(b) > 0 {
+		n, typ, m := protowire.ConsumeTag(b)
+		if m < 0 {
+			return "diagnostic"
+		}
+		b = b[m:]
+		if typ == protowire.BytesType {
+			switch n {
+			case eventUsageField:
+				return "usage"
+			case eventVerdictEventField:
+				return "verdict"
+			case eventRouteDecisionField:
+				return "route"
+			case eventReceiptCheckpointField:
+				return "receipt"
+			}
+		}
+		if m = protowire.ConsumeFieldValue(n, typ, b); m < 0 {
+			return "diagnostic"
+		}
+		b = b[m:]
+	}
+	return "diagnostic"
 }
 
 // topLevelBytes walks the top-level wire fields of one encoded Event for the
