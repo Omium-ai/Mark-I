@@ -12,10 +12,11 @@ func TestLogFileRotatesOncePastEightMiB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate(9 << 20); err != nil {
+	_ = f.Close()
+	// grown on disk, not via Truncate on the append handle (Windows refuses that)
+	if err := os.WriteFile(filepath.Join(state, "logs", "mark1d.log"), make([]byte, 9<<20), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_ = f.Close()
 	if _, err := openLogFile(state); err != nil {
 		t.Fatal(err)
 	}

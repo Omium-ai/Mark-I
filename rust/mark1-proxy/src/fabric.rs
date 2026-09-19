@@ -415,6 +415,8 @@ mod tests {
             outcome: pb::GuardOutcome::Refused as i32,
             cred_fingerprint: vec![0; 32],
             sample_rate: 1.0,
+            tokens_saved_estimate: 0,
+            attempt: 0,
             reason_code: crate::guard::REASON_UNPROVISIONED.to_owned(),
         });
     }

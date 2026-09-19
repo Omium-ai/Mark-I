@@ -453,6 +453,8 @@ impl Guard {
                 outcome: pb::GuardOutcome::Forwarded as i32,
                 cred_fingerprint: actual.to_vec(),
                 sample_rate: self.sampling.forward,
+                tokens_saved_estimate: 0,
+                attempt: 0,
                 reason_code: String::new(),
             });
         let decision = if off {
@@ -481,6 +483,8 @@ pub fn refused_record(refusal: Refusal, fingerprint: Option<[u8; 32]>) -> pb::Gu
         outcome: pb::GuardOutcome::Refused as i32,
         cred_fingerprint: fingerprint.map(|f| f.to_vec()).unwrap_or_default(),
         sample_rate: REFUSED_SAMPLE_RATE,
+        tokens_saved_estimate: 0,
+        attempt: 0,
         reason_code: refusal.reason_code().to_owned(),
     }
 }

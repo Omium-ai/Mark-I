@@ -82,11 +82,11 @@ func hookFixture(t *testing.T, event string) []byte {
 
 // stopDeadlineMs is D-AU's 250 ms gate budget minus 08 §4.4's 10 ms shim
 // margin — the number the shim must put on the wire, spelled out here so a
-// silent map edit cannot move it. It is NOT the agent's 30 s hook timeout,
-// which 08 §4.4 bounds only from above: spending the whole ceiling makes a
-// wedged daemon cost 31.4 s per turn against 217 ms for an absent one, and
-// 250 ms is already 50× the ≤5 ms cache read 04 §2.3 specifies this gate to be.
-const stopDeadlineMs = 250 - 10
+// silent map edit cannot move it. It is the map's 20 s Stop budget (04 §2.2:
+// the task's owed anchors run at Stop and the gate waits for them), under the
+// agent's 30 s hook timeout; a wedged daemon never costs it — the shim bounds
+// the handshake at 250 ms (fabric.rs HANDSHAKE_MS) and fails open there.
+const stopDeadlineMs = 20_000 - 10
 
 // blockRow is 08 §5.1's Stop row, transcribed byte for byte. The shim's stdout
 // is compared against this template with the placeholder replaced by the
@@ -313,7 +313,7 @@ func TestShimStopGateBlocksTheAgent(t *testing.T) {
 		t.Fatalf("gate kind %v, want STOP", q.GetGate())
 	}
 	if q.GetDeadlineMs() != stopDeadlineMs {
-		t.Fatalf("deadline_ms = %d, want %d (D-AU's 250 ms budget − 08 §4.4's 10 ms)", q.GetDeadlineMs(), stopDeadlineMs)
+		t.Fatalf("deadline_ms = %d, want %d (the map's 20 s Stop budget − 08 §4.4's 10 ms)", q.GetDeadlineMs(), stopDeadlineMs)
 	}
 
 	reason, err := json.Marshal("two anchors report the build is broken [evidence: ev/9f2c]")

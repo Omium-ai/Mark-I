@@ -45,6 +45,17 @@ const CRED_REF_2: &str = "ref-2";
 const GUARD_KEY: &[u8] = b"device-local-guard-key";
 
 /// `ref → enrollment fingerprint`, computed the one way the guard computes it.
+/// The proxy resolves the fabric at `$XDG_RUNTIME_DIR/omium-mark1/m1p.sock` first (fabric.rs endpoints): on a developer's machine that is the LIVE daemon, and these tests then emit their frames into a real ledger instead of the spill they assert on. Every test runs against a socket dir nothing listens on.
+fn isolate_fabric() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("mark1-proxy-tests-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: called once before any test spawns a proxy; the value is the same for every test.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
+    });
+}
+
 fn registry_of(pairs: &[(&str, &[u8])]) -> HashMap<String, [u8; 32]> {
     let probe = Guard::from_parts(GUARD_KEY.to_vec(), HashMap::new(), Sampling::default());
     pairs
@@ -242,6 +253,7 @@ async fn start_with(
     route: Option<RouteTable>,
     dialect: Dialect,
 ) -> Ctx {
+    isolate_fabric();
     let base = tempfile::tempdir().unwrap();
 
     // `ref-oauth` enrolls an OAuth token: the §3.1 step 5 case, where provenance passes and
@@ -431,6 +443,7 @@ fn rebuild(base: &std::path::Path, registry: HashMap<String, [u8; 32]>) -> Proxy
 }
 
 fn proxy_with(base: &std::path::Path, guard: Guard) -> Proxy {
+    isolate_fabric();
     let cfg = Arc::new(ProxyConfig {
         mode: Mode::Sidecar,
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -1758,6 +1771,7 @@ async fn start_gateway(
             .unwrap()
             .block_on(tee::run(tee_rx, reports_tx));
     });
+    isolate_fabric();
     let proxy = Arc::new(
         Proxy::new(
             cfg,
