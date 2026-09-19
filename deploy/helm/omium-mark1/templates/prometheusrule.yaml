@@ -1,5 +1,6 @@
 {{- if .Values.monitoring.prometheusRule }}
 # docs/11 §8 rules whose metrics controld emits today (grep internal/obs + promauto names); the rest wait on their metrics.
+# severity is the estate's routing key (critical → #omium-oncall, warning → #omium-alerts); doc 11's page/ticket lives in `class`, `service` names the row in the Slack title.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -18,7 +19,9 @@ spec:
       expr: histogram_quantile(0.99, sum by (le) (rate(controld_ingest_ack_seconds_bucket[5m]))) > 0.8
       for: 10m
       labels:
-        severity: page
+        severity: critical
+        class: page
+        service: mark1
       annotations:
         summary: "controld ingest ack p99 > 0.8s for 10m (A-02)"
         description: "p99 ack latency is {{ `{{ $value }}` }}s; freshness is degrading, spools absorb, fleet spool exhaustion eventually blocks billing-grade writers."
@@ -26,7 +29,9 @@ spec:
     - alert: Mark1StructuralAssumptionBroken
       expr: increase(controld_ingest_identity_disagreements_total[5m]) > 0 or increase(controld_querychoke_render_refusals_total[5m]) > 0
       labels:
-        severity: page
+        severity: critical
+        class: page
+        service: mark1
       annotations:
         summary: "controld cannot-happen counter moved (A-05)"
         description: "Envelope/token identity disagreement or a querychoke render refusal: an attack, an edge bug, or a boot-validated template invariant failing at runtime."
@@ -34,7 +39,9 @@ spec:
     - alert: Mark1RolloutHalted
       expr: increase(controld_policydist_rollout_decisions_total{decision="halt"}[10m]) > 0
       labels:
-        severity: page
+        severity: critical
+        class: page
+        service: mark1
       annotations:
         summary: "policy bundle canary controller halted a rollout (A-09)"
         description: "The canary controller detected harm and stopped widening; a human must disposition it (05 §4.3)."
@@ -42,7 +49,9 @@ spec:
     - alert: Mark1WitnessPublicationFailure
       expr: sum(increase(controld_receipts_witness_published_total{outcome="error"}[2h])) > 0 unless sum(increase(controld_receipts_witness_published_total{outcome="published"}[2h])) > 0
       labels:
-        severity: page
+        severity: critical
+        class: page
+        service: mark1
       annotations:
         summary: "no witness head published in 2h while publications error (A-10)"
         description: "The external-verifiability claim is degrading silently (SLO-9)."
@@ -50,7 +59,9 @@ spec:
     - alert: Mark1SecretNearMiss
       expr: increase(controld_ingest_scanner_hits_total[1h]) > 0 or increase(controld_ingest_quarantines_total[1h]) > 0
       labels:
-        severity: ticket
+        severity: warning
+        class: ticket
+        service: mark1
       annotations:
         summary: "secret scanner hit or batch quarantined (A-13)"
         description: "Fail-closed already contained it (quarantine prefix, never replayed); follow up with tenant hygiene and edge-ruleset gap analysis."
@@ -59,7 +70,9 @@ spec:
       expr: controld_ingest_ch_project_lag_seconds > 300
       for: 5m
       labels:
-        severity: ticket
+        severity: warning
+        class: ticket
+        service: mark1
       annotations:
         summary: "ClickHouse projection lag > 5m (SLO-4)"
         description: "Newest landed batch vs newest projected is {{ `{{ $value }}` }}s; reports go stale, capture and receipts do not."
