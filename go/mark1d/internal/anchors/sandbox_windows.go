@@ -129,8 +129,13 @@ func (s *WindowsSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, erro
 	}
 	defer func() { _ = os.RemoveAll(scratch) }()
 	env = windowsEnv(env, scratch)
-	if err := s.grant(spec.WorktreeRO, modifyMask); err != nil {
-		return RunResult{}, fmt.Errorf("%w: worktree grant refused: %v", ErrSandboxUnavailable, err)
+	for _, root := range writableRoots(spec, scratch) {
+		if root == scratch { // inherits scratchRoot's ACE; the worktree and the build cache are granted per run
+			continue
+		}
+		if err := s.grant(root, modifyMask); err != nil {
+			return RunResult{}, fmt.Errorf("%w: %s grant refused: %v", ErrSandboxUnavailable, root, err)
+		}
 	}
 	if err := s.grant(toolRoot(spec.Argv[0]), readExecMask); err != nil {
 		return RunResult{}, fmt.Errorf("%w: toolchain grant refused: %v", ErrSandboxUnavailable, err)

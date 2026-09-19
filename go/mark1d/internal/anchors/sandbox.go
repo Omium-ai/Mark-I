@@ -56,13 +56,13 @@ type Limits struct {
 // DefaultLimits returns the 04 §1.4 defaults per cost class: 60 s fast /
 // 600 s slow wall (CPU capped likewise), memory.max 512 MiB.
 func DefaultLimits(c Class) Limits {
-	wall := 60 * time.Second
+	wall, mem := 60*time.Second, uint64(512<<20)
 	if c == ClassSlow {
-		wall = 600 * time.Second
+		wall, mem = 600*time.Second, 4<<30 // compilers: rustc alone passes 512 MiB of data on a mid-size crate
 	}
 	return Limits{
 		CPUSeconds:  uint64(wall / time.Second), //nolint:gosec // G115: wall is one of the two constants above
-		MemoryBytes: 512 << 20,
+		MemoryBytes: mem,
 		NoFile:      1024,
 		FSizeBytes:  512 << 20,
 		Wall:        wall,
@@ -74,6 +74,7 @@ func DefaultLimits(c Class) Limits {
 type RunSpec struct {
 	Argv       []string          // argv[0] absolute — the consented BinaryPath
 	WorktreeRO string            // cwd; writes confined to here + scratch (doc.go)
+	CacheDir   string            // daemon-owned build cache the tool may also write (GOCACHE); "" ⇒ none
 	Env        map[string]string // the allow-list, nothing inherited; HOME added by the sandbox
 	Limits     Limits
 	// RequireFSConfined refuses the run (ErrSandboxUnavailable) when write

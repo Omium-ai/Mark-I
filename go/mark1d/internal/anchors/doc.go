@@ -79,17 +79,18 @@
 //     to a host daemon.
 //
 //     ENFORCED — env scrub: the child is exec'd with exactly the allow-list
-//     env (PATH = resolved catalog dirs, HOME = a per-run scratch dir, LANG,
-//     TZ); nothing is inherited. The exact env is attested in
-//     AnchorIntegrity.env_scrub_attestation.
+//     env (PATH = resolved catalog dirs, HOME and TMPDIR = a per-run scratch
+//     dir, LANG, TZ, and for the compilers their offline module-cache
+//     pointers — toolchain.go); nothing is inherited. The exact env is
+//     attested in AnchorIntegrity.env_scrub_attestation.
 //
 //     ENFORCED — rlimits: CPU, AS, NOFILE, FSIZE (soft = hard), wall-clock
 //     SIGKILL of the process group, kill-switch via context cancel, and a
 //     combined stdout+stderr byte cap that kills the run when exceeded.
 //
 //     ENFORCED WHERE THE KERNEL HAS LANDLOCK (>= 5.13) — writes confined to
-//     the worktree and the scratch dir; a write anywhere else fails with
-//     EACCES. Reads stay unconfined: linters need /usr, and "read-only
+//     the worktree, the scratch dir and the anchor's daemon-owned build cache
+//     (RunSpec.CacheDir); a write anywhere else fails with EACCES. Reads stay unconfined: linters need /usr, and "read-only
 //     outside the worktree" means exactly that — reads allowed, writes not.
 //
 //     NOT ENFORCED, BY CONSTRUCTION — read confinement, and therefore

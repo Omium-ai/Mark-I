@@ -110,7 +110,7 @@ func (s *LinuxSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error)
 		NoFile:       lim.NoFile,
 		FSizeBytes:   lim.FSizeBytes,
 		LandlockMask: s.landlockMask,
-		Writable:     []string{spec.WorktreeRO, scratch},
+		Writable:     writableRoots(spec, scratch),
 	}
 	attr := &syscall.SysProcAttr{
 		// CLONE_NEWNET inside CLONE_NEWUSER: the unprivileged path to a

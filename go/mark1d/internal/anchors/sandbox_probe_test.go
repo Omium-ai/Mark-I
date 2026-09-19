@@ -344,7 +344,7 @@ func TestSandboxEnvScrub(t *testing.T) {
 		t.Fatal("helper spec env leaked into the anchor")
 	}
 	// __CF_USER_TEXT_ENCODING is the darwin sandbox's own (sandbox_darwin.go cfEncodingEnv); the rest of the second row is the windows sandbox's (sandbox_windows.go windowsEnv). Neither appears on linux.
-	allowed := map[string]bool{probeEnv: true, "PATH": true, "LANG": true, "TZ": true, "HOME": true, "__CF_USER_TEXT_ENCODING": true,
+	allowed := map[string]bool{probeEnv: true, "PATH": true, "LANG": true, "TZ": true, "HOME": true, "TMPDIR": true, "__CF_USER_TEXT_ENCODING": true,
 		"SystemRoot": true, "PATHEXT": true, "COMSPEC": true, "USERPROFILE": true, "TEMP": true, "TMP": true, "APPDATA": true, "LOCALAPPDATA": true}
 	seen := map[string]bool{}
 	for _, line := range strings.Split(got, "\n") {

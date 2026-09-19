@@ -10,7 +10,7 @@ import (
 
 // TestSeatbeltProfile pins the profile text sandbox-exec is handed: allow-default, network* denied, writes confined to the two realpath'd dirs plus /dev/null, quotes escaped.
 func TestSeatbeltProfile(t *testing.T) {
-	got := seatbelt(`/private/tmp/w"t`, "/private/tmp/scratch")
+	got := seatbelt([]string{`/private/tmp/w"t`, "/private/tmp/scratch"})
 	want := "(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n" +
 		"(allow file-write* (subpath \"/private/tmp/w\\\"t\") (subpath \"/private/tmp/scratch\") (literal \"/dev/null\"))\n"
 	if got != want {

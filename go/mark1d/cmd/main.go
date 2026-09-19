@@ -734,6 +734,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	}
 	runner := anchors.NewRunner(sb, votes, outKey, false)
 	runner.StateDir = cfg.stateDir
+	runner.CacheRoot = filepath.Join(scratch, "cache") // the compilers' build caches: warm go vet is 0.8 s, cold 28 s (measured)
 	runner.OnDropped = func(string) { adm.AccountDropped(dropE1ConsentAbsent, spool.ClassDiagnostic, 1) }
 	if runner.Evidence, err = evidence.Open(cfg.stateDir); err != nil {
 		_ = sp.Close()

@@ -329,12 +329,16 @@ func Explain(sb Sandbox, worktree string) (Derivation, error) {
 			miss(d, err.Error())
 			continue
 		}
-		// Consent binds to the file that executes, not a symlink alias of it.
+		// Consent binds to the file that executes, not a symlink alias of it — but argv[0] keeps the alias when the two names differ: rustup's `cargo` is a symlink to rustup, which dispatches on argv[0] and ran `rustup check --quiet` on the founder's machine (the runner re-resolves the alias to BinaryPath before every run).
+		alias := bin
 		if resolved, rerr := filepath.EvalSymlinks(bin); rerr == nil {
 			bin = resolved
 		}
+		if trimExe(filepath.Base(bin)) == d.binary {
+			alias = bin
+		}
 		// What executes is argv[0]; a script tool's argv is interpreter + script (npm's Windows .cmd shims, which no sandbox can run as-is).
-		prefix := []string{bin}
+		prefix := []string{alias}
 		if ext := strings.ToLower(filepath.Ext(bin)); ext == ".cmd" || ext == ".bat" {
 			node, script, ok := npmShimTarget(bin)
 			if !ok {
@@ -381,6 +385,8 @@ func Explain(sb Sandbox, worktree string) (Derivation, error) {
 // pre-consent exec with only chdir + env scrub — the same "weaker isolation
 // gets a smaller privilege, not a waiver" rule as 04 §11.5. The sandbox's
 // refusal is returned so Derive can tell it from a tool that merely failed.
+func trimExe(name string) string { return strings.TrimSuffix(strings.ToLower(name), ".exe") }
+
 func sniffVersion(sb Sandbox, worktree string, prefix, args []string) (string, error) {
 	if sb == nil {
 		return "", nil

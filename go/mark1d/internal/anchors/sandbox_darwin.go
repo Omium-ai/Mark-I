@@ -65,16 +65,14 @@ func (s *DarwinSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error
 	defer func() { _ = os.RemoveAll(scratch) }()
 	env = withDefault(env, cfEncodingEnv, fmt.Sprintf("0x%X:0:0", os.Getuid()))
 	// Seatbelt matches resolved paths: /tmp and /var live under /private.
-	worktree, err := filepath.EvalSymlinks(spec.WorktreeRO)
-	if err != nil {
-		return RunResult{}, err
-	}
-	scratchReal, err := filepath.EvalSymlinks(scratch)
-	if err != nil {
-		return RunResult{}, err
+	writable := writableRoots(spec, scratch)
+	for i, w := range writable {
+		if writable[i], err = filepath.EvalSymlinks(w); err != nil {
+			return RunResult{}, err
+		}
 	}
 	profile := filepath.Join(scratch, "profile.sb")
-	if err := os.WriteFile(profile, []byte(seatbelt(worktree, scratchReal)), 0o600); err != nil {
+	if err := os.WriteFile(profile, []byte(seatbelt(writable)), 0o600); err != nil {
 		return RunResult{}, err
 	}
 	hs := helperSpec{
@@ -95,10 +93,14 @@ func (s *DarwinSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error
 var sbQuote = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 
 // seatbelt is the per-run profile: allow-default (deny-default needs a per-toolchain mach/sysctl/Rosetta allow-list, and reads are unconfined on Linux too), network* denied (TCP/UDP and unix-domain — the netns+seccomp twin), writes denied everywhere but the worktree, scratch and /dev/null.
-func seatbelt(worktree, scratch string) string {
+func seatbelt(writable []string) string {
 	q := func(p string) string { return `"` + sbQuote.Replace(p) + `"` }
+	allow := ""
+	for _, w := range writable {
+		allow += " (subpath " + q(w) + ")"
+	}
 	return "(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n" +
-		"(allow file-write* (subpath " + q(worktree) + ") (subpath " + q(scratch) + ") (literal \"/dev/null\"))\n"
+		"(allow file-write*" + allow + " (literal \"/dev/null\"))\n"
 }
 
 // stripSandboxExecWarning drops the deprecation line so the anchor's captured stderr is the anchor's alone.

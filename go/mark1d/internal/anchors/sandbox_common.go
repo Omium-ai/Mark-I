@@ -29,7 +29,17 @@ func prepare(scratchRoot string, spec RunSpec) (scratch string, env []string, li
 		env = append(env, k+"="+v)
 	}
 	sort.Strings(env)
-	return scratch, withDefault(env, "HOME", scratch), defaultedLimits(spec.Limits), nil
+	// TMPDIR too: go's work dir and rustc's temps land in the one place the sandbox lets them write
+	return scratch, withDefault(withDefault(env, "HOME", scratch), "TMPDIR", scratch), defaultedLimits(spec.Limits), nil
+}
+
+// writableRoots is the write set every sandbox grants: the worktree, the per-run scratch and, when the anchor has one, its daemon-owned build cache.
+func writableRoots(spec RunSpec, scratch string) []string {
+	roots := []string{spec.WorktreeRO, scratch}
+	if spec.CacheDir != "" {
+		roots = append(roots, spec.CacheDir)
+	}
+	return roots
 }
 
 // withDefault adds k=v to the sorted env unless the caller set k.

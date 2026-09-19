@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -279,6 +280,8 @@ type Runner struct {
 
 	// Evidence is the raw local store (NFR-PRIVACY-005); nil stores nothing.
 	Evidence *evidence.Store
+	// CacheRoot holds the per-tool build caches a compiler anchor may write (toolchainEnv); empty ⇒ cold caches in scratch.
+	CacheRoot string
 	// StateDir locates gates/consents.json, the Step-4 record EmitExcerpt reads for E1; empty reads as nothing consented (consents.Read).
 	StateDir string
 	// OnDropped receives the Dropped{reason} accounting for an excerpt refused at the door (wired to capture.AccountDropped); nil is legal.
@@ -290,6 +293,15 @@ type Runner struct {
 	// 2026-09-16); nil ⇒ votes stay unsigned, the same fail-soft posture
 	// receipt sealing already has with no enrolled device key.
 	signer identity.DeviceKey
+}
+
+// aliasIntact: when argv[0] is a symlink alias of the consented binary (rustup's cargo), the alias must still resolve to it — a re-pointed alias would run a file the hash never covered.
+func aliasIntact(e CatalogEntry) bool {
+	if len(e.Argv) == 0 || e.Argv[0] == e.BinaryPath {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(e.Argv[0])
+	return err == nil && resolved == e.BinaryPath
 }
 
 // NewRunner wires the sandbox and the capture emitter.
@@ -344,10 +356,19 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 			env[k] = v
 		}
 	}
+	cacheDir := ""
+	if r.CacheRoot != "" {
+		cacheDir = filepath.Join(r.CacheRoot, tool)
+		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+			cacheDir = ""
+		}
+	}
+	maps.Copy(env, toolchainEnv(detectors[e.Kind].binary, cacheDir))
 	spec := RunSpec{
 		Argv:       e.Argv,
 		WorktreeRO: worktree,
 		Env:        env,
+		CacheDir:   cacheDir,
 		Limits:     DefaultLimits(e.Class),
 		// FR-VERIFY-003 precondition, extended to repo-code executors: a tool
 		// that EVALUATES repo-supplied code (eslint config JS, build.rs, cgo)
@@ -372,7 +393,7 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 	var integrity *m1pv1.AnchorIntegrity
 	var stdout, stderr []byte
 	var d diffFacts
-	if preHash, preErr := hashFile(e.BinaryPath); preErr != nil || !bytes.Equal(preHash, e.BinaryHash) {
+	if preHash, preErr := hashFile(e.BinaryPath); preErr != nil || !bytes.Equal(preHash, e.BinaryHash) || !aliasIntact(e) {
 		integrity = &m1pv1.AnchorIntegrity{
 			WorktreeMerkleRoot:   r.currentL0Root(), // empty ⇒ incomplete, never certifies
 			ResolvedBinaryHashes: map[string][]byte{tool: preHash},
