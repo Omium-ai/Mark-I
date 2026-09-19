@@ -233,6 +233,28 @@ func main() {
 	}
 }
 
+// enabledRootFor is the enabled workspace root cwd sits in (the deepest one), the same roots the tailers and cortex read (workspaces.json + --workspace).
+func enabledRootFor(stateDir, extra, cwd string) (string, bool) {
+	roots, err := cortex.Roots(stateDir, extra)
+	if err != nil {
+		return "", false
+	}
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", false
+	}
+	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
+		abs = resolved
+	}
+	best := ""
+	for _, r := range roots {
+		if rel, rerr := filepath.Rel(r, abs); rerr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && len(r) > len(best) {
+			best = r
+		}
+	}
+	return best, best != ""
+}
+
 // openLogFile appends to <state>/logs/mark1d.log; past 8 MiB the file rotates once to mark1d.log.1.
 func openLogFile(stateDir string) (*os.File, error) {
 	dir := filepath.Join(stateDir, "logs")
@@ -616,6 +638,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// path key as the segmenter — so a workspace has ONE digest across the
 	// estate and a coverage row joins to a task row.
 	cov := coverage.New(adm.Admit, segKey)
+	var sessionCwd sync.Map // session → the hook process's cwd (Hello.cwd), for SessionStart.workspace_id; sessions are few and short, never swept
 
 	// Site: the 95%-disk hard stop (07 §6 / NFR-FOOTPRINT-002). Both edges are
 	// receipted, and the close carries the window length so the server can
@@ -823,6 +846,16 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		// publishes or retires the session file cortexd Hellos with, and an
 		// admitted CortexInjection's root_hash reaches the anchor runner.
 		cx.Observe(ev)
+		// SessionStart.workspace_id (events.proto): the shim sends it empty — the tenant path key is the daemon's — and the daemon stamps it from the Hello's cwd when that cwd sits inside an enabled workspace; the app names the project from the same HMAC (GET /v1/projects). A session started outside every enabled root stays unattributed, honestly.
+		if ss := ev.GetSessionStart(); ss != nil && len(ss.GetWorkspaceId()) == 0 && len(ev.GetSessionId()) == 16 {
+			var sid [16]byte
+			copy(sid[:], ev.GetSessionId())
+			if cwd, ok := sessionCwd.Load(sid); ok {
+				if root, ok := enabledRootFor(cfg.stateDir, cfg.workspace, cwd.(string)); ok {
+					ss.WorkspaceId = cov.WorkspaceID(root)
+				}
+			}
+		}
 		// Segmentation runs BEFORE admission so a vote or gate query riding the
 		// same connection already resolves to the task this event opened, and
 		// TaskOpen precedes the event that opened it in the spool.
@@ -884,6 +917,12 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	gate.Health = health
 	srv.Health = health
 	srv.Sync = sp.Sync // FlushAck attests to fsynced records (NFR-DURABILITY-004)
+	srv.OnHello = func(session [16]byte, cwd string) {
+		if cwd != "" {
+			sessionCwd.Store(session, cwd)
+		}
+	}
+	ctl.WorkspaceID = cov.WorkspaceID
 	srv.SetGate(gate)
 	srv.SetContextHandler(fabric.ContextChain{gate, mem})
 	srv.SetContaminationHandler(contaminationRollback{log: log, stateDir: cfg.stateDir, adm: adm})

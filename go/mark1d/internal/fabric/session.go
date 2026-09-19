@@ -160,6 +160,9 @@ func (ss *session) frame(ctx context.Context, payload []byte) error {
 			return fmt.Errorf("fabric: %s: Hello carries no session_id; the all-zero sentinel is not a session and everything under it is dropped (08 §4.3)", CodeHandshake)
 		}
 		ss.helloed = true
+		if ss.s.OnHello != nil {
+			ss.s.OnHello(ss.id, h.GetCwd())
+		}
 		// max_frame is the symbol M1PL_MAX_FRAME, never a re-typed literal.
 		return ss.reply(&m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_HelloAck{
 			HelloAck: &m1pv1.HelloAck{Accepted: true, MaxFrame: MaxFrame},

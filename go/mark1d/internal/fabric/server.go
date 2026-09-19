@@ -59,6 +59,8 @@ type Server struct {
 	// fsync path the spool has, not a second one. nil (the stub tests, an
 	// embedding with no durable store) acks on admission alone.
 	Sync func() error
+	// OnHello observes each accepted handshake: the writer's session and cwd (Hello.cwd — a hook process runs in the agent's project root, which is how SessionStart.workspace_id gets stamped). nil is legal.
+	OnHello func(session [16]byte, cwd string)
 
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -527,8 +528,15 @@ func optedOut(root string) bool {
 
 func (s *Server) project(e workspaceEntry) map[string]any {
 	_, ignErr := os.Stat(filepath.Join(e.Path, ".mark1ignore"))
+	workspaceID := ""
+	if s.WorkspaceID != nil {
+		if id := s.WorkspaceID(e.Path); len(id) == 32 && !bytes.Equal(id, make([]byte, 32)) {
+			workspaceID = hex.EncodeToString(id)
+		}
+	}
 	return map[string]any{
 		"path":           e.Path,
+		"workspace_id":   workspaceID, // hex(HMAC_tenant(path)) — what cloud session rows carry as `project`; "" before enrollment
 		"enabled_at":     e.EnabledAt.UTC().Format(time.RFC3339),
 		"agents_seen":    s.agentsSeen(e.Path),
 		"tests_enabled":  anchors.TestsOptedIn(e.Path),

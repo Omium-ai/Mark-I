@@ -39,13 +39,15 @@ type Server struct {
 	since time.Time
 	hub   *Hub
 
-	hardStop  atomic.Bool
-	mu        sync.Mutex
-	reconcile func()
-	enrolled  func()
-	shutdown  func()
-	compat    map[string]compatVerdict // "<agent>@<version>" -> verdict + probe text
-	files     sync.Mutex               // ponytail: serializes this process's read-modify-writes only; a concurrent `mark1 enable` races exactly as two CLIs do today
+	// WorkspaceID is the tenant HMAC of a root (coverage.Emitter.WorkspaceID), the id cloud rows carry as `project`; nil ⇒ rows carry none.
+	WorkspaceID func(path string) []byte
+	hardStop    atomic.Bool
+	mu          sync.Mutex
+	reconcile   func()
+	enrolled    func()
+	shutdown    func()
+	compat      map[string]compatVerdict // "<agent>@<version>" -> verdict + probe text
+	files       sync.Mutex               // ponytail: serializes this process's read-modify-writes only; a concurrent `mark1 enable` races exactly as two CLIs do today
 }
 
 func Path(stateDir string) string { return filepath.Join(stateDir, "run", "control.json") }
