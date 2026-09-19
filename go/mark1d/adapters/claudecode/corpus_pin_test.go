@@ -36,6 +36,7 @@ import (
 var recordedCorpusDigest = map[string]string{
 	"2.1.251": "feab581125d058af1a707f496e36c7732da93692517c879a7aa498385ed5d6dd",
 	"2.1.273": "e30d55464eb310273d36af755209c33997a5d8fe778f2ece3337e6aa4e5f2044",
+	"2.1.278": "3e7dd4070c19d03d6b4e090d7b5209efa8ebc48e039e567413d9db97fb328288",
 }
 
 // corpusPinExempt: the two files under a version directory that are not

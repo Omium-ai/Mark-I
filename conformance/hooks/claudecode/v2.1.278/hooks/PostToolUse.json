@@ -1,0 +1,26 @@
+{
+  "session_id": "aa000000-0000-4000-8000-000000000201",
+  "transcript_path": "/home/devuser/.claude/projects/-home-devuser-workspace-acme-app/aa000000-0000-4000-8000-000000000201.jsonl",
+  "cwd": "/home/devuser/workspace/acme-app",
+  "prompt_id": "aa000000-0000-4000-8000-000000000002",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "true",
+    "description": "Run true command"
+  },
+  "tool_response": {
+    "stdout": "",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_01SynthRecorded00000001",
+  "duration_ms": 489
+}
+

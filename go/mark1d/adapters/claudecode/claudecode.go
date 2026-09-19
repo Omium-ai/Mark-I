@@ -132,6 +132,7 @@ func (a *Adapter) Detect() (adapters.Detection, error) {
 var SupportedVersions = map[string]struct{}{
 	"2.1.251": {},
 	"2.1.273": {},
+	"2.1.278": {},
 }
 
 // Supported reports whether the transcript tailer may parse this agent's

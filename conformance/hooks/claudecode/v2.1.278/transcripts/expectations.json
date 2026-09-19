@@ -1,0 +1,130 @@
+{
+  "agent": "claudecode",
+  "agent_version": "2.1.278",
+  "idem_key_recipe": "idem_key = HMAC_tenant(session_id, message_id, request_id) — 07 §7 / 08 §5.1; session_id is the PARENT sessionId for subagent streams too (04 §2.1)",
+  "out_of_workspace_streams": [
+    {
+      "cwd": "/home/devuser/workspace-acme-app",
+      "file": "transcripts/-home-devuser-workspace-acme-app/aa000000-0000-4000-8000-000000000202.jsonl",
+      "never_emit_message_id": "msg_01SynthRecorded00000007",
+      "reason": "munged-dir collision: /home/devuser/workspace-acme-app and /home/devuser/workspace/acme-app map to the SAME vendor directory, so this foreign session shares the enabled workspace's transcript dir. Invariant 3 (04 §0.3) + 04 §2.1: its cwd resolves outside the enabled root, so the stream is never tailed and none of its keys ever emit."
+    }
+  ],
+  "overcount_case": {
+    "correct_output_tokens": 146,
+    "message_id": "msg_01SynthRecorded00000003",
+    "min_overcount_ratio_asserted": 2,
+    "naive_per_line_output_token_sum": 438,
+    "request_id": "req_01SynthRecorded00000003",
+    "streamed_lines": 3,
+    "why": "NFR-CORRECTNESS-001 / 07 §7: emitting per line is the verified overcount; one Usage per (message.id, requestId), last line wins"
+  },
+  "streams": [
+    {
+      "file": "transcripts/-home-devuser-workspace-acme-app/aa000000-0000-4000-8000-000000000201.jsonl",
+      "never_emit": [],
+      "role": "parent",
+      "usage_events": [
+        {
+          "idem_key_inputs": {
+            "message_id": "msg_01SynthRecorded00000002",
+            "request_id": "req_01SynthRecorded00000002",
+            "session_id": "aa000000-0000-4000-8000-000000000201"
+          },
+          "usage": {
+            "cache_creation_input_tokens": 6346,
+            "cache_read_input_tokens": 10251,
+            "input_tokens": 2,
+            "output_tokens": 4,
+            "service_tier": "standard"
+          },
+          "model": "claude-opus-5"
+        },
+        {
+          "idem_key_inputs": {
+            "message_id": "msg_01SynthRecorded00000003",
+            "request_id": "req_01SynthRecorded00000003",
+            "session_id": "aa000000-0000-4000-8000-000000000201"
+          },
+          "usage": {
+            "cache_creation_input_tokens": 3764,
+            "cache_read_input_tokens": 12939,
+            "input_tokens": 2,
+            "output_tokens": 146,
+            "service_tier": "standard"
+          },
+          "model": "claude-opus-5"
+        },
+        {
+          "idem_key_inputs": {
+            "message_id": "msg_01SynthRecorded00000004",
+            "request_id": "req_01SynthRecorded00000004",
+            "session_id": "aa000000-0000-4000-8000-000000000201"
+          },
+          "usage": {
+            "cache_creation_input_tokens": 271,
+            "cache_read_input_tokens": 16703,
+            "input_tokens": 2,
+            "output_tokens": 3,
+            "service_tier": "standard"
+          },
+          "model": "claude-opus-5"
+        },
+        {
+          "idem_key_inputs": {
+            "message_id": "msg_01SynthRecorded00000005",
+            "request_id": "req_01SynthRecorded00000005",
+            "session_id": "aa000000-0000-4000-8000-000000000201"
+          },
+          "usage": {
+            "cache_creation_input_tokens": 99,
+            "cache_read_input_tokens": 16974,
+            "input_tokens": 2,
+            "output_tokens": 138,
+            "service_tier": "standard"
+          },
+          "model": "claude-opus-5"
+        },
+        {
+          "idem_key_inputs": {
+            "message_id": "msg_01SynthRecorded00000006",
+            "request_id": "req_01SynthRecorded00000006",
+            "session_id": "aa000000-0000-4000-8000-000000000201"
+          },
+          "usage": {
+            "cache_creation_input_tokens": 430,
+            "cache_read_input_tokens": 17073,
+            "input_tokens": 2,
+            "output_tokens": 3,
+            "service_tier": "standard"
+          },
+          "model": "claude-opus-5"
+        }
+      ]
+    },
+    {
+      "file": "transcripts/-home-devuser-workspace-acme-app/aa000000-0000-4000-8000-000000000201/subagents/agent-a7f3e2d1c0b9a8001.jsonl",
+      "never_emit": [],
+      "role": "subagent",
+      "usage_events": [
+        {
+          "idem_key_inputs": {
+            "message_id": "msg_01SynthRecorded00000001",
+            "request_id": "req_01SynthRecorded00000001",
+            "session_id": "aa000000-0000-4000-8000-000000000201"
+          },
+          "usage": {
+            "cache_creation_input_tokens": 3054,
+            "cache_read_input_tokens": 6897,
+            "input_tokens": 2,
+            "output_tokens": 3,
+            "service_tier": "standard"
+          },
+          "model": "claude-opus-5"
+        }
+      ]
+    }
+  ],
+  "suite": "conf_hooks_claudecode_2.1.278_replay",
+  "workspace_root": "/home/devuser/workspace/acme-app"
+}

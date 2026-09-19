@@ -4,6 +4,7 @@
 |---|---|---|---|
 | [v2.1.251](v2.1.251/) | 2026-08-29 | transcribed from live on-disk shapes (see its README) | `claudecode.SupportedVersions`, `recordedCorpusDigest` |
 | [v2.1.273](v2.1.273/) | 2026-09-16 | `mark1 corpus record` against the installed `claude` | `claudecode.SupportedVersions`, `recordedCorpusDigest` |
+| [v2.1.278](v2.1.278/) | 2026-09-19 | `mark1 corpus record` against the installed `claude` | `claudecode.SupportedVersions`, `recordedCorpusDigest` |
 
 A version outside this table is admitted only through the structural probe (`claudecode.Compatibility`,
 D-EE): capture runs UNVERIFIED under a receipted `unsupported_agent_version` window until a directory
