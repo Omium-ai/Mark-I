@@ -479,3 +479,40 @@ func TestBusyMapsTo503(t *testing.T) {
 		t.Fatalf("busy: got %d", w.Code)
 	}
 }
+
+// TestServiceQuerySurface: the intel driver's READ half of the ADR-0010 §2.2 seam — the same registry as /api/v1/query, the tenant from the body under the service credential, never a token (prod 2026-09-19: the hourly rollup's tvo_task_window read 401ed on the token surface).
+func TestServiceQuerySurface(t *testing.T) {
+	tenant := uuid.New()
+	run := &fakeRunner{rows: &Rows{}}
+	_, mux, _, deviceBearer := newTestModule(t, run, true)
+	body := func(tpl string) string {
+		return `{"tenant_id":"` + tenant.String() + `","template":"` + tpl + `","params":{"from":"2026-08-28","to":"2026-08-29"}}`
+	}
+	post := func(cred, b string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/internal/v1/query", strings.NewReader(b))
+		if cred != "" {
+			req.Header.Set("Authorization", "Bearer "+cred)
+		}
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w
+	}
+	for _, cred := range []string{"", "wrong", deviceBearer} {
+		if w := post(cred, body("tvo_task_window")); w.Code != http.StatusForbidden {
+			t.Fatalf("cred %q: got %d %s", cred, w.Code, w.Body.String())
+		}
+	}
+	if w := post("intel-secret", body("tvo_rollup_tenant_day")); w.Code != http.StatusForbidden {
+		t.Fatalf("write template on the read surface: got %d %s", w.Code, w.Body.String())
+	}
+	if w := post("intel-secret", `{"tenant_id":"nope","template":"tvo_task_window","params":{}}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad tenant: got %d", w.Code)
+	}
+	w := post("intel-secret", body("tvo_task_window"))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"template_version"`) {
+		t.Fatalf("service read: got %d %s", w.Code, w.Body.String())
+	}
+	if run.last.Template().Name() != "tvo_task_window" || run.last.Bind()["tid"] != tenant.String() {
+		t.Fatalf("executed %s for tenant %v", run.last.Template().Name(), run.last.Bind()["tid"])
+	}
+}

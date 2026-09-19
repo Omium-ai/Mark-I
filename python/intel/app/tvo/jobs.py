@@ -39,7 +39,7 @@ async def rollup_verify(
     )
     async with own as client:
         outcomes = await run_rollup(
-            QuerychokeReader(client, ctx.settings.querychoke_base_url),
+            QuerychokeReader(client, ctx.settings.querychoke_base_url, tenant_id=ctx.tenant_id),
             tenant_id=ctx.tenant_id,
             day=day,
             bearer=bearer,

@@ -20,7 +20,7 @@ async def score(ctx: Any, http: httpx.AsyncClient | None = None) -> str | None:
         raise ValueError("INTEL_QUERYCHOKE_TOKEN is required (intel's service credential)")
     settings = ctx.settings
     async with http or httpx.AsyncClient(timeout=settings.http_timeout_s) as client:
-        reader = QuerychokeReader(client, settings.querychoke_base_url)
+        reader = QuerychokeReader(client, settings.querychoke_base_url, tenant_id=ctx.tenant_id)
         out = await fetch(reader, ctx.day, ctx.day, bearer=bearer)
     log.info(
         "ope.score %s %s: admitted=%d dropped=%s",

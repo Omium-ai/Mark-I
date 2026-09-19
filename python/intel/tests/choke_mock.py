@@ -35,6 +35,9 @@ import httpx
 from mark1_receipts import DOMAIN_PREFIX, canonical_json
 
 QUERY_PATH = "/api/v1/query"
+SERVICE_QUERY_PATH = (
+    "/internal/v1/query"  # the driver's read surface: tenant_id in the body, service bearer
+)
 ROLLUP_WRITE_PATH = "/internal/v1/rollup/tvo_tenant_day"
 WRITE_TEMPLATE = "tvo_rollup_tenant_day"
 APPEND_PATH = "/internal/v1/receipts/append"
@@ -86,9 +89,14 @@ class MockChoke:
             return self._rollup_write(request)
         if request.url.path == APPEND_PATH:
             return self._receipt_append(request)
-        assert request.url.path == QUERY_PATH, request.url.path
+        assert request.url.path in (QUERY_PATH, SERVICE_QUERY_PATH), request.url.path
         body = json.loads(request.content)
-        assert set(body) == {"template", "params"}, body  # the §3.3 read body, exact
+        if request.url.path == SERVICE_QUERY_PATH:
+            # module.go handleServiceQuery: tenant in the body, service credential as bearer
+            assert set(body) == {"tenant_id", "template", "params"}, body
+            assert body["tenant_id"], "a service read names its tenant"
+        else:
+            assert set(body) == {"template", "params"}, body  # the §3.3 read body, exact
         template, params = body["template"], body["params"]
         auth = request.headers.get("authorization")
         self.requests.append((template, params, auth))

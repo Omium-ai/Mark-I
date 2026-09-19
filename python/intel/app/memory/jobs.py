@@ -60,7 +60,7 @@ async def extract(ctx: Any) -> str | None:
         AsyncAnthropic() as anthropic,
     ):
         await run_extract(
-            QuerychokeReader(http, ctx.settings.querychoke_base_url),
+            QuerychokeReader(http, ctx.settings.querychoke_base_url, tenant_id=ctx.tenant_id),
             conn,
             AnthropicBatchRunner(anthropic),
             tenant_id=ctx.tenant_id,
@@ -78,7 +78,7 @@ async def admit(ctx: Any) -> str | None:
         httpx.AsyncClient(timeout=ctx.settings.http_timeout_s) as http,
     ):
         report = await run_admit(
-            QuerychokeReader(http, base_url),
+            QuerychokeReader(http, base_url, tenant_id=ctx.tenant_id),
             conn,
             receipt_append(http, base_url, bearer),
             tenant_id=ctx.tenant_id,
@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             async with httpx.AsyncClient(timeout=30.0) as http, AsyncAnthropic() as anthropic:
                 return await run_nightly(
-                    QuerychokeReader(http, args.base_url),
+                    QuerychokeReader(http, args.base_url, tenant_id=args.tenant_id),
                     conn,
                     AnthropicBatchRunner(anthropic),
                     receipt_append(http, args.base_url, bearer),

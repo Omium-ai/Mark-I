@@ -213,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
 
     async def _run() -> list[RollupOutcome]:
         async with httpx.AsyncClient(timeout=30.0) as http:
-            reader = QuerychokeReader(http, args.base_url)
+            reader = QuerychokeReader(http, args.base_url, tenant_id=args.tenant_id)
             return await run_rollup(
                 reader,
                 tenant_id=args.tenant_id,

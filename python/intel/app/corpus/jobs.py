@@ -65,7 +65,7 @@ async def export(ctx: Any, *, http: httpx.AsyncClient | None = None) -> str | No
     )
     base_url = ctx.settings.querychoke_base_url
     async with own as client:
-        result = await QuerychokeReader(client, base_url).run_template(
+        result = await QuerychokeReader(client, base_url, tenant_id=ctx.tenant_id).run_template(
             CANDIDATES_TEMPLATE,
             {"from": ctx.day.isoformat(), "to": ctx.day.isoformat()},
             bearer=bearer,

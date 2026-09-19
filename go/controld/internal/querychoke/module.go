@@ -92,6 +92,78 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	// still meters it; the auth chain does not apply.
 	mux.Handle("POST /internal/v1/rollup/tvo_tenant_day",
 		m.deps.ObsCfg.HTTPMiddleware(nil)(http.HandlerFunc(m.handleRollupWrite)))
+	// The driver's READ half of the same seam: its ledger reads (tvo_task_window, coverage inputs, memory_certified_sessions, …) name the tenant in the body under the service credential; /api/v1/query would answer them M1E-1002, it only knows tokens (prod 2026-09-19: every hourly rollup 401ed).
+	mux.Handle("POST /internal/v1/query",
+		m.deps.ObsCfg.HTTPMiddleware(nil)(http.HandlerFunc(m.handleServiceQuery)))
+}
+
+// serviceTenant verifies the intel driver's bearer and resolves the tenant the request names (FromServiceJob); false means the refusal was written.
+func (m *Module) serviceTenant(w http.ResponseWriter, r *http.Request, tenantID string) (TenantID, bool) {
+	bearer := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if len(bearer) <= len(prefix) || bearer[:len(prefix)] != prefix {
+		writeErr(w, http.StatusForbidden, "M1E-1001", "service credential required")
+		return TenantID{}, false
+	}
+	cred, err := VerifyServiceCredential(m.deps.IntelServiceToken, bearer[len(prefix):])
+	if err != nil {
+		writeErr(w, http.StatusForbidden, "M1E-1001", "service credential rejected")
+		return TenantID{}, false
+	}
+	tenant, err := uuid.Parse(tenantID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", "tenant_id: not a UUID")
+		return TenantID{}, false
+	}
+	tid, err := FromServiceJob(cred, tenant)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", err.Error())
+		return TenantID{}, false
+	}
+	return tid, true
+}
+
+// handleServiceQuery is handleQuery for the intel driver: the same closed registry, the same write refusal, the tenant from the body instead of the token.
+func (m *Module) handleServiceQuery(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TenantID string `json:"tenant_id"`
+		Template string `json:"template"`
+		Params   Params `json:"params"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.UseNumber()
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", "malformed query request")
+		return
+	}
+	tid, ok := m.serviceTenant(w, r, req.TenantID)
+	if !ok {
+		return
+	}
+	tpl, err := m.reg.Lookup(req.Template)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "M1E-2008",
+			fmt.Sprintf("unknown query template %q — the chokepoint refuses, it does not improvise", req.Template))
+		return
+	}
+	if tpl.IsWrite() {
+		writeErr(w, http.StatusForbidden, "M1E-1001", "write-shaped templates are not executable on this surface")
+		return
+	}
+	q, err := Build(tid, tpl, req.Params)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", err.Error())
+		return
+	}
+	rows, ok := m.run(w, r, q)
+	if !ok {
+		return
+	}
+	out := rows.Rows
+	if out == nil {
+		out = []map[string]any{}
+	}
+	writeJSON(w, map[string]any{"rows": out, "template_version": tpl.Version()})
 }
 
 // ---------------------------------------------------------------------------
@@ -515,18 +587,6 @@ func (m *Module) handleRollupWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	// The service credential seam (ADR-0010 §2.2): the verified principal is
 	// the intel driver, presented as a bearer, compared constant-time.
-	bearer := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if len(bearer) <= len(prefix) || bearer[:len(prefix)] != prefix {
-		writeErr(w, http.StatusForbidden, "M1E-1001", "service credential required")
-		return
-	}
-	cred, err := VerifyServiceCredential(m.deps.IntelServiceToken, bearer[len(prefix):])
-	if err != nil {
-		writeErr(w, http.StatusForbidden, "M1E-1001", "service credential rejected")
-		return
-	}
-
 	var req rollupRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20))
 	dec.UseNumber()
@@ -534,14 +594,8 @@ func (m *Module) handleRollupWrite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "M1E-2001", "malformed rollup request")
 		return
 	}
-	tenant, err := uuid.Parse(req.TenantID)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "M1E-2001", "tenant_id: not a UUID")
-		return
-	}
-	tid, err := FromServiceJob(cred, tenant)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "M1E-2001", err.Error())
+	tid, ok := m.serviceTenant(w, r, req.TenantID)
+	if !ok {
 		return
 	}
 	tpl, err := m.reg.Lookup("tvo_rollup_tenant_day")

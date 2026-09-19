@@ -55,7 +55,9 @@ async def compile(  # noqa: A001 — the scheduler contract names the entry `com
     )
     async with own as client:
         attempts = await read_attempts(
-            QuerychokeReader(client, ctx.settings.querychoke_base_url), ctx.day, bearer=bearer
+            QuerychokeReader(client, ctx.settings.querychoke_base_url, tenant_id=ctx.tenant_id),
+            ctx.day,
+            bearer=bearer,
         )
     bases = {a.cost_basis for a in certified(attempts)}
     if not bases:

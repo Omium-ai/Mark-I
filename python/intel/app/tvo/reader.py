@@ -24,6 +24,10 @@ import httpx
 from app.tvo.engine import AttemptRow
 
 QUERY_PATH = "/api/v1/query"
+# The intel driver's own read surface: the service credential names the tenant in the body
+# (module.go handleServiceQuery); /api/v1/query only knows tokens and answered the hourly
+# rollup M1E-1002 in prod (2026-09-19).
+SERVICE_QUERY_PATH = "/internal/v1/query"
 
 # The ADR-0010 §2.2 write seam — controld's INTERNAL route (module.go
 # RegisterRoutes), service-credential authenticated, with its own request and
@@ -115,19 +119,31 @@ class QuerychokeReader:
     driven through run_write() by app/tvo/rollup.py — this class stays
     template-name-agnostic so the closed registry (05 §6.3) remains the single list."""
 
-    def __init__(self, http: httpx.AsyncClient, base_url: str) -> None:
+    def __init__(
+        self, http: httpx.AsyncClient, base_url: str, tenant_id: str | None = None
+    ) -> None:
+        """`tenant_id` set ⇒ a service-job reader: every read goes to the internal surface with the
+        tenant named in the body and the bearer being intel's service credential. Unset ⇒ the
+        tenant-facing surface, where the bearer is a user/device token naming the tenant."""
         self._http = http
         self._base_url = base_url.rstrip("/")
+        self._tenant_id = tenant_id
 
     async def run_template(
         self, template: str, params: Mapping[str, Any], *, bearer: str
     ) -> QueryResult:
         """POST /api/v1/query {"template", "params"} → {"rows", "template_version"}
-        (08 §3.3, exact). Non-2xx bodies carry {"error": {"code", "message"}} (08 §9)
+        (08 §3.3, exact), or /internal/v1/query {"tenant_id", "template", "params"} for a
+        service-job reader. Non-2xx bodies carry {"error": {"code", "message"}} (08 §9)
         and surface as typed QuerychokeError — the M1E code crosses intact."""
+        body: dict[str, Any] = {"template": template, "params": dict(params)}
+        path = QUERY_PATH
+        if self._tenant_id is not None:
+            body["tenant_id"] = self._tenant_id
+            path = SERVICE_QUERY_PATH
         resp = await self._http.post(
-            f"{self._base_url}{QUERY_PATH}",
-            json={"template": template, "params": dict(params)},
+            f"{self._base_url}{path}",
+            json=body,
             headers={"Authorization": f"Bearer {bearer}"},
         )
         return self._decode(resp)
