@@ -33,7 +33,8 @@
         "tool": "npm-test",
         "why": "no \"test\" script in package.json"
       }
-    ]
+    ],
+    "workspace_id": "e4b11f4813aa67cf6f3e6e9fa58ab7e0ea6f2d3aa2de302314512ceb57a6b3a9"
   },
   {
     "path": "/Users/dev/api-service",
@@ -68,6 +69,7 @@
         "tool": "npm-test",
         "why": "no \"test\" script in package.json"
       }
-    ]
+    ],
+    "workspace_id": "279bbf4d6ce7c07618ed5ef7138ca25633aad057d11c845294b5989cd94150d2"
   }
 ]
