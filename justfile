@@ -141,6 +141,10 @@ test-rust:
 #             which has no Windows listener — see NFR-PORTABILITY-002 and D-CA).
 #   linux  -> anchors/sandbox_linux_test.go; the namespace sandbox is a Linux kernel feature
 #             (sandbox_other.go is the !linux refusal it pairs with).
+#   windows -> internal/procattr/procattr_{windows,other}{,_test}.go; CREATE_NO_WINDOW on every
+#             child the daemon spawns is a Win32 creation flag, so the Windows file carries the
+#             attribute and its test, and the !windows pair asserts the no-op. Both halves run on
+#             their own leg (windows-2022 and ubuntu/macos), so nothing is hidden from any leg.
 # Adding a platform tag to make a red leg green is the failure this row exists to catch: the
 # test that cannot run on Windows should be the one whose SUBJECT is unix, never the one whose
 # helper happened to live in a unix file (harness_test.go).
