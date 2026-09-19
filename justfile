@@ -141,6 +141,10 @@ test-rust:
 #             which has no Windows listener — see NFR-PORTABILITY-002 and D-CA).
 #   linux  -> anchors/sandbox_linux_test.go; the namespace sandbox is a Linux kernel feature
 #             (sandbox_other.go is the !linux refusal it pairs with).
+#   darwin -> anchors/sandbox_darwin{,_test}.go (the sandbox-exec sandbox), sandbox_common.go and
+#             sandbox_probe_test.go (`linux || darwin`: the shared helper and the portable probes),
+#             sandbox_other.go (`!linux && !darwin`: the Windows refusal). The probes run on the
+#             macos-14 leg with M1_REQUIRE_SANDBOX=1, so a skipped probe there is a red leg.
 #   windows -> internal/procattr/procattr_{windows,other}{,_test}.go; CREATE_NO_WINDOW on every
 #             child the daemon spawns is a Win32 creation flag, so the Windows file carries the
 #             attribute and its test, and the !windows pair asserts the no-op. Both halves run on
