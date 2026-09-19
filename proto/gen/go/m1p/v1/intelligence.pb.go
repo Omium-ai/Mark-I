@@ -482,11 +482,16 @@ func (x *RouteDecision) GetBundleSeq() uint64 {
 // guarantee-grade TVO issuance is REFUSED below the coverage floor
 // (M1E-5004), not footnoted.
 type CoverageTransition struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kind          CoverageKind           `protobuf:"varint,1,opt,name=kind,proto3,enum=m1p.v1.CoverageKind" json:"kind,omitempty"`        // [P0]
-	WorkspaceId   []byte                 `protobuf:"bytes,2,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"` // [P1] HMAC_tenant(workspace root path)
-	DurationMs    uint64                 `protobuf:"varint,3,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`   // [P0] length of a closed bypass window; 0 otherwise
-	ReasonCode    string                 `protobuf:"bytes,4,opt,name=reason_code,json=reasonCode,proto3" json:"reason_code,omitempty"`    // [P0] machine code: "mark1_off" | "disk_hard_stop" |
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Kind        CoverageKind           `protobuf:"varint,1,opt,name=kind,proto3,enum=m1p.v1.CoverageKind" json:"kind,omitempty"`        // [P0]
+	WorkspaceId []byte                 `protobuf:"bytes,2,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"` // [P1] HMAC_tenant(workspace root path)
+	DurationMs  uint64                 `protobuf:"varint,3,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`   // [P0] length of a closed bypass window; 0 otherwise
+	ReasonCode  string                 `protobuf:"bytes,4,opt,name=reason_code,json=reasonCode,proto3" json:"reason_code,omitempty"`    // [P0] machine code: "mark1_off" | "disk_hard_stop" |
+	// "user_enable" | "proxy_bypass" |
+	// "proxy_failed" | "unsupported_agent_version" |
+	// "transcript_retention_gap" | "agent_pause" |
+	// "agent_resume" (04 §2.7)
+	Agent         string `protobuf:"bytes,5,opt,name=agent,proto3" json:"agent,omitempty"` // [P0] the one agent this window is about ("codex" for an
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -549,6 +554,13 @@ func (x *CoverageTransition) GetReasonCode() string {
 	return ""
 }
 
+func (x *CoverageTransition) GetAgent() string {
+	if x != nil {
+		return x.Agent
+	}
+	return ""
+}
+
 var File_m1p_v1_intelligence_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_intelligence_proto_rawDesc = "" +
@@ -579,14 +591,15 @@ const file_m1p_v1_intelligence_proto_rawDesc = "" +
 	"propensity\x121\n" +
 	"\bfidelity\x18\x05 \x01(\x0e2\x15.m1p.v1.RouteFidelityR\bfidelity\x12\x1d\n" +
 	"\n" +
-	"bundle_seq\x18\x06 \x01(\x04R\tbundleSeq\"\xa3\x01\n" +
+	"bundle_seq\x18\x06 \x01(\x04R\tbundleSeq\"\xb9\x01\n" +
 	"\x12CoverageTransition\x12(\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x14.m1p.v1.CoverageKindR\x04kind\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\fR\vworkspaceId\x12\x1f\n" +
 	"\vduration_ms\x18\x03 \x01(\x04R\n" +
 	"durationMs\x12\x1f\n" +
 	"\vreason_code\x18\x04 \x01(\tR\n" +
-	"reasonCode*\xe8\x01\n" +
+	"reasonCode\x12\x14\n" +
+	"\x05agent\x18\x05 \x01(\tR\x05agent*\xe8\x01\n" +
 	"\x10InjectionChannel\x12!\n" +
 	"\x1dINJECTION_CHANNEL_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fINJECTION_CHANNEL_SESSION_START\x10\x01\x12\"\n" +

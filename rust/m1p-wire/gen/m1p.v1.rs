@@ -1175,6 +1175,14 @@ pub struct CoverageTransition {
     /// \[P0\] machine code: "mark1_off" | "disk_hard_stop" |
     #[prost(string, tag="4")]
     pub reason_code: ::prost::alloc::string::String,
+    ///       "user_enable" | "proxy_bypass" |
+    ///       "proxy_failed" | "unsupported_agent_version" |
+    ///       "transcript_retention_gap" | "agent_pause" |
+    ///       "agent_resume" (04 §2.7)
+    ///
+    /// \[P0\] the one agent this window is about ("codex" for an
+    #[prost(string, tag="5")]
+    pub agent: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

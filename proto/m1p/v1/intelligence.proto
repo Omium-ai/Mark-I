@@ -140,6 +140,10 @@ message CoverageTransition {
                             //      "proxy_failed" | "unsupported_agent_version" |
                             //      "transcript_retention_gap" | "agent_pause" |
                             //      "agent_resume" (04 §2.7)
+  string agent = 5;         // [P0] the one agent this window is about ("codex" for an
+                            //      unsupported_agent_version or agent_pause window); empty =
+                            //      the machine. A transition carries no session, so the
+                            //      envelope's per-session agent cannot say this.
 }
 
 enum CoverageKind {

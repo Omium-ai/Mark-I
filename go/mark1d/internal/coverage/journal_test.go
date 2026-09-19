@@ -1,6 +1,7 @@
 package coverage
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -289,5 +290,33 @@ func TestDrainJournalIsQuietWithNoJournal(t *testing.T) {
 func TestJournalPathMatchesTheCLI(t *testing.T) {
 	if got, want := JournalPath("/s"), filepath.Join("/s", "coverage", "transitions.jsonl"); got != want {
 		t.Fatalf("JournalPath = %q, want %q (go/mark1/internal/cli.Env.CoveragePath)", got, want)
+	}
+}
+
+// TestAgentScopedWindowsNameTheirAgent: an agent_pause journalled by the app names its agent, and the receipted transition carries it (the workspace stays DeviceWide: the cause is one agent, not one project); a machine-wide line carries none.
+func TestAgentScopedWindowsNameTheirAgent(t *testing.T) {
+	cov, sp := wire(t)
+	state := t.TempDir()
+	writeJournal(t, state,
+		`{"ts":"2026-08-31T10:00:00Z","kind":"disable","reason":"agent_pause","scope":"all","agent":"codex"}`,
+		cliOnLine)
+	if _, err := cov.DrainJournal(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	got := landed(t, sp)
+	if len(got) != 2 {
+		t.Fatalf("spooled %d, want 2", len(got))
+	}
+	if ct := got[0].ct; ct.GetAgent() != "codex" || ct.GetReasonCode() != ReasonAgentPause || !bytes.Equal(ct.GetWorkspaceId(), DeviceWide()) {
+		t.Fatalf("agent_pause landed as %+v", ct)
+	}
+	if ct := got[1].ct; ct.GetAgent() != "" {
+		t.Fatalf("a machine-wide enable named an agent: %q", ct.GetAgent())
+	}
+	if err := cov.TransitionFor(context.Background(), "gemini", m1pv1.CoverageKind_COVERAGE_KIND_BYPASS, DeviceWide(), ReasonUnsupportedAgentVersion, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := landed(t, sp); got[len(got)-1].ct.GetAgent() != "gemini" {
+		t.Fatalf("TransitionFor dropped the agent: %+v", got[len(got)-1].ct)
 	}
 }

@@ -1370,7 +1370,7 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 		}
 		if c == adapters.CompatibleUnpinned {
 			log.Warn("mark1d: transcript capture UNVERIFIED — no conformance corpus for this version; its artifact shape passed the structural probe, capture proceeds and this window is receipted as unsupported_agent_version", "agent", name, "version", d.Version)
-			if cerr := cov.Transition(ctx, m1pv1.CoverageKind_COVERAGE_KIND_BYPASS, coverage.DeviceWide(), coverage.ReasonUnsupportedAgentVersion, 0); cerr != nil {
+			if cerr := cov.TransitionFor(ctx, name, m1pv1.CoverageKind_COVERAGE_KIND_BYPASS, coverage.DeviceWide(), coverage.ReasonUnsupportedAgentVersion, 0); cerr != nil {
 				log.Error("COVERAGE BYPASS NOT RECEIPTED — this is a gap, not a warning", "reason_code", coverage.ReasonUnsupportedAgentVersion, "err", cerr)
 			}
 		}
@@ -1397,7 +1397,7 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 		// never arms for this daemon's life, so this is a bypass window that
 		// opens here and closes at restart — a START, bounded by whatever
 		// transition follows it.
-		if cerr := cov.Transition(ctx, m1pv1.CoverageKind_COVERAGE_KIND_BYPASS,
+		if cerr := cov.TransitionFor(ctx, "claudecode", m1pv1.CoverageKind_COVERAGE_KIND_BYPASS,
 			coverage.DeviceWide(), coverage.ReasonUnsupportedAgentVersion, 0); cerr != nil {
 			log.Error("COVERAGE BYPASS NOT RECEIPTED — this is a gap, not a warning",
 				"reason_code", coverage.ReasonUnsupportedAgentVersion, "err", cerr)
@@ -1410,7 +1410,7 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 		// the band never counts an unproven parser as verified coverage.
 		log.Warn("mark1d: transcript capture UNVERIFIED — Claude Code version has no conformance corpus; its transcript shape passed the structural probe, capture proceeds and this window is receipted as unsupported_agent_version",
 			"version", d.Version, "fix", "record a corpus: `mark1 corpus record`, then add the version to claudecode.SupportedVersions")
-		if cerr := cov.Transition(ctx, m1pv1.CoverageKind_COVERAGE_KIND_BYPASS,
+		if cerr := cov.TransitionFor(ctx, "claudecode", m1pv1.CoverageKind_COVERAGE_KIND_BYPASS,
 			coverage.DeviceWide(), coverage.ReasonUnsupportedAgentVersion, 0); cerr != nil {
 			log.Error("COVERAGE BYPASS NOT RECEIPTED — this is a gap, not a warning",
 				"reason_code", coverage.ReasonUnsupportedAgentVersion, "err", cerr)

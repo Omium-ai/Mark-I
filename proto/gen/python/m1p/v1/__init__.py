@@ -893,6 +893,13 @@ class CoverageTransition(betterproto.Message):
     workspace_id: bytes = betterproto.bytes_field(2)
     duration_ms: int = betterproto.uint64_field(3)
     reason_code: str = betterproto.string_field(4)
+    agent: str = betterproto.string_field(5)
+    """
+    "user_enable" | "proxy_bypass" |
+          "proxy_failed" | "unsupported_agent_version" |
+          "transcript_retention_gap" | "agent_pause" |
+          "agent_resume" (04 §2.7)
+    """
 
 
 @dataclass(eq=False, repr=False)

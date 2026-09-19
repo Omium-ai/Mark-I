@@ -151,17 +151,22 @@ func (e *Emitter) WorkspaceID(path string) []byte {
 //     never authorized"). Callers must log it as a gap, not as a warning.
 //   - capture.ErrQuarantined — a malformed transition, i.e. a bug here.
 func (e *Emitter) Transition(ctx context.Context, kind m1pv1.CoverageKind, workspaceID []byte, reason string, window time.Duration) error {
+	return e.TransitionFor(ctx, "", kind, workspaceID, reason, window)
+}
+
+// TransitionFor is Transition scoped to one agent: an unsupported_agent_version or agent_pause window is that agent's, not the machine's, and the envelope's agent field says so (the workspace_id stays DeviceWide because the cause is not a workspace). Empty agent = machine-wide.
+func (e *Emitter) TransitionFor(ctx context.Context, agent string, kind m1pv1.CoverageKind, workspaceID []byte, reason string, window time.Duration) error {
 	if e == nil {
 		return fmt.Errorf("%w (reason %q)", ErrNotWired, reason)
 	}
-	return e.emit(ctx, kind, workspaceID, reason, window, e.now())
+	return e.emit(ctx, agent, kind, workspaceID, reason, window, e.now())
 }
 
 // emit is Transition with the occurrence time supplied. Separate because a
 // journalled CLI transition happened when the CLI wrote it, which may be hours
 // before this daemon drains it: stamping now() there would silently move a
 // window, and a window in the wrong place is worse than no window at all.
-func (e *Emitter) emit(ctx context.Context, kind m1pv1.CoverageKind, workspaceID []byte, reason string, window time.Duration, at time.Time) error {
+func (e *Emitter) emit(ctx context.Context, agent string, kind m1pv1.CoverageKind, workspaceID []byte, reason string, window time.Duration, at time.Time) error {
 	want, ok := reasonKind[reason]
 	if !ok {
 		// The vocabulary is frozen and mirrored into a Postgres column that
@@ -190,6 +195,7 @@ func (e *Emitter) emit(ctx context.Context, kind m1pv1.CoverageKind, workspaceID
 			WorkspaceId: workspaceID,
 			DurationMs:  uint64(window.Milliseconds()), //nolint:gosec // G115: window >= 0 checked above
 			ReasonCode:  reason,
+			Agent:       agent,
 		}},
 	})
 }

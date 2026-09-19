@@ -125,7 +125,11 @@ func RowsFromBatch(b *m1pv1.Batch, tenant, device uuid.UUID, receivedAt time.Tim
 			unknownEventTypes.Inc()
 			continue
 		}
-		rows = append(rows, eventRow(ev, tenant, device, agentOf(uuidOrNil(ev.GetSessionId())), fallbackAt))
+		agent := agentOf(uuidOrNil(ev.GetSessionId()))
+		if a := ev.GetCoverageTransition().GetAgent(); a != "" {
+			agent = a // an agent-scoped window (unsupported_agent_version, agent_pause) has no session; the body names the agent
+		}
+		rows = append(rows, eventRow(ev, tenant, device, agent, fallbackAt))
 	}
 	for i, d := range b.GetDropped() {
 		rows = append(rows, droppedRow(d, i, batchID, tenant, device, sessionID, agentOf(sessionID), fallbackAt))

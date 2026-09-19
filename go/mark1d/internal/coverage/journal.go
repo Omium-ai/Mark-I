@@ -39,6 +39,7 @@ type journalLine struct {
 	Reason    string `json:"reason"`
 	Workspace string `json:"workspace"`
 	Scope     string `json:"scope"`
+	Agent     string `json:"agent"` // set by the per-agent pause/resume writers; empty = machine-wide
 }
 
 // DrainJournal receipts everything `mark1 enable`/`off`/`on` journalled since
@@ -98,7 +99,7 @@ func (e *Emitter) DrainJournal(ctx context.Context, stateDir string) (int, error
 		raw, advance := tail[:i], int64(i)+1
 		tail = tail[i+1:]
 
-		kind, ws, reason, at, perr := e.parseLine(raw)
+		kind, ws, reason, agent, at, perr := e.parseLine(raw)
 		if perr != nil {
 			// Skipped, not retried: a line we cannot parse will not parse on
 			// the next tick either, and wedging here would cost every LATER
@@ -107,7 +108,7 @@ func (e *Emitter) DrainJournal(ctx context.Context, stateDir string) (int, error
 			_ = writeCursor(stateDir, off)
 			return n, perr
 		}
-		if err := e.emit(ctx, kind, ws, reason, 0, at); err != nil {
+		if err := e.emit(ctx, agent, kind, ws, reason, 0, at); err != nil {
 			// Cursor NOT advanced: a shed or a parked spool is transient, and
 			// this row is the evidence for a window the customer is billed on.
 			_ = writeCursor(stateDir, off)
@@ -119,10 +120,10 @@ func (e *Emitter) DrainJournal(ctx context.Context, stateDir string) (int, error
 	return n, writeCursor(stateDir, off)
 }
 
-func (e *Emitter) parseLine(raw []byte) (m1pv1.CoverageKind, []byte, string, time.Time, error) {
+func (e *Emitter) parseLine(raw []byte) (m1pv1.CoverageKind, []byte, string, string, time.Time, error) {
 	var l journalLine
 	if err := json.Unmarshal(raw, &l); err != nil {
-		return 0, nil, "", time.Time{}, fmt.Errorf("coverage: unparseable journal line: %w", err)
+		return 0, nil, "", "", time.Time{}, fmt.Errorf("coverage: unparseable journal line: %w", err)
 	}
 	reason := l.Reason
 	if reason == "" {
@@ -138,14 +139,14 @@ func (e *Emitter) parseLine(raw []byte) (m1pv1.CoverageKind, []byte, string, tim
 	}
 	kind, ok := reasonKind[reason]
 	if !ok {
-		return 0, nil, "", time.Time{}, fmt.Errorf("coverage: journal line has no usable reason (kind %q, reason %q)", l.Kind, l.Reason)
+		return 0, nil, "", "", time.Time{}, fmt.Errorf("coverage: journal line has no usable reason (kind %q, reason %q)", l.Kind, l.Reason)
 	}
 	at, err := time.Parse(time.RFC3339, l.TS)
 	if err != nil {
 		// The CLI's timestamp is the transition's REAL time; the daemon may
 		// drain hours later. Falling back to now() would silently move a
 		// window, so an unusable ts is a refusal.
-		return 0, nil, "", time.Time{}, fmt.Errorf("coverage: journal line has an unusable ts %q: %w", l.TS, err)
+		return 0, nil, "", "", time.Time{}, fmt.Errorf("coverage: journal line has an unusable ts %q: %w", l.TS, err)
 	}
 	surface := l.Workspace
 	if surface == "" {
@@ -155,7 +156,7 @@ func (e *Emitter) parseLine(raw []byte) (m1pv1.CoverageKind, []byte, string, tim
 	if surface != "" && surface != "all" {
 		ws = e.WorkspaceID(surface)
 	}
-	return kind, ws, reason, at, nil
+	return kind, ws, reason, l.Agent, at, nil
 }
 
 func readCursor(stateDir string) int64 {
