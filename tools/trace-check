@@ -173,7 +173,12 @@ def go_tests() -> frozenset[str]:
     # the untagged pass alone under-reports by exactly the suites the tags route elsewhere --
     # `integration` (8 files in controld, run by `just test-integration`) and, when it lands,
     # `chaos`. Both passes are unioned because a `!tag` file drops out of the tagged one.
-    variants = [[], ["-tags=" + ",".join(declared_build_tags())]]
+    # A platform tag (linux, windows, unix...) is the host's to satisfy; forcing a foreign one on makes
+    # internal/goos declare two platforms at once and the collector fails. Only the non-platform tags are forced.
+    platform = {"aix", "android", "darwin", "dragonfly", "freebsd", "hurd", "illumos", "ios", "js", "linux",
+                "netbsd", "openbsd", "plan9", "solaris", "wasip1", "windows", "zos", "unix"}
+    forced = [t for t in declared_build_tags() if t not in platform]
+    variants = [[], ["-tags=" + ",".join(forced)]]
     for mod in ("go/mark1", "go/mark1d", "go/controld"):
         d = ROOT / mod
         if not (d / "go.mod").exists():
