@@ -200,11 +200,13 @@ class CoverageKind(betterproto.Enum):
 
 
 class GuardOutcome(betterproto.Enum):
-    """07 §3, verbatim."""
+    """07 §3, verbatim, plus the verify plane's two outcomes."""
 
     UNSPECIFIED = 0
     FORWARDED = 1
     REFUSED = 2
+    BLOCKED = 3
+    ARRESTED = 4
 
 
 class DiffClassification(betterproto.Enum):
@@ -955,6 +957,20 @@ class GuardDecision(betterproto.Message):
      the server-side guard on it.
     """
 
+    tokens_saved_estimate: int = betterproto.uint64_field(5)
+    """
+    [P1] The verify plane's own decisions (04 §2.3), on the task the event
+     names: a Stop the gate refused ("stop_gate_block") and a retry loop the
+     knee ended ("knee_arrest"). tokens_saved_estimate is the edge's estimate
+     of what the decision kept the agent from spending — a block saves the
+     follow-up request the human would have sent (one more read of the
+     context), an arrest saves the next attempt at this task's mean attempt
+     cost. An ESTIMATE, labelled so wherever it is summed; 0 when the edge had
+     no usage to size it from.
+    """
+
+    attempt: int = betterproto.uint32_field(6)
+
 
 @dataclass(eq=False, repr=False)
 class BundleAck(betterproto.Message):
@@ -1608,6 +1624,14 @@ class Hello(betterproto.Message):
      dropped everything from, which is the failure D-AT exists to end. cortexd
      is not exempt — it has no session identity yet, so its pushes are refused
      and counted until the MCP surface carries one (D-AV).
+    """
+
+    cwd: str = betterproto.string_field(5)
+    """
+    The writer's working directory — the agent's project root for a hook
+     process. LOCAL FABRIC ONLY: it never enters an event or the uplink; the
+     daemon maps it to an enabled workspace and stamps SessionStart.workspace_id
+     (the HMAC) from it. Empty when the writer has no meaningful cwd.
     """
 
 

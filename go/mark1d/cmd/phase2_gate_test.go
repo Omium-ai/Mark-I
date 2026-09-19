@@ -290,11 +290,23 @@ func TestPhase2RetryLoopArrestedAtTheKnee(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	votes := 0
+	votes, blocks, arrests := 0, 0, 0
 	for _, r := range recs {
 		var ev m1pv1.Event
 		if err := proto.Unmarshal(r.Payload, &ev); err != nil {
 			continue
+		}
+		// Every BLOCK and the arrest are ledger rows on the task (policy.proto GuardDecision): what the app's arrests, blocks and tokens-saved read.
+		if gd := ev.GetGuardDecision(); gd != nil {
+			if len(ev.GetTaskId()) != 16 || len(ev.GetSessionId()) != 16 || gd.GetAttempt() == 0 {
+				t.Fatalf("guard decision %s is not filed on a task/session with its attempt: %v", gd.GetReasonCode(), gd)
+			}
+			switch gd.GetReasonCode() {
+			case "stop_gate_block":
+				blocks++
+			case "knee_arrest":
+				arrests++
+			}
 		}
 		av := ev.GetAnchorVote()
 		if av == nil {
@@ -313,5 +325,8 @@ func TestPhase2RetryLoopArrestedAtTheKnee(t *testing.T) {
 	}
 	if votes < kneeAttempt {
 		t.Fatalf("spool holds %d anchor votes, want one per attempt (%d)", votes, kneeAttempt)
+	}
+	if blocks < kneeAttempt-1 || arrests != 1 {
+		t.Fatalf("spool holds %d blocks and %d arrests, want ≥%d blocks and exactly one arrest", blocks, arrests, kneeAttempt-1)
 	}
 }

@@ -161,10 +161,10 @@ ORDER BY day, task_seg_version`,
 		// `e.verdict != ''` resolves the unqualified alias recursively and
 		// ClickHouse rejects the aggregate-in-WHERE cycle.
 		name:    "interventions",
-		version: "interventions.v2",
+		version: "interventions.v3",
 		body: `SELECT e.task_id AS task_id,
-       sumIf(JSONExtractUInt(e.payload, 'tokens_saved_estimate'), e.event_type = 'GuardDecision') AS tokens_saved_estimate,
-       countIf(e.event_type = 'GuardDecision')              AS arrests,
+       sumIf(JSONExtractUInt(e.payload, 'tokens_saved_estimate'), e.event_type = 'GuardDecision' AND JSONExtractString(e.payload, 'reason_code') = 'knee_arrest') AS tokens_saved_estimate,
+       countIf(e.event_type = 'GuardDecision' AND JSONExtractString(e.payload, 'reason_code') = 'knee_arrest') AS arrests,
        argMaxIf(e.verdict, e.occurred_at, e.verdict != '')  AS verdict,
        anyLastIf(e.bundle_seq, e.event_type = 'GuardDecision') AS bundle_seq
 FROM (SELECT event_id, task_id, occurred_at, event_type, payload, verdict, bundle_seq
@@ -180,6 +180,26 @@ ORDER BY tokens_saved_estimate DESC`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},
 		rowLimit: 10_000,
+		timeout:  timeoutReport,
+	},
+	{
+		// GET /reports/tvo tokens_saved: the verify plane's decisions on a task, by reason (knee_arrest, stop_gate_block), with the edge's savings estimate summed — an estimate, labelled so on every surface that shows it.
+		name:    "savings",
+		version: "savings.v1",
+		body: `SELECT JSONExtractString(e.payload, 'reason_code') AS reason,
+       count() AS decisions,
+       sum(JSONExtractUInt(e.payload, 'tokens_saved_estimate')) AS tokens_saved
+FROM (SELECT event_id, payload
+      FROM m1p_events
+      WHERE {{tenant_pred}}
+        AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
+        AND event_type = 'GuardDecision'
+        AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+      LIMIT 1 BY event_id) AS e
+GROUP BY reason`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: 100,
 		timeout:  timeoutReport,
 	},
 	{

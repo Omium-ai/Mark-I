@@ -167,6 +167,7 @@ fn frame_roundtrip_every_fabric_arm() {
             component: "mark1-hookshim".into(),
             pid: 4242,
             version: "0.1.0".into(),
+            cwd: String::new(),
             session_id: vec![5u8; 16],
         }),
         Kind::HelloAck(pb::HelloAck {

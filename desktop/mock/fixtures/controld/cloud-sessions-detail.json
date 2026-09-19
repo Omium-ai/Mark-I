@@ -8,12 +8,13 @@
       "observed_fraction": 0.98
     },
     "guarantee_grade": false,
-    "refusal": "M1E-5004 rollup missing for 1 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 \u00a78.4)",
+    "refusal": "M1E-5004 rollup missing for 1 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 §8.4)",
     "task_seg_version": "task_seg.v1"
   },
   "session": {
     "agent": "claudecode",
     "arrests": 1,
+    "blocks": 0,
     "checkpoint_seq": 9,
     "coverage": {
       "capture_paths": [
@@ -24,12 +25,13 @@
       "proxy_in_path": true,
       "transcript_tailed": false
     },
-    "ended_at": "2026-09-19T10:05:29.838046819Z",
+    "ended_at": "2026-09-19T21:25:44.169969091Z",
+    "history_import": false,
     "injections": 1,
     "project": "0f0e0d0c0b0a09080706050403020100ffeeddccbbaa99887766554433221100",
     "route_decisions": 1,
-    "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
-    "started_at": "2026-09-19T09:05:29.838046819Z",
+    "session_id": "01a0bbfd-7169-7ecc-8869-d00c3b2dcc0b",
+    "started_at": "2026-09-19T20:25:44.169969091Z",
     "tasks": 2,
     "tokens": {
       "cache_create": 5,
@@ -37,16 +39,17 @@
       "input": 1000,
       "output": 200
     },
-    "verified_outcomes": 1,
-    "history_import": false
+    "tokens_saved": 0,
+    "verified_outcomes": 1
   },
   "tasks": [
     {
       "arrests": [
         {
-          "at": "2026-09-19T09:05:34.838046819Z",
+          "at": "2026-09-19T20:25:49.169969091Z",
+          "attempt": 0,
           "bundle_seq": 7,
-          "event_id": "01a0b98e-aa6e-7158-9fd0-27566bee8fe6",
+          "event_id": "01a0bbfd-7169-7f06-922a-af4f4bc8ee33",
           "tokens_saved_estimate": 1200
         }
       ],
@@ -59,11 +62,12 @@
           "verdict_stage": "certified"
         }
       ],
-      "closed_at": "2026-09-19T09:05:37.838046819Z",
+      "blocks": [],
+      "closed_at": "2026-09-19T20:25:52.169969091Z",
       "evidence": [
         {
           "anchor_id": "ruff@1",
-          "at": "2026-09-19T09:05:33.838046819Z",
+          "at": "2026-09-19T20:25:48.169969091Z",
           "category": "lint",
           "counts": {
             "errors": 2,
@@ -71,7 +75,7 @@
             "warnings": 0
           },
           "diagnostic_code": "E501",
-          "event_id": "01a0b98e-aa6e-7102-9a3b-ed442f8d2fbc",
+          "event_id": "01a0bbfd-7169-7f04-942f-598c83ce0fda",
           "path_role": "src",
           "tamper": false,
           "tool": "ruff",
@@ -81,33 +85,33 @@
       "injections": [
         {
           "artifact_count": 1,
-          "at": "2026-09-19T09:05:35.838046819Z",
+          "at": "2026-09-19T20:25:50.169969091Z",
           "channel": "hook_context",
-          "event_id": "01a0b98e-aa6e-7167-a2f9-2fa0e6d08614",
+          "event_id": "01a0bbfd-7169-7f0b-83a7-588150f1ab72",
           "tokens_used": 12
         }
       ],
-      "opened_at": "2026-09-19T09:05:30.838046819Z",
+      "opened_at": "2026-09-19T20:25:45.169969091Z",
       "resolution": "verdict",
       "task_class": "edit.small",
-      "task_id": "7cc888ef-ba14-4dfd-a34b-1a9b532b2297",
+      "task_id": "c34ae17a-6de0-40df-9151-22740c503f00",
       "task_seg_version": "task_seg.v1",
       "verdict_trail": [
         {
-          "at": "2026-09-19T09:05:32.838046819Z",
+          "at": "2026-09-19T20:25:47.169969091Z",
           "bundle_seq": 7,
           "certificate_id": null,
           "certification": "bootstrapping",
-          "event_id": "01a0b98e-aa6e-70fa-a3ee-3680447288d7",
+          "event_id": "01a0bbfd-7169-7efa-8640-78de150fda94",
           "stage": "provisional",
           "verdict": "violated"
         },
         {
-          "at": "2026-09-19T09:05:36.838046819Z",
+          "at": "2026-09-19T20:25:51.169969091Z",
           "bundle_seq": 0,
-          "certificate_id": "7df2bd9c-3a6c-4b8d-b325-93bd1ee7e0f3",
+          "certificate_id": "83d06d6a-7998-4a5a-89bb-e9d99215fb01",
           "certification": "certified",
-          "event_id": "01a0b98e-aa6e-7188-822e-6de7f4b2ba1f",
+          "event_id": "01a0bbfd-7169-7f0d-a4c6-31d45b4e025a",
           "stage": "certified",
           "verdict": "satisfied"
         }
@@ -116,9 +120,10 @@
     {
       "arrests": [
         {
-          "at": "2026-09-19T09:05:39.838046819Z",
+          "at": "2026-09-19T20:25:54.169969091Z",
+          "attempt": 0,
           "bundle_seq": 7,
-          "event_id": "01a0b98e-aa6e-71b2-8eae-7427a5064c4a",
+          "event_id": "01a0bbfd-716a-7400-aa0f-e19c434e15ac",
           "tokens_saved_estimate": 900
         }
       ],
@@ -131,13 +136,14 @@
           "verdict_stage": ""
         }
       ],
+      "blocks": [],
       "closed_at": null,
       "evidence": [],
       "injections": [],
-      "opened_at": "2026-09-19T09:05:38.838046819Z",
+      "opened_at": "2026-09-19T20:25:53.169969091Z",
       "resolution": "",
       "task_class": "",
-      "task_id": "04ecdd87-732a-4705-8b2a-66d691841f29",
+      "task_id": "c4c95a4d-0c7c-494c-91c1-b7a6977ddc65",
       "task_seg_version": "task_seg.v1",
       "verdict_trail": []
     }

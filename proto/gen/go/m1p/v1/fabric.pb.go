@@ -517,7 +517,12 @@ type Hello struct {
 	// dropped everything from, which is the failure D-AT exists to end. cortexd
 	// is not exempt — it has no session identity yet, so its pushes are refused
 	// and counted until the MCP surface carries one (D-AV).
-	SessionId     []byte `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	SessionId []byte `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// The writer's working directory — the agent's project root for a hook
+	// process. LOCAL FABRIC ONLY: it never enters an event or the uplink; the
+	// daemon maps it to an enabled workspace and stamps SessionStart.workspace_id
+	// (the HMAC) from it. Empty when the writer has no meaningful cwd.
+	Cwd           string `protobuf:"bytes,5,opt,name=cwd,proto3" json:"cwd,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -578,6 +583,13 @@ func (x *Hello) GetSessionId() []byte {
 		return x.SessionId
 	}
 	return nil
+}
+
+func (x *Hello) GetCwd() string {
+	if x != nil {
+		return x.Cwd
+	}
+	return ""
 }
 
 type HelloAck struct {
@@ -1005,13 +1017,14 @@ const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"deadlineMs\x12!\n" +
 	"\fis_interrupt\x18\x05 \x01(\bR\visInterrupt\"=\n" +
 	"\fContextReply\x12-\n" +
-	"\x12additional_context\x18\x01 \x01(\tR\x11additionalContext\"p\n" +
+	"\x12additional_context\x18\x01 \x01(\tR\x11additionalContext\"\x82\x01\n" +
 	"\x05Hello\x12\x1c\n" +
 	"\tcomponent\x18\x01 \x01(\tR\tcomponent\x12\x10\n" +
 	"\x03pid\x18\x02 \x01(\rR\x03pid\x12\x18\n" +
 	"\aversion\x18\x03 \x01(\tR\aversion\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x04 \x01(\fR\tsessionId\"^\n" +
+	"session_id\x18\x04 \x01(\fR\tsessionId\x12\x10\n" +
+	"\x03cwd\x18\x05 \x01(\tR\x03cwd\"^\n" +
 	"\bHelloAck\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x1b\n" +
 	"\tmax_frame\x18\x02 \x01(\rR\bmaxFrame\x12\x19\n" +

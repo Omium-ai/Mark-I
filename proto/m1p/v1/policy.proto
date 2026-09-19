@@ -96,13 +96,26 @@ message GuardDecision {
   // verbatim from 07 §3, which is frozen; ingest length/charset validation is
   // the server-side guard on it.
   string reason_code = 4;
+
+  // [P1] The verify plane's own decisions (04 §2.3), on the task the event
+  // names: a Stop the gate refused ("stop_gate_block") and a retry loop the
+  // knee ended ("knee_arrest"). tokens_saved_estimate is the edge's estimate
+  // of what the decision kept the agent from spending — a block saves the
+  // follow-up request the human would have sent (one more read of the
+  // context), an arrest saves the next attempt at this task's mean attempt
+  // cost. An ESTIMATE, labelled so wherever it is summed; 0 when the edge had
+  // no usage to size it from.
+  uint64 tokens_saved_estimate = 5;
+  uint32 attempt = 6;
 }
 
-// 07 §3, verbatim.
+// 07 §3, verbatim, plus the verify plane's two outcomes.
 enum GuardOutcome {
   GUARD_OUTCOME_UNSPECIFIED = 0;
   GUARD_OUTCOME_FORWARDED = 1;
   GUARD_OUTCOME_REFUSED = 2;  // 403, no override path exists in the binary
+  GUARD_OUTCOME_BLOCKED = 3;  // the stop-gate refused a Stop: the agent keeps working
+  GUARD_OUTCOME_ARRESTED = 4; // the knee ended a retry loop: the human is told
 }
 
 // ---------------------------------------------------------------------------

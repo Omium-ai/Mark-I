@@ -25,7 +25,7 @@
     },
     "session": {
       "type": "object",
-      "required": ["session_id", "agent", "project", "started_at", "ended_at", "tokens", "tasks", "verified_outcomes", "arrests", "injections", "route_decisions", "coverage", "checkpoint_seq", "history_import"],
+      "required": ["session_id", "agent", "project", "started_at", "ended_at", "tokens", "tasks", "verified_outcomes", "arrests", "blocks", "tokens_saved", "injections", "route_decisions", "coverage", "checkpoint_seq", "history_import"],
       "additionalProperties": false,
       "properties": {
         "session_id": { "type": "string", "format": "uuid" },
@@ -46,7 +46,9 @@
         },
         "tasks": { "type": "integer", "minimum": 0 },
         "verified_outcomes": { "type": "integer", "minimum": 0, "description": "tasks with a verdict whose posterior mode is satisfied (every anchor passed); certification is the trail's" },
-        "arrests": { "type": "integer", "minimum": 0 },
+        "arrests": { "type": "integer", "minimum": 0, "description": "retry loops the knee ended (GuardDecision knee_arrest)" },
+        "blocks": { "type": "integer", "minimum": 0, "description": "Stops the gate refused so the agent fixed its work first (GuardDecision stop_gate_block)" },
+        "tokens_saved": { "type": "integer", "minimum": 0, "description": "the edge's ESTIMATE of tokens the session's arrests and blocks kept the agent from spending" },
         "injections": { "type": "integer", "minimum": 0 },
         "route_decisions": { "type": "integer", "minimum": 0 },
         "coverage": {

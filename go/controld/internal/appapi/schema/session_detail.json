@@ -14,11 +14,23 @@
     "honesty": { "$ref": "honesty.json" }
   },
   "$defs": {
+    "decision": {
+      "type": "object",
+      "required": ["at", "event_id", "bundle_seq", "tokens_saved_estimate", "attempt"],
+      "additionalProperties": false,
+      "properties": {
+        "at": { "type": "string", "format": "date-time" },
+        "event_id": { "type": "string", "format": "uuid" },
+        "bundle_seq": { "type": "integer", "minimum": 0 },
+        "tokens_saved_estimate": { "type": "integer", "minimum": 0 },
+        "attempt": { "type": "integer", "minimum": 0 }
+      }
+    },
     "verdict": { "type": "string", "enum": ["", "satisfied", "violated", "refused", "error"] },
     "stage": { "type": "string", "enum": ["", "provisional", "certified", "revised"] },
     "task": {
       "type": "object",
-      "required": ["task_id", "task_seg_version", "task_class", "opened_at", "closed_at", "resolution", "attempts", "verdict_trail", "evidence", "injections", "arrests"],
+      "required": ["task_id", "task_seg_version", "task_class", "opened_at", "closed_at", "resolution", "attempts", "verdict_trail", "evidence", "injections", "arrests", "blocks"],
       "additionalProperties": false,
       "properties": {
         "task_id": { "type": "string", "format": "uuid" },
@@ -91,20 +103,8 @@
           }
         },
         "injections": { "type": "array", "items": { "$ref": "moments.json#/$defs/injection" } },
-        "arrests": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["at", "event_id", "bundle_seq", "tokens_saved_estimate"],
-            "additionalProperties": false,
-            "properties": {
-              "at": { "type": "string", "format": "date-time" },
-              "event_id": { "type": "string", "format": "uuid" },
-              "bundle_seq": { "type": "integer", "minimum": 0 },
-              "tokens_saved_estimate": { "type": "integer", "minimum": 0 }
-            }
-          }
-        }
+        "arrests": { "type": "array", "items": { "$ref": "#/$defs/decision" } },
+        "blocks": { "type": "array", "items": { "$ref": "#/$defs/decision" } }
       }
     }
   }

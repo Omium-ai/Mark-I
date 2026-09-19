@@ -380,6 +380,27 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	}
 	covFraction, covLower := coverageBand(observed, bypass, disabled, droppedBilling, billingIngested)
 
+	// tokens_saved: the verify plane's own decisions over the window (savings.v1), an ESTIMATE from the edge (policy.proto GuardDecision.tokens_saved_estimate); re-exploration and routing have no witness at v1 and say 0.
+	var savedArrests, savedBlocks, nBlocks, nArrests uint64
+	if savTpl, err := m.reg.Lookup("savings"); err != nil {
+		writeErr(w, http.StatusInternalServerError, "M1E-9500", "registry miswired")
+		return
+	} else if savQ, err := Build(tid, savTpl, Params{"from": from, "to": to}); err != nil {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", err.Error())
+		return
+	} else if savRows, ok := m.run(w, r, savQ); !ok {
+		return
+	} else {
+		for _, row := range savRows.Rows {
+			switch asStr(row["reason"]) {
+			case "knee_arrest":
+				savedArrests, nArrests = asU64(row["tokens_saved"]), asU64(row["decisions"])
+			case "stop_gate_block":
+				savedBlocks, nBlocks = asU64(row["tokens_saved"]), asU64(row["decisions"])
+			}
+		}
+	}
+
 	// Every refusal is STATED, none silently absorbed (06 §8.5; report.py's
 	// assemble_report is the reference implementation). A missing rollup day
 	// leads the list: the band below it was computed over the rows that ARE
@@ -408,6 +429,10 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 			"over_model_tokens":     overModel,
 		},
 		"guarantee_grade": len(refusals) == 0,
+		"tokens_saved": map[string]any{
+			"arrests": savedArrests, "blocks": savedBlocks, "re_exploration_avoided": uint64(0), "routing": uint64(0),
+			"total": savedArrests + savedBlocks, "arrest_count": nArrests, "block_count": nBlocks, "estimate": true,
+		},
 	}
 	if costBasis == costBasisUSD && pricePinned {
 		resp["price_table_version"] = modelPrices.version // 08 §3.3: usd only, the table the figures were priced under

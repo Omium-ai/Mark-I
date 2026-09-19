@@ -1353,6 +1353,18 @@ pub struct GuardDecision {
     /// the server-side guard on it.
     #[prost(string, tag="4")]
     pub reason_code: ::prost::alloc::string::String,
+    /// \[P1\] The verify plane's own decisions (04 §2.3), on the task the event
+    /// names: a Stop the gate refused ("stop_gate_block") and a retry loop the
+    /// knee ended ("knee_arrest"). tokens_saved_estimate is the edge's estimate
+    /// of what the decision kept the agent from spending — a block saves the
+    /// follow-up request the human would have sent (one more read of the
+    /// context), an arrest saves the next attempt at this task's mean attempt
+    /// cost. An ESTIMATE, labelled so wherever it is summed; 0 when the edge had
+    /// no usage to size it from.
+    #[prost(uint64, tag="5")]
+    pub tokens_saved_estimate: u64,
+    #[prost(uint32, tag="6")]
+    pub attempt: u32,
 }
 // ---------------------------------------------------------------------------
 // Bundle ACK — the other half of policy distribution (05 §4.3, 08 §3.2)
@@ -1455,7 +1467,7 @@ pub struct BundleAck {
     #[prost(string, tag="6")]
     pub reject_code: ::prost::alloc::string::String,
 }
-/// 07 §3, verbatim.
+/// 07 §3, verbatim, plus the verify plane's two outcomes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum GuardOutcome {
@@ -1463,6 +1475,10 @@ pub enum GuardOutcome {
     Forwarded = 1,
     /// 403, no override path exists in the binary
     Refused = 2,
+    /// the stop-gate refused a Stop: the agent keeps working
+    Blocked = 3,
+    /// the knee ended a retry loop: the human is told
+    Arrested = 4,
 }
 impl GuardOutcome {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1474,6 +1490,8 @@ impl GuardOutcome {
             GuardOutcome::Unspecified => "GUARD_OUTCOME_UNSPECIFIED",
             GuardOutcome::Forwarded => "GUARD_OUTCOME_FORWARDED",
             GuardOutcome::Refused => "GUARD_OUTCOME_REFUSED",
+            GuardOutcome::Blocked => "GUARD_OUTCOME_BLOCKED",
+            GuardOutcome::Arrested => "GUARD_OUTCOME_ARRESTED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1482,6 +1500,8 @@ impl GuardOutcome {
             "GUARD_OUTCOME_UNSPECIFIED" => Some(Self::Unspecified),
             "GUARD_OUTCOME_FORWARDED" => Some(Self::Forwarded),
             "GUARD_OUTCOME_REFUSED" => Some(Self::Refused),
+            "GUARD_OUTCOME_BLOCKED" => Some(Self::Blocked),
+            "GUARD_OUTCOME_ARRESTED" => Some(Self::Arrested),
             _ => None,
         }
     }
@@ -2371,6 +2391,12 @@ pub struct Hello {
     /// and counted until the MCP surface carries one (D-AV).
     #[prost(bytes="vec", tag="4")]
     pub session_id: ::prost::alloc::vec::Vec<u8>,
+    /// The writer's working directory — the agent's project root for a hook
+    /// process. LOCAL FABRIC ONLY: it never enters an event or the uplink; the
+    /// daemon maps it to an enabled workspace and stamps SessionStart.workspace_id
+    /// (the HMAC) from it. Empty when the writer has no meaningful cwd.
+    #[prost(string, tag="5")]
+    pub cwd: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]

@@ -143,6 +143,10 @@ impl Conn {
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             session_id: session_id.to_vec(),
+            // the agent runs its hooks in the project root: the daemon turns this into SessionStart.workspace_id, the path itself stays on this socket
+            cwd: std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         }))?;
         let ack = match self.read_frame(deadline) {
             Ok(f) => f,

@@ -7,7 +7,7 @@
       "observed_fraction": 0.98
     },
     "guarantee_grade": false,
-    "refusal": "M1E-5004 rollup missing for 6 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 \u00a78.4)",
+    "refusal": "M1E-5004 rollup missing for 6 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 §8.4)",
     "task_seg_version": "task_seg.v1"
   },
   "next_cursor": null,
@@ -15,6 +15,7 @@
     {
       "agent": "claudecode",
       "arrests": 1,
+      "blocks": 0,
       "checkpoint_seq": 9,
       "coverage": {
         "capture_paths": [
@@ -25,12 +26,13 @@
         "proxy_in_path": true,
         "transcript_tailed": false
       },
-      "ended_at": "2026-09-19T10:05:29.838046819Z",
+      "ended_at": "2026-09-19T21:25:44.169969091Z",
+      "history_import": false,
       "injections": 1,
       "project": "0f0e0d0c0b0a09080706050403020100ffeeddccbbaa99887766554433221100",
       "route_decisions": 1,
-      "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
-      "started_at": "2026-09-19T09:05:29.838046819Z",
+      "session_id": "01a0bbfd-7169-7ecc-8869-d00c3b2dcc0b",
+      "started_at": "2026-09-19T20:25:44.169969091Z",
       "tasks": 2,
       "tokens": {
         "cache_create": 5,
@@ -38,12 +40,13 @@
         "input": 1000,
         "output": 200
       },
-      "verified_outcomes": 1,
-      "history_import": false
+      "tokens_saved": 0,
+      "verified_outcomes": 1
     },
     {
       "agent": "codex",
       "arrests": 1,
+      "blocks": 0,
       "checkpoint_seq": 9,
       "coverage": {
         "capture_paths": [
@@ -53,12 +56,13 @@
         "proxy_in_path": false,
         "transcript_tailed": true
       },
-      "ended_at": "2026-09-19T09:05:29.838046819Z",
+      "ended_at": "2026-09-19T20:25:44.169969091Z",
+      "history_import": false,
       "injections": 1,
       "project": "",
       "route_decisions": 1,
-      "session_id": "01a0b98e-aa6e-70bc-9b32-f3db70a073cb",
-      "started_at": "2026-09-19T08:05:29.838046819Z",
+      "session_id": "01a0bbfd-7169-7ecd-b07e-0e36732b62df",
+      "started_at": "2026-09-19T19:25:44.169969091Z",
       "tasks": 2,
       "tokens": {
         "cache_create": 5,
@@ -66,8 +70,8 @@
         "input": 1000,
         "output": 200
       },
-      "verified_outcomes": 1,
-      "history_import": false
+      "tokens_saved": 0,
+      "verified_outcomes": 1
     }
   ],
   "window": {

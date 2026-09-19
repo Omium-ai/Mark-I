@@ -161,6 +161,7 @@ async fn deliver<S: AsyncRead + AsyncWrite + Unpin>(
                 component: "mark1-proxy".to_owned(),
                 pid: std::process::id(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
+                cwd: String::new(),
                 session_id: session_id.to_vec(),
             })),
         },

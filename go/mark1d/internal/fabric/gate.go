@@ -95,6 +95,8 @@ type Gate struct {
 	Health *obs.Health
 	// OnArrest observes every knee stop the gate actually told the human about (the control API's arrest row); nil is legal.
 	OnArrest func(session, task [16]byte, k verdict.KneeState, evidenceRef string)
+	// OnBlock observes every BLOCK the gate answered (the ledger's GuardDecision row); nil is legal.
+	OnBlock func(session, task [16]byte, k verdict.KneeState, evidenceRef string)
 }
 
 func NewGate(r verdict.Reader, blocks *verdict.Blocks, stateDir string) *Gate {
@@ -353,6 +355,9 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		// continuation reason. Only here — an ALLOW has no failing anchor to
 		// name, and a knee stop surfaces the verdict, not a retry target.
 		v.EvidenceRef = g.evidence(task)
+		if g.OnBlock != nil {
+			g.OnBlock(session, task, e.Knee, v.EvidenceRef)
+		}
 		// D-AN(c): !Stop is also how "no knee table", "n below the first row"
 		// (D-Y(b)) and "no p_lcb on the row" (D-Z) arrive here. Printing the
 		// inequality then states a false one (0.000 · V > c) and reads as

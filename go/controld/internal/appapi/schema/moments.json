@@ -15,21 +15,14 @@
         "required": ["kind", "at", "event_id", "session_id", "task_id", "agent"],
         "additionalProperties": false,
         "properties": {
-          "kind": { "type": "string", "enum": ["arrest", "injection", "route"] },
+          "kind": { "type": "string", "enum": ["arrest", "block", "injection", "route"] },
           "at": { "type": "string", "format": "date-time" },
           "event_id": { "type": "string", "format": "uuid" },
           "session_id": { "type": "string", "format": "uuid" },
           "task_id": { "type": ["string", "null"], "format": "uuid" },
           "agent": { "$ref": "sessions.json#/$defs/agent" },
-          "arrest": {
-            "type": "object",
-            "required": ["bundle_seq", "tokens_saved_estimate"],
-            "additionalProperties": false,
-            "properties": {
-              "bundle_seq": { "type": "integer", "minimum": 0 },
-              "tokens_saved_estimate": { "type": "integer", "minimum": 0 }
-            }
-          },
+          "arrest": { "$ref": "#/$defs/decision" },
+          "block": { "$ref": "#/$defs/decision" },
           "injection": { "$ref": "#/$defs/injection" },
           "route": {
             "type": "object",
@@ -50,6 +43,16 @@
     "honesty": { "$ref": "honesty.json" }
   },
   "$defs": {
+    "decision": {
+      "type": "object",
+      "required": ["bundle_seq", "tokens_saved_estimate", "attempt"],
+      "additionalProperties": false,
+      "properties": {
+        "bundle_seq": { "type": "integer", "minimum": 0 },
+        "tokens_saved_estimate": { "type": "integer", "minimum": 0 },
+        "attempt": { "type": "integer", "minimum": 0 }
+      }
+    },
     "injection": {
       "type": "object",
       "required": ["at", "event_id", "channel", "tokens_used", "artifact_count"],

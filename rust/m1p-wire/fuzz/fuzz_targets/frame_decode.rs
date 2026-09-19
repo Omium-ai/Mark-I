@@ -78,6 +78,7 @@ fuzz_target!(|data: &[u8]| {
             component: text.clone(),
             pid: data.len() as u32,
             version: text.clone(),
+            cwd: String::new(),
             session_id: data.to_vec(),
         }),
         pb::fabric_frame::Kind::HelloAck(pb::HelloAck {

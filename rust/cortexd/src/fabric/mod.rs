@@ -308,6 +308,7 @@ async fn deliver<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
                 // The daemon-published live session (D-AT): the same id the
                 // event carries, so what the connection attributes and what
                 // the record says agree.
+                cwd: String::new(),
                 session_id: sid.to_vec(),
             })),
         },

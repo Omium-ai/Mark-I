@@ -50,6 +50,9 @@ type Hub struct {
 	verify      []map[string]any  // GET /v1/verify/events rows, arrival order
 	checkpoints []map[string]any  // GET /v1/receipts rows, arrival order
 	lastRun     map[string]string // anchor id -> occurred_at of its newest vote since boot
+	// spend sizes the verify plane's savings estimates: the newest request's tokens per session (what a follow-up request re-reads) and each task's running total (an attempt's mean cost).
+	lastRequest map[[16]byte]uint64
+	taskTokens  map[[16]byte]uint64
 	resolver    func(id uuid.UUID) (agent, root string, ok bool)
 }
 
@@ -61,7 +64,21 @@ func (h *Hub) SetSessionResolver(f func(id uuid.UUID) (agent, root string, ok bo
 }
 
 func NewHub() *Hub {
-	return &Hub{subs: map[chan frame]struct{}{}, sessions: map[[16]byte]*LiveSession{}, lastRun: map[string]string{}}
+	return &Hub{subs: map[chan frame]struct{}{}, sessions: map[[16]byte]*LiveSession{}, lastRun: map[string]string{}, lastRequest: map[[16]byte]uint64{}, taskTokens: map[[16]byte]uint64{}}
+}
+
+// EstimateBlock is what a Stop the gate refused saved: the follow-up request the human would have sent re-reads the context, so one request at this session's newest size. 0 when no usage has been seen.
+func (h *Hub) EstimateBlock(session [16]byte) uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastRequest[session]
+}
+
+// EstimateArrest is what the knee saved: the next attempt, at this task's mean attempt cost so far.
+func (h *Hub) EstimateArrest(task [16]byte, attempts uint32) uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.taskTokens[task] / uint64(max(attempts, 1))
 }
 
 func family(ev *m1pv1.Event) string {
@@ -256,10 +273,24 @@ func (h *Hub) track(ev *m1pv1.Event) {
 		}
 	case *m1pv1.Event_SessionEnd:
 		delete(h.sessions, sid)
+		delete(h.lastRequest, sid)
 	case *m1pv1.Event_Usage:
+		u := b.Usage
+		total := u.GetInputTokens() + u.GetOutputTokens() + u.GetCacheCreationInputTokens() + u.GetCacheReadInputTokens()
 		if s := h.sessions[sid]; s != nil {
-			u := b.Usage
-			s.Tokens += u.GetInputTokens() + u.GetOutputTokens() + u.GetCacheCreationInputTokens() + u.GetCacheReadInputTokens()
+			s.Tokens += total
+		}
+		h.lastRequest[sid] = total
+		if len(ev.GetTaskId()) == 16 {
+			var tid [16]byte
+			copy(tid[:], ev.GetTaskId())
+			h.taskTokens[tid] += total
+		}
+	case *m1pv1.Event_TaskClose:
+		if len(ev.GetTaskId()) == 16 {
+			var tid [16]byte
+			copy(tid[:], ev.GetTaskId())
+			delete(h.taskTokens, tid)
 		}
 	}
 	if s := h.sessions[sid]; s != nil {

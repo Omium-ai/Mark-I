@@ -13,8 +13,8 @@
   "moments": [
     {
       "agent": "claudecode",
-      "at": "2026-09-19T12:04:29.838114377Z",
-      "event_id": "01a0b98e-aa6e-71c1-a33a-134787e11598",
+      "at": "2026-09-19T23:24:44.170353064Z",
+      "event_id": "01a0bbfd-716a-7566-84cd-a55d64c8d514",
       "kind": "route",
       "route": {
         "action": "claude-haiku-4-5",
@@ -26,37 +26,38 @@
         "fidelity": "wire_enforced",
         "propensity": 0.97
       },
-      "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
-      "task_id": "7cc888ef-ba14-4dfd-a34b-1a9b532b2297"
+      "session_id": "01a0bbfd-7169-7ecc-8869-d00c3b2dcc0b",
+      "task_id": "c34ae17a-6de0-40df-9151-22740c503f00"
     },
     {
       "agent": "claudecode",
-      "at": "2026-09-19T12:03:29.838114377Z",
-      "event_id": "01a0b98e-aa6e-7225-8a37-1cbc3a1249be",
+      "at": "2026-09-19T23:23:44.170353064Z",
+      "event_id": "01a0bbfd-716a-756a-8d58-c93e8c98014e",
       "injection": {
         "artifact_count": 1,
-        "at": "2026-09-19T12:03:29.838114377Z",
+        "at": "2026-09-19T23:23:44.170353064Z",
         "channel": "mcp_pull",
-        "event_id": "01a0b98e-aa6e-7225-8a37-1cbc3a1249be",
+        "event_id": "01a0bbfd-716a-756a-8d58-c93e8c98014e",
         "tokens_used": 40
       },
       "kind": "injection",
-      "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
+      "session_id": "01a0bbfd-7169-7ecc-8869-d00c3b2dcc0b",
       "task_id": null
     },
     {
       "agent": "claudecode",
       "arrest": {
+        "attempt": 0,
         "bundle_seq": 483,
         "tokens_saved_estimate": 900
       },
-      "at": "2026-09-19T12:02:29.838114377Z",
-      "event_id": "01a0b98e-aa6e-722f-932d-48ac102112bd",
+      "at": "2026-09-19T23:22:44.170353064Z",
+      "event_id": "01a0bbfd-716a-757b-ab5b-3814d008cb36",
       "kind": "arrest",
-      "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
-      "task_id": "7cc888ef-ba14-4dfd-a34b-1a9b532b2297"
+      "session_id": "01a0bbfd-7169-7ecc-8869-d00c3b2dcc0b",
+      "task_id": "c34ae17a-6de0-40df-9151-22740c503f00"
     }
   ],
-  "next_since": "2026-09-19T12:04:29.838114377Z",
-  "since": "2026-09-18T12:05:29.860282174Z"
+  "next_since": "2026-09-19T23:24:44.170353064Z",
+  "since": "2026-09-18T23:25:44.174927667Z"
 }

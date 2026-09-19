@@ -1,9 +1,27 @@
 {
-  "tvo": 100,
-  "coverage_band": {"observed_fraction": 0.98, "coverage_lower": 0.98, "floor": 0.95},
   "cost_basis": "usd",
-  "task_seg_version": "task_seg.v1",
-  "waste": {"retry_loop_tokens": 10, "re_exploration_tokens": 20, "over_model_tokens": 30},
+  "coverage_band": {
+    "coverage_lower": 0.98,
+    "floor": 0.95,
+    "observed_fraction": 0.98
+  },
+  "guarantee_grade": true,
   "price_table_version": "model_prices.v1@sha256:41d8a17e29f8cfa2f0ca30061caa8fb8d1646b6fb1a7a129849132f596de82f0",
-  "guarantee_grade": true
+  "task_seg_version": "task_seg.v1",
+  "tokens_saved": {
+    "arrest_count": 0,
+    "arrests": 0,
+    "block_count": 0,
+    "blocks": 0,
+    "estimate": true,
+    "re_exploration_avoided": 0,
+    "routing": 0,
+    "total": 0
+  },
+  "tvo": 100,
+  "waste": {
+    "over_model_tokens": 30,
+    "re_exploration_tokens": 20,
+    "retry_loop_tokens": 10
+  }
 }

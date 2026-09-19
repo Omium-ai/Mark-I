@@ -101,6 +101,11 @@ message Hello {
   // is not exempt — it has no session identity yet, so its pushes are refused
   // and counted until the MCP surface carries one (D-AV).
   bytes session_id = 4;
+  // The writer's working directory — the agent's project root for a hook
+  // process. LOCAL FABRIC ONLY: it never enters an event or the uplink; the
+  // daemon maps it to an enabled workspace and stamps SessionStart.workspace_id
+  // (the HMAC) from it. Empty when the writer has no meaningful cwd.
+  string cwd = 5;
 }
 
 message HelloAck {

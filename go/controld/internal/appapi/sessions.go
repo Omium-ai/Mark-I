@@ -20,6 +20,8 @@ type sessionRow struct {
 	Tasks            uint64   `json:"tasks"`
 	VerifiedOutcomes uint64   `json:"verified_outcomes"`
 	Arrests          uint64   `json:"arrests"`
+	Blocks           uint64   `json:"blocks"`
+	TokensSaved      uint64   `json:"tokens_saved"` // the edge's estimate over the session's arrests and blocks
 	Injections       uint64   `json:"injections"`
 	RouteDecisions   uint64   `json:"route_decisions"`
 	Coverage         coverage `json:"coverage"`
@@ -61,6 +63,8 @@ func sessionFromRow(row map[string]any) sessionRow {
 		Tasks:            asU64(row["tasks"]),
 		VerifiedOutcomes: asU64(row["tasks_verified"]),
 		Arrests:          asU64(row["arrests"]),
+		Blocks:           asU64(row["blocks"]),
+		TokensSaved:      asU64(row["tokens_saved"]),
 		Injections:       asU64(row["injections"]),
 		RouteDecisions:   asU64(row["route_decisions"]),
 		Coverage: coverage{
@@ -88,6 +92,7 @@ type task struct {
 	Evidence       []evidence  `json:"evidence"`
 	Injections     []injection `json:"injections"`
 	Arrests        []arrest    `json:"arrests"`
+	Blocks         []arrest    `json:"blocks"`
 }
 
 type attempt struct {
@@ -141,6 +146,7 @@ type arrest struct {
 	EventID             string `json:"event_id"`
 	BundleSeq           uint64 `json:"bundle_seq"`
 	TokensSavedEstimate uint64 `json:"tokens_saved_estimate"`
+	Attempt             uint32 `json:"attempt"`
 }
 
 type anchorVotePayload struct {
@@ -180,6 +186,8 @@ type injectionPayload struct {
 
 type guardPayload struct {
 	TokensSavedEstimate uint64 `json:"tokens_saved_estimate"`
+	ReasonCode          string `json:"reason_code"`
+	Attempt             uint32 `json:"attempt"`
 }
 
 func isFinal(stage string) bool { return stage == "certified" || stage == "revised" }
@@ -209,7 +217,7 @@ func foldTasks(rows []map[string]any, sid uuid.UUID) []task {
 		}
 		t, ok := byTask[id]
 		if !ok {
-			t = &task{TaskID: id, Attempts: []attempt{}, VerdictTrail: []trailStep{}, Evidence: []evidence{}, Injections: []injection{}, Arrests: []arrest{}}
+			t = &task{TaskID: id, Attempts: []attempt{}, VerdictTrail: []trailStep{}, Evidence: []evidence{}, Injections: []injection{}, Arrests: []arrest{}, Blocks: []arrest{}}
 			byTask[id] = t
 			order = append(order, id)
 		}
@@ -263,7 +271,13 @@ func foldTasks(rows []map[string]any, sid uuid.UUID) []task {
 		case "GuardDecision":
 			var p guardPayload
 			_ = json.Unmarshal([]byte(payload), &p)
-			t.Arrests = append(t.Arrests, arrest{At: at, EventID: eventID, BundleSeq: asU64(row["bundle_seq"]), TokensSavedEstimate: p.TokensSavedEstimate})
+			row := arrest{At: at, EventID: eventID, BundleSeq: asU64(row["bundle_seq"]), TokensSavedEstimate: p.TokensSavedEstimate, Attempt: p.Attempt}
+			switch p.ReasonCode {
+			case "stop_gate_block":
+				t.Blocks = append(t.Blocks, row)
+			default:
+				t.Arrests = append(t.Arrests, row)
+			}
 		}
 	}
 	out := make([]task, 0, len(order))
@@ -283,6 +297,7 @@ type moment struct {
 	TaskID    *string       `json:"task_id"`
 	Agent     string        `json:"agent"`
 	Arrest    *arrestDetail `json:"arrest,omitempty"`
+	Block     *arrestDetail `json:"block,omitempty"`
 	Injection *injection    `json:"injection,omitempty"`
 	Route     *routeDetail  `json:"route,omitempty"`
 }
@@ -290,6 +305,7 @@ type moment struct {
 type arrestDetail struct {
 	BundleSeq           uint64 `json:"bundle_seq"`
 	TokensSavedEstimate uint64 `json:"tokens_saved_estimate"`
+	Attempt             uint32 `json:"attempt"`
 }
 
 type routeDetail struct {
@@ -319,7 +335,12 @@ func momentFromRow(row map[string]any, since time.Time) (moment, bool) {
 	case "GuardDecision":
 		var p guardPayload
 		_ = json.Unmarshal(payload, &p)
-		mo.Kind, mo.Arrest = "arrest", &arrestDetail{BundleSeq: asU64(row["bundle_seq"]), TokensSavedEstimate: p.TokensSavedEstimate}
+		d := &arrestDetail{BundleSeq: asU64(row["bundle_seq"]), TokensSavedEstimate: p.TokensSavedEstimate, Attempt: p.Attempt}
+		if p.ReasonCode == "stop_gate_block" {
+			mo.Kind, mo.Block = "block", d
+		} else {
+			mo.Kind, mo.Arrest = "arrest", d
+		}
 	case "MemoryInjection":
 		var p injectionPayload
 		_ = json.Unmarshal(payload, &p)

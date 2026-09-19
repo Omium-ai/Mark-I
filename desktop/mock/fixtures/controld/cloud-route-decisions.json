@@ -3,19 +3,19 @@
     {
       "action": "claude-haiku-4-5",
       "agent": "claudecode",
-      "at": "2026-09-19T12:05:29.838Z",
+      "at": "2026-09-19T23:25:44.169Z",
       "bundle_seq": 483,
       "candidates": [
         "claude-haiku-4-5",
         "claude-sonnet-4-5"
       ],
-      "decision_id": "01a0b98e-aa6e-70c0-9efb-be9b5007168f",
+      "decision_id": "01a0bbfd-7169-7ece-86f7-16b03b0d2847",
       "fidelity": "wire_enforced",
       "label_confidence": 0.9100000262260437,
       "propensity": 0.97,
       "served_model": "claude-haiku-4-5",
-      "session_id": "01a0b98e-aa6e-70bb-8fa3-398139e7aafe",
-      "task_id": "7cc888ef-ba14-4dfd-a34b-1a9b532b2297",
+      "session_id": "01a0bbfd-7169-7ecc-8869-d00c3b2dcc0b",
+      "task_id": "c34ae17a-6de0-40df-9151-22740c503f00",
       "verdict": "satisfied",
       "verdict_stage": "certified"
     }

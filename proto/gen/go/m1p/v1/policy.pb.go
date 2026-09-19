@@ -68,13 +68,15 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// 07 §3, verbatim.
+// 07 §3, verbatim, plus the verify plane's two outcomes.
 type GuardOutcome int32
 
 const (
 	GuardOutcome_GUARD_OUTCOME_UNSPECIFIED GuardOutcome = 0
 	GuardOutcome_GUARD_OUTCOME_FORWARDED   GuardOutcome = 1
 	GuardOutcome_GUARD_OUTCOME_REFUSED     GuardOutcome = 2 // 403, no override path exists in the binary
+	GuardOutcome_GUARD_OUTCOME_BLOCKED     GuardOutcome = 3 // the stop-gate refused a Stop: the agent keeps working
+	GuardOutcome_GUARD_OUTCOME_ARRESTED    GuardOutcome = 4 // the knee ended a retry loop: the human is told
 )
 
 // Enum value maps for GuardOutcome.
@@ -83,11 +85,15 @@ var (
 		0: "GUARD_OUTCOME_UNSPECIFIED",
 		1: "GUARD_OUTCOME_FORWARDED",
 		2: "GUARD_OUTCOME_REFUSED",
+		3: "GUARD_OUTCOME_BLOCKED",
+		4: "GUARD_OUTCOME_ARRESTED",
 	}
 	GuardOutcome_value = map[string]int32{
 		"GUARD_OUTCOME_UNSPECIFIED": 0,
 		"GUARD_OUTCOME_FORWARDED":   1,
 		"GUARD_OUTCOME_REFUSED":     2,
+		"GUARD_OUTCOME_BLOCKED":     3,
+		"GUARD_OUTCOME_ARRESTED":    4,
 	}
 )
 
@@ -158,9 +164,19 @@ type GuardDecision struct {
 	// customer text, never bundle-supplied, never executed. Kept as a string
 	// verbatim from 07 §3, which is frozen; ingest length/charset validation is
 	// the server-side guard on it.
-	ReasonCode    string `protobuf:"bytes,4,opt,name=reason_code,json=reasonCode,proto3" json:"reason_code,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ReasonCode string `protobuf:"bytes,4,opt,name=reason_code,json=reasonCode,proto3" json:"reason_code,omitempty"`
+	// [P1] The verify plane's own decisions (04 §2.3), on the task the event
+	// names: a Stop the gate refused ("stop_gate_block") and a retry loop the
+	// knee ended ("knee_arrest"). tokens_saved_estimate is the edge's estimate
+	// of what the decision kept the agent from spending — a block saves the
+	// follow-up request the human would have sent (one more read of the
+	// context), an arrest saves the next attempt at this task's mean attempt
+	// cost. An ESTIMATE, labelled so wherever it is summed; 0 when the edge had
+	// no usage to size it from.
+	TokensSavedEstimate uint64 `protobuf:"varint,5,opt,name=tokens_saved_estimate,json=tokensSavedEstimate,proto3" json:"tokens_saved_estimate,omitempty"`
+	Attempt             uint32 `protobuf:"varint,6,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *GuardDecision) Reset() {
@@ -219,6 +235,20 @@ func (x *GuardDecision) GetReasonCode() string {
 		return x.ReasonCode
 	}
 	return ""
+}
+
+func (x *GuardDecision) GetTokensSavedEstimate() uint64 {
+	if x != nil {
+		return x.TokensSavedEstimate
+	}
+	return 0
+}
+
+func (x *GuardDecision) GetAttempt() uint32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
 }
 
 // What an edge reports after it verified (or refused) a distributed bundle.
@@ -390,14 +420,16 @@ var File_m1p_v1_policy_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_policy_proto_rawDesc = "" +
 	"\n" +
-	"\x13m1p/v1/policy.proto\x12\x06m1p.v1\"\xac\x01\n" +
+	"\x13m1p/v1/policy.proto\x12\x06m1p.v1\"\xfa\x01\n" +
 	"\rGuardDecision\x12.\n" +
 	"\aoutcome\x18\x01 \x01(\x0e2\x14.m1p.v1.GuardOutcomeR\aoutcome\x12)\n" +
 	"\x10cred_fingerprint\x18\x02 \x01(\fR\x0fcredFingerprint\x12\x1f\n" +
 	"\vsample_rate\x18\x03 \x01(\x01R\n" +
 	"sampleRate\x12\x1f\n" +
 	"\vreason_code\x18\x04 \x01(\tR\n" +
-	"reasonCode\"\xbc\x01\n" +
+	"reasonCode\x122\n" +
+	"\x15tokens_saved_estimate\x18\x05 \x01(\x04R\x13tokensSavedEstimate\x12\x18\n" +
+	"\aattempt\x18\x06 \x01(\rR\aattempt\"\xbc\x01\n" +
 	"\tBundleAck\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\tR\achannel\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1f\n" +
@@ -406,11 +438,13 @@ const file_m1p_v1_policy_proto_rawDesc = "" +
 	"\x06result\x18\x04 \x01(\tR\x06result\x12)\n" +
 	"\x10sections_skipped\x18\x05 \x03(\tR\x0fsectionsSkipped\x12\x1f\n" +
 	"\vreject_code\x18\x06 \x01(\tR\n" +
-	"rejectCode*e\n" +
+	"rejectCode*\x9c\x01\n" +
 	"\fGuardOutcome\x12\x1d\n" +
 	"\x19GUARD_OUTCOME_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17GUARD_OUTCOME_FORWARDED\x10\x01\x12\x19\n" +
-	"\x15GUARD_OUTCOME_REFUSED\x10\x02B\x8d\x01\n" +
+	"\x15GUARD_OUTCOME_REFUSED\x10\x02\x12\x19\n" +
+	"\x15GUARD_OUTCOME_BLOCKED\x10\x03\x12\x1a\n" +
+	"\x16GUARD_OUTCOME_ARRESTED\x10\x04B\x8d\x01\n" +
 	"\n" +
 	"com.m1p.v1B\vPolicyProtoP\x01Z9github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1;m1pv1\xa2\x02\x03MXX\xaa\x02\x06M1p.V1\xca\x02\x06M1p\\V1\xe2\x02\x12M1p\\V1\\GPBMetadata\xea\x02\aM1p::V1b\x06proto3"
 

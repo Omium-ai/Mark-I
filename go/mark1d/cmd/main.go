@@ -853,7 +853,28 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// the only verdict surface with no method that computes (04 §2.3).
 	gate.Evidence = votes.Evidence // FR-VERIFY-011: evidence_ref on BLOCK
 	gate.Corrections = eng.TakeCorrections
-	gate.OnArrest = ctl.Hub().Arrest
+	// The verify plane's decisions land in the ledger with their savings estimate (policy.proto GuardDecision): the app's arrests, blocks and tokens-saved read from these rows and from nothing else.
+	decided := func(session, task [16]byte, outcome m1pv1.GuardOutcome, reason string, attempt uint32, saved uint64) {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := adm.Admit(ctx, &m1pv1.Event{
+				SessionId: session[:], TaskId: task[:], OccurredAt: timestamppb.Now(),
+				Body: &m1pv1.Event_GuardDecision{GuardDecision: &m1pv1.GuardDecision{
+					Outcome: outcome, SampleRate: 1, ReasonCode: reason, TokensSavedEstimate: saved, Attempt: attempt,
+				}},
+			}); err != nil && !perEventLoss(err) {
+				log.Warn("gate: decision not recorded", "reason", reason, "err", err)
+			}
+		}()
+	}
+	gate.OnBlock = func(session, task [16]byte, k verdict.KneeState, _ string) {
+		decided(session, task, m1pv1.GuardOutcome_GUARD_OUTCOME_BLOCKED, "stop_gate_block", uint32(k.N), ctl.Hub().EstimateBlock(session)) //nolint:gosec // G115: attempts are small
+	}
+	gate.OnArrest = func(session, task [16]byte, k verdict.KneeState, evidenceRef string) {
+		ctl.Hub().Arrest(session, task, k, evidenceRef)
+		decided(session, task, m1pv1.GuardOutcome_GUARD_OUTCOME_ARRESTED, "knee_arrest", uint32(k.N), ctl.Hub().EstimateArrest(task, uint32(k.N))) //nolint:gosec // G115: attempts are small
+	}
 	if cfg.matrices == nil {
 		gate.ApplyGates(bc.Gates())
 	}
