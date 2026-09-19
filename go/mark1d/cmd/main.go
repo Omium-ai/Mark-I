@@ -17,6 +17,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -200,6 +201,12 @@ func main() {
 	flag.StringVar(&cfg.policyChannel, "policy-channel", "stable", "policy rollout channel (08 §3.2)")
 	flag.Parse()
 	cfg.offPoll = time.Second
+	// The daemon keeps its own log: the app's stderr relay is what the WSL lane lost (no daemon line reached the app log through wsl.exe), and a crash is diagnosed from the file either way.
+	if lf, err := openLogFile(cfg.stateDir); err == nil {
+		log = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, lf), nil))
+	} else {
+		log.Warn("mark1d: no log file, stderr only", "err", err)
+	}
 	if *fleet {
 		if gw.Bind == "" || gw.TLSCert == "" || gw.TLSKey == "" || gw.ClientCA == "" || gw.CredDir == "" {
 			log.Error("mark1d exiting: --fleet needs all of --gateway-bind, --gateway-tls-cert, --gateway-tls-key, --gateway-client-ca, --gateway-cred-dir")
@@ -224,6 +231,19 @@ func main() {
 		log.Error("mark1d exiting", "err", err)
 		os.Exit(1)
 	}
+}
+
+// openLogFile appends to <state>/logs/mark1d.log; past 8 MiB the file rotates once to mark1d.log.1.
+func openLogFile(stateDir string) (*os.File, error) {
+	dir := filepath.Join(stateDir, "logs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, "mark1d.log")
+	if st, err := os.Stat(path); err == nil && st.Size() > 8<<20 {
+		_ = os.Rename(path, path+".1")
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304 -- the daemon's own state dir
 }
 
 // enrollment is the slice of <state>/enrollment.json the daemon boots identity
