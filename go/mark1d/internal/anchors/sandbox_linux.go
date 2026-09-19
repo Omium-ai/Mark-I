@@ -4,35 +4,18 @@ package anchors
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
-
-// helperSpecEnv carries the run spec into the re-exec'd helper. It is the
-// helper process's ENTIRE environment, so the anchor cannot see it: the
-// helper replaces the env wholesale at exec with spec.Env.
-const helperSpecEnv = "MARK1_ANCHOR_HELPER_SPEC"
-
-// helperSetupExit is the helper's "sandbox setup failed before exec" code,
-// disambiguated from a tool's own 125 by the stderr prefix check in Run.
-// ponytail: a tool that exits 125 AND prints our prefix is misread as a
-// setup failure; a dedicated status pipe if that ever bites.
-const helperSetupExit = 125
-
-const helperStderrPrefix = "mark1d-anchor-helper: "
 
 // landlockWriteV1 is the ABI-v1 write-type access set — everything that
 // mutates the filesystem. Reads and execute stay unhandled: "read-only
@@ -44,24 +27,14 @@ const landlockWriteV1 = unix.LANDLOCK_ACCESS_FS_WRITE_FILE |
 	unix.LANDLOCK_ACCESS_FS_MAKE_FIFO | unix.LANDLOCK_ACCESS_FS_MAKE_BLOCK |
 	unix.LANDLOCK_ACCESS_FS_MAKE_SYM
 
-type helperSpec struct {
-	Argv         []string `json:"argv"`
-	Dir          string   `json:"dir"`
-	Env          []string `json:"env"` // final K=V set, sorted
-	CPUSeconds   uint64   `json:"cpu_seconds"`
-	MemoryBytes  uint64   `json:"memory_bytes"`
-	NoFile       uint64   `json:"nofile"`
-	FSizeBytes   uint64   `json:"fsize_bytes"`
-	LandlockMask uint64   `json:"landlock_mask"` // 0 ⇒ kernel lacks Landlock; skip
-	Writable     []string `json:"writable"`      // worktree + scratch
-}
-
 // LinuxSandbox implements Sandbox with unprivileged user+net namespaces,
 // rlimits, and Landlock write confinement. See doc.go for the exact enforced
 // / not-enforced statement.
 type LinuxSandbox struct {
 	scratchRoot  string // per-run HOME dirs are created beneath this
 	landlockMask uint64 // 0 when the kernel has no Landlock
+	mu           sync.Mutex
+	floor        string // the last userns refusal Run saw; "" once a run was admitted
 }
 
 // NewSandbox probes the kernel once (Landlock ABI) and returns the sandbox.
@@ -92,58 +65,42 @@ func landlockMask() uint64 {
 
 func (s *LinuxSandbox) FSConfined() bool { return s.landlockMask != 0 }
 
+// Status reports the floor as the last Run found it (the kernel is only asked at clone time, so before any run it reads available) plus the Landlock regime.
+func (s *LinuxSandbox) Status() SandboxStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.floor != "" {
+		return SandboxStatus{Available: false, Reason: "unprivileged user namespaces refused: " + s.floor}
+	}
+	if s.landlockMask == 0 {
+		return SandboxStatus{Available: true, Reason: "write confinement (Landlock) unavailable: test-class and repo-code anchors refuse"}
+	}
+	return SandboxStatus{Available: true}
+}
+
+func (s *LinuxSandbox) noteFloor(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.floor = ""
+	if err != nil {
+		s.floor = err.Error()
+	}
+}
+
 // Run executes spec per the doc.go contract. Network denial is the floor: a
 // kernel that refuses unprivileged CLONE_NEWUSER|CLONE_NEWNET refuses the
 // run — there is no unsandboxed fallback (CON-009).
 func (s *LinuxSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
-	if len(spec.Argv) == 0 || !strings.HasPrefix(spec.Argv[0], "/") {
-		return RunResult{}, errors.New("anchors: RunSpec.Argv[0] must be the absolute consented binary path")
+	scratch, env, lim, err := prepare(s.scratchRoot, spec)
+	if err != nil {
+		return RunResult{}, err
 	}
+	defer func() { _ = os.RemoveAll(scratch) }()
 	if spec.RequireFSConfined && !s.FSConfined() {
 		// FR-VERIFY-003: test-class anchors refuse rather than run without
 		// kernel-enforced write confinement.
 		return RunResult{}, fmt.Errorf("%w: write confinement (Landlock) unavailable", ErrSandboxUnavailable)
 	}
-	scratch, err := os.MkdirTemp(s.scratchRoot, "anchor-scratch-")
-	if err != nil {
-		return RunResult{}, err
-	}
-	defer func() { _ = os.RemoveAll(scratch) }()
-
-	// Final child env: the caller's allow-list plus the sandbox-owned HOME.
-	// Sorted so EffectiveEnv (the attestation input) is deterministic.
-	envMap := make(map[string]string, len(spec.Env)+1)
-	for k, v := range spec.Env {
-		envMap[k] = v
-	}
-	if _, ok := envMap["HOME"]; !ok {
-		envMap["HOME"] = scratch
-	}
-	env := make([]string, 0, len(envMap))
-	for k, v := range envMap {
-		env = append(env, k+"="+v)
-	}
-	sort.Strings(env)
-
-	// The helper treats a zero rlimit as "skip", so an unset field here would
-	// be an UNCAPPED run — but doc.go states CPU/DATA/NOFILE/FSIZE as ENFORCED
-	// per run. Default the zeros like Wall/OutputCap below: unset ⇒ default,
-	// never unbounded.
-	lim := spec.Limits
-	def := DefaultLimits(ClassSlow)
-	if lim.CPUSeconds == 0 {
-		lim.CPUSeconds = def.CPUSeconds
-	}
-	if lim.MemoryBytes == 0 {
-		lim.MemoryBytes = def.MemoryBytes
-	}
-	if lim.NoFile == 0 {
-		lim.NoFile = def.NoFile
-	}
-	if lim.FSizeBytes == 0 {
-		lim.FSizeBytes = def.FSizeBytes
-	}
-
 	hs := helperSpec{
 		Argv:         spec.Argv,
 		Dir:          spec.WorktreeRO,
@@ -155,28 +112,7 @@ func (s *LinuxSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error)
 		LandlockMask: s.landlockMask,
 		Writable:     []string{spec.WorktreeRO, scratch},
 	}
-	specJSON, err := json.Marshal(hs)
-	if err != nil {
-		return RunResult{}, err
-	}
-	self, err := os.Executable()
-	if err != nil {
-		return RunResult{}, err
-	}
-
-	outCap := spec.Limits.OutputCap
-	if outCap <= 0 {
-		outCap = DefaultLimits(ClassSlow).OutputCap // unset ⇒ default, never unbounded
-	}
-	budget := &outputBudget{remaining: outCap}
-	var stdout, stderr capWriter
-	stdout.budget, stderr.budget = budget, budget
-
-	cmd := exec.Command(self) //nolint:gosec // G204: self is os.Executable() — this is the re-exec helper, not a caller-named binary
-	cmd.Env = []string{helperSpecEnv + "=" + string(specJSON)}
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{
+	attr := &syscall.SysProcAttr{
 		// CLONE_NEWNET inside CLONE_NEWUSER: the unprivileged path to a
 		// loopback-less netns — the network denial itself.
 		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET,
@@ -190,164 +126,13 @@ func (s *LinuxSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error)
 		Setpgid:                    true,            // the kill unit is the process group
 		Pdeathsig:                  syscall.SIGKILL, // a dying daemon never orphans an anchor
 	}
-
-	start := time.Now()
-	if err := startDumpable(cmd); err != nil {
-		// EPERM/EINVAL here is the kernel refusing unprivileged userns —
-		// the sandbox floor cannot be established.
-		return RunResult{}, fmt.Errorf("%w: %v", ErrSandboxUnavailable, err)
+	// EPERM/EINVAL at start is the kernel refusing unprivileged userns — the sandbox floor cannot be established; Status remembers it.
+	start := func(cmd *exec.Cmd) error {
+		err := startDumpable(cmd)
+		s.noteFloor(err)
+		return err
 	}
-	pgid := cmd.Process.Pid
-	gk := &groupKill{sig: func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) }}
-	budget.onExceed(func() { gk.kill(false) }) // output cap breach kills the whole group
-
-	watchDone := make(chan struct{})
-	go func() {
-		wall := spec.Limits.Wall
-		if wall <= 0 {
-			wall = DefaultLimits(ClassSlow).Wall
-		}
-		t := time.NewTimer(wall)
-		defer t.Stop()
-		select {
-		case <-ctx.Done(): // the kill switch: `mark1 off` cancels all anchors
-		case <-t.C:
-		case <-watchDone:
-			return
-		}
-		gk.kill(true)
-	}()
-
-	waitErr := cmd.Wait()
-	timedOut := gk.markReaped()
-	close(watchDone)
-	res := RunResult{
-		Stdout:       stdout.buf,
-		Stderr:       stderr.buf,
-		TimedOut:     timedOut,
-		Truncated:    budget.exceeded(),
-		EffectiveEnv: env,
-		Duration:     time.Since(start),
-	}
-
-	var ws syscall.WaitStatus
-	if cmd.ProcessState != nil {
-		ws, _ = cmd.ProcessState.Sys().(syscall.WaitStatus)
-	}
-	switch {
-	case waitErr == nil:
-		res.ExitCode = 0
-	case ws.Signaled():
-		res.ExitCode = -1
-		res.Signal = ws.Signal().String()
-	default:
-		res.ExitCode = ws.ExitStatus()
-	}
-
-	if res.Truncated {
-		return res, ErrOutputCap
-	}
-	if res.ExitCode == helperSetupExit && strings.Contains(string(res.Stderr), helperStderrPrefix) {
-		return res, fmt.Errorf("anchors: sandbox setup failed: %s", strings.TrimSpace(string(res.Stderr)))
-	}
-	return res, nil
-}
-
-// groupKill serializes every SIGKILL sender with the reap. cmd.Wait() frees
-// the leader's pid, and with it the pgid — a later syscall.Kill(-pgid) can
-// land on an unrelated process group the kernel recycled the id to. So a kill
-// that has committed (watcher past its select, or a cap breach) must re-check
-// reaped under the lock, and markReaped is where TimedOut is read: after it,
-// no watcher can retroactively flip a run that exited on its own into a
-// "timed out" one.
-// ponytail: the kernel reaps inside Wait itself, microseconds before
-// markReaped runs — a kill in THAT sliver still races pid reuse; closing it
-// needs pidfd_send_signal on a pidfd held from Start.
-type groupKill struct {
-	mu       sync.Mutex
-	reaped   bool
-	timedOut bool
-	sig      func() // syscall.Kill(-pgid, SIGKILL) in production
-}
-
-func (g *groupKill) kill(timeout bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.reaped {
-		return
-	}
-	if timeout {
-		g.timedOut = true
-	}
-	g.sig()
-}
-
-// markReaped flags the reap and returns whether a timeout kill landed first.
-func (g *groupKill) markReaped() bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.reaped = true
-	return g.timedOut
-}
-
-// outputBudget is the shared stdout+stderr cap; breaching it flips exceeded
-// once and fires the kill.
-type outputBudget struct {
-	mu        sync.Mutex
-	remaining int64
-	over      bool
-	kill      func()
-}
-
-func (b *outputBudget) onExceed(kill func()) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.kill = kill
-	if b.over {
-		// A write breached the cap in the Start→onExceed window, when take had
-		// no kill to fire and the latch had already flipped — fire it now, or
-		// the run burns to the wall clock with its output silently discarded.
-		kill()
-	}
-}
-
-func (b *outputBudget) exceeded() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.over
-}
-
-// take grants up to n bytes; a zero grant with over=true means the cap fired.
-func (b *outputBudget) take(n int) int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if int64(n) <= b.remaining {
-		b.remaining -= int64(n)
-		return n
-	}
-	grant := int(b.remaining)
-	b.remaining = 0
-	if !b.over {
-		b.over = true
-		if b.kill != nil {
-			b.kill()
-		}
-	}
-	return grant
-}
-
-type capWriter struct {
-	budget *outputBudget
-	buf    []byte
-}
-
-// Write never errors: after the cap fires the process is being killed and
-// residual pipe bytes are swallowed rather than turned into copy errors.
-func (w *capWriter) Write(p []byte) (int, error) {
-	if n := w.budget.take(len(p)); n > 0 {
-		w.buf = append(w.buf, p[:n]...)
-	}
-	return len(p), nil
+	return runHelper(ctx, hs, lim, attr, start, nil)
 }
 
 var startMu sync.Mutex
@@ -382,26 +167,12 @@ func MaybeRunHelper() {
 	}
 	runtime.LockOSThread()
 	helperAssertConfined()
-	var spec helperSpec
-	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
-		helperDie("bad spec: " + err.Error())
-	}
-	rl := func(resource int, v uint64) {
-		if v == 0 {
-			return // Run defaults every zero field, so this never skips a real limit
-		}
-		if err := unix.Setrlimit(resource, &unix.Rlimit{Cur: v, Max: v}); err != nil {
-			helperDie(fmt.Sprintf("setrlimit(%d): %v", resource, err))
-		}
-	}
-	rl(unix.RLIMIT_CPU, spec.CPUSeconds)
-	rl(unix.RLIMIT_DATA, spec.MemoryBytes)
-	rl(unix.RLIMIT_NOFILE, spec.NoFile)
-	rl(unix.RLIMIT_FSIZE, spec.FSizeBytes)
-	// {0,0} not rl(…,1): the hardened parent's hard limit is 0 and cannot be raised.
-	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
-		helperDie(fmt.Sprintf("setrlimit(RLIMIT_CORE): %v", err))
-	}
+	spec := helperSpecFromEnv(specJSON)
+	helperRlimit(unix.RLIMIT_CPU, spec.CPUSeconds)
+	helperRlimit(unix.RLIMIT_DATA, spec.MemoryBytes)
+	helperRlimit(unix.RLIMIT_NOFILE, spec.NoFile)
+	helperRlimit(unix.RLIMIT_FSIZE, spec.FSizeBytes)
+	helperNoCore()
 
 	if spec.LandlockMask != 0 {
 		if err := applyLandlock(spec.LandlockMask, spec.Writable); err != nil {
@@ -426,11 +197,6 @@ func MaybeRunHelper() {
 	if err := unix.Exec(spec.Argv[0], spec.Argv, spec.Env); err != nil {
 		helperDie("exec: " + err.Error())
 	}
-}
-
-func helperDie(msg string) {
-	fmt.Fprintln(os.Stderr, helperStderrPrefix+msg)
-	os.Exit(helperSetupExit)
 }
 
 // helperAssertConfined is the helper's positive self-check that it really is

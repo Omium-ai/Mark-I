@@ -1215,7 +1215,7 @@ func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *a
 			log.Error("mark1d: anchor consent store unreadable; no anchor will run", "err", err)
 			consented = nil
 		}
-		if err := anchors.PublishCandidates(candidatesPath, consented, derived); err != nil {
+		if err := anchors.PublishCandidates(candidatesPath, consented, derived, sb.Status()); err != nil {
 			log.Error("mark1d: anchor candidates not published; `mark1 enable` cannot offer consent", "path", candidatesPath, "err", err)
 		} else {
 			published = true

@@ -309,7 +309,8 @@ func (fakeSandbox) Run(_ context.Context, spec anchors.RunSpec) (anchors.RunResu
 	}
 	return anchors.RunResult{ExitCode: 0, EffectiveEnv: env}, nil
 }
-func (fakeSandbox) FSConfined() bool { return false }
+func (fakeSandbox) FSConfined() bool              { return false }
+func (fakeSandbox) Status() anchors.SandboxStatus { return anchors.SandboxStatus{Available: true} }
 
 type recordingEmitter struct {
 	mu  sync.Mutex

@@ -131,48 +131,16 @@ jobs:
       # uv.lock rather than a pin here, so the anchor is the same one lint-py resolves and there
       # is no second version to drift.
       #
-      # ubuntu-only by SUBJECT, not convenience: macOS has no namespace sandbox
-      # (anchors/sandbox_other.go returns UnavailableSandbox, so derivation is empty there
-      # whatever is installed), and windows-2022 never compiles this //go:build unix package.
-      - if: matrix.os == 'ubuntu-24.04'
-        uses: astral-sh/setup-uv@v5
-      - if: matrix.os == 'ubuntu-24.04'
-        run: |
-          uv sync --frozen --all-packages
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-      # FR-VERIFY-002: the anchor sandbox (anchors/sandbox_linux.go) IS the security boundary, and
-      # its in-sandbox probes skip on a kernel that refuses unprivileged user namespaces. The stock
-      # ubuntu-24.04 image is that kernel: Ubuntu ≥ 23.10 ships
-      # kernel.apparmor_restrict_unprivileged_userns=1 (24.04 release notes, "Unprivileged user
-      # namespace restrictions"), and the image KEEPS it — runner-images
-      # images/ubuntu/scripts/build/install-container-tools.sh grants `userns` to podman alone via
-      # an AppArmor profile, and PR #11489 (lift it image-wide) was closed unmerged. An unconfined
-      # Go test binary gets EPERM from clone(CLONE_NEWUSER), so every network-denial, AF_UNIX,
-      # env-scrub, write-confinement and resource-kill probe t.Skip()ped and this job read green
-      # on zero denials asserted (runner-images issue #10443). The VM is discarded after the job,
-      # so lifting it here costs nothing; `unshare` proves it took before a single test runs, and
-      # the lsm list shows whether Landlock (in Ubuntu's CONFIG_LSM since 5.13, LP #1950381) is
-      # stacked on this kernel — the write-confinement probes need it and fail loudly if not.
-      - if: matrix.os == 'ubuntu-24.04'
-        name: Allow unprivileged user namespaces for the anchor sandbox probes
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          unshare -Un true
-          cat /sys/kernel/security/lsm; echo
-      # M1_REQUIRE_STORES turns that skip into a failure. It is the existing gate for exactly this
-      # shape — a suite whose external dependency is absent — and already covers a non-store
-      # binary (receipts/integration_test.go gates `cargo` on it). Every other test that reads it
-      # is //go:build integration, which test-go does not compile, so this changes the behaviour
-      # of precisely one test.
-      #
-      # M1_REQUIRE_SANDBOX is the same inversion for the kernel features the sandbox needs: with
-      # it set, anchors/sandbox_linux_test.go fails instead of skipping when userns or Landlock
-      # is refused, and TestSandboxProbesNotVacuous asserts the probes actually executed. Linux
-      # only by subject — the sandbox is //go:build linux; macOS and Windows have no probes to arm.
+      # ubuntu+macos by SUBJECT: Linux has the namespace/Landlock sandbox, macOS the sandbox-exec
+      # profile (anchors/sandbox_{linux,darwin}.go); windows-2022 still refuses (sandbox_other.go)
+      # and never compiles the //go:build unix packages. M1_REQUIRE_SANDBOX is the inversion for the
+      # kernel features each sandbox needs: with it set, the probes in anchors/sandbox_probe_test.go
+      # fail instead of skipping when userns, Landlock or sandbox-exec is refused, and
+      # TestSandboxProbesNotVacuous asserts the probes actually executed on that leg.
       - run: just test-go
         env:
           M1_REQUIRE_STORES: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}
-          M1_REQUIRE_SANDBOX: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}
+          M1_REQUIRE_SANDBOX: ${{ (matrix.os == 'ubuntu-24.04' || matrix.os == 'macos-14') && '1' || '' }}
 
   # NFR-PORTABILITY-001's "any red platform blocks merge", made a single stable check name.
   # Requiring the six expanded matrix legs by name would work until the day someone adds a

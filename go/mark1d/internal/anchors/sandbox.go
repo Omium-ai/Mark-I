@@ -27,6 +27,14 @@ type Sandbox interface {
 	// precondition. It never overclaims: false means "chdir + env scrub
 	// only", exactly as doc.go states.
 	FSConfined() bool
+	// Status is the candidates.json honesty field: can this platform admit a run at all, and why not.
+	Status() SandboxStatus
+}
+
+// SandboxStatus is published in candidates.json so `mark1 doctor` and the app can say WHY nothing derives: Available is false when no run can be admitted, Reason is non-empty whenever something is refused or degraded.
+type SandboxStatus struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason"`
 }
 
 // Limits are the per-run resource caps (04 §1.4 row "anchors").
@@ -36,6 +44,7 @@ type Limits struct {
 	// stand-in (doc.go). NOT RLIMIT_AS: address space is not memory, and a
 	// thread-per-core allocator reserves it in proportion to the core count, so
 	// an AS cap kills real toolchains on big hosts without them using the memory.
+	// On darwin the kernel enforces neither: a mark1d RSS watchdog over the process group kills it past the cap (sandbox_darwin.go).
 	MemoryBytes uint64
 	NoFile      uint64        // RLIMIT_NOFILE
 	FSizeBytes  uint64        // RLIMIT_FSIZE — bounds any single file written

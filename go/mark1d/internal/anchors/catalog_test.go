@@ -4,6 +4,7 @@ package anchors
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -109,8 +110,9 @@ func TestDeriveFullWorkspace(t *testing.T) {
 // "NOTHING RUNS WITHOUT CONSENT — and 'runs' includes derivation": the version
 // sniff execs an UNCONSENTED binary that PATH may have resolved out of a
 // freshly cloned repo's node_modules/.bin. The fake tool here touches a marker
-// file when it runs; with a sandbox that refuses, that marker must not appear
-// and the entry must still derive with an empty ToolVersion.
+// file when it runs; with a sandbox that refuses, that marker must not appear,
+// and an entry no run could admit either must not publish (it would only ever
+// vote VERDICT_ERROR/sandbox_unavailable — candidates.json's sandbox field says why).
 func TestDeriveNeverExecsOutsideTheSandbox(t *testing.T) {
 	wt := canonTemp(t)
 	writeFixture(t, wt, "pyproject.toml", "[tool.ruff]\n")
@@ -127,8 +129,8 @@ func TestDeriveNeverExecsOutsideTheSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].ToolVersion != "" {
-		t.Fatalf("a refused sniff must derive the entry with NO version: %+v", got)
+	if len(got) != 0 {
+		t.Fatalf("no sandbox floor: nothing can run, so nothing must derive, got %+v", got)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("the tool binary executed even though the sandbox refused — pre-consent exec")
@@ -141,6 +143,25 @@ func TestDeriveNeverExecsOutsideTheSandbox(t *testing.T) {
 	}
 	if sb.specs[0].Argv[0] != filepath.Join(bin, "ruff") || sb.specs[0].Limits.OutputCap <= 0 {
 		t.Fatalf("sniff spec %+v: wrong binary or unbounded output", sb.specs[0])
+	}
+}
+
+// TestDeriveWithoutWriteConfinement is the Landlock-less Linux shape: the floor stands, the sniff is refused (unconsented binary, RequireFSConfined), so pure parsers still derive with no version — they run under the remaining caps (doc.go) — while a repo-code executor, which the runner would refuse identically, is dropped.
+func TestDeriveWithoutWriteConfinement(t *testing.T) {
+	wt := canonTemp(t)
+	writeFixture(t, wt, "pyproject.toml", "[tool.ruff]\n")
+	writeFixture(t, wt, "eslint.config.js", "export default []\n")
+	bin := canonTemp(t)
+	fakeBin(t, bin, "ruff", "ruff 0.6.2")
+	fakeBin(t, bin, "eslint", "v9.9.0")
+	t.Setenv("PATH", bin)
+
+	got, err := Derive(&fakeSandbox{err: ErrSandboxUnavailable, floorUp: true}, wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "ruff@cat-1" || got[0].ToolVersion != "" {
+		t.Fatalf("want ruff alone with no version (eslint executes repo code and would refuse at run time), got %+v", got)
 	}
 }
 
@@ -412,5 +433,25 @@ func TestExecHashSymlinkIndependent(t *testing.T) {
 	}
 	if !bytes.Equal(ExecHash(direct), ExecHash(viaLink)) {
 		t.Fatal("exec hash depends on the PATH alias, not the file that executes")
+	}
+}
+
+// TestPublishCandidatesCarriesSandboxStatus: the additive sandbox field is what `mark1 doctor` and the app print when a workspace derives nothing.
+func TestPublishCandidatesCarriesSandboxStatus(t *testing.T) {
+	path := CandidatesPath(canonTemp(t))
+	st := SandboxStatus{Available: false, Reason: "no sandbox on plan9 yet (04 §11.5)"}
+	if err := PublishCandidates(path, nil, map[string][]CatalogEntry{"/w": {}}, st); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c Candidates
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Sandbox != st || len(c.Workspaces) != 1 || len(c.Workspaces[0].Anchors) != 0 {
+		t.Fatalf("published %s", raw)
 	}
 }

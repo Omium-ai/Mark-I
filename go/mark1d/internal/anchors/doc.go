@@ -125,6 +125,29 @@
 //     is the thing memory.max means; RLIMIT_AS would cap address space, which
 //     a per-core allocator reserves far past what it ever commits.
 //
+//     On macOS the same contract rides /usr/bin/sandbox-exec (Seatbelt) with
+//     a per-run 0600 profile (sandbox_darwin.go). ENFORCED — network* denied
+//     (TCP/UDP and unix-domain: the netns+seccomp twin); writes confined to
+//     the worktree, the scratch dir and /dev/null, reads unconfined (the same
+//     one-way valve); the env scrub as above plus __CF_USER_TEXT_ENCODING
+//     (CoreFoundation would set it inside sandbox-exec otherwise; it is
+//     attested like the rest); RLIMIT_CPU/NOFILE/FSIZE/CORE, wall clock, kill
+//     switch and output cap as above. ENFORCED BY MARK1D, NOT THE KERNEL —
+//     the memory cap: Darwin accepts RLIMIT_DATA/AS and applies neither
+//     (arm64 refuses them outright), so mark1d polls the process group's
+//     resident set every 250 ms and SIGKILLs it past the cap. NOT ENFORCED —
+//     an anchor that ignores SIGXCPU runs to the wall clock (Darwin sends it
+//     once and no SIGKILL follows); no Pdeathsig, so a crashed daemon can
+//     orphan an anchor for up to its wall cap; and the helper has no positive
+//     confinement self-check, so the residual exec gadget is a network-denied
+//     exec into attacker-chosen writable dirs. sandbox-exec absent ⇒ every run
+//     refused (ErrSandboxUnavailable), never degraded.
+//
+//     Elsewhere (Windows) every run is refused until 04 §11.5's job-object +
+//     AppContainer sandbox lands. Wherever runs are refused, Derive publishes
+//     no entry that could only vote sandbox_unavailable, and candidates.json's
+//     sandbox field carries the reason (candidates.go).
+//
 // The runner registry mirrors the estate's PROBE_HANDLERS discipline
 // (recovery-orchestrator app/verify/probes.py, adopted per 06 §2.1): a map of
 // kind → handler with an init-time exhaustiveness assert against the detector

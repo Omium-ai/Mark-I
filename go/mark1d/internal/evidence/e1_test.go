@@ -131,7 +131,8 @@ type noSandbox struct{}
 func (noSandbox) Run(context.Context, anchors.RunSpec) (anchors.RunResult, error) {
 	return anchors.RunResult{}, errors.New("unused")
 }
-func (noSandbox) FSConfined() bool { return false }
+func (noSandbox) FSConfined() bool              { return false }
+func (noSandbox) Status() anchors.SandboxStatus { return anchors.SandboxStatus{Available: true} }
 
 func TestPrepareE1RedactsSignsAndPassesTheEmitDoor(t *testing.T) {
 	f := setup(t)

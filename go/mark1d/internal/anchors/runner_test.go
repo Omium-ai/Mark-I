@@ -26,6 +26,8 @@ type fakeSandbox struct {
 	res      RunResult
 	err      error
 	confined bool
+	// floorUp keeps Status() available while err refuses: the Landlock-less Linux shape, where pure parsers still run.
+	floorUp bool
 	// run, when set, answers per spec.
 	run   func(RunSpec) (RunResult, error)
 	mu    sync.Mutex
@@ -48,6 +50,12 @@ func (f *fakeSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error) 
 	return res, f.err
 }
 func (f *fakeSandbox) FSConfined() bool { return f.confined }
+func (f *fakeSandbox) Status() SandboxStatus {
+	if f.err != nil && !f.floorUp {
+		return SandboxStatus{Reason: f.err.Error()}
+	}
+	return SandboxStatus{Available: true}
+}
 
 // enabledRuff derives + consents the fixture ruff entry so the runner sees a
 // legitimate Enabled row (the only legal provenance).

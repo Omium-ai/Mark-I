@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -272,8 +273,11 @@ const sniffVersionOutputCap = 64 << 10
 // in npm/direnv shells routinely contains the repo's own node_modules/.bin: an
 // unsandboxed sniff would hand a freshly cloned hostile repo an unconfined
 // exec on the user's machine before they were asked anything (doc.go property
-// 2). A sniff failure — including a kernel too weak for the sandbox — leaves
-// ToolVersion empty rather than dropping the entry or running unsandboxed.
+// 2). A sniff failure leaves ToolVersion empty rather than running unsandboxed;
+// a sniff the SANDBOX refused drops the entry when the run would be refused
+// the same way (no floor, or no write confinement for an entry that needs it):
+// publishing it would only mint VERDICT_ERROR/sandbox_unavailable votes, and
+// candidates.json's sandbox field says why instead (candidates.go).
 //
 // sb must be the same Sandbox the runner uses; nil skips every sniff. NOTE any
 // process calling this with a LinuxSandbox must call MaybeRunHelper() first
@@ -304,6 +308,10 @@ func Derive(sb Sandbox, worktree string) ([]CatalogEntry, error) {
 		if err != nil {
 			continue // unreadable binary cannot be consent-hashed, so cannot exist
 		}
+		version, err := sniffVersion(sb, abs, bin, d.versionArgs)
+		if errors.Is(err, ErrSandboxUnavailable) && (!sb.Status().Available || d.execsRepoCode || d.sideEffect == SideEffectTest) {
+			continue // the run would be refused exactly like the sniff was
+		}
 		out = append(out, CatalogEntry{
 			ID:            fmt.Sprintf("%s@cat-%d", d.tool, d.rule),
 			Kind:          kind,
@@ -314,7 +322,7 @@ func Derive(sb Sandbox, worktree string) ([]CatalogEntry, error) {
 			ExecsRepoCode: d.execsRepoCode,
 			BinaryPath:    bin,
 			BinaryHash:    hash,
-			ToolVersion:   sniffVersion(sb, abs, bin, d.versionArgs),
+			ToolVersion:   version,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -325,10 +333,11 @@ func Derive(sb Sandbox, worktree string) ([]CatalogEntry, error) {
 // is set because the binary is UNCONSENTED at this point: a kernel that cannot
 // confine its writes gets no sniff at all (empty version) rather than a
 // pre-consent exec with only chdir + env scrub — the same "weaker isolation
-// gets a smaller privilege, not a waiver" rule as 04 §11.5.
-func sniffVersion(sb Sandbox, worktree, bin string, args []string) string {
+// gets a smaller privilege, not a waiver" rule as 04 §11.5. The sandbox's
+// refusal is returned so Derive can tell it from a tool that merely failed.
+func sniffVersion(sb Sandbox, worktree, bin string, args []string) (string, error) {
 	if sb == nil {
-		return ""
+		return "", nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), versionSniffTimeout)
 	defer cancel()
@@ -344,10 +353,10 @@ func sniffVersion(sb Sandbox, worktree, bin string, args []string) string {
 		RequireFSConfined: true,
 	})
 	if err != nil || res.ExitCode != 0 {
-		return ""
+		return "", err
 	}
 	line, _, _ := strings.Cut(string(res.Stdout), "\n")
-	return strings.TrimSpace(line)
+	return strings.TrimSpace(line), nil
 }
 
 func hashFile(path string) ([]byte, error) {

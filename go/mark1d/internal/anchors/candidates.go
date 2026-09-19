@@ -23,7 +23,8 @@ import (
 //     it. mark1d rewrites it on boot, on every workspaces.json change, after
 //     every approval it applies, and on the re-derive tick. Absent ⇒ the daemon
 //     has not published; an empty workspace list ⇒ nothing is enabled; a
-//     workspace with an empty anchor list ⇒ nothing derivable there.
+//     workspace with an empty anchor list ⇒ nothing derivable there, and the
+//     sandbox field says whether that is because no anchor can RUN here.
 //   - approvals.jsonl is CLI → DAEMON, append-only: one line per anchor the
 //     user consented to at a TTY, naming the EXACT exec_hash shown. The daemon
 //     applies a line only while that (id, exec_hash) is a current candidate —
@@ -42,6 +43,7 @@ func ApprovalsPath(stateDir string) string {
 // (Derive's order): deterministic bytes.
 type Candidates struct {
 	Version    int                   `json:"version"`
+	Sandbox    SandboxStatus         `json:"sandbox"` // additive (v1): why Derive dropped what it dropped
 	Workspaces []WorkspaceCandidates `json:"workspaces"`
 }
 
@@ -70,13 +72,14 @@ type Approval struct {
 
 // PublishCandidates joins each workspace's derivation against the store and
 // writes candidates.json. Same binding as Reconcile: consented iff the store
-// holds the ID under this exact exec_hash.
-func PublishCandidates(path string, consented []ConsentRecord, derived map[string][]CatalogEntry) error {
+// holds the ID under this exact exec_hash. sandbox is the Sandbox's Status()
+// as of this derivation.
+func PublishCandidates(path string, consented []ConsentRecord, derived map[string][]CatalogEntry, sandbox SandboxStatus) error {
 	byID := map[string]ConsentRecord{}
 	for _, r := range consented {
 		byID[r.ID] = r
 	}
-	c := Candidates{Version: 1, Workspaces: []WorkspaceCandidates{}}
+	c := Candidates{Version: 1, Sandbox: sandbox, Workspaces: []WorkspaceCandidates{}}
 	for root, entries := range derived {
 		ws := WorkspaceCandidates{Path: root, Anchors: []Candidate{}}
 		for _, e := range entries {

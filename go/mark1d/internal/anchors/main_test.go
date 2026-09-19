@@ -98,11 +98,6 @@ func runProbe(mode string) {
 			os.Exit(1)
 		}
 		os.Exit(0)
-	case "spin":
-		// CPU burn for the RLIMIT_CPU kill test; never exits on its own.
-		for {
-			_ = time.Now()
-		}
 	case "sleep":
 		time.Sleep(time.Minute)
 		os.Exit(0)
@@ -118,6 +113,7 @@ func runProbe(mode string) {
 			}
 			held = append(held, b)
 		}
+		time.Sleep(time.Second) // hold it resident long enough for a polling watchdog (darwin) to see it
 		os.Exit(len(held) - 64)
 	case "flood":
 		// Output-cap probe: 8 MiB to stdout, far past any test cap.
