@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -91,18 +90,6 @@ func (s *DarwinSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, error
 	res, err := runHelper(ctx, hs, lim, &syscall.SysProcAttr{Setpgid: true}, (*exec.Cmd).Start, watch)
 	res.Stderr = stripSandboxExecWarning(res.Stderr)
 	return res, err
-}
-
-// withDefault adds k=v to the sorted env unless the caller set k.
-func withDefault(env []string, k, v string) []string {
-	for _, kv := range env {
-		if strings.HasPrefix(kv, k+"=") {
-			return env
-		}
-	}
-	env = append(env, k+"="+v)
-	sort.Strings(env)
-	return env
 }
 
 var sbQuote = strings.NewReplacer(`\`, `\\`, `"`, `\"`)

@@ -132,8 +132,8 @@ jobs:
       # is no second version to drift.
       #
       # ubuntu-only by SUBJECT, not convenience: the Phase 2 gate runs ruff inside the Linux
-      # namespace sandbox; macOS has its own sandbox-exec sandbox (anchors/sandbox_darwin.go) whose
-      # probes run on that leg, and windows-2022 never compiles this //go:build unix package.
+      # namespace sandbox; macOS (sandbox-exec, anchors/sandbox_darwin.go) and Windows (AppContainer,
+      # anchors/sandbox_windows.go) run their own probes on their legs without this setup.
       - if: matrix.os == 'ubuntu-24.04'
         uses: astral-sh/setup-uv@v5
       - if: matrix.os == 'ubuntu-24.04'
@@ -167,12 +167,12 @@ jobs:
       #
       # M1_REQUIRE_SANDBOX is the same inversion for the kernel features the sandbox needs: with
       # it set, anchors/sandbox_linux_test.go fails instead of skipping when userns or Landlock
-      # is refused, and TestSandboxProbesNotVacuous asserts the probes actually executed. Linux and
-      # macOS by subject: each has a sandbox (namespaces/Landlock, sandbox-exec); Windows has none yet.
+      # is refused, and TestSandboxProbesNotVacuous asserts the probes actually executed. All three
+      # legs by subject: namespaces/Landlock, sandbox-exec, AppContainer + job object.
       - run: just test-go
         env:
           M1_REQUIRE_STORES: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}
-          M1_REQUIRE_SANDBOX: ${{ (matrix.os == 'ubuntu-24.04' || matrix.os == 'macos-14') && '1' || '' }}
+          M1_REQUIRE_SANDBOX: "1"
 
   # NFR-PORTABILITY-001's "any red platform blocks merge", made a single stable check name.
   # Requiring the six expanded matrix legs by name would work until the day someone adds a

@@ -45,6 +45,7 @@ type Limits struct {
 	// thread-per-core allocator reserves it in proportion to the core count, so
 	// an AS cap kills real toolchains on big hosts without them using the memory.
 	// On darwin the kernel enforces neither: a mark1d RSS watchdog over the process group kills it past the cap (sandbox_darwin.go).
+	// On windows it is the job's JOB_MEMORY commit limit, CPUSeconds its JOB_TIME; NoFile and FSizeBytes have no job twin and are not enforced there (sandbox_windows.go).
 	MemoryBytes uint64
 	NoFile      uint64        // RLIMIT_NOFILE
 	FSizeBytes  uint64        // RLIMIT_FSIZE — bounds any single file written

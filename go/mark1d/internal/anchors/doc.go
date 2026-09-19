@@ -143,10 +143,39 @@
 //     exec into attacker-chosen writable dirs. sandbox-exec absent ⇒ every run
 //     refused (ErrSandboxUnavailable), never degraded.
 //
-//     Elsewhere (Windows) every run is refused until 04 §11.5's job-object +
-//     AppContainer sandbox lands. Wherever runs are refused, Derive publishes
-//     no entry that could only vote sandbox_unavailable, and candidates.json's
-//     sandbox field carries the reason (candidates.go).
+//     On Windows the contract rides an AppContainer plus a job object
+//     (sandbox_windows.go), parent-applied at CreateProcessW — no helper, so
+//     no exec gadget. ENFORCED — network denied: the per-user profile
+//     Omium.Mark1.Anchors has ZERO capabilities, so its LowBox token reaches
+//     no network at all, loopback included; the fabric pipe's owner-only DACL
+//     (fabric/listener_windows.go) carries no package ACE, so the anchor
+//     cannot open mark1d's endpoint either (the AF_UNIX twin). ENFORCED —
+//     filesystem confinement STRONGER than the one-way valve above: an
+//     AppContainer reaches only objects whose DACL grants its package, so
+//     READS are confined too. The allow-list is explicit ACEs: Modify on the
+//     worktree and the scratch root (per-run dirs inherit), Read+Execute on
+//     the consented binary's root and a fixed table of user-profile toolchain
+//     homes (%LOCALAPPDATA%\Programs, %APPDATA%\npm, .cargo, go, …) plus
+//     GOMODCACHE/CARGO_HOME when set (caches readable, never network — founder
+//     ruling 2026-09-19); Program Files and Windows carry ALL APPLICATION
+//     PACKAGES read by default. Grants are applied once per root, not per
+//     run; a non-NTFS volume has no ACLs to grant on and refuses by name.
+//     ENFORCED — caps as job limits: user-CPU time (JOB_TIME, tree-wide, the
+//     RLIMIT_CPU twin), committed memory (JOB_MEMORY, tree-wide, the
+//     RLIMIT_DATA twin), 256 active processes, kill-on-close (the Pdeathsig
+//     twin), no fault dialogs, every UI restriction; wall clock, kill switch
+//     and output cap TerminateJobObject the whole tree by handle, so the pgid
+//     reuse caveat does not exist. The env scrub as above plus SystemRoot,
+//     PATHEXT and COMSPEC passed through and USERPROFILE/TEMP/TMP/APPDATA/
+//     LOCALAPPDATA pointed at the scratch dir, all attested. NOT ENFORCED —
+//     no FSIZE or NOFILE twin (job objects have neither); a tool whose DLLs or
+//     data sit outside the granted roots fails with ERROR_ACCESS_DENIED
+//     naming the path (tool_error, never a degraded run); a profile or
+//     CreateProcess refusal is ErrSandboxUnavailable, never a fallback.
+//
+//     Wherever runs are refused, Derive publishes no entry that could only
+//     vote sandbox_unavailable, and candidates.json's sandbox field carries
+//     the reason (candidates.go).
 //
 // The runner registry mirrors the estate's PROBE_HANDLERS discipline
 // (recovery-orchestrator app/verify/probes.py, adopted per 06 §2.1): a map of

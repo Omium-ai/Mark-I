@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package anchors
 
@@ -7,16 +7,11 @@ import (
 	"errors"
 	"net"
 	"os"
-	"os/signal"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // kernelLacks is the ONE skip site for a kernel that cannot host the sandbox.
@@ -39,30 +34,6 @@ func kernelLacks(t *testing.T, feature string) {
 // probeRuns counts sandbox runs the kernel actually admitted (the child was
 // spawned inside the namespaces); TestSandboxProbesNotVacuous reads it.
 var probeRuns atomic.Int32
-
-func init() {
-	// rlimit probe: exit 0 iff RLIMIT_FSIZE is finite — i.e. a caller-unset
-	// limit was defaulted by Run rather than skipped by the helper (uncapped).
-	extraProbes["fsize"] = func() int {
-		var r unix.Rlimit
-		if err := unix.Getrlimit(unix.RLIMIT_FSIZE, &r); err != nil {
-			return 1
-		}
-		if r.Cur == unix.RLIM_INFINITY {
-			return 1
-		}
-		return 0
-	}
-	// CPU burn for the RLIMIT_CPU kill test; never exits on its own. Linux SIGKILLs at a soft=hard cap before any SIGXCPU lands; darwin delivers one SIGXCPU and nothing after, so exit on it the way a default-disposition tool would.
-	extraProbes["spin"] = func() int {
-		ch := make(chan os.Signal, 1)
-		signal.Notify(ch, syscall.SIGXCPU)
-		go func() { <-ch; os.Exit(3) }()
-		for {
-			_ = time.Now()
-		}
-	}
-}
 
 // These tests EXECUTE the real sandbox — the test binary itself is the anchor,
 // steered by probeEnv (main_test.go). A probe exits 0 iff its operation
@@ -139,59 +110,14 @@ func TestSandboxDeniesNetwork(t *testing.T) {
 	}
 }
 
-// TestSandboxDeniesUnixSockets is the other half of "network denied": the
-// netns removes every interface but leaves AF_UNIX, and Landlock ABI ≤ 3 does
-// not govern connect(2). Without the seccomp filter an anchor reaches any
-// same-uid pathname socket — mark1d's own m1p.sock among them, which would be
-// unauthenticated ledger injection.
-func TestSandboxDeniesUnixSockets(t *testing.T) {
-	// OUTSIDE the worktree, and under /tmp rather than t.TempDir(): darwin's /var/folders/… test dirs push sun_path past its 104-byte limit.
-	sockDir, err := os.MkdirTemp("/tmp", "m1sock")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
-	sock := filepath.Join(sockDir, "host.sock")
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			_ = c.Close()
-		}
-	}()
-	// Control: reachable from outside the sandbox, so a denial is the sandbox.
-	c, err := net.Dial("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = c.Close()
-
-	sb := NewSandbox(t.TempDir())
-	spec := probeSpec(t, t.TempDir(), "uds", map[string]string{"MARK1_ANCHOR_TEST_ADDR": sock})
-	res, err := runProbeSpec(t, sb, spec)
-	if err != nil {
-		t.Fatalf("run: %v (stderr: %s)", err, res.Stderr)
-	}
-	if res.ExitCode == 0 {
-		t.Fatal("anchor reached a host unix socket from inside the sandbox — AF_UNIX denial is broken")
-	}
-}
-
 func TestSandboxWriteConfinement(t *testing.T) {
 	sb := NewSandbox(t.TempDir())
 	worktree := t.TempDir()
 	outside := t.TempDir()
 
 	if !sb.FSConfined() {
-		// Honest asymmetry (doc.go): without Landlock (linux) or sandbox-exec
-		// (darwin), write confinement is NOT enforced and FSConfined says so;
+		// Honest asymmetry (doc.go): without Landlock (linux), sandbox-exec
+		// (darwin) or an AppContainer profile (windows), write confinement is NOT enforced and FSConfined says so;
 		// test-class anchors then refuse (asserted below) instead of running unsandboxed.
 		spec := probeSpec(t, worktree, "write", map[string]string{"MARK1_ANCHOR_TEST_PATH": outside + "/escape"})
 		spec.RequireFSConfined = true
@@ -229,39 +155,6 @@ func TestSandboxWriteConfinement(t *testing.T) {
 	})
 }
 
-// TestSandboxIsAOneWayValve is a characterization test, not an aspiration: it
-// asserts the sandbox behaves EXACTLY as doc.go's "NOT ENFORCED, BY
-// CONSTRUCTION" paragraph says — unconfined reads plus a writable worktree let
-// consented anchor code copy a same-uid secret into the repo. If this ever
-// starts failing, the code gained read confinement and that paragraph is now
-// an UNDERclaim; either way doc.go must be edited in the same commit. The
-// property is load-bearing for the consent prompt's meaning (11 §5).
-func TestSandboxIsAOneWayValve(t *testing.T) {
-	sb := NewSandbox(t.TempDir())
-	if !sb.FSConfined() {
-		kernelLacks(t, "Landlock; the claim under test is about the STRONGEST regime")
-	}
-	worktree := t.TempDir()
-	secret := filepath.Join(t.TempDir(), "redact.key") // stands in for <state>/redact.key
-	if err := os.WriteFile(secret, []byte("PRIVATE-KEY-MATERIAL"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	stolen := filepath.Join(worktree, "vendored.txt")
-	spec := probeSpec(t, worktree, "exfil", map[string]string{
-		"MARK1_ANCHOR_TEST_SRC":  secret,
-		"MARK1_ANCHOR_TEST_PATH": stolen,
-	})
-	res, err := runProbeSpec(t, sb, spec)
-	if err != nil {
-		t.Fatalf("run: %v (stderr: %s)", err, res.Stderr)
-	}
-	got, readErr := os.ReadFile(stolen)
-	if res.ExitCode != 0 || readErr != nil || string(got) != "PRIVATE-KEY-MATERIAL" {
-		t.Fatalf("exfiltration into the worktree did not happen (exit=%d err=%v) — "+
-			"the sandbox now confines reads; update doc.go's 'NOT ENFORCED, BY CONSTRUCTION' paragraph", res.ExitCode, readErr)
-	}
-}
-
 func TestSandboxKillsCPUHog(t *testing.T) {
 	sb := NewSandbox(t.TempDir())
 	spec := probeSpec(t, t.TempDir(), "spin", nil)
@@ -274,8 +167,8 @@ func TestSandboxKillsCPUHog(t *testing.T) {
 	if res.ExitCode == 0 || res.TimedOut {
 		t.Fatalf("CPU hog was not stopped by the cap: %+v", res)
 	}
-	// Linux SIGKILLs at a soft=hard cap; darwin delivers SIGXCPU once and the probe exits on it.
-	if runtime.GOOS == "linux" && (res.Signal == "" || res.ExitCode != -1) {
+	// Linux SIGKILLs at a soft=hard cap and the windows job terminates the tree (ERROR_NOT_ENOUGH_QUOTA); darwin delivers SIGXCPU once and the probe exits on it.
+	if runtime.GOOS != "darwin" && (res.Signal == "" || res.ExitCode != -1) {
 		t.Fatalf("CPU hog was not signal-killed: exit=%d signal=%q", res.ExitCode, res.Signal)
 	}
 	if el := time.Since(start); el > 15*time.Second {
@@ -352,21 +245,22 @@ func TestSandboxOutputCap(t *testing.T) {
 	}
 }
 
-// TestSandboxDefaultsUnsetRlimits pins the doc.go claim that CPU/AS/NOFILE/
-// FSIZE are ENFORCED per run: the helper treats 0 as "skip", so Run must
-// default an unset field — a caller that forgets a limit must never get an
-// uncapped run. The probe asserts RLIMIT_FSIZE (left zero here) came out
-// finite inside the sandbox.
-func TestSandboxDefaultsUnsetRlimits(t *testing.T) {
+// TestSandboxDefaultsUnsetLimits pins the doc.go claim that the caps are
+// ENFORCED per run: the helper treats 0 as "skip", so Run must default an
+// unset field — a caller that forgets a limit must never get an uncapped run.
+// The "capped" probe (sandbox_posix_test.go / sandbox_appcontainer_test.go)
+// asserts a caller-unset cap came out finite inside the sandbox: RLIMIT_FSIZE
+// on linux/darwin, the job's user-time limit on windows.
+func TestSandboxDefaultsUnsetLimits(t *testing.T) {
 	sb := NewSandbox(t.TempDir())
-	spec := probeSpec(t, t.TempDir(), "fsize", nil)
-	spec.Limits.FSizeBytes = 0 // the field under test stays caller-unset
+	spec := probeSpec(t, t.TempDir(), "capped", nil)
+	spec.Limits.FSizeBytes, spec.Limits.CPUSeconds = 0, 0 // the fields under test stay caller-unset
 	res, err := runProbeSpec(t, sb, spec)
 	if err != nil {
 		t.Fatalf("run: %v (stderr: %s)", err, res.Stderr)
 	}
 	if res.ExitCode != 0 {
-		t.Fatal("RLIMIT_FSIZE was infinite inside the sandbox — an unset limit ran uncapped, contradicting doc.go's ENFORCED claim")
+		t.Fatal("an unset limit ran uncapped inside the sandbox, contradicting doc.go's ENFORCED claim")
 	}
 }
 
@@ -435,8 +329,9 @@ func TestSandboxEnvScrub(t *testing.T) {
 	if strings.Contains(got, helperSpecEnv) {
 		t.Fatal("helper spec env leaked into the anchor")
 	}
-	// __CF_USER_TEXT_ENCODING is the darwin sandbox's own (sandbox_darwin.go cfEncodingEnv); it never appears on linux.
-	allowed := map[string]bool{probeEnv: true, "PATH": true, "LANG": true, "TZ": true, "HOME": true, "__CF_USER_TEXT_ENCODING": true}
+	// __CF_USER_TEXT_ENCODING is the darwin sandbox's own (sandbox_darwin.go cfEncodingEnv); the rest of the second row is the windows sandbox's (sandbox_windows.go windowsEnv). Neither appears on linux.
+	allowed := map[string]bool{probeEnv: true, "PATH": true, "LANG": true, "TZ": true, "HOME": true, "__CF_USER_TEXT_ENCODING": true,
+		"SystemRoot": true, "PATHEXT": true, "COMSPEC": true, "USERPROFILE": true, "TEMP": true, "TMP": true, "APPDATA": true, "LOCALAPPDATA": true}
 	seen := map[string]bool{}
 	for _, line := range strings.Split(got, "\n") {
 		if line == "" {
@@ -469,12 +364,14 @@ func TestSandboxEnvScrub(t *testing.T) {
 // asserted. Under M1_REQUIRE_SANDBOX=1 it asserts the sandbox really admitted
 // at least one run per probe, so a refactor that hands the probes a new skip
 // path cannot re-open the hole silently. Source order is run order (this
-// package never shuffles), so it stays the LAST test in this file.
+// package never shuffles; files sort by name), so it stays the LAST test in
+// this file and every platform probe file must sort BEFORE it
+// (sandbox_appcontainer_test.go, sandbox_linux_test.go, sandbox_posix_test.go).
 func TestSandboxProbesNotVacuous(t *testing.T) {
 	if os.Getenv("M1_REQUIRE_SANDBOX") != "1" {
 		t.Skip("M1_REQUIRE_SANDBOX unset; the probes above may legitimately skip here")
 	}
-	want := int32(12) // one per runProbeSpec/KillSwitch run above; +1 for the linux/amd64-only x32 probe (sandbox_linux_test.go)
+	want := int32(12) // 10 runProbeSpec/KillSwitch runs above + 2 in the platform file (posix: unix sockets, one-way valve; windows: named pipe, read denial); +1 for the linux/amd64-only x32 probe (sandbox_linux_test.go)
 	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
 		want++
 	}

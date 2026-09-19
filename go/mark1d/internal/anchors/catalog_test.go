@@ -1,5 +1,3 @@
-//go:build unix
-
 package anchors
 
 import (
@@ -7,14 +5,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
 
-// fakeBin drops an executable shell script named `name` into dir that prints
-// `version` for any invocation — enough for LookPath + the version sniff.
 // canonTemp is t.TempDir() with symlinks resolved: the catalog resolves argv[0] through
-// EvalSymlinks (FR-VERIFY-004), and macOS's /var/folders is itself a symlink to /private/var.
+// EvalSymlinks (FR-VERIFY-004), macOS's /var/folders is itself a symlink to /private/var, and
+// windows' %TEMP% may be an 8.3 short name.
 func canonTemp(t *testing.T) string {
 	t.Helper()
 	d, err := filepath.EvalSymlinks(t.TempDir())
@@ -24,10 +22,24 @@ func canonTemp(t *testing.T) string {
 	return d
 }
 
+// binName is the file LookPath resolves `name` to: bare on unix, a .cmd on windows (PATHEXT), which CreateProcess runs through cmd.exe exactly as a real npm shim.
+func binName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".cmd"
+	}
+	return name
+}
+
+// fakeBin drops an executable named `name` into dir that prints `version` for
+// any invocation — a sh script, or a .cmd on windows — enough for LookPath +
+// the version sniff.
 func fakeBin(t *testing.T, dir, name, version string) string {
 	t.Helper()
-	p := filepath.Join(dir, name)
+	p := filepath.Join(dir, binName(name))
 	script := "#!/bin/sh\necho '" + version + "'\n"
+	if runtime.GOOS == "windows" {
+		script = "@echo " + version + "\r\n"
+	}
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +131,10 @@ func TestDeriveNeverExecsOutsideTheSandbox(t *testing.T) {
 	bin := canonTemp(t)
 	marker := filepath.Join(canonTemp(t), "i-ran")
 	script := "#!/bin/sh\ntouch " + marker + "\necho 'ruff 0.6.2'\n"
-	if err := os.WriteFile(filepath.Join(bin, "ruff"), []byte(script), 0o755); err != nil {
+	if runtime.GOOS == "windows" {
+		script = "@echo.> \"" + marker + "\"\r\n@echo ruff 0.6.2\r\n"
+	}
+	if err := os.WriteFile(filepath.Join(bin, binName("ruff")), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)
@@ -141,7 +156,7 @@ func TestDeriveNeverExecsOutsideTheSandbox(t *testing.T) {
 	if len(sb.specs) != 1 || !sb.specs[0].RequireFSConfined {
 		t.Fatalf("sniff spec %+v did not demand FS confinement", sb.specs)
 	}
-	if sb.specs[0].Argv[0] != filepath.Join(bin, "ruff") || sb.specs[0].Limits.OutputCap <= 0 {
+	if sb.specs[0].Argv[0] != filepath.Join(bin, binName("ruff")) || sb.specs[0].Limits.OutputCap <= 0 {
 		t.Fatalf("sniff spec %+v: wrong binary or unbounded output", sb.specs[0])
 	}
 }
@@ -241,7 +256,8 @@ func TestConsentLifecycle(t *testing.T) {
 	if err := Approve(path, now, derived...); err != nil {
 		t.Fatal(err)
 	}
-	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+	// Mode bits are a unix statement; windows has no 0600 to read back (the store sits under the 0700-equivalent state dir).
+	if st, err := os.Stat(path); err != nil || (runtime.GOOS != "windows" && st.Mode().Perm() != 0o600) {
 		t.Fatalf("consent store must be 0600: %v %v", st.Mode(), err)
 	}
 	consented, err := LoadConsent(path)
@@ -344,8 +360,7 @@ func TestLoadConsentCorruptIsError(t *testing.T) {
 
 // testSandbox is the REAL sandbox, used wherever a test derives a catalog:
 // derivation's version sniff execs an unconsented binary and must go through it
-// (catalog.go Derive). It lives here rather than in main_test.go because every
-// caller is unix-tagged, and main_test.go builds on every GOOS for TestMain.
+// (catalog.go Derive).
 func testSandbox(t *testing.T) Sandbox {
 	t.Helper()
 	return NewSandbox(canonTemp(t))
@@ -414,7 +429,10 @@ func TestExecHashSymlinkIndependent(t *testing.T) {
 	real := canonTemp(t)
 	target := fakeBin(t, real, "ruff", "ruff 0.6.2")
 	links := canonTemp(t)
-	if err := os.Symlink(target, filepath.Join(links, "ruff")); err != nil {
+	if err := os.Symlink(target, filepath.Join(links, binName("ruff"))); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink: %v (SeCreateSymbolicLinkPrivilege or developer mode needed on windows)", err)
+		}
 		t.Fatal(err)
 	}
 	sb := testSandbox(t)

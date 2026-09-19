@@ -14,10 +14,10 @@ import (
 )
 
 // fakeEmitter records what the vote path admitted. It lives in the tag-free
-// file for the reason stated above about extraProbes, inverted: it came from
-// runner_test.go, which is //go:build unix, while votes_test.go — which is not
-// — uses it, so the anchors package did not compile on Windows at all. Nothing
-// about an in-memory slice is platform-specific; only the file it sat in was.
+// file for the reason stated below about extraProbes, inverted: it came from
+// runner_test.go back when that file was //go:build unix, while votes_test.go
+// — which never was — uses it, so the anchors package did not compile on
+// Windows at all. Nothing about an in-memory slice is platform-specific.
 type fakeEmitter struct {
 	mu     sync.Mutex
 	events []*m1pv1.Event

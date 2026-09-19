@@ -1,5 +1,3 @@
-//go:build unix
-
 package anchors
 
 import (
@@ -10,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -321,7 +320,9 @@ func TestEvidenceStoreNeverReachesTheWire(t *testing.T) {
 		wire = append(wire, raw)
 	}
 
-	if st, _ := os.Stat(evidence.Dir(state)); st == nil || st.Mode().Perm() != 0o700 {
+	// Mode bits are a unix statement (NFR-PRIVACY-005); windows has none to read back.
+	unixModes := runtime.GOOS != "windows"
+	if st, _ := os.Stat(evidence.Dir(state)); st == nil || (unixModes && st.Mode().Perm() != 0o700) {
 		t.Fatalf("evidence dir %v, want 0700", st)
 	}
 	files, lines := 0, 0
@@ -330,7 +331,7 @@ func TestEvidenceStoreNeverReachesTheWire(t *testing.T) {
 			return err
 		}
 		files++
-		if st, _ := d.Info(); st.Mode().Perm() != 0o600 {
+		if st, _ := d.Info(); unixModes && st.Mode().Perm() != 0o600 {
 			t.Errorf("%s: mode %v, want 0600", p, st.Mode().Perm())
 		}
 		b, err := os.ReadFile(p)

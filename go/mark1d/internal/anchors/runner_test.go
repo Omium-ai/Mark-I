@@ -1,5 +1,3 @@
-//go:build unix
-
 package anchors
 
 import (
@@ -21,7 +19,7 @@ import (
 )
 
 // fakeSandbox returns a canned RunResult — runner/scheduler logic is platform-
-// independent; the REAL sandbox is exercised in sandbox_linux_test.go.
+// independent; the REAL sandbox is exercised in sandbox_probe_test.go.
 type fakeSandbox struct {
 	res      RunResult
 	err      error
