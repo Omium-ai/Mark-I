@@ -127,17 +127,32 @@ func TestVotesSlowAnchorPublishesRevised(t *testing.T) {
 // TestVotesSecondRunOfAnAnchorIsANewAttempt pins the attempt-counting rule the
 // knee is evaluated at: an anchor runs once per debounce round, so its second
 // vote is the next round.
+// TestVotesSecondRunOfAnAnchorIsANewAttempt: an attempt is a new state of the tree — a re-vote with the same evidence (a debounce re-run over an unchanged tree) stays on the same attempt; a re-vote whose evidence changed opens the next one.
 func TestVotesSecondRunOfAnAnchorIsANewAttempt(t *testing.T) {
 	eng := runEngine(t, voteMatrices())
 	v := votesFor(&fakeEmitter{}, eng, []CatalogEntry{{ID: "ruff@cat-1", Class: ClassFast}})
 	task := verdict.TaskID{4}
 	ctx := context.Background()
+	withErrors := func(n uint32) *m1pv1.Event {
+		ev := anchorVoteEvent(task, "ruff@cat-1", m1pv1.Verdict_VERDICT_VIOLATED, false)
+		ev.GetAnchorVote().Evidence = &m1pv1.EvidenceRecord{Tool: "ruff", DiagnosticCode: "F821", Counts: &m1pv1.EvidenceCounts{Errors: n, FilesAffected: 1}}
+		return ev
+	}
 	for i := range 3 {
-		if err := v.Admit(ctx, anchorVoteEvent(task, "ruff@cat-1", m1pv1.Verdict_VERDICT_VIOLATED, false)); err != nil {
+		if err := v.Admit(ctx, withErrors(uint32(3-i))); err != nil {
 			t.Fatal(err)
 		}
 		want := i + 1
 		waitCached(t, eng.Reader(), task, "attempt bump", func(e verdict.Cached) bool { return e.Knee.N == want })
+	}
+	for range 4 {
+		if err := v.Admit(ctx, withErrors(1)); err != nil { // the same evidence again: still attempt 3
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if e := waitCached(t, eng.Reader(), task, "cached", func(verdict.Cached) bool { return true }); e.Knee.N != 3 {
+		t.Fatalf("re-observing an unchanged tree bumped the attempt to %d", e.Knee.N)
 	}
 }
 

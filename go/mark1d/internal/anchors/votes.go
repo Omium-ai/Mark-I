@@ -43,7 +43,8 @@ type Votes struct {
 // member once, which is what the confusion model assumes.
 type taskVotes struct {
 	latest  map[string]verdict.AnchorVote
-	voted   map[string]bool // anchors that have already voted at this attempt
+	voted   map[string]bool   // anchors that have already voted at this attempt
+	seen    map[string]string // per anchor, the fingerprint of the evidence its last vote carried
 	attempt int
 	// evidence is the typed EvidenceRecord riding on each anchor's newest
 	// vote, kept beside the vote because the fusion tee strips it and the
@@ -135,10 +136,14 @@ func (v *Votes) resolve(ev *m1pv1.Event) (verdict.TaskID, bool) {
 //
 // Attempt counting is the caller's job (verdict.Engine takes n as a parameter)
 // and no document fixes how the edge derives n, so this is the operational
-// definition: an anchor runs at most once per debounce round, so the SECOND
-// vote from an anchor that has already voted is the first evidence of the next
-// round — that is where n increments. A REVISED (slow) completion is late
-// evidence for the attempt it was scheduled in, so it never bumps n on its own.
+// definition: an attempt is a new state of the tree the agent produced. The
+// SECOND vote from an anchor that has already voted opens the next attempt
+// only when its evidence differs from the last (output fingerprint, else the
+// typed counts); a debounce re-run over an unchanged tree (Write, cat, ls,
+// Stop — four re-observations in seven seconds, live 2026-09-19) is the same
+// attempt, or the knee arrests before the agent has had its first chance. A
+// REVISED (slow) completion is late evidence for the attempt it was scheduled
+// in, so it never bumps n on its own.
 // ponytail: per-task state is never evicted — task close (04 §9.2) is the
 // eviction trigger and the daemon does not segment tasks yet.
 func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote, ev *m1pv1.EvidenceRecord) ([]verdict.AnchorVote, int, bool) {
@@ -146,14 +151,16 @@ func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote, ev *m1pv1.E
 	defer v.mu.Unlock()
 	tv := v.tasks[task]
 	if tv == nil {
-		tv = &taskVotes{latest: map[string]verdict.AnchorVote{}, voted: map[string]bool{}, attempt: 1, evidence: map[string]*m1pv1.EvidenceRecord{}}
+		tv = &taskVotes{latest: map[string]verdict.AnchorVote{}, voted: map[string]bool{}, seen: map[string]string{}, attempt: 1, evidence: map[string]*m1pv1.EvidenceRecord{}}
 		v.tasks[task] = tv
 	}
-	if tv.voted[vote.AnchorID] {
+	fp := fingerprint(vote, ev)
+	if tv.voted[vote.AnchorID] && tv.seen[vote.AnchorID] != fp {
 		tv.attempt++
 		tv.voted = map[string]bool{}
 	}
 	tv.voted[vote.AnchorID] = true
+	tv.seen[vote.AnchorID] = fp
 	tv.latest[vote.AnchorID] = vote
 	tv.evidence[vote.AnchorID] = ev
 	out := make([]verdict.AnchorVote, 0, len(tv.latest))
@@ -168,6 +175,15 @@ func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote, ev *m1pv1.E
 // typed record as "<tool>:<code> errors=N warnings=M files=F", anchor-id
 // order, "; "-joined. Typed fields only -- no path, no excerpt (CON-004).
 // Empty when nothing violated, which the gate renders as no suffix.
+// fingerprint is what "the same evidence" means for attempt counting: the tool's output HMAC when the runner had a key, else the vote and its typed counts.
+func fingerprint(vote verdict.AnchorVote, ev *m1pv1.EvidenceRecord) string {
+	if h := ev.GetOutputHmac(); len(h) > 0 {
+		return string(h)
+	}
+	c := ev.GetCounts()
+	return fmt.Sprintf("%d|%s|%d|%d|%d|%v", vote.Vote, ev.GetDiagnosticCode(), c.GetErrors(), c.GetWarnings(), c.GetFilesAffected(), vote.Tamper)
+}
+
 func (v *Votes) Evidence(task verdict.TaskID) string {
 	v.mu.Lock()
 	defer v.mu.Unlock()
