@@ -112,6 +112,10 @@ func record(ctx context.Context, env *cli.Env, opts Options) error {
 		return cli.Failf(cli.ExitRuntime, "", "foreign session: %v", err)
 	}
 	if err := r.write(out, vendorDir, d.Version, opts.Out); err != nil {
+		if errors.Is(err, errSelfcheck) {
+			// The recording is complete and sanitized; only the reference check disagrees. Keep it, so the disagreement can be read instead of re-recorded.
+			return cli.Failf(cli.ExitRuntime, "", "%v; the recording is kept at %s for inspection (delete it before recording again)", err, out)
+		}
 		_ = os.RemoveAll(out)
 		return cli.Failf(cli.ExitRuntime, "", "%v", err)
 	}
@@ -232,10 +236,12 @@ func (r *recording) write(out, vendorDir, version, root string) error {
 	check := exec.Command("python3", "selfcheck.py") //nolint:gosec // G204: fixed argv
 	check.Dir, check.Stdout, check.Stderr = out, r.env.Stderr, r.env.Stderr
 	if err := check.Run(); err != nil {
-		return fmt.Errorf("selfcheck.py failed on the recording: %w", err)
+		return fmt.Errorf("%w: %v", errSelfcheck, err)
 	}
 	return nil
 }
+
+var errSelfcheck = errors.New("selfcheck.py failed on the recording")
 
 // sanitizer is the corpus README's rule as byte substitutions: the recording
 // machine's paths and user become the placeholders, every UUID and vendor id
@@ -287,6 +293,9 @@ func sanitizer(fixed [][2]string, keep ...string) func([]byte) []byte {
 			return synth(kind, id, func(n int) string { return fmt.Sprintf("%s_01SynthRecorded%08d", kind, n) })
 		})
 		s = hexRe.ReplaceAllStringFunc(s, func(h string) string {
+			if !strings.ContainsAny(h, "abcdef") {
+				return h // a 16–17 digit run with no letter is a number (2.1.278's cost-state totalCostUSD fraction), not an id
+			}
 			return synth("hex", h, func(n int) string { return "a7f3e2d1c0b9a8765a"[:len(h)-3] + fmt.Sprintf("%03d", n) })
 		})
 		return []byte(s)

@@ -300,7 +300,8 @@ func (s *Server) agents() []map[string]any {
 			return must(cp.Detect()), s.memoCompat("copilot", cp.Compatibility)
 		},
 		"cursor": func() (adapters.Detection, func(string) compatVerdict) {
-			return must((&cursor.Adapter{StateDir: d}).Detect()), pinned(cursor.Supported)
+			cu := &cursor.Adapter{StateDir: d}
+			return must(cu.Detect()), s.memoCompat("cursor", cu.Compatibility)
 		},
 	}
 	frags := s.fragments()
@@ -421,16 +422,6 @@ func (s *Server) memoCompat(agent string, probe func(string) (adapters.Compat, e
 			s.mu.Unlock()
 		}
 		return c
-	}
-}
-
-// pinned is the exact-pin verdict for the one surface with no artifact to probe (cursor: hooks only).
-func pinned(supported func(string) bool) func(string) compatVerdict {
-	return func(v string) compatVerdict {
-		if supported(v) {
-			return compatVerdict{compat: "pinned"}
-		}
-		return compatVerdict{compat: "incompatible", probe: "cursor is hooks-only: no artifact to probe, so only a recorded version is admitted"}
 	}
 }
 

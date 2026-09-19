@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -81,5 +82,17 @@ func TestDeriveExpectationsReproducesThePinnedOracle(t *testing.T) {
 		if !bytes.Equal(p, d) {
 			t.Fatalf("overcount_case.%s: pinned %s derived %s", k, p, d)
 		}
+	}
+}
+
+func TestSanitizerLeavesNumbersAlone(t *testing.T) {
+	san := sanitizer(nil)
+	in := `{"totalCostUSD":0.02843960000000001,"agentId":"agent-a7f3e2d1c0b9a8001","uuid":"3f9c2e71-58d4-4b6a-9e2f-7a1c0d8b4e55"}`
+	out := string(san([]byte(in)))
+	if !strings.Contains(out, `"totalCostUSD":0.02843960000000001`) {
+		t.Fatalf("a 17-digit decimal fraction was rewritten as a hex id: %s", out)
+	}
+	if strings.Contains(out, "a7f3e2d1c0b9a8001") || strings.Contains(out, "3f9c2e71") {
+		t.Fatalf("ids kept their recording-machine values: %s", out)
 	}
 }

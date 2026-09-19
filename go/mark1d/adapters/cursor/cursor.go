@@ -126,6 +126,28 @@ func Supported(version string) bool {
 	return ok
 }
 
+// Compatibility is the hooks-only form of D-EE's probe: Cursor writes no transcript, so the only artifact is the hook-shape file the shim spills per event (adapters.HookShape). A pinned version is Pinned; a version whose fired hooks carried every mapped field is CompatibleUnpinned; one that lost a field is Incompatible with the field named; a version that has fired nothing yet is Unprobed.
+func (a *Adapter) Compatibility(version string) (adapters.Compat, error) {
+	if Supported(version) {
+		return adapters.Pinned, nil
+	}
+	if version == "" {
+		return adapters.Incompatible, errors.New("cursor version unsniffable")
+	}
+	_, state, err := a.paths()
+	if err != nil {
+		return adapters.Incompatible, err
+	}
+	if err := adapters.HookShape(state, a.Name()); err != nil {
+		return adapters.Incompatible, err
+	}
+	shapes, _ := filepath.Glob(filepath.Join(state, "shape", a.Name(), "*.json"))
+	if len(shapes) == 0 {
+		return adapters.Unprobed, errors.New("no cursor hook has fired at this version yet; run one Cursor agent turn, then restart mark1d")
+	}
+	return adapters.CompatibleUnpinned, nil
+}
+
 func (a *Adapter) Provision(adapters.Workspace, adapters.Maps) error {
 	_, err := a.Apply()
 	return err

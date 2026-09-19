@@ -377,3 +377,26 @@ func TestRecentProjectsIsAnEmptyListWithoutASessionTree(t *testing.T) {
 		t.Fatalf("cursor has no local session tree; recent_projects must be [] not null: %v", got)
 	}
 }
+
+// TestCompatibilityIsHooksOnly: Cursor has no transcript to probe, so the shim's hook-shape files decide — nothing fired is Unprobed, every mapped field present is CompatibleUnpinned, a lost field is Incompatible by name.
+func TestCompatibilityIsHooksOnly(t *testing.T) {
+	a := &Adapter{Home: t.TempDir(), CursorDir: t.TempDir(), StateDir: t.TempDir()}
+	if c, err := a.Compatibility("2026.09.10-fd3934a"); c != adapters.Pinned || err != nil {
+		t.Fatalf("pinned = %v, %v", c, err)
+	}
+	if c, err := a.Compatibility("3.20.21"); c != adapters.Unprobed || err == nil || c.Admits() {
+		t.Fatalf("nothing fired = %v, %v", c, err)
+	}
+	if err := adapters.WriteShape(a.StateDir, "cursor", "preToolUse", map[string]string{"conversation_id": "string"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := a.Compatibility("3.20.21"); c != adapters.CompatibleUnpinned || err != nil || !c.Admits() {
+		t.Fatalf("well-shaped unpinned = %v, %v", c, err)
+	}
+	if err := adapters.WriteShape(a.StateDir, "cursor", "stop", map[string]string{"hook_event_name": "string"}, []string{"conversation_id"}); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := a.Compatibility("3.20.21"); c != adapters.Incompatible || err == nil || !strings.Contains(err.Error(), "conversation_id") {
+		t.Fatalf("lost field = %v, %v", c, err)
+	}
+}
