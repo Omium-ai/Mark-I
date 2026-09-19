@@ -18,9 +18,8 @@ func copilotAgent(env *cli.Env, opts Options, a *Agent) {
 		return
 	}
 	a.Version, a.Regime = d.Version, regimeWord(d.Regime)
-	if !copilot.Supported(d.Version) {
-		a.Note = "no pinned fixture for this version; session capture inert (08 §5 rule 2)"
-	}
+	c, err := cp.Compatibility(d.Version)
+	a.Note = compatNote(c, err, "session")
 	// FR-AGENT-014's three-way row: whether the BYOK env pointer was ever
 	// applied, and whether THIS process's environment — the user's shell, if
 	// they sourced the printed line into it — currently carries it.

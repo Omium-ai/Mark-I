@@ -27,8 +27,9 @@ import (
 
 func enrolledEnv(t *testing.T) (*cli.Env, *bytes.Buffer) {
 	t.Helper()
-	// Hermetic PATH: the developer's own `claude`/`codex`/`gemini`/`opencode` must not be what doctor sniffs.
+	// Hermetic PATH and HOME: the developer's own `claude`/`codex`/`gemini`/`opencode` must not be what doctor sniffs (adapters.LookPath also searches ~/.local/bin and friends), and the claudecode probe must not walk the developer's real ~/.claude/projects.
 	t.Setenv("PATH", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
 	for _, v := range []string{"CODEX_HOME", "GEMINI_CLI_HOME", "GEMINI_API_KEY", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "COPILOT_HOME", "COPILOT_PROVIDERS_CONFIG", "COPILOT_PROVIDER_BASE_URL", "COPILOT_PROVIDER_API_KEY"} {
 		t.Setenv(v, "")
 	}

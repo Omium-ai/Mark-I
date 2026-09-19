@@ -19,9 +19,8 @@ func geminiAgent(env *cli.Env, opts Options, a *Agent) {
 		return
 	}
 	a.Version, a.Regime = d.Version, regimeWord(d.Regime)
-	if !gemini.Supported(d.Version) {
-		a.Note = "no pinned fixture for this version; chat capture inert (08 §5 rule 2)"
-	}
+	c, err := g.Compatibility(d.Version)
+	a.Note = compatNote(c, err, "chat")
 	tmp, err := g.TmpDir()
 	if err != nil {
 		return

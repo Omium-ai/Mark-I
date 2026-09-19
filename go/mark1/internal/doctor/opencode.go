@@ -16,9 +16,8 @@ func opencodeAgent(env *cli.Env, opts Options, a *Agent) {
 		return
 	}
 	a.Version, a.Regime = d.Version, regimeWord(d.Regime)
-	if !opencode.Supported(d.Version) {
-		a.Note = "no pinned fixture for this version; usage capture inert (08 §5 rule 2)"
-	}
+	c, err := oc.Compatibility(d.Version)
+	a.Note = compatNote(c, err, "usage")
 	if _, err := opencode.LoadManifest(env.StateDir); err == nil {
 		a.Note = join(a.Note, "plugin loads at opencode start; restart any opencode running since `mark1 enable`")
 	}

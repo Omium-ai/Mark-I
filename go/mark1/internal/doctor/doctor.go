@@ -485,6 +485,24 @@ func retentionCheck(opts Options) Check {
 	return Check{"transcript_retention", true, fmt.Sprintf("cleanupPeriodDays=%d", *settings.CleanupPeriodDays)}
 }
 
+// compatNote words the daemon's own admission verdict (adapters.Compat) for the roster row: the daemon tails a CompatibleUnpinned version under a receipted window, so "inert" is said only when it really is.
+func compatNote(c adapters.Compat, err error, surface string) string {
+	switch c {
+	case adapters.Pinned:
+		return ""
+	case adapters.CompatibleUnpinned:
+		return "no pinned fixture for this version; its artifact shape passed the probe, so " + surface + " capture proceeds under a receipted unsupported_agent_version window"
+	case adapters.Unprobed:
+		return "no pinned fixture for this version and nothing of it on disk yet; " + surface + " capture starts once a session exists to probe"
+	default:
+		why := ""
+		if err != nil {
+			why = ": " + err.Error()
+		}
+		return "no pinned fixture for this version and its artifact shape failed the probe" + why + "; " + surface + " capture inert (08 §5 rule 2)"
+	}
+}
+
 func renderHuman(w io.Writer, r *Report) {
 	if len(r.Anchors) == 0 {
 		// Which kind of nothing: unpublished, no workspace, or nothing

@@ -283,23 +283,23 @@ func (s *Server) agents() []map[string]any {
 	d := s.cfg.StateDir
 	cc, cx := &claudecode.Adapter{StateDir: d}, &codex.Adapter{StateDir: d}
 	gm, oc, cp := &gemini.Adapter{StateDir: d}, &opencode.Adapter{StateDir: d}, &copilot.Adapter{StateDir: d}
-	detect := map[string]func() (adapters.Detection, func(string) string){
-		"claudecode": func() (adapters.Detection, func(string) string) {
+	detect := map[string]func() (adapters.Detection, func(string) compatVerdict){
+		"claudecode": func() (adapters.Detection, func(string) compatVerdict) {
 			return must(cc.Detect()), s.memoCompat("claudecode", cc.Compatibility)
 		},
-		"codex": func() (adapters.Detection, func(string) string) {
+		"codex": func() (adapters.Detection, func(string) compatVerdict) {
 			return must(cx.Detect()), s.memoCompat("codex", cx.Compatibility)
 		},
-		"gemini": func() (adapters.Detection, func(string) string) {
+		"gemini": func() (adapters.Detection, func(string) compatVerdict) {
 			return must(gm.Detect()), s.memoCompat("gemini", gm.Compatibility)
 		},
-		"opencode": func() (adapters.Detection, func(string) string) {
+		"opencode": func() (adapters.Detection, func(string) compatVerdict) {
 			return must(oc.Detect()), s.memoCompat("opencode", oc.Compatibility)
 		},
-		"copilot": func() (adapters.Detection, func(string) string) {
+		"copilot": func() (adapters.Detection, func(string) compatVerdict) {
 			return must(cp.Detect()), s.memoCompat("copilot", cp.Compatibility)
 		},
-		"cursor": func() (adapters.Detection, func(string) string) {
+		"cursor": func() (adapters.Detection, func(string) compatVerdict) {
 			return must((&cursor.Adapter{StateDir: d}).Detect()), pinned(cursor.Supported)
 		},
 	}
@@ -307,7 +307,7 @@ func (s *Server) agents() []map[string]any {
 	trees := s.sessionTrees()
 	out := make([]map[string]any, 0, len(adapters.Roster))
 	for _, slot := range adapters.Roster {
-		row := map[string]any{"name": slot.Name, "installed": false, "version": nil, "compat": nil, "regime": nil, "provisioned": nil, "recent_projects": []string{}, "paused": off.AgentOff(d, slot.Name)}
+		row := map[string]any{"name": slot.Name, "installed": false, "version": nil, "compat": nil, "probe": nil, "regime": nil, "provisioned": nil, "recent_projects": []string{}, "paused": off.AgentOff(d, slot.Name)}
 		det, ok := detect[slot.Name]
 		if !ok {
 			out = append(out, row)
@@ -316,7 +316,11 @@ func (s *Server) agents() []map[string]any {
 		dt, compat := det()
 		row["installed"] = dt.Installed
 		if dt.Installed {
-			row["compat"] = compat(dt.Version)
+			v := compat(dt.Version)
+			row["compat"] = v.compat
+			if v.probe != "" {
+				row["probe"] = v.probe
+			}
 			if dt.Version != "" {
 				row["version"] = dt.Version
 			}
@@ -392,10 +396,13 @@ func claudeRecentProjects() []string {
 	return out
 }
 
+// compatVerdict is one agent row's compat answer: the enum plus the probe's own words when it did not say pinned (the app shows them under the chip; item 18's "why").
+type compatVerdict struct{ compat, probe string }
+
 // memoCompat memoizes per agent and version: an unpinned version costs an artifact scan (each adapter's compat.go probe), seconds on a real home dir.
 // Unprobed is never memoized: "no transcript at this version yet" becomes a verdict after the user's first session.
-func (s *Server) memoCompat(agent string, probe func(string) (adapters.Compat, error)) func(string) string {
-	return func(v string) string {
+func (s *Server) memoCompat(agent string, probe func(string) (adapters.Compat, error)) func(string) compatVerdict {
+	return func(v string) compatVerdict {
 		key := agent + "@" + v
 		s.mu.Lock()
 		c, ok := s.compat[key]
@@ -403,8 +410,11 @@ func (s *Server) memoCompat(agent string, probe func(string) (adapters.Compat, e
 		if ok {
 			return c
 		}
-		k, _ := probe(v)
-		c = k.String()
+		k, err := probe(v)
+		c = compatVerdict{compat: k.String()}
+		if err != nil {
+			c.probe = err.Error()
+		}
 		if k != adapters.Unprobed {
 			s.mu.Lock()
 			s.compat[key] = c
@@ -415,12 +425,12 @@ func (s *Server) memoCompat(agent string, probe func(string) (adapters.Compat, e
 }
 
 // pinned is the exact-pin verdict for the one surface with no artifact to probe (cursor: hooks only).
-func pinned(supported func(string) bool) func(string) string {
-	return func(v string) string {
+func pinned(supported func(string) bool) func(string) compatVerdict {
+	return func(v string) compatVerdict {
 		if supported(v) {
-			return "pinned"
+			return compatVerdict{compat: "pinned"}
 		}
-		return "incompatible"
+		return compatVerdict{compat: "incompatible", probe: "cursor is hooks-only: no artifact to probe, so only a recorded version is admitted"}
 	}
 }
 

@@ -44,8 +44,8 @@ type Server struct {
 	reconcile func()
 	enrolled  func()
 	shutdown  func()
-	compat    map[string]string // "<agent>@<version>" -> verdict
-	files     sync.Mutex        // ponytail: serializes this process's read-modify-writes only; a concurrent `mark1 enable` races exactly as two CLIs do today
+	compat    map[string]compatVerdict // "<agent>@<version>" -> verdict + probe text
+	files     sync.Mutex               // ponytail: serializes this process's read-modify-writes only; a concurrent `mark1 enable` races exactly as two CLIs do today
 }
 
 func Path(stateDir string) string { return filepath.Join(stateDir, "run", "control.json") }
@@ -106,7 +106,7 @@ func Listen(cfg Config) (*Server, error) {
 		_ = l.Close()
 		return nil, err
 	}
-	s := &Server{cfg: cfg, l: l, host: l.Addr().String(), token: hex.EncodeToString(raw[:]), since: time.Now(), hub: NewHub(), compat: map[string]string{}}
+	s := &Server{cfg: cfg, l: l, host: l.Addr().String(), token: hex.EncodeToString(raw[:]), since: time.Now(), hub: NewHub(), compat: map[string]compatVerdict{}}
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: readHeaderTimeout}
 	port := l.Addr().(*net.TCPAddr).Port
 	b, _ := json.Marshal(discovery{Port: port, Token: s.token})

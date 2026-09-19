@@ -20,10 +20,10 @@ func codexAgent(env *cli.Env, opts Options, a *Agent) {
 	switch {
 	case !d.Installed:
 		a.Note = "codex not on PATH"
-	case !codex.Supported(d.Version):
-		a.Version, a.Note = d.Version, "no pinned fixture for this version; rollout capture inert (08 §5 rule 2)"
 	default:
 		a.Version = d.Version
+		c, err := cx.Compatibility(d.Version)
+		a.Note = compatNote(c, err, "rollout")
 	}
 	if d.Installed {
 		a.Regime = regimeWord(d.Regime)

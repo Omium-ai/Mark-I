@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -99,9 +100,11 @@ func (a *Adapter) Compatibility(version string) (Compat, error) {
 
 var errUnprobed = errors.New("no transcript at this version yet")
 
-// probe scans transcripts newest-first for the first assistant usage line
+// probeFiles bounds the newest-first scan: a session at the running version is among the newest transcripts or nowhere (a 1.4 GB ~/.claude/projects took minutes unbounded, on every /v1/agents call while Unprobed).
+const probeFiles = 64
+
+// probe scans the newest transcripts for the first assistant usage line
 // stamped with version and checks it against probeLine.
-// ponytail: unbounded newest-first scan; cap the file count if boot gets slow.
 func probe(projects, version string) error {
 	type file struct {
 		path string
@@ -118,6 +121,9 @@ func probe(projects, version string) error {
 		return nil
 	})
 	sort.Slice(files, func(i, j int) bool { return files[i].mod > files[j].mod })
+	if len(files) > probeFiles {
+		files = files[:probeFiles]
+	}
 	for _, f := range files {
 		line, found, err := candidate(f.path, version)
 		if err != nil || !found {
@@ -143,8 +149,15 @@ func candidate(path, version string) ([]byte, bool, error) {
 	}
 	defer func() { _ = f.Close() }()
 	r := bufio.NewReader(f)
+	stamp := []byte(`"version":"` + version + `"`)
 	for {
 		line, err := r.ReadBytes('\n')
+		if !bytes.Contains(line, stamp) { // the cheap test first: most lines are not this version's assistant usage
+			if err != nil {
+				return nil, false, nil
+			}
+			continue
+		}
 		var l struct {
 			Type    string `json:"type"`
 			Version string `json:"version"`

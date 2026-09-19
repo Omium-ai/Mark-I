@@ -22,7 +22,8 @@
         "/Users/dev/myrepo",
         "/Users/dev/api-service"
       ],
-      "paused": false
+      "paused": false,
+      "probe": null
     },
     {
       "name": "codex",
@@ -45,7 +46,8 @@
         ]
       },
       "recent_projects": [],
-      "paused": false
+      "paused": false,
+      "probe": null
     },
     {
       "name": "gemini",
@@ -55,7 +57,8 @@
       "regime": "subscription",
       "provisioned": null,
       "recent_projects": [],
-      "paused": false
+      "paused": false,
+      "probe": null
     },
     {
       "name": "opencode",
@@ -65,7 +68,8 @@
       "regime": "subscription",
       "provisioned": null,
       "recent_projects": [],
-      "paused": false
+      "paused": false,
+      "probe": null
     },
     {
       "name": "copilot",
@@ -85,7 +89,8 @@
         "notes": []
       },
       "recent_projects": [],
-      "paused": false
+      "paused": false,
+      "probe": null
     },
     {
       "name": "cursor",
@@ -101,7 +106,8 @@
         ]
       },
       "recent_projects": [],
-      "paused": false
+      "paused": false,
+      "probe": null
     },
     {
       "name": "crush",
@@ -111,7 +117,8 @@
       "regime": null,
       "provisioned": null,
       "recent_projects": [],
-      "paused": false
+      "paused": false,
+      "probe": null
     }
   ],
   "fragments": [
@@ -197,7 +204,7 @@
     {
       "name": "disk_hard_stop",
       "ok": true,
-      "detail": "spool below the 95 % hard stop (07 §6)"
+      "detail": "spool below the 95 % hard stop (07 \u00a76)"
     },
     {
       "name": "anchor_candidates",
