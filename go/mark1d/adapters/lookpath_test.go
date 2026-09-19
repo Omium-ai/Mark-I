@@ -5,6 +5,7 @@ package adapters
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -66,5 +67,28 @@ func TestLookPathPrefersPATHAndNewestNode(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	if _, err := LookPath("claude", filepath.Join(home, "nowhere")); err == nil {
 		t.Fatal("PATH cleared and a home with no installs: must be not found")
+	}
+}
+
+// TestLookPathPrefersNativeOverWSLInterop: under WSL the login PATH carries /mnt/c/…, where a Windows npm shim of the agent lives; the Linux install (nvm here) is this daemon's agent, the shim is the Windows daemon's. Only with no native install does the shim answer.
+func TestLookPathPrefersNativeOverWSLInterop(t *testing.T) {
+	home := t.TempDir()
+	drive := filepath.Join(t.TempDir(), "Users", "u", "AppData", "Roaming", "npm")
+	shim := plant(t, drive, "claude")
+	saved := isInterop
+	isInterop = func(p string) bool { return strings.HasPrefix(p, drive) }
+	t.Cleanup(func() { isInterop = saved })
+	t.Setenv("PATH", drive)
+	if got, _ := LookPath("claude", home); got != shim {
+		t.Fatalf("no native install: the shim is the only answer, got %q", got)
+	}
+	native := plant(t, filepath.Join(home, ".nvm", "versions", "node", "v24.18.0", "bin"), "claude")
+	if got, _ := LookPath("claude", home); got != native {
+		t.Fatalf("got %q, want the native install %q over the interop shim on PATH", got, native)
+	}
+	t.Setenv("WSL_DISTRO_NAME", "Ubuntu")
+	isInterop = saved
+	if !isInterop("/mnt/c/Users/u/AppData/Roaming/npm/claude") || isInterop("/home/u/.nvm/versions/node/v24.18.0/bin/claude") || isInterop("/mnt/wsl/x") {
+		t.Fatal("isInterop must accept /mnt/<drive>/ paths only")
 	}
 }

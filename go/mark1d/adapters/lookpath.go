@@ -6,12 +6,18 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 )
 
 // LookPath is exec.LookPath plus the install dirs a desktop-launched or service-supervised daemon's PATH lacks (launchd/systemd --user/GNOME hand it /usr/bin:/bin; nvm, ~/.local/bin and Homebrew live in shell rc files).
+// Under WSL the login PATH also carries every Windows dir (/mnt/c/…), so a Windows npm shim of the same agent can shadow the Linux install; that one is the Windows daemon's agent, never this one's — a native hit from the install dirs wins over it, and it is the answer only when nothing native exists.
 func LookPath(name, home string) (string, error) {
+	interop := ""
 	if p, err := exec.LookPath(name); err == nil {
-		return p, nil
+		if !isInterop(p) {
+			return p, nil
+		}
+		interop = p
 	}
 	if home == "" {
 		home, _ = os.UserHomeDir()
@@ -21,7 +27,18 @@ func LookPath(name, home string) (string, error) {
 			return p, nil
 		}
 	}
+	if interop != "" {
+		return interop, nil
+	}
 	return "", exec.ErrNotFound
+}
+
+// isInterop: a Linux path under a WSL drive mount (/mnt/<drive>/…) resolves to a Windows program through binfmt interop. A var so a test can name its own mount.
+var isInterop = func(p string) bool {
+	if runtime.GOOS != "linux" || os.Getenv("WSL_DISTRO_NAME") == "" && os.Getenv("WSL_INTEROP") == "" {
+		return false
+	}
+	return len(p) > 6 && strings.HasPrefix(p, "/mnt/") && p[6] == '/'
 }
 
 func installDirs(home string) []string {
