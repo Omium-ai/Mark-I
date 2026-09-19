@@ -25,7 +25,7 @@
     },
     "session": {
       "type": "object",
-      "required": ["session_id", "agent", "project", "started_at", "ended_at", "tokens", "tasks", "verified_outcomes", "arrests", "injections", "route_decisions", "coverage", "checkpoint_seq"],
+      "required": ["session_id", "agent", "project", "started_at", "ended_at", "tokens", "tasks", "verified_outcomes", "arrests", "injections", "route_decisions", "coverage", "checkpoint_seq", "history_import"],
       "additionalProperties": false,
       "properties": {
         "session_id": { "type": "string", "format": "uuid" },
@@ -60,7 +60,8 @@
             "dropped_billing": { "type": "integer", "minimum": 0, "description": "billing-grade Dropped{} quantity attributed to this session" }
           }
         },
-        "checkpoint_seq": { "type": "integer", "minimum": 0, "description": "the newest receipt checkpoint covering this session; 0 = not yet checkpointed" }
+        "checkpoint_seq": { "type": "integer", "minimum": 0, "description": "the newest receipt checkpoint covering this session; 0 = not yet checkpointed" },
+        "history_import": { "type": "boolean", "description": "the tailer imported this session from transcript history on its first tail (a history_import coverage window), so it was not captured live" }
       }
     }
   }

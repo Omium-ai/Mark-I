@@ -5,15 +5,16 @@ func init() { v1Templates = append(v1Templates, appTemplates...) }
 
 var appTemplates = []template{
 	{
-		// appapi GET /sessions (desktop spec §5.2): one row per session over [from, to]; project = SessionStart.workspace_id hex, capture_paths the protojson enum names; arrests are task-bearing GuardDecision rows (the `interventions` reading). ponytail: agent/project/cursor filters are applied by the handler over this window scan; push them into the template when a tenant's window outgrows the row limit.
+		// appapi GET /sessions (desktop spec §5.2): one row per session over [from, to]; project = SessionStart.workspace_id hex, capture_paths the protojson enum names; arrests are task-bearing GuardDecision rows (the `interventions` reading); history_import marks a session the tailer imported from transcript history (its history_import CoverageTransition, stamped at import time, is kept out of started_at/ended_at). ponytail: agent/project/cursor filters are applied by the handler over this window scan; push them into the template when a tenant's window outgrows the row limit.
 		name:    "app_sessions",
-		version: "app_sessions.v2",
+		version: "app_sessions.v3",
 		body: `SELECT e.session_id AS session_id,
        coalesce(nullIf(anyIf(JSONExtractString(e.payload, 'agent'), e.event_type = 'SessionStart'), ''), anyIf(e.agent, e.agent != '')) AS agent,
        hex(base64Decode(maxIf(JSONExtractString(e.payload, 'workspace_id'), e.event_type = 'SessionStart'))) AS project,
        anyIf(JSONExtract(e.payload, 'capture_paths', 'Array(String)'), e.event_type = 'SessionStart') AS capture_paths,
-       min(e.occurred_at) AS started_at,
-       max(e.occurred_at) AS ended_at,
+       minIf(e.occurred_at, e.event_type != 'CoverageTransition') AS started_at,
+       maxIf(e.occurred_at, e.event_type != 'CoverageTransition') AS ended_at,
+       countIf(e.event_type = 'CoverageTransition' AND JSONExtractString(e.payload, 'reason_code') = 'history_import') > 0 AS history_import,
        sum(e.input_tokens)                AS tokens_in,
        sum(e.output_tokens)               AS tokens_out,
        sum(e.cache_read_input_tokens)     AS tokens_cache_read,

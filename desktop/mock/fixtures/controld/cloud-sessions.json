@@ -7,7 +7,7 @@
       "observed_fraction": 0.98
     },
     "guarantee_grade": false,
-    "refusal": "M1E-5004 rollup missing for 6 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 §8.4)",
+    "refusal": "M1E-5004 rollup missing for 6 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 \u00a78.4)",
     "task_seg_version": "task_seg.v1"
   },
   "next_cursor": null,
@@ -38,7 +38,8 @@
         "input": 1000,
         "output": 200
       },
-      "verified_outcomes": 1
+      "verified_outcomes": 1,
+      "history_import": false
     },
     {
       "agent": "codex",
@@ -65,7 +66,8 @@
         "input": 1000,
         "output": 200
       },
-      "verified_outcomes": 1
+      "verified_outcomes": 1,
+      "history_import": false
     }
   ],
   "window": {

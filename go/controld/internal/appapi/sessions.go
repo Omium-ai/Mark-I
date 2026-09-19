@@ -24,6 +24,7 @@ type sessionRow struct {
 	RouteDecisions   uint64   `json:"route_decisions"`
 	Coverage         coverage `json:"coverage"`
 	CheckpointSeq    uint64   `json:"checkpoint_seq"`
+	HistoryImport    bool     `json:"history_import"` // imported from transcript history on first tail, not captured live
 }
 
 type tokens struct {
@@ -69,6 +70,7 @@ func sessionFromRow(row map[string]any) sessionRow {
 			DroppedBilling:   asU64(row["dropped_billing"]),
 		},
 		CheckpointSeq: asU64(row["checkpoint_seq"]),
+		HistoryImport: asU64(row["history_import"]) != 0,
 	}
 }
 
