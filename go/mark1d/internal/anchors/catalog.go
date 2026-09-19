@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -352,7 +353,7 @@ func Explain(sb Sandbox, worktree string) (Derivation, error) {
 			miss(d, bin+" is unreadable") // unreadable binary cannot be consent-hashed, so cannot exist
 			continue
 		}
-		version, err := sniffVersion(sb, abs, prefix, d.versionArgs)
+		version, err := sniffVersion(sb, abs, prefix, d.versionArgs, toolchainEnv(d.binary, ""))
 		if errors.Is(err, ErrSandboxUnavailable) && (!sb.Status().Available || d.execsRepoCode || d.sideEffect == SideEffectTest) {
 			miss(d, "the sandbox cannot run it here: "+sb.Status().Reason) // the run would be refused exactly like the sniff was
 			continue
@@ -387,7 +388,7 @@ func Explain(sb Sandbox, worktree string) (Derivation, error) {
 // refusal is returned so Derive can tell it from a tool that merely failed.
 func trimExe(name string) string { return strings.TrimSuffix(strings.ToLower(name), ".exe") }
 
-func sniffVersion(sb Sandbox, worktree string, prefix, args []string) (string, error) {
+func sniffVersion(sb Sandbox, worktree string, prefix, args []string, extra map[string]string) (string, error) {
 	if sb == nil {
 		return "", nil
 	}
@@ -397,10 +398,12 @@ func sniffVersion(sb Sandbox, worktree string, prefix, args []string) (string, e
 	limits.CPUSeconds = uint64(versionSniffTimeout / time.Second)
 	limits.Wall = versionSniffTimeout
 	limits.OutputCap = sniffVersionOutputCap
+	env := map[string]string{"PATH": filepath.Dir(prefix[0]), "LANG": "C"}
+	maps.Copy(env, extra) // rustup's proxy answers --version by syncing the channel unless it can see its toolchains
 	res, err := sb.Run(ctx, RunSpec{
 		Argv:              append(append([]string{}, prefix...), args...),
 		WorktreeRO:        worktree,
-		Env:               map[string]string{"PATH": filepath.Dir(prefix[0]), "LANG": "C"},
+		Env:               env,
 		Limits:            limits,
 		RequireFSConfined: true,
 	})
