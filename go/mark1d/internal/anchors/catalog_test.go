@@ -32,9 +32,11 @@ func binName(name string) string {
 }
 
 // fakeBin drops an executable named `name` into dir that prints `version` for
-// any invocation — a sh script on unix; on windows a copy of this test binary
-// (an AppContainer cannot run a batch file) beside a `<name>.exe.version`
-// sidecar that TestMain prints — enough for LookPath + the version sniff.
+// any invocation — a sh script on unix; on windows a byte copy of this test
+// binary (an AppContainer cannot run a batch file; a hard link would share the
+// running image, which Windows lets nobody rewrite or delete) beside a
+// `<name>.exe.version` sidecar that TestMain prints — enough for LookPath +
+// the version sniff.
 func fakeBin(t *testing.T, dir, name, version string) string {
 	t.Helper()
 	p := filepath.Join(dir, binName(name))
@@ -43,15 +45,12 @@ func fakeBin(t *testing.T, dir, name, version string) string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_ = os.Remove(p)
-		if err := os.Link(self, p); err != nil {
-			b, rerr := os.ReadFile(self)
-			if rerr != nil {
-				t.Fatal(rerr)
-			}
-			if err := os.WriteFile(p, b, 0o755); err != nil {
-				t.Fatal(err)
-			}
+		b, err := os.ReadFile(self)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, b, 0o755); err != nil {
+			t.Fatal(err)
 		}
 		if err := os.WriteFile(p+versionSidecar, []byte(version+"\n"), 0o644); err != nil {
 			t.Fatal(err)
