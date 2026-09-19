@@ -18,6 +18,7 @@ type diffFacts struct {
 	delta int32
 	raw   []byte
 	paths []string // git status paths, worktree-relative, slash-separated
+	known bool     // git status answered; false = no git/no repo, so nothing is known about what was touched
 }
 
 var (
@@ -122,12 +123,12 @@ func (r *Runner) diff(ctx context.Context, worktree string) diffFacts {
 	}
 	raw, _ := run("diff", "HEAD", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv")
 	delta := suppressionDelta(raw)
-	return diffFacts{class: classifyDiff(paths, delta), delta: delta, raw: raw, paths: paths}
+	return diffFacts{class: classifyDiff(paths, delta), delta: delta, raw: raw, paths: paths, known: true}
 }
 
-// touchedSet is diffFacts.paths as the RunResult.Touched map; nil when git said nothing (no repo, no git): then every finding counts.
+// touchedSet is diffFacts.paths as the RunResult.Touched map; nil when git could not answer (no repo, no git): then every finding counts. A clean tree is an empty set, not nil: nothing was touched, so every finding is baseline.
 func (d diffFacts) touchedSet() map[string]bool {
-	if d.paths == nil {
+	if !d.known {
 		return nil
 	}
 	out := map[string]bool{}

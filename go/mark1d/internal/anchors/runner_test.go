@@ -880,3 +880,15 @@ func TestBaselineFindingsNeverViolate(t *testing.T) {
 		t.Fatal("touched must resolve absolute, ./-prefixed and directory-listed paths")
 	}
 }
+
+func TestTouchedSetDistinguishesCleanFromUnknown(t *testing.T) {
+	if (diffFacts{}).touchedSet() != nil {
+		t.Fatal("no git answer must read as unknown (nil)")
+	}
+	if s := (diffFacts{known: true}).touchedSet(); s == nil || len(s) != 0 {
+		t.Fatalf("a clean tree is the empty set, got %v", s)
+	}
+	if s := (diffFacts{known: true, paths: []string{"a/b.py", "dir/"}}).touchedSet(); !s["a/b.py"] || !s["dir"] {
+		t.Fatalf("paths lost: %v", s)
+	}
+}
