@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,13 +81,31 @@ func defectWorkspace(t *testing.T) string {
 	}
 	for name, body := range map[string]string{
 		"pyproject.toml": "[tool.ruff]\n",
-		"defect.py":      "import os\n",
+		"defect.py":      "x = 1\n",
 	} {
 		if err := os.WriteFile(filepath.Join(ws, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
+	// A repo committed CLEAN, then the defect as the agent's uncommitted edit: a finding in a file git says was touched is the agent's (a committed one would be the repo's baseline), and an attempt is a new state of the tree (votes.go record), so the retry loop below edits the tracked file each time.
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "clean"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = ws
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Skipf("git %v: %v: %s", args, err, out)
+		}
+	}
+	retry(t, ws, 0)
 	return ws
+}
+
+// retry is the agent's n-th try: it edits the tracked file (the tree changes) but the defect stays.
+func retry(t *testing.T, ws string, n int) {
+	t.Helper()
+	body := fmt.Sprintf("import os\n# attempt %d\n", n)
+	if err := os.WriteFile(filepath.Join(ws, "defect.py"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // consentTo is the user's half — `mark1 doctor --approve` — done against the
@@ -223,6 +242,7 @@ func TestPhase2RetryLoopArrestedAtTheKnee(t *testing.T) {
 	// keep going, which is the whole mechanism.
 	var last *m1pv1.GateVerdict
 	for n := 1; n < kneeAttempt; n++ {
+		retry(t, ws, n)
 		c.toolUse(session, n)
 		want := fmt.Sprintf("attempt %d", n)
 		waitFor(t, "the stop gate to BLOCK at "+want, func() bool {
@@ -240,6 +260,7 @@ func TestPhase2RetryLoopArrestedAtTheKnee(t *testing.T) {
 	// The knee: same defect, same anchor, same fused verdict — only the attempt
 	// index moved onto the second row, and another attempt stops being worth
 	// paying for. The loop is arrested.
+	retry(t, ws, kneeAttempt)
 	c.toolUse(session, kneeAttempt)
 	waitFor(t, "the knee governor to arrest the retry loop", func() bool {
 		last = c.gate()

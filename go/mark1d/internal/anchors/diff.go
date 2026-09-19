@@ -3,6 +3,8 @@ package anchors
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -124,6 +126,20 @@ func (r *Runner) diff(ctx context.Context, worktree string) diffFacts {
 	raw, _ := run("diff", "HEAD", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv")
 	delta := suppressionDelta(raw)
 	return diffFacts{class: classifyDiff(paths, delta), delta: delta, raw: raw, paths: paths, known: true}
+}
+
+// fingerprint names the state of the tree these facts describe: the status paths plus the diff against HEAD; empty when git could not answer. Content edits inside an untracked file do not move it — the vote tee ORs it with the evidence fingerprint for that case.
+func (d diffFacts) fingerprint() string {
+	if !d.known {
+		return ""
+	}
+	h := sha256.New()
+	for _, p := range d.paths {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	h.Write(d.raw)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // touchedSet is diffFacts.paths as the RunResult.Touched map; nil when git could not answer (no repo, no git): then every finding counts. A clean tree is an empty set, not nil: nothing was touched, so every finding is baseline.

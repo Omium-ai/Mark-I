@@ -251,6 +251,11 @@ type Emitter interface {
 	Admit(ctx context.Context, ev *m1pv1.Event) error
 }
 
+// treeNoter is the in-package side channel from the runner to the vote tee: which state of the tree a vote judged (the wire vote carries no slot for it — WorktreeMerkleRoot is cortexd's certification root, not this).
+type treeNoter interface {
+	NoteTree(task [16]byte, anchorID, fingerprint string)
+}
+
 // DeriveOutputHMACKey derives the per-tenant anchor-output HMAC key from the
 // tenant HMAC root (label parallel to tailers.DeriveUsageIdemKey). Per-tenant
 // keyed and not a plain hash for artifacts.proto's reason: diagnostics have
@@ -427,6 +432,9 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 		Integrity: integrity,
 	}
 	r.signVote(av)
+	if n, ok := r.emit.(treeNoter); ok {
+		n.NoteTree(task, e.ID, d.fingerprint()) // the attempt boundary the vote tee counts on: the tree this vote judged
+	}
 	ev := &m1pv1.Event{
 		SessionId:  session[:],
 		TaskId:     task[:],

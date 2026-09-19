@@ -44,7 +44,8 @@ type Votes struct {
 type taskVotes struct {
 	latest  map[string]verdict.AnchorVote
 	voted   map[string]bool   // anchors that have already voted at this attempt
-	seen    map[string]string // per anchor, the fingerprint of the evidence its last vote carried
+	seen    map[string]string // per anchor, the fingerprint (tree + evidence) its last vote carried
+	tree    map[string]string // per anchor, the tree fingerprint the runner noted for its next vote
 	attempt int
 	// evidence is the typed EvidenceRecord riding on each anchor's newest
 	// vote, kept beside the vote because the fusion tee strips it and the
@@ -151,10 +152,9 @@ func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote, ev *m1pv1.E
 	defer v.mu.Unlock()
 	tv := v.tasks[task]
 	if tv == nil {
-		tv = &taskVotes{latest: map[string]verdict.AnchorVote{}, voted: map[string]bool{}, seen: map[string]string{}, attempt: 1, evidence: map[string]*m1pv1.EvidenceRecord{}}
-		v.tasks[task] = tv
+		tv = v.newTask(task)
 	}
-	fp := fingerprint(vote, ev)
+	fp := tv.tree[vote.AnchorID] + "|" + fingerprint(vote, ev)
 	if tv.voted[vote.AnchorID] && tv.seen[vote.AnchorID] != fp {
 		tv.attempt++
 		tv.voted = map[string]bool{}
@@ -175,6 +175,23 @@ func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote, ev *m1pv1.E
 // typed record as "<tool>:<code> errors=N warnings=M files=F", anchor-id
 // order, "; "-joined. Typed fields only -- no path, no excerpt (CON-004).
 // Empty when nothing violated, which the gate renders as no suffix.
+func (v *Votes) newTask(task verdict.TaskID) *taskVotes {
+	tv := &taskVotes{latest: map[string]verdict.AnchorVote{}, voted: map[string]bool{}, seen: map[string]string{}, tree: map[string]string{}, attempt: 1, evidence: map[string]*m1pv1.EvidenceRecord{}}
+	v.tasks[task] = tv
+	return tv
+}
+
+// NoteTree is the runner's side channel (runner.go treeNoter): the state of the tree the anchor's next vote judged. A changed tree is a new attempt even when the evidence reads the same (the defect stayed put while the agent edited elsewhere).
+func (v *Votes) NoteTree(task [16]byte, anchorID, fingerprint string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	tv := v.tasks[task]
+	if tv == nil {
+		tv = v.newTask(task)
+	}
+	tv.tree[anchorID] = fingerprint
+}
+
 // fingerprint is what "the same evidence" means for attempt counting: the tool's output HMAC when the runner had a key, else the vote and its typed counts.
 func fingerprint(vote verdict.AnchorVote, ev *m1pv1.EvidenceRecord) string {
 	if h := ev.GetOutputHmac(); len(h) > 0 {
