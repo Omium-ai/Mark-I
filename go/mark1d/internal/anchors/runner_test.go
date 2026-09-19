@@ -731,10 +731,10 @@ func TestRunOneDiffReachesTheEnvelope(t *testing.T) {
 	if in.GetDiffClassification() != m1pv1.DiffClassification_DIFF_CLASSIFICATION_TEST_TOUCHED || in.GetSuppressionDirectiveDelta() != 1 {
 		t.Fatalf("integrity %v, want TEST_TOUCHED with delta 1", in)
 	}
-	if len(sb.specs) != 3 || sb.specs[0].Argv[0] != e.BinaryPath {
-		t.Fatalf("%d sandbox runs, want anchor then two git reads", len(sb.specs))
+	if len(sb.specs) != 3 || sb.specs[2].Argv[0] != e.BinaryPath {
+		t.Fatalf("%d sandbox runs, want two git reads then the anchor", len(sb.specs))
 	}
-	for _, s := range sb.specs[1:] {
+	for _, s := range sb.specs[:2] {
 		if !s.RequireFSConfined || strings.TrimSuffix(filepath.Base(s.Argv[0]), filepath.Ext(s.Argv[0])) != "git" || s.WorktreeRO != wt {
 			t.Fatalf("git read %+v is not confined to the worktree", s.Argv)
 		}
@@ -852,5 +852,31 @@ func TestEmitExcerptE1NeedsTheStepFourConsent(t *testing.T) {
 	}
 	if len(dropped) != 4 || len(em.all()) != 2 {
 		t.Fatalf("dropped %v, emitted %d", dropped, len(em.all()))
+	}
+}
+
+// TestBaselineFindingsNeverViolate: the verdict is about the change. A repo that already carried 243 ruff findings (omium-mark1's own root, 2026-09-19) must not read VIOLATED on every turn — only a finding in a file the agent touched does; untouched findings are the baseline, and a tool that failed on the baseline alone is SATISFIED with diagnostic baseline_only.
+func TestBaselineFindingsNeverViolate(t *testing.T) {
+	h := defaultHandlers[KindRuff]
+	out := []byte("legacy/old.py:3:1: F401 `os` imported but unused\nsrc/new.py:7:5: F821 Undefined name `x`\nvendor/lib/x.py:1:1: E501 Line too long\n")
+	set := map[string]bool{"src/new.py": true, "vendor/": true}
+	v, ev := h(RunResult{ExitCode: 1, Stdout: out, Touched: set, Worktree: "/w"})
+	if v != m1pv1.Verdict_VERDICT_VIOLATED || ev.GetCounts().GetErrors() != 2 || ev.GetCounts().GetFilesAffected() != 2 || ev.GetDiagnosticCode() != "F821" {
+		t.Fatalf("touched findings must violate and be counted: %v %+v", v, ev)
+	}
+	v, ev = h(RunResult{ExitCode: 1, Stdout: out, Touched: map[string]bool{"README.md": true}, Worktree: "/w"})
+	if v != m1pv1.Verdict_VERDICT_SATISFIED || ev.GetDiagnosticCode() != "baseline_only" || ev.GetCounts().GetErrors() != 0 {
+		t.Fatalf("baseline-only failure must read SATISFIED/baseline_only: %v %+v", v, ev)
+	}
+	v, ev = h(RunResult{ExitCode: 1, Stdout: out, Worktree: "/w"})
+	if v != m1pv1.Verdict_VERDICT_VIOLATED || ev.GetCounts().GetErrors() != 3 {
+		t.Fatalf("no git ⇒ every finding counts: %v %+v", v, ev)
+	}
+	v, ev = h(RunResult{ExitCode: 2, Stdout: []byte("ruff: error: bad flag\n"), Touched: set, Worktree: "/w"})
+	if v != m1pv1.Verdict_VERDICT_ERROR || ev.GetDiagnosticCode() != "tool_error" {
+		t.Fatalf("a tool failure with no findings stays an error: %v %+v", v, ev)
+	}
+	if !touched(set, "/w", "/w/src/new.py") || touched(set, "/w", "./legacy/old.py") || !touched(set, "/w", "vendor/lib/x.py") {
+		t.Fatal("touched must resolve absolute, ./-prefixed and directory-listed paths")
 	}
 }

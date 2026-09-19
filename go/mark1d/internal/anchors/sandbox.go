@@ -94,4 +94,7 @@ type RunResult struct {
 	// env_scrub_attestation input (proto verify.proto: "the exact env map
 	// passed to RunSpec", plus the sandbox-owned HOME)
 	Duration time.Duration
+	// Touched is the set of worktree-relative paths git reports as changed or untracked when the run began (nil = unknown, every finding counts), and Worktree the root they are relative to. A static anchor's verdict is about the change, not the repo's history: a finding in an untouched file is the baseline the repo already carried, never the agent's doing.
+	Touched  map[string]bool
+	Worktree string
 }

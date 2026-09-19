@@ -37,7 +37,7 @@ var ErrRefused = errors.New("anchors: run refused")
 // It sees only RunResult — the Runner owns the sandbox call so the integrity
 // envelope is computed over the SAME run the handler judged (04 §2.2). The
 // handler never sees infra failures: crash/timeout/sandbox-error short-circuit
-// to VERDICT_ERROR before parsing (F-31, "error, never violated").
+// to VERDICT_ERROR before parsing (F-31, "error, never violated"). A finding in a file res.Touched does not name is the repo's baseline and never violates (RunResult.Touched); test-class anchors carry no file per failure, so every failure counts there.
 type Handler func(res RunResult) (m1pv1.Verdict, *m1pv1.EvidenceRecord)
 
 // defaultHandlers is the PROBE_HANDLERS twin of the detector table: every
@@ -147,12 +147,16 @@ func goVetLine(l string) (diag, bool) {
 // customer's code as broken).
 func lineHandler(tool string, cat m1pv1.EvidenceCategory, parse func(string) (diag, bool)) Handler {
 	return func(res RunResult) (m1pv1.Verdict, *m1pv1.EvidenceRecord) {
-		var errs, warns uint32
+		var errs, warns, baseline uint32
 		files := map[string]bool{}
 		code := ""
 		for _, l := range strings.Split(string(res.Stdout)+"\n"+string(res.Stderr), "\n") {
 			d, ok := parse(strings.TrimSpace(l))
 			if !ok {
+				continue
+			}
+			if d.file != "" && !touched(res.Touched, res.Worktree, d.file) {
+				baseline++ // the repo carried this before the agent touched anything
 				continue
 			}
 			if d.file != "" {
@@ -179,6 +183,9 @@ func lineHandler(tool string, cat m1pv1.EvidenceCategory, parse func(string) (di
 			return m1pv1.Verdict_VERDICT_SATISFIED, ev
 		case errs > 0:
 			return m1pv1.Verdict_VERDICT_VIOLATED, ev
+		case baseline > 0:
+			ev.DiagnosticCode = "baseline_only" // the tool failed on findings the change did not introduce
+			return m1pv1.Verdict_VERDICT_SATISFIED, ev
 		default:
 			ev.DiagnosticCode = "tool_error"
 			return m1pv1.Verdict_VERDICT_ERROR, ev
@@ -190,6 +197,7 @@ func lineHandler(tool string, cat m1pv1.EvidenceCategory, parse func(string) (di
 // than lines. Same verdict mapping as lineHandler.
 func eslintHandler(res RunResult) (m1pv1.Verdict, *m1pv1.EvidenceRecord) {
 	var results []struct {
+		FilePath     string `json:"filePath"`
 		ErrorCount   uint32 `json:"errorCount"`
 		WarningCount uint32 `json:"warningCount"`
 		Messages     []struct {
@@ -206,7 +214,12 @@ func eslintHandler(res RunResult) (m1pv1.Verdict, *m1pv1.EvidenceRecord) {
 		ev.DiagnosticCode = "tool_error"
 		return m1pv1.Verdict_VERDICT_ERROR, ev
 	}
+	baseline := uint32(0)
 	for _, r := range results {
+		if !touched(res.Touched, res.Worktree, r.FilePath) {
+			baseline += r.ErrorCount
+			continue
+		}
 		ev.Counts.Errors += r.ErrorCount
 		ev.Counts.Warnings += r.WarningCount
 		if r.ErrorCount+r.WarningCount > 0 {
@@ -223,6 +236,9 @@ func eslintHandler(res RunResult) (m1pv1.Verdict, *m1pv1.EvidenceRecord) {
 		return m1pv1.Verdict_VERDICT_SATISFIED, ev
 	case ev.Counts.Errors > 0:
 		return m1pv1.Verdict_VERDICT_VIOLATED, ev
+	case baseline > 0:
+		ev.DiagnosticCode = "baseline_only"
+		return m1pv1.Verdict_VERDICT_SATISFIED, ev
 	default:
 		ev.DiagnosticCode = "tool_error"
 		return m1pv1.Verdict_VERDICT_ERROR, ev
@@ -350,6 +366,7 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 	var evidence *m1pv1.EvidenceRecord
 	var integrity *m1pv1.AnchorIntegrity
 	var stdout, stderr []byte
+	var d diffFacts
 	if preHash, preErr := hashFile(e.BinaryPath); preErr != nil || !bytes.Equal(preHash, e.BinaryHash) {
 		integrity = &m1pv1.AnchorIntegrity{
 			WorktreeMerkleRoot:   r.currentL0Root(), // empty ⇒ incomplete, never certifies
@@ -364,7 +381,9 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 			Category:       categoryOf(e.Kind),
 		}
 	} else {
+		d = r.diff(ctx, worktree) // read before the run: the touched set is the baseline boundary the handler judges against, and the anchor is side-effect-free so the tree it sees is this one
 		res, runErr := r.sb.Run(ctx, spec)
+		res.Touched, res.Worktree = d.touchedSet(), worktree
 
 		// Anti-tamper envelope (04 §2.2 table): effective-execution hashing —
 		// the binary is re-hashed AFTER the run too, so a swap that lands
@@ -397,8 +416,6 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 			}
 		}
 	}
-	// Read after the anchor ran, so the classification describes the tree it saw.
-	d := r.diff(ctx, worktree)
 	integrity.DiffClassification, integrity.SuppressionDirectiveDelta = d.class, d.delta
 	// Raw evidence stays on this device; a failed local write never fails the vote.
 	_, _ = r.Evidence.Put(task, e.ID, stdout, stderr, d.raw)

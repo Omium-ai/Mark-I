@@ -153,7 +153,7 @@ var detectors = map[Kind]detector{
 		},
 	},
 	KindEslint: {
-		rule: 1, tool: "eslint", binary: "eslint", wants: "an eslint.config.* or .eslintrc* file",
+		rule: 1, tool: "eslint", binary: "eslint", wants: "eslint.config.* or .eslintrc* file",
 		class: ClassFast, sideEffect: SideEffectStatic,
 		// eslint's config (eslint.config.js / .eslintrc.js) is JS EVALUATED by
 		// node, and plugins are arbitrary repo deps — repo code.
@@ -204,7 +204,7 @@ var detectors = map[Kind]detector{
 		argv: func(bin string) []string { return []string{bin, "-q", "-p", "no:cacheprovider"} },
 	},
 	KindNpmTest: {
-		rule: 1, tool: "npm-test", binary: "npm", wants: `a "test" script in package.json`,
+		rule: 1, tool: "npm-test", binary: "npm", wants: `"test" script in package.json`,
 		class: ClassSlow, sideEffect: SideEffectTest, execsRepoCode: true,
 		versionArgs: []string{"--version"},
 		probe: func(wt string) bool {

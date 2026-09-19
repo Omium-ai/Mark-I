@@ -17,6 +17,7 @@ type diffFacts struct {
 	class m1pv1.DiffClassification
 	delta int32
 	raw   []byte
+	paths []string // git status paths, worktree-relative, slash-separated
 }
 
 var (
@@ -121,5 +122,40 @@ func (r *Runner) diff(ctx context.Context, worktree string) diffFacts {
 	}
 	raw, _ := run("diff", "HEAD", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv")
 	delta := suppressionDelta(raw)
-	return diffFacts{class: classifyDiff(paths, delta), delta: delta, raw: raw}
+	return diffFacts{class: classifyDiff(paths, delta), delta: delta, raw: raw, paths: paths}
+}
+
+// touchedSet is diffFacts.paths as the RunResult.Touched map; nil when git said nothing (no repo, no git): then every finding counts.
+func (d diffFacts) touchedSet() map[string]bool {
+	if d.paths == nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, p := range d.paths {
+		out[filepath.ToSlash(filepath.Clean(p))] = true
+	}
+	return out
+}
+
+// touched reports whether a tool's path token names a touched file: tools print worktree-relative paths (ruff, tsc, cargo, go vet's ./pkg/f.go, eslint's absolute filePath); anything under a touched directory counts too (an untracked directory lists as "dir/").
+func touched(set map[string]bool, worktree, file string) bool {
+	if set == nil {
+		return true
+	}
+	p := file
+	if filepath.IsAbs(p) {
+		if rel, err := filepath.Rel(worktree, p); err == nil {
+			p = rel
+		}
+	}
+	p = filepath.ToSlash(filepath.Clean(p))
+	if set[p] {
+		return true
+	}
+	for dir := path.Dir(p); dir != "." && dir != "/"; dir = path.Dir(dir) {
+		if set[dir+"/"] || set[dir] {
+			return true
+		}
+	}
+	return false
 }
