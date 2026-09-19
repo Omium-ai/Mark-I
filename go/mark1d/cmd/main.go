@@ -1181,6 +1181,7 @@ func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *a
 	approvalsPath := anchors.ApprovalsPath(cfg.stateDir)
 	candidatesPath := anchors.CandidatesPath(cfg.stateDir)
 	derived := map[string][]anchors.CatalogEntry{}
+	looked := map[string][]anchors.Miss{}
 	var lastRoots []string
 	var lastDerive time.Time
 	var approvalsOffset int64
@@ -1189,16 +1190,16 @@ func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *a
 		roots := enabledRoots(cfg)
 		rederived := !slices.Equal(roots, lastRoots) || time.Since(lastDerive) >= anchorRederiveEvery
 		if rederived {
-			next := map[string][]anchors.CatalogEntry{}
+			next, nextLooked := map[string][]anchors.CatalogEntry{}, map[string][]anchors.Miss{}
 			for _, root := range roots {
-				entries, err := anchors.Derive(sb, root)
+				d, err := anchors.Explain(sb, root)
 				if err != nil {
 					log.Error("mark1d: anchor derivation failed; workspace publishes no candidates", "worktree", root, "err", err)
 					continue
 				}
-				next[root] = entries
+				next[root], nextLooked[root] = d.Entries, d.Looked
 			}
-			derived, lastRoots, lastDerive = next, roots, time.Now()
+			derived, looked, lastRoots, lastDerive = next, nextLooked, roots, time.Now()
 		}
 		off, approved, err := anchors.ApplyApprovals(consentPath, approvalsPath, approvalsOffset, derived, time.Now(), log)
 		if err != nil {
@@ -1215,7 +1216,7 @@ func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *a
 			log.Error("mark1d: anchor consent store unreadable; no anchor will run", "err", err)
 			consented = nil
 		}
-		if err := anchors.PublishCandidates(candidatesPath, consented, derived, sb.Status()); err != nil {
+		if err := anchors.PublishCandidates(candidatesPath, consented, derived, looked, sb.Status()); err != nil {
 			log.Error("mark1d: anchor candidates not published; `mark1 enable` cannot offer consent", "path", candidatesPath, "err", err)
 		} else {
 			published = true

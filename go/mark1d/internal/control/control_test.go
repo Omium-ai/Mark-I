@@ -411,7 +411,7 @@ func TestAnchorsConsentGoesThroughTheDaemonsReconcile(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := anchors.PublishCandidates(anchors.CandidatesPath(dir), consented, derived, anchors.SandboxStatus{Available: true}); err != nil {
+		if err := anchors.PublishCandidates(anchors.CandidatesPath(dir), consented, derived, nil, anchors.SandboxStatus{Available: true}); err != nil {
 			t.Fatal(err)
 		}
 	}

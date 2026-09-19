@@ -50,6 +50,7 @@ type Candidates struct {
 type WorkspaceCandidates struct {
 	Path    string      `json:"path"`
 	Anchors []Candidate `json:"anchors"`
+	Looked  []Miss      `json:"looked"` // additive (v1): every kind Explain did not derive here, and why
 }
 
 // Candidate is one derived entry in ConsentRecord's own field names, plus the
@@ -72,16 +73,19 @@ type Approval struct {
 
 // PublishCandidates joins each workspace's derivation against the store and
 // writes candidates.json. Same binding as Reconcile: consented iff the store
-// holds the ID under this exact exec_hash. sandbox is the Sandbox's Status()
-// as of this derivation.
-func PublishCandidates(path string, consented []ConsentRecord, derived map[string][]CatalogEntry, sandbox SandboxStatus) error {
+// holds the ID under this exact exec_hash. looked is Explain's misses per
+// root (nil is fine); sandbox is the Sandbox's Status() as of this derivation.
+func PublishCandidates(path string, consented []ConsentRecord, derived map[string][]CatalogEntry, looked map[string][]Miss, sandbox SandboxStatus) error {
 	byID := map[string]ConsentRecord{}
 	for _, r := range consented {
 		byID[r.ID] = r
 	}
 	c := Candidates{Version: 1, Sandbox: sandbox, Workspaces: []WorkspaceCandidates{}}
 	for root, entries := range derived {
-		ws := WorkspaceCandidates{Path: root, Anchors: []Candidate{}}
+		ws := WorkspaceCandidates{Path: root, Anchors: []Candidate{}, Looked: looked[root]}
+		if ws.Looked == nil {
+			ws.Looked = []Miss{}
+		}
 		for _, e := range entries {
 			cand := Candidate{ConsentRecord: toRecord(e, time.Time{})}
 			if rec, ok := byID[e.ID]; ok && rec.ExecHash == cand.ExecHash {

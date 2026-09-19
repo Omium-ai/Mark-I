@@ -493,10 +493,18 @@ type AnchorCandidates struct {
 type WorkspaceCandidates struct {
 	Path    string            `json:"path"`
 	Anchors []AnchorCandidate `json:"anchors"`
+	Looked  []AnchorMiss      `json:"looked"` // what the daemon looked for here and did not derive, and why
+
 }
 
 // AnchorCandidate is one derived entry in the consent store's own field names
 // (consent.go's ConsentRecord) plus the store's answer.
+// AnchorMiss mirrors mark1d's anchors.Miss.
+type AnchorMiss struct {
+	Tool string `json:"tool"`
+	Why  string `json:"why"`
+}
+
 type AnchorCandidate struct {
 	ID          string    `json:"id"`
 	Tool        string    `json:"tool"`

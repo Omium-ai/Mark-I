@@ -46,6 +46,7 @@ type Options struct {
 type Report struct {
 	OK          bool         `json:"ok"`
 	Anchors     []Anchor     `json:"anchors"`
+	Looked      []Looked     `json:"anchors_looked"` // per workspace: the kinds the daemon looked for and did not derive
 	Agents      []Agent      `json:"agents"`
 	Fragments   []Fragment   `json:"fragments"`
 	Health      []Check      `json:"health"`
@@ -65,6 +66,12 @@ type Anchor struct {
 	Consented   bool      `json:"consented"`
 	State       string    `json:"state,omitempty"`
 	ConsentedAt time.Time `json:"consented_at"`
+}
+
+// Looked is one workspace's miss list, straight from candidates.json.
+type Looked struct {
+	Workspace string           `json:"workspace"`
+	Misses    []cli.AnchorMiss `json:"misses"`
 }
 
 // Agent is one of 08 §5's seven slots. Printing the unimplemented ones is the
@@ -116,8 +123,8 @@ func Run(env *cli.Env, opts Options) error {
 		return cli.Failf(cli.ExitRuntime, "", "reading enrollment: %v", err)
 	}
 	rep := Report{OK: true}
-	anchors, anchorChecks := readAnchors(env)
-	rep.Anchors = anchors
+	anchors, looked, anchorChecks := readAnchors(env)
+	rep.Anchors, rep.Looked = anchors, looked
 	rep.Agents = roster(env, opts)
 	rep.Fragments = scanFragments(env, opts)
 	rep.Health = append(healthChecks(env, opts), anchorChecks...)
@@ -170,8 +177,9 @@ func Run(env *cli.Env, opts Options) error {
 // TODAY. With it, every candidate is a row carrying its state; without it
 // the rows are the store's and the anchor_candidates finding says the daemon
 // has not published — never an empty list that reads as "nothing to consent".
-func readAnchors(env *cli.Env) ([]Anchor, []Check) {
+func readAnchors(env *cli.Env) ([]Anchor, []Looked, []Check) {
 	var checks []Check
+	var looked []Looked
 	store := map[string]string{} // id → consented exec_hash
 	storeAt := map[string]time.Time{}
 	if data, err := os.ReadFile(env.AnchorsCatalog()); err == nil {
@@ -207,6 +215,9 @@ func readAnchors(env *cli.Env) ([]Anchor, []Check) {
 		checks = append(checks, Check{"anchor_candidates", true, "no workspace enabled"})
 	default:
 		for _, ws := range cands.Workspaces {
+			if len(ws.Looked) > 0 {
+				looked = append(looked, Looked{Workspace: ws.Path, Misses: ws.Looked})
+			}
 			for _, c := range ws.Anchors {
 				seen[c.ID] = true
 				row := Anchor{ID: c.ID, Workspace: ws.Path, Consented: c.Consented, ConsentedAt: c.ConsentedAt}
@@ -232,7 +243,7 @@ func readAnchors(env *cli.Env) ([]Anchor, []Check) {
 		}
 		out = append(out, row)
 	}
-	return out, checks
+	return out, looked, checks
 }
 
 func roster(env *cli.Env, opts Options) []Agent {
@@ -489,6 +500,11 @@ func renderHuman(w io.Writer, r *Report) {
 	for _, a := range r.Anchors {
 		_, _ = fmt.Fprintf(w, "anchor        %s consented=%v %s consented_at=%s %s\n",
 			a.ID, a.Consented, a.State, a.ConsentedAt.Format(time.RFC3339), a.Workspace)
+	}
+	for _, l := range r.Looked {
+		for _, m := range l.Misses {
+			_, _ = fmt.Fprintf(w, "looked for    %-12s %s  %s\n", m.Tool, m.Why, l.Workspace)
+		}
 	}
 	for _, a := range r.Agents {
 		if !a.Implemented {

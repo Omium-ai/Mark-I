@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -43,6 +44,22 @@ func (f *fakeEmitter) all() []*m1pv1.Event {
 // path works.
 const probeEnv = "MARK1_ANCHOR_TEST_PROBE"
 
+// versionSidecar is the fakeBin contract on windows: this binary, copied under a tool's name, prints the sidecar beside it and exits — no batch file, which an AppContainer refuses to run.
+const versionSidecar = ".version"
+
+func printVersionSidecar() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	for _, p := range []string{exe + versionSidecar, func() string { r, _ := filepath.EvalSymlinks(exe); return r + versionSidecar }()} {
+		if b, err := os.ReadFile(p); err == nil {
+			_, _ = os.Stdout.Write(b)
+			os.Exit(0)
+		}
+	}
+}
+
 // extraProbes lets platform-specific test files register probes this file
 // cannot host: main_test.go builds on every GOOS, while a probe like the
 // raw x32 socket syscall only exists on linux (sandbox_linux_test.go).
@@ -52,6 +69,7 @@ func TestMain(m *testing.M) {
 	// Helper stage first: the sandbox parent re-execs this binary with the
 	// helper spec env var; MaybeRunHelper never returns in that mode.
 	MaybeRunHelper()
+	printVersionSidecar()
 	if mode := os.Getenv(probeEnv); mode != "" {
 		runProbe(mode)
 	}

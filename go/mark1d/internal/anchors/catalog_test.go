@@ -2,6 +2,7 @@ package anchors
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -22,24 +23,42 @@ func canonTemp(t *testing.T) string {
 	return d
 }
 
-// binName is the file LookPath resolves `name` to: bare on unix, a .cmd on windows (PATHEXT), which CreateProcess runs through cmd.exe exactly as a real npm shim.
+// binName is the file LookPath resolves `name` to: bare on unix, an .exe on windows (PATHEXT).
 func binName(name string) string {
 	if runtime.GOOS == "windows" {
-		return name + ".cmd"
+		return name + ".exe"
 	}
 	return name
 }
 
 // fakeBin drops an executable named `name` into dir that prints `version` for
-// any invocation — a sh script, or a .cmd on windows — enough for LookPath +
-// the version sniff.
+// any invocation — a sh script on unix; on windows a copy of this test binary
+// (an AppContainer cannot run a batch file) beside a `<name>.exe.version`
+// sidecar that TestMain prints — enough for LookPath + the version sniff.
 func fakeBin(t *testing.T, dir, name, version string) string {
 	t.Helper()
 	p := filepath.Join(dir, binName(name))
-	script := "#!/bin/sh\necho '" + version + "'\n"
 	if runtime.GOOS == "windows" {
-		script = "@echo " + version + "\r\n"
+		self, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Remove(p)
+		if err := os.Link(self, p); err != nil {
+			b, rerr := os.ReadFile(self)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			if err := os.WriteFile(p, b, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(p+versionSidecar, []byte(version+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
 	}
+	script := "#!/bin/sh\necho '" + version + "'\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +118,9 @@ func TestDeriveFullWorkspace(t *testing.T) {
 		// binary is unconsented); a kernel without it yields an empty version
 		// rather than a pre-consent unsandboxed exec.
 		if e.ToolVersion == "" && sb.FSConfined() {
-			t.Errorf("%s: version sniff empty", e.ID)
+			res, err := sb.Run(context.Background(), RunSpec{Argv: append([]string{e.BinaryPath}, detectors[e.Kind].versionArgs...), WorktreeRO: wt,
+				Env: map[string]string{"PATH": filepath.Dir(e.BinaryPath), "LANG": "C"}, Limits: DefaultLimits(ClassFast), RequireFSConfined: true})
+			t.Errorf("%s: version sniff empty (rerun: err=%v exit=%d signal=%q timed_out=%v dur=%s stdout=%q stderr=%q)", e.ID, err, res.ExitCode, res.Signal, res.TimedOut, res.Duration, res.Stdout, res.Stderr)
 		}
 		if e.SideEffect != SideEffectStatic {
 			t.Errorf("%s: default catalog must be static-only (FR-VERIFY-003), got %q", e.ID, e.SideEffect)
@@ -130,12 +151,13 @@ func TestDeriveNeverExecsOutsideTheSandbox(t *testing.T) {
 	writeFixture(t, wt, "pyproject.toml", "[tool.ruff]\n")
 	bin := canonTemp(t)
 	marker := filepath.Join(canonTemp(t), "i-ran")
-	script := "#!/bin/sh\ntouch " + marker + "\necho 'ruff 0.6.2'\n"
 	if runtime.GOOS == "windows" {
-		script = "@echo.> \"" + marker + "\"\r\n@echo ruff 0.6.2\r\n"
-	}
-	if err := os.WriteFile(filepath.Join(bin, binName("ruff")), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+		fakeBin(t, bin, "ruff", "ruff 0.6.2") // the refusing sandbox below never runs it; the marker is the unix script's tell
+	} else {
+		script := "#!/bin/sh\ntouch " + marker + "\necho 'ruff 0.6.2'\n"
+		if err := os.WriteFile(filepath.Join(bin, binName("ruff")), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("PATH", bin)
 
@@ -205,6 +227,34 @@ func TestDeriveNegatives(t *testing.T) {
 		}
 		if len(got) != 0 {
 			t.Fatalf("derived %+v with no tsc on PATH", got)
+		}
+	})
+	t.Run("every miss says what was looked for and why", func(t *testing.T) {
+		wt := canonTemp(t)
+		writeFixture(t, wt, "tsconfig.json", "{}")
+		writeFixture(t, wt, "go.mod", "module x\n")
+		d, err := Explain(testSandbox(t), wt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.Entries) != 0 || len(d.Looked) != len(detectors) {
+			t.Fatalf("entries %d, looked %d of %d kinds", len(d.Entries), len(d.Looked), len(detectors))
+		}
+		why := map[string]string{}
+		for _, m := range d.Looked {
+			why[m.Tool] = m.Why
+		}
+		for tool, want := range map[string]string{
+			"tsc":     "tsc is not on PATH",
+			"go-test": "tests are off for this project",
+			"ruff":    "no ruff.toml, .ruff.toml or [tool.ruff] in pyproject.toml",
+		} {
+			if why[tool] != want {
+				t.Errorf("%s: %q, want %q", tool, why[tool], want)
+			}
+		}
+		if _, ok := why["go-vet"]; !ok || why["go-vet"] == "no go.mod" {
+			t.Errorf("go-vet with go.mod present: %q", why["go-vet"])
 		}
 	})
 }
@@ -435,6 +485,11 @@ func TestExecHashSymlinkIndependent(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
+	if runtime.GOOS == "windows" {
+		if err := os.WriteFile(filepath.Join(links, binName("ruff"))+versionSidecar, []byte("ruff 0.6.2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	sb := testSandbox(t)
 	derive := func(path string) CatalogEntry {
 		t.Helper()
@@ -458,7 +513,7 @@ func TestExecHashSymlinkIndependent(t *testing.T) {
 func TestPublishCandidatesCarriesSandboxStatus(t *testing.T) {
 	path := CandidatesPath(canonTemp(t))
 	st := SandboxStatus{Available: false, Reason: "no sandbox on plan9 yet (04 §11.5)"}
-	if err := PublishCandidates(path, nil, map[string][]CatalogEntry{"/w": {}}, st); err != nil {
+	if err := PublishCandidates(path, nil, map[string][]CatalogEntry{"/w": {}}, nil, st); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(path)
@@ -471,5 +526,29 @@ func TestPublishCandidatesCarriesSandboxStatus(t *testing.T) {
 	}
 	if c.Sandbox != st || len(c.Workspaces) != 1 || len(c.Workspaces[0].Anchors) != 0 {
 		t.Fatalf("published %s", raw)
+	}
+}
+
+func TestNpmShimTarget(t *testing.T) {
+	dir := canonTemp(t)
+	script := filepath.Join(dir, "node_modules", "typescript", "bin", "tsc")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFixture(t, filepath.Dir(script), "tsc", "#!/usr/bin/env node\n")
+	node := fakeBin(t, dir, "node", "v22.0.0")
+	for name, body := range map[string]string{
+		"new.cmd": "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\typescript\\bin\\tsc\" %*\r\n",
+		"old.cmd": "@IF EXIST \"%~dp0\\node.exe\" (\r\n  \"%~dp0\\node.exe\"  \"%~dp0\\node_modules\\typescript\\bin\\tsc\" %*\r\n) ELSE (\r\n  @SETLOCAL\r\n  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n  node  \"%~dp0\\node_modules\\typescript\\bin\\tsc\" %*\r\n)\r\n",
+	} {
+		writeFixture(t, dir, name, body)
+		gotNode, gotScript, ok := npmShimTarget(filepath.Join(dir, name))
+		if !ok || gotScript != script || (runtime.GOOS == "windows" && gotNode != node) {
+			t.Errorf("%s: node=%q script=%q ok=%v (want script %q)", name, gotNode, gotScript, ok, script)
+		}
+	}
+	writeFixture(t, dir, "plain.cmd", "@echo hi\r\n")
+	if _, _, ok := npmShimTarget(filepath.Join(dir, "plain.cmd")); ok {
+		t.Error("a plain batch file is not an npm shim")
 	}
 }

@@ -7,7 +7,33 @@
       "codex"
     ],
     "tests_enabled": true,
-    "ignore_present": true
+    "ignore_present": true,
+    "anchors_looked": [
+      {
+        "tool": "cargo-check",
+        "why": "no Cargo.toml"
+      },
+      {
+        "tool": "cargo-test",
+        "why": "no Cargo.toml"
+      },
+      {
+        "tool": "eslint",
+        "why": "no eslint.config.* or .eslintrc* file"
+      },
+      {
+        "tool": "go-test",
+        "why": "no go.mod"
+      },
+      {
+        "tool": "go-vet",
+        "why": "no go.mod"
+      },
+      {
+        "tool": "npm-test",
+        "why": "no \"test\" script in package.json"
+      }
+    ]
   },
   {
     "path": "/Users/dev/api-service",
@@ -16,6 +42,32 @@
       "claudecode"
     ],
     "tests_enabled": true,
-    "ignore_present": false
+    "ignore_present": false,
+    "anchors_looked": [
+      {
+        "tool": "cargo-check",
+        "why": "no Cargo.toml"
+      },
+      {
+        "tool": "cargo-test",
+        "why": "no Cargo.toml"
+      },
+      {
+        "tool": "eslint",
+        "why": "no eslint.config.* or .eslintrc* file"
+      },
+      {
+        "tool": "go-test",
+        "why": "no go.mod"
+      },
+      {
+        "tool": "go-vet",
+        "why": "no go.mod"
+      },
+      {
+        "tool": "npm-test",
+        "why": "no \"test\" script in package.json"
+      }
+    ]
   }
 ]

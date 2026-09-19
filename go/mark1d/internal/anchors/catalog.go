@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -86,6 +87,7 @@ type detector struct {
 	rule          int    // derivation rule number → the "@cat-N" ID suffix
 	tool          string // EvidenceRecord.tool name
 	binary        string // PATH lookup name
+	wants         string // the config the probe looks for, for the miss line a person reads
 	class         Class  //
 	sideEffect    SideEffect
 	execsRepoCode bool     // see CatalogEntry.ExecsRepoCode
@@ -100,7 +102,7 @@ type detector struct {
 // an unimplemented kind is REFUSED, never faked.
 var detectors = map[Kind]detector{
 	KindRuff: {
-		rule: 1, tool: "ruff", binary: "ruff",
+		rule: 1, tool: "ruff", binary: "ruff", wants: "ruff.toml, .ruff.toml or [tool.ruff] in pyproject.toml",
 		class: ClassFast, sideEffect: SideEffectStatic,
 		versionArgs: []string{"--version"},
 		probe: func(wt string) bool {
@@ -117,7 +119,7 @@ var detectors = map[Kind]detector{
 		},
 	},
 	KindTsc: {
-		rule: 1, tool: "tsc", binary: "tsc",
+		rule: 1, tool: "tsc", binary: "tsc", wants: "tsconfig.json",
 		class: ClassFast, sideEffect: SideEffectStatic,
 		versionArgs: []string{"--version"},
 		probe:       func(wt string) bool { return fileExists(filepath.Join(wt, "tsconfig.json")) },
@@ -128,7 +130,7 @@ var detectors = map[Kind]detector{
 		},
 	},
 	KindCargoCheck: {
-		rule: 1, tool: "cargo-check", binary: "cargo",
+		rule: 1, tool: "cargo-check", binary: "cargo", wants: "Cargo.toml",
 		class: ClassSlow, sideEffect: SideEffectStatic, // compiles: slow even warm-ish
 		// `cargo check` executes build.rs and proc macros — repo code.
 		execsRepoCode: true,
@@ -139,7 +141,7 @@ var detectors = map[Kind]detector{
 		},
 	},
 	KindGoVet: {
-		rule: 1, tool: "go-vet", binary: "go",
+		rule: 1, tool: "go-vet", binary: "go", wants: "go.mod",
 		class: ClassSlow, sideEffect: SideEffectStatic, // vet compiles the package graph
 		// vet's compile step honors repo-supplied cgo directives (#cgo
 		// CFLAGS/LDFLAGS reach the host compiler/linker) — repo-steered exec.
@@ -151,7 +153,7 @@ var detectors = map[Kind]detector{
 		},
 	},
 	KindEslint: {
-		rule: 1, tool: "eslint", binary: "eslint",
+		rule: 1, tool: "eslint", binary: "eslint", wants: "an eslint.config.* or .eslintrc* file",
 		class: ClassFast, sideEffect: SideEffectStatic,
 		// eslint's config (eslint.config.js / .eslintrc.js) is JS EVALUATED by
 		// node, and plugins are arbitrary repo deps — repo code.
@@ -175,21 +177,21 @@ var detectors = map[Kind]detector{
 	},
 	// Test runners (06 §2.5): SideEffectTest, always Slow, derived only under the per-repo opt-in.
 	KindGoTest: {
-		rule: 1, tool: "go-test", binary: "go",
+		rule: 1, tool: "go-test", binary: "go", wants: "go.mod",
 		class: ClassSlow, sideEffect: SideEffectTest, execsRepoCode: true,
 		versionArgs: []string{"version"},
 		probe:       func(wt string) bool { return fileExists(filepath.Join(wt, "go.mod")) },
 		argv:        func(bin string) []string { return []string{bin, "test", "./..."} },
 	},
 	KindCargoTest: {
-		rule: 1, tool: "cargo-test", binary: "cargo",
+		rule: 1, tool: "cargo-test", binary: "cargo", wants: "Cargo.toml",
 		class: ClassSlow, sideEffect: SideEffectTest, execsRepoCode: true,
 		versionArgs: []string{"--version"},
 		probe:       func(wt string) bool { return fileExists(filepath.Join(wt, "Cargo.toml")) },
 		argv:        func(bin string) []string { return []string{bin, "test", "--quiet", "--no-fail-fast"} },
 	},
 	KindPytest: {
-		rule: 1, tool: "pytest", binary: "pytest",
+		rule: 1, tool: "pytest", binary: "pytest", wants: "pytest.ini, conftest.py or [tool.pytest] in pyproject.toml",
 		class: ClassSlow, sideEffect: SideEffectTest, execsRepoCode: true,
 		versionArgs: []string{"--version"},
 		probe: func(wt string) bool {
@@ -202,7 +204,7 @@ var detectors = map[Kind]detector{
 		argv: func(bin string) []string { return []string{bin, "-q", "-p", "no:cacheprovider"} },
 	},
 	KindNpmTest: {
-		rule: 1, tool: "npm-test", binary: "npm",
+		rule: 1, tool: "npm-test", binary: "npm", wants: `a "test" script in package.json`,
 		class: ClassSlow, sideEffect: SideEffectTest, execsRepoCode: true,
 		versionArgs: []string{"--version"},
 		probe: func(wt string) bool {
@@ -283,40 +285,83 @@ const sniffVersionOutputCap = 64 << 10
 // process calling this with a LinuxSandbox must call MaybeRunHelper() first
 // (mark1d does, cmd/main.go) — the sandbox re-execs the caller as its helper.
 func Derive(sb Sandbox, worktree string) ([]CatalogEntry, error) {
+	d, err := Explain(sb, worktree)
+	return d.Entries, err
+}
+
+// Miss is one anchor kind Explain looked for and did not derive, with the reason a person can act on (v3 item 3: a workspace with zero anchors says what was looked for).
+type Miss struct {
+	Tool string `json:"tool"`
+	Why  string `json:"why"`
+}
+
+// Derivation is Explain's answer: the entries Derive returns plus a Miss per kind that did not make it, both sorted by tool.
+type Derivation struct {
+	Entries []CatalogEntry
+	Looked  []Miss
+}
+
+// Explain is Derive with the misses kept.
+func Explain(sb Sandbox, worktree string) (Derivation, error) {
 	abs, err := filepath.Abs(worktree)
 	if err != nil {
-		return nil, err
+		return Derivation{}, err
 	}
 	var out []CatalogEntry
+	var looked []Miss
+	miss := func(d detector, why string) { looked = append(looked, Miss{Tool: d.tool, Why: why}) }
 	tests := TestsOptedIn(abs)
 	for kind, d := range detectors {
-		if !d.probe(abs) || (d.sideEffect == SideEffectTest && !tests) {
+		if !d.probe(abs) {
+			miss(d, "no "+d.wants)
+			continue
+		}
+		if d.sideEffect == SideEffectTest && !tests {
+			miss(d, "tests are off for this project")
 			continue
 		}
 		bin, err := exec.LookPath(d.binary)
 		if err != nil {
-			continue // config present, tool absent: not derivable
+			miss(d, d.binary+" is not on PATH") // config present, tool absent: not derivable
+			continue
 		}
 		if bin, err = filepath.Abs(bin); err != nil {
+			miss(d, err.Error())
 			continue
 		}
 		// Consent binds to the file that executes, not a symlink alias of it.
 		if resolved, rerr := filepath.EvalSymlinks(bin); rerr == nil {
 			bin = resolved
 		}
+		// What executes is argv[0]; a script tool's argv is interpreter + script (npm's Windows .cmd shims, which no sandbox can run as-is).
+		prefix := []string{bin}
+		if ext := strings.ToLower(filepath.Ext(bin)); ext == ".cmd" || ext == ".bat" {
+			node, script, ok := npmShimTarget(bin)
+			if !ok {
+				miss(d, filepath.Base(bin)+" is a batch file, which cannot run inside the sandbox")
+				continue
+			}
+			bin, prefix = node, []string{node, script}
+		}
 		hash, err := hashFile(bin)
 		if err != nil {
-			continue // unreadable binary cannot be consent-hashed, so cannot exist
+			miss(d, bin+" is unreadable") // unreadable binary cannot be consent-hashed, so cannot exist
+			continue
 		}
-		version, err := sniffVersion(sb, abs, bin, d.versionArgs)
+		version, err := sniffVersion(sb, abs, prefix, d.versionArgs)
 		if errors.Is(err, ErrSandboxUnavailable) && (!sb.Status().Available || d.execsRepoCode || d.sideEffect == SideEffectTest) {
-			continue // the run would be refused exactly like the sniff was
+			miss(d, "the sandbox cannot run it here: "+sb.Status().Reason) // the run would be refused exactly like the sniff was
+			continue
+		}
+		if err != nil && !errors.Is(err, ErrSandboxUnavailable) {
+			miss(d, d.tool+" did not answer its version check: "+err.Error()) // a run would fail the same way, and consent needs the version
+			continue
 		}
 		out = append(out, CatalogEntry{
 			ID:            fmt.Sprintf("%s@cat-%d", d.tool, d.rule),
 			Kind:          kind,
 			Tool:          d.tool,
-			Argv:          d.argv(bin),
+			Argv:          append(prefix, d.argv(bin)[1:]...),
 			Class:         d.class,
 			SideEffect:    d.sideEffect,
 			ExecsRepoCode: d.execsRepoCode,
@@ -326,7 +371,8 @@ func Derive(sb Sandbox, worktree string) ([]CatalogEntry, error) {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
+	sort.Slice(looked, func(i, j int) bool { return looked[i].Tool < looked[j].Tool })
+	return Derivation{Entries: out, Looked: looked}, nil
 }
 
 // sniffVersion runs `bin <versionArgs>` under the sandbox. RequireFSConfined
@@ -335,7 +381,7 @@ func Derive(sb Sandbox, worktree string) ([]CatalogEntry, error) {
 // pre-consent exec with only chdir + env scrub — the same "weaker isolation
 // gets a smaller privilege, not a waiver" rule as 04 §11.5. The sandbox's
 // refusal is returned so Derive can tell it from a tool that merely failed.
-func sniffVersion(sb Sandbox, worktree, bin string, args []string) (string, error) {
+func sniffVersion(sb Sandbox, worktree string, prefix, args []string) (string, error) {
 	if sb == nil {
 		return "", nil
 	}
@@ -346,17 +392,63 @@ func sniffVersion(sb Sandbox, worktree, bin string, args []string) (string, erro
 	limits.Wall = versionSniffTimeout
 	limits.OutputCap = sniffVersionOutputCap
 	res, err := sb.Run(ctx, RunSpec{
-		Argv:              append([]string{bin}, args...),
+		Argv:              append(append([]string{}, prefix...), args...),
 		WorktreeRO:        worktree,
-		Env:               map[string]string{"PATH": filepath.Dir(bin), "LANG": "C"},
+		Env:               map[string]string{"PATH": filepath.Dir(prefix[0]), "LANG": "C"},
 		Limits:            limits,
 		RequireFSConfined: true,
 	})
-	if err != nil || res.ExitCode != 0 {
+	if err != nil {
 		return "", err
+	}
+	if res.ExitCode != 0 {
+		detail := strings.TrimSpace(string(res.Stderr))
+		if detail == "" {
+			detail = strings.TrimSpace(string(res.Stdout))
+		}
+		if len(detail) > 200 {
+			detail = detail[:200]
+		}
+		if res.Signal != "" {
+			detail = res.Signal
+		}
+		return "", fmt.Errorf("exit %d: %s", res.ExitCode, detail)
 	}
 	line, _, _ := strings.Cut(string(res.Stdout), "\n")
 	return strings.TrimSpace(line), nil
+}
+
+// npmShimRe matches the script line of both cmd-shim generations: `"%_prog%"  "%dp0%\node_modules\typescript\bin\tsc" %*` and the older `"%~dp0\node.exe"  "%~dp0\node_modules\...\tsc" %*`.
+var npmShimRe = regexp.MustCompile(`"%~?dp0%?\\([^"]+)"\s+%\*`)
+
+// npmShimTarget reads an npm .cmd shim and returns the node.exe that would run it and the script it runs, absolute. Any other batch file is not ok: an AppContainer cannot run one, so the catalog refuses it by name instead of deriving an anchor that can only ever fail.
+func npmShimTarget(shim string) (node, script string, ok bool) {
+	b, err := os.ReadFile(shim)
+	if err != nil || len(b) > sniffVersionOutputCap {
+		return "", "", false
+	}
+	m := npmShimRe.FindSubmatch(b)
+	if m == nil {
+		return "", "", false
+	}
+	dir := filepath.Dir(shim)
+	script = filepath.Join(dir, filepath.FromSlash(strings.ReplaceAll(string(m[1]), "\\", "/")))
+	if !fileExists(script) {
+		return "", "", false
+	}
+	node = filepath.Join(dir, "node.exe")
+	if !fileExists(node) {
+		if node, err = exec.LookPath("node"); err != nil {
+			return "", "", false
+		}
+	}
+	if node, err = filepath.Abs(node); err != nil {
+		return "", "", false
+	}
+	if resolved, rerr := filepath.EvalSymlinks(node); rerr == nil {
+		node = resolved
+	}
+	return node, script, true
 }
 
 func hashFile(path string) ([]byte, error) {

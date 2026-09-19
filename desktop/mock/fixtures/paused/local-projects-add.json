@@ -10,5 +10,31 @@
     "copilot",
     "cursor"
   ],
-  "agents_refused": []
+  "agents_refused": [],
+  "anchors_looked": [
+    {
+      "tool": "cargo-check",
+      "why": "no Cargo.toml"
+    },
+    {
+      "tool": "cargo-test",
+      "why": "no Cargo.toml"
+    },
+    {
+      "tool": "eslint",
+      "why": "no eslint.config.* or .eslintrc* file"
+    },
+    {
+      "tool": "go-test",
+      "why": "no go.mod"
+    },
+    {
+      "tool": "go-vet",
+      "why": "no go.mod"
+    },
+    {
+      "tool": "npm-test",
+      "why": "no \"test\" script in package.json"
+    }
+  ]
 }

@@ -166,11 +166,8 @@ func (s *WindowsSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, erro
 	si.ShowWindow = windows.SW_HIDE
 	si.StdInput, si.StdOutput, si.StdErr = std[0], std[1], std[2]
 
+	// argv[0] is a real executable: an AppContainer refuses batch files outright (cmd.exe answers ERROR_ACCESS_DENIED for a .cmd even in a granted dir), so Derive resolves npm's .cmd shims to node.exe + script before anything reaches here.
 	argv := spec.Argv
-	if ext := strings.ToLower(filepath.Ext(argv[0])); ext == ".cmd" || ext == ".bat" {
-		// CreateProcess cannot start a batch file; cmd.exe (readable to every package under System32's ALL APPLICATION PACKAGES ACE) runs it
-		argv = append([]string{comspec(), "/d", "/c", argv[0]}, argv[1:]...)
-	}
 	exe, err := windows.UTF16PtrFromString(argv[0])
 	if err != nil {
 		return RunResult{}, err
@@ -338,13 +335,6 @@ func windowsEnv(env []string, scratch string) []string {
 }
 
 // comspec: cmd.exe from COMSPEC, else System32's.
-func comspec() string {
-	if c := os.Getenv("COMSPEC"); c != "" {
-		return c
-	}
-	return filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe")
-}
-
 // attestedEnv is what the child actually sees: Windows redirects an AppContainer's LOCALAPPDATA to <LOCALAPPDATA>\Packages\<family>\AC and TEMP/TMP to its Temp (observed on windows-2022), so the attestation names those paths and the dirs exist for the child's writes.
 func attestedEnv(env []string, scratch string) []string {
 	ac := filepath.Join(scratch, "Packages", strings.ToLower(appContainerName), "AC")

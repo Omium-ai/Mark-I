@@ -532,7 +532,22 @@ func (s *Server) project(e workspaceEntry) map[string]any {
 		"agents_seen":    s.agentsSeen(e.Path),
 		"tests_enabled":  anchors.TestsOptedIn(e.Path),
 		"ignore_present": ignErr == nil,
+		"anchors_looked": s.anchorsLooked(e.Path),
 	}
+}
+
+// anchorsLooked is candidates.json's miss list for one root: what the last derivation looked for there and why each kind did not derive. Empty until the daemon has published.
+func (s *Server) anchorsLooked(root string) []anchors.Miss {
+	c, err := s.candidates()
+	if err != nil {
+		return []anchors.Miss{}
+	}
+	for _, ws := range c.Workspaces {
+		if ws.Path == root && ws.Looked != nil {
+			return ws.Looked
+		}
+	}
+	return []anchors.Miss{}
 }
 
 func (s *Server) getProjects(w http.ResponseWriter, _ *http.Request) {
