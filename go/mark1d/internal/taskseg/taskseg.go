@@ -121,11 +121,16 @@ func (s *Segmenter) Observe(ev *m1pv1.Event, files []string) []*m1pv1.Event {
 	defer s.mu.Unlock()
 	ss := s.sessions[sid]
 	if ss == nil {
-		if ev.GetUsage() != nil {
+		switch ev.Body.(type) {
+		case *m1pv1.Event_Usage:
 			if id, ok := s.ended[sid]; ok && len(ev.TaskId) == 0 {
 				ev.TaskId = id[:]
 			}
 			return nil // a Usage opens nothing (R1): no session state for it
+		case *m1pv1.Event_Turn, *m1pv1.Event_ToolUse, *m1pv1.Event_VerdictEvent, *m1pv1.Event_SessionEnd:
+		default:
+			// An event the segmenter never acts on (the tailer's history_import marker, SessionStart) opens no state either: after SessionEnd it would shadow ended[sid] and the Usage behind it would lose its task.
+			return nil
 		}
 		ss = &session{}
 		s.sessions[sid] = ss

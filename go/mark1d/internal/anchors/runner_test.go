@@ -8,12 +8,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 	"google.golang.org/protobuf/proto"
+
+	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
 )
@@ -733,7 +735,7 @@ func TestRunOneDiffReachesTheEnvelope(t *testing.T) {
 		t.Fatalf("%d sandbox runs, want anchor then two git reads", len(sb.specs))
 	}
 	for _, s := range sb.specs[1:] {
-		if !s.RequireFSConfined || filepath.Base(s.Argv[0]) != "git" || s.WorktreeRO != wt {
+		if !s.RequireFSConfined || strings.TrimSuffix(filepath.Base(s.Argv[0]), filepath.Ext(s.Argv[0])) != "git" || s.WorktreeRO != wt {
 			t.Fatalf("git read %+v is not confined to the worktree", s.Argv)
 		}
 	}

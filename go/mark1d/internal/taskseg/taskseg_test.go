@@ -481,3 +481,27 @@ func TestUsageStampTakesTheOpenTaskAndKeepsAPriorStamp(t *testing.T) {
 		t.Fatalf("post-SessionEnd Usage lost its task: %x vs %x", late.TaskId, live.TaskId)
 	}
 }
+
+func TestUsageAfterEndKeepsTaskPastAForeignMarker(t *testing.T) {
+	s := New(nil)
+	sid := uuid.New()
+	prompt := &m1pv1.Event{SessionId: sid[:], Body: &m1pv1.Event_Turn{Turn: &m1pv1.Turn{Initiator: m1pv1.Initiator_INITIATOR_HUMAN}}}
+	s.Observe(prompt, nil)
+	s.Observe(&m1pv1.Event{SessionId: sid[:], Body: &m1pv1.Event_ToolUse{ToolUse: &m1pv1.ToolUse{ToolName: "Bash"}}}, []string{"a.go"})
+	var opened []byte
+	for _, ev := range s.Observe(&m1pv1.Event{SessionId: sid[:], Body: &m1pv1.Event_SessionEnd{SessionEnd: &m1pv1.SessionEnd{}}}, nil) {
+		if ev.GetTaskClose() != nil {
+			opened = ev.TaskId
+		}
+	}
+	if len(opened) != 16 {
+		t.Fatalf("session end closed no task: %v", opened)
+	}
+	marker := &m1pv1.Event{SessionId: sid[:], Body: &m1pv1.Event_CoverageTransition{CoverageTransition: &m1pv1.CoverageTransition{}}}
+	s.Observe(marker, nil)
+	usage := &m1pv1.Event{SessionId: sid[:], Body: &m1pv1.Event_Usage{Usage: &m1pv1.Usage{}}}
+	s.Observe(usage, nil)
+	if string(usage.TaskId) != string(opened) {
+		t.Fatalf("usage after a post-end marker lost its task: got %x want %x", usage.TaskId, opened)
+	}
+}
