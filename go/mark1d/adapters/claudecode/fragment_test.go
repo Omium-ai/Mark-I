@@ -26,6 +26,9 @@ const userSettings = `{
 }
 `
 
+// fenceLines is every pointer the fence records: the nine handlers plus the status-line slot.
+var fenceLines = len(hookRegistrations) + 1
+
 func writeSettings(t *testing.T, body string) (path, stateDir string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -120,10 +123,10 @@ func TestFragmentRegistersStopAndSessionStart(t *testing.T) {
 		t.Fatalf("checksum is not blake3: %v", mg["checksum"])
 	}
 	ptrs := mg["pointers"].([]any)
-	if len(ptrs) != len(hookRegistrations) {
-		t.Fatalf("%d pointers, want %d", len(ptrs), len(hookRegistrations))
+	if len(ptrs) != fenceLines {
+		t.Fatalf("%d pointers, want %d", len(ptrs), fenceLines)
 	}
-	if !contains(ptrs, "/hooks/Stop/1") || !contains(ptrs, "/hooks/SessionStart/0") {
+	if !contains(ptrs, "/hooks/Stop/1") || !contains(ptrs, "/hooks/SessionStart/0") || !contains(ptrs, "/statusLine") {
 		t.Fatalf("pointers do not record where our entries landed: %v", ptrs)
 	}
 

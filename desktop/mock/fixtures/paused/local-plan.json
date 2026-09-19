@@ -1,0 +1,63 @@
+{
+  "agent": "claudecode",
+  "tier": {
+    "id": "default_claude_max_20x",
+    "label": "Max 20x",
+    "fetched_at": "2026-09-10T09:12:45Z",
+    "organization_type": "claude_max",
+    "billing_type": "stripe_subscription",
+    "extra_usage_enabled": false
+  },
+  "windows": {
+    "five_hour": {
+      "used_percentage": 23.5,
+      "resets_at": "2026-09-10T18:00:00Z",
+      "observed_at": "2026-09-10T14:31:40Z"
+    },
+    "seven_day": {
+      "used_percentage": 41.2,
+      "resets_at": "2026-09-14T09:00:00Z",
+      "observed_at": "2026-09-10T14:31:40Z"
+    }
+  },
+  "model": "claude-opus-5",
+  "context_window": {
+    "total_input_tokens": 15500,
+    "total_output_tokens": 1200,
+    "context_window_size": 200000,
+    "used_percentage": 8,
+    "remaining_percentage": 92,
+    "current_usage": {
+      "input_tokens": 8500,
+      "output_tokens": 1200,
+      "cache_creation_input_tokens": 5000,
+      "cache_read_input_tokens": 2000
+    }
+  },
+  "prompt_cache": {
+    "warm": true,
+    "caching_observed": true,
+    "ttl": "1h",
+    "expires_at": 1757521900,
+    "requests": 14,
+    "misses": 2,
+    "expected_rebuilds": 1,
+    "hit_ratio": 0.91,
+    "cache_write_tokens": 352000,
+    "miss_recache_tokens": 310200,
+    "last_miss_at": 1757518130,
+    "last_miss_cause": {
+      "causes": [
+        "tools_changed"
+      ],
+      "tools_added": 2,
+      "tools_removed": 0
+    },
+    "miss_causes": {
+      "tools_changed": 2
+    },
+    "recache_tokens_if_cold": 45000
+  },
+  "source": "statusline",
+  "note": "Mark 1 never reads, stores, or transmits your Claude account token and never calls Anthropic on your behalf; your plan tier and usage limits are read from the files and status-line data that the unmodified Claude Code binary writes on your own machine, so Claude Code remains the only program that uses your subscription."
+}

@@ -61,6 +61,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/pause", func(w http.ResponseWriter, _ *http.Request) { s.setOff(w, true) })
 	mux.HandleFunc("POST /v1/resume", func(w http.ResponseWriter, _ *http.Request) { s.setOff(w, false) })
 	mux.HandleFunc("GET /v1/doctor", s.doctor)
+	mux.HandleFunc("GET /v1/plan", s.plan)
 	mux.HandleFunc("POST /v1/shutdown", s.postShutdown)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("GET /v1/receipts", s.receipts)
@@ -122,6 +123,21 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		"projects_enabled": enabled,
 		"spool":            map[string]any{"bytes": spoolBytes, "cap": s.cfg.SpoolCap, "hard_stop": s.hardStop.Load()},
 	})
+}
+
+// plan is the Claude plan tier and rate-limit windows, from local files only (adapters/claudecode/plan.go).
+func (s *Server) plan(w http.ResponseWriter, _ *http.Request) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	p, err := claudecode.ReadPlan(home, s.cfg.StateDir)
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	writeJSON(w, p)
 }
 
 // projectOf is the hub's fallback after its session resolver (tailers.Resolve): it joins a live session to the enabled root whose Claude Code transcript names it, since that session id IS the transcript file name and the head carries the cwd the hookshim's SessionStart does not (08 §5.1). The other adapters derive session ids, so only their tailers can attribute them.

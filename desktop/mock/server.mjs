@@ -19,6 +19,7 @@ export const LOCAL_ROUTES = [
   ['POST', '/v1/pause', 'local-pause'],
   ['POST', '/v1/resume', 'local-resume'],
   ['GET', '/v1/doctor', 'local-doctor'],
+  ['GET', '/v1/plan', 'local-plan'],
   ['POST', '/v1/shutdown', 'local-shutdown'],
   ['GET', '/v1/receipts', 'local-receipts'],
   ['POST', '/v1/receipts/verify', 'local-receipts-verify'],

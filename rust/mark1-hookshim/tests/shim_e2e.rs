@@ -230,6 +230,36 @@ impl TestEnv {
         Self::finish(cmd, stdin_bytes)
     }
 
+    /// `mark1-hookshim statusline` with the given stdin (the status-line JSON).
+    fn statusline(&self, stdin_bytes: &[u8], envs: &[(&str, &str)]) -> (bool, Vec<u8>, Duration) {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_mark1-hookshim"));
+        cmd.arg("statusline")
+            .env_remove("MARK1_DISABLE")
+            .env("HOME", self.home.path())
+            .env("XDG_RUNTIME_DIR", self.xdg.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        Self::finish(cmd, stdin_bytes)
+    }
+
+    fn ratelimits_path(&self) -> PathBuf {
+        self.home
+            .path()
+            .join(".omium/mark1/claude/ratelimits.jsonl")
+    }
+
+    /// The adapter's sidecar: the user's own statusLine entry, verbatim.
+    fn install_statusline_prev(&self, command: &str) {
+        let dir = self.home.path().join(".omium/mark1/claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = serde_json::json!({"type": "command", "command": command, "padding": 2});
+        std::fs::write(dir.join("statusline.prev.json"), entry.to_string()).unwrap();
+    }
+
     /// Like `run`, but with no resolvable home at all: the off-marker is then
     /// unreachable and `off()` must fail closed (08 §7.6).
     fn run_homeless(&self, stdin_bytes: &[u8]) -> (bool, Vec<u8>, Duration) {
@@ -1346,4 +1376,116 @@ fn cold_start_end_to_end_under_50ms() {
         wall < Duration::from_millis(50),
         "observer budget blown: {wall:?} (04 §5 step 4)"
     );
+}
+
+// ---- statusline mode: the sanctioned plan-usage feed ----
+
+/// A status-line stdin document in the vendor's published shape, with the fields the feed must drop.
+const STATUSLINE_STDIN: &str = r#"{"cwd":"/home/u/secret-repo","session_id":"abc","transcript_path":"/home/u/.claude/projects/x/abc.jsonl","model":{"id":"claude-opus-5","display_name":"Opus"},"cost":{"total_cost_usd":0.5},"context_window":{"used_percentage":8,"context_window_size":200000},"prompt_cache":{"warm":true,"hit_ratio":0.91},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1738425600},"seven_day":{"used_percentage":41.2,"resets_at":1738857600}}}"#;
+
+#[test]
+fn statusline_files_the_rate_limit_slice_and_nothing_else() {
+    let env = TestEnv::new();
+    let d = env.listen();
+    let (ok, chatter, _wall) = env.statusline(STATUSLINE_STDIN.as_bytes(), &[]);
+    assert!(ok);
+    let line = String::from_utf8_lossy(&chatter);
+    assert!(
+        line.starts_with("Mark 1 · ") && line.contains("5h ") && line.contains("7d "),
+        "no previous command ⇒ Mark 1's own one-liner (model + both windows), got {line:?}"
+    );
+    assert!(d.no_event(), "statusline mode never touches the fabric");
+    let log = std::fs::read_to_string(env.ratelimits_path()).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 1);
+    let rec: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let keys: Vec<&str> = rec
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "context_window",
+            "model",
+            "prompt_cache",
+            "rate_limits",
+            "received_at"
+        ]
+    );
+    assert_eq!(rec["rate_limits"]["five_hour"]["used_percentage"], 23.5);
+    assert_eq!(rec["model"]["id"], "claude-opus-5");
+    assert!(rec["received_at"].as_u64().unwrap() > 1_700_000_000);
+    assert!(!log.contains("secret-repo") && !log.contains("transcript") && !log.contains("cost"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(env.ratelimits_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+}
+
+#[test]
+fn statusline_replays_stdin_to_the_previous_command() {
+    let env = TestEnv::new();
+    env.install_statusline_prev("printf 'prev:%s' \"$(cat)\"");
+    let (ok, chatter, _wall) = env.statusline(b"{\"rate_limits\":{}}", &[]);
+    assert!(ok);
+    assert_eq!(chatter, b"prev:{\"rate_limits\":{}}");
+    assert!(env.ratelimits_path().exists());
+}
+
+#[test]
+fn statusline_off_still_chains_but_records_nothing() {
+    let env = TestEnv::new();
+    env.install_statusline_prev("printf theirs");
+    let (ok, chatter, _wall) =
+        env.statusline(STATUSLINE_STDIN.as_bytes(), &[("MARK1_DISABLE", "1")]);
+    assert!(ok);
+    assert_eq!(
+        chatter, b"theirs",
+        "the user's display must not depend on Mark 1 being on"
+    );
+    assert!(!env.ratelimits_path().exists());
+}
+
+#[test]
+fn statusline_keeps_the_newest_2000_lines() {
+    let env = TestEnv::new();
+    let dir = env.home.path().join(".omium/mark1/claude");
+    std::fs::create_dir_all(&dir).unwrap();
+    let old: String = (0..2005)
+        .map(|i| format!("{{\"received_at\":{i}}}\n"))
+        .collect();
+    std::fs::write(env.ratelimits_path(), old).unwrap();
+    let (ok, _chatter, _wall) = env.statusline(STATUSLINE_STDIN.as_bytes(), &[]);
+    assert!(ok);
+    let log = std::fs::read_to_string(env.ratelimits_path()).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2000);
+    assert_eq!(lines[0], "{\"received_at\":6}", "the oldest lines go first");
+    assert!(
+        lines[1999].contains("claude-opus-5"),
+        "the new record is the newest line"
+    );
+    assert!(!dir.join("ratelimits.jsonl.tmp").exists());
+}
+
+#[test]
+fn statusline_garbage_stdin_is_a_silent_noop() {
+    let env = TestEnv::new();
+    let (ok, chatter, _wall) = env.statusline(b"not json", &[]);
+    assert!(ok);
+    assert_eq!(
+        String::from_utf8_lossy(&chatter),
+        "Mark 1",
+        "garbage stdin ⇒ the bare label, nothing filed"
+    );
+    assert!(!env.ratelimits_path().exists());
 }

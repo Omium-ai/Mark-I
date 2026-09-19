@@ -22,7 +22,7 @@ func provisioned(t *testing.T, body string) (path, state string) {
 	if err != nil {
 		t.Fatalf("setup apply: %v", err)
 	}
-	if !res.Changed || len(res.Pointers) != len(hookRegistrations) {
+	if !res.Changed || len(res.Pointers) != fenceLines {
 		t.Fatalf("setup apply did nothing: %+v", res)
 	}
 	b, err := os.ReadFile(path)
@@ -288,9 +288,9 @@ func TestInspectReportsTheFourStates(t *testing.T) {
 		if st.State != StateOK {
 			t.Fatalf("state %q (%s), want OK", st.State, st.Detail)
 		}
-		if len(st.Lines) != len(hookRegistrations) {
+		if len(st.Lines) != fenceLines {
 			t.Fatalf("%d provisioned lines, want %d — doctor must show every line we wrote",
-				len(st.Lines), len(hookRegistrations))
+				len(st.Lines), fenceLines)
 		}
 		// The lines are the bytes actually on disk, not a re-render of intent.
 		if !strings.Contains(st.Lines[0].Value, DefaultShimPath) || st.Lines[0].Pointer != "/hooks/SessionStart/0" {
@@ -362,8 +362,8 @@ func TestInspectReportsTheFourStates(t *testing.T) {
 		if st.State != StateDamaged {
 			t.Fatalf("state %q, want %q: entries survived without their checksum", st.State, StateDamaged)
 		}
-		if len(st.Lines) != len(hookRegistrations) {
-			t.Fatalf("%d lines, want the %d orphaned entries", len(st.Lines), len(hookRegistrations))
+		if len(st.Lines) != fenceLines {
+			t.Fatalf("%d lines, want the %d orphaned entries", len(st.Lines), fenceLines)
 		}
 	})
 

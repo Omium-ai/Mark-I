@@ -22,6 +22,7 @@ mod fabric;
 mod gate;
 mod maps;
 mod spill;
+mod statusline;
 
 /// The observer wall budget (04 §5 step 4): at 45 ms the shim abandons the
 /// fabric attempt and spills — the timer, not hope, is what bounds the total
@@ -42,6 +43,12 @@ const MAX_STDIN: u64 = 4 * 1024 * 1024;
 
 fn main() {
     let started = Instant::now();
+    // `statusline` chains the user's own command even when Mark 1 is off, so their display never depends on us; only the recording is gated.
+    if std::env::args().nth(1).as_deref() == Some("statusline") {
+        let record = mark1_harden::apply().is_ok() && !off();
+        statusline::run(home().as_deref(), record);
+        return;
+    }
     // Off-check BEFORE everything — before stdin, maps, or any fabric I/O
     // (invariant 2, 08 §7.6): no output, no I/O beyond the marker stat.
     if off() {

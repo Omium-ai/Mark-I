@@ -197,7 +197,7 @@ fn seal(base: &Path, plaintext: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(unix)]
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     match std::fs::DirBuilder::new()
         .recursive(true)
@@ -211,7 +211,7 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     // 0600 at creation (07 §5 / 04 §5.4), not chmod-after: no window where
     // another user could open the ring.
@@ -223,12 +223,12 @@ fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 #[cfg(not(unix))]
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)
 }
 
 #[cfg(not(unix))]
-fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
     // Windows privacy is the profile DACL until the named pipe lands — a
     // weaker guarantee than the 0600 unix path, stated as such. Same
     // unsanctioned gap as fabric::send (D-CA/D-CD), not a scheduled lane.

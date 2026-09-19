@@ -379,7 +379,9 @@ mod tests {
             let started = tokio::time::Instant::now();
             (open_pipe(&name2).await.map(|_| ()), started.elapsed())
         });
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // 10 ms held, not 30: the second open's whole retry budget is CONNECT_DEADLINE (100 ms) and a loaded
+        // runner needs the rest of it for the server to relisten (windows-2022 timed out at 30).
+        tokio::time::sleep(Duration::from_millis(10)).await;
         drop(first);
         server.disconnect().unwrap();
         let relisten = tokio::spawn(async move { server.connect().await });
@@ -389,7 +391,7 @@ mod tests {
             .unwrap();
         r.unwrap();
         assert!(
-            waited >= Duration::from_millis(25),
+            waited >= Duration::from_millis(8),
             "did not wait: {waited:?}"
         );
         relisten.await.unwrap().unwrap();

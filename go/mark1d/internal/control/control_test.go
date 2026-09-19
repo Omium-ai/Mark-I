@@ -411,7 +411,7 @@ func TestAnchorsConsentGoesThroughTheDaemonsReconcile(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := anchors.PublishCandidates(anchors.CandidatesPath(dir), consented, derived); err != nil {
+		if err := anchors.PublishCandidates(anchors.CandidatesPath(dir), consented, derived, anchors.SandboxStatus{Available: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1349,7 +1349,7 @@ func TestEnableProvisionsThroughTheControlAPI(t *testing.T) {
 		Fragments   []fragment          `json:"fragments"`
 	}
 	decodeTo(t, body, &fixed)
-	if fixed.Agent != "claudecode" || !fixed.Provisioned || !fixed.Changed || len(fixed.Refused) != 0 || len(fixed.Fragments) != 1 || fixed.Fragments[0].State != string(claudecode.StateOK) || len(fixed.Fragments[0].Lines) != 9 {
+	if fixed.Agent != "claudecode" || !fixed.Provisioned || !fixed.Changed || len(fixed.Refused) != 0 || len(fixed.Fragments) != 1 || fixed.Fragments[0].State != string(claudecode.StateOK) || len(fixed.Fragments[0].Lines) != 10 {
 		t.Fatalf("repair %s", body)
 	}
 	if m2, err := claudecode.LoadManifest(dir); err != nil || m2.PreImageHash != m.PreImageHash {

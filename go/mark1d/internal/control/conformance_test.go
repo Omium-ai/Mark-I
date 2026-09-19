@@ -126,7 +126,7 @@ func seedConformance(t *testing.T) seeded {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := anchors.PublishCandidates(anchors.CandidatesPath(dir), consented, derived); err != nil {
+		if err := anchors.PublishCandidates(anchors.CandidatesPath(dir), consented, derived, anchors.SandboxStatus{Available: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -150,6 +150,9 @@ func seedConformance(t *testing.T) seeded {
 	if _, err := claudecode.ApplyFragment(settings, dir, ""); err != nil {
 		t.Fatal(err)
 	}
+	// The plan sources: ~/.claude.json's oauthAccount (never .credentials.json) and one status-line record in the vendor's published shape (https://code.claude.com/docs/en/statusline).
+	writeFile(t, filepath.Join(home, ".claude.json"), []byte(`{"oauthAccount":{"organizationRateLimitTier":"default_claude_max_20x","organizationType":"claude_max","billingType":"stripe_subscription","hasExtraUsageEnabled":false,"profileFetchedAt":1789501965151}}`), 0o600)
+	writeFile(t, claudecode.RateLimitsPath(dir), []byte(`{"received_at":1789562800,"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1789575600},"seven_day":{"used_percentage":41.2,"resets_at":1789893600}},"model":{"id":"claude-opus-5","display_name":"Opus"},"context_window":{"total_input_tokens":15500,"total_output_tokens":1200,"context_window_size":200000,"used_percentage":8,"remaining_percentage":92,"current_usage":{"input_tokens":8500,"output_tokens":1200,"cache_creation_input_tokens":5000,"cache_read_input_tokens":2000}},"prompt_cache":{"warm":true,"caching_observed":true,"ttl":"1h","expires_at":1789566400,"requests":14,"misses":2,"expected_rebuilds":1,"hit_ratio":0.91,"cache_write_tokens":352000,"miss_recache_tokens":310200,"last_miss_at":1789562630,"last_miss_cause":{"causes":["tools_changed"],"tools_added":2,"tools_removed":0},"miss_causes":{"tools_changed":2},"recache_tokens_if_cold":45000}}`+"\n"), 0o600)
 	// The verifier's own Report (tools/verifier/src/lib.rs), which the route relays verbatim — after checking it was handed the export and key manifest the stub controld below serves.
 	verifier := filepath.Join(bin, "mark1-verifier")
 	writeFile(t, verifier, []byte("#!/bin/sh\nread -r c < \"$3\"; read -r k < \"$5\"\ncase \"$c\" in *'\"seq\":1'*) ;; *) echo no-chain >&2; exit 1;; esac\ncase \"$k\" in *pubkey_hex*) ;; *) echo no-keys >&2; exit 1;; esac\necho '{\"ok\":true,\"checked\":{\"receipts\":3,\"checkpoints\":1,\"inclusion_proofs\":3,\"witness_heads\":0},\"intact_prefix_seq\":92,\"intact_prefix_hash\":\"ab\",\"last_good_seq\":92,\"last_good_hash\":\"ab\",\"defects\":[]}'\n"), 0o700)

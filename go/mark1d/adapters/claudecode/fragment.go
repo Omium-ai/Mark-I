@@ -49,6 +49,10 @@ const (
 	entryTag   = "_mark1"         // per-entry tag: survives a damaged manifest
 	tagValue   = "v1"
 
+	// The tenth pointer: Claude Code's single status-line slot (https://code.claude.com/docs/en/statusline — `type`, `command`, optional `padding`/`refreshInterval`/`hideVimModeIndicator`), taken so the shim can file the sanctioned rate-limit feed and chain the user's own command.
+	statusLineKey     = "statusLine"
+	statusLinePointer = "/" + statusLineKey
+
 	// 08 §8.3: mechanism B refuses to create a user file it would then own.
 	CodeNoTarget = "M1E-7101"
 	// 08 §8.3(d): a human edited inside our pointers — stop, never overwrite.
@@ -248,6 +252,41 @@ func desiredEntries(shim string) ([]json.RawMessage, error) {
 	return out, nil
 }
 
+// desiredStatusLine renders our status-line entry over the user's current one: their display options (`padding` and friends) ride along because the shim replays their command, only `type`/`command`/`_mark1` are ours.
+func desiredStatusLine(shim string, cur json.RawMessage) (json.RawMessage, error) {
+	o := map[string]json.RawMessage{}
+	if len(cur) > 0 && json.Unmarshal(cur, &o) != nil {
+		o = map[string]json.RawMessage{} // not an object: nothing of theirs to carry
+	}
+	cmd, err := json.Marshal(shim + " statusline")
+	if err != nil {
+		return nil, err
+	}
+	o["type"], o["command"], o[entryTag] = json.RawMessage(`"command"`), cmd, json.RawMessage(`"`+tagValue+`"`)
+	return json.Marshal(o)
+}
+
+// recordStatusLinePrev mirrors the slot as we found it into the sidecar the shim chains to: the user's own entry is recorded, an empty slot clears a stale record, and our own entry leaves the record as it is.
+func recordStatusLinePrev(stateDir string, cur json.RawMessage, present bool) error {
+	if stateDir == "" {
+		return nil
+	}
+	path := StatusLinePrevPath(stateDir)
+	switch {
+	case !present:
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	case isOurs(cur):
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return writeAtomicMode(path, cur, 0o600)
+}
+
 // ApplyFragment is 08 §8.3's idempotent apply for the strict-JSON fence:
 // registers the nine 08 §5.1 hooks into an EXISTING settings file, owning
 // exactly the JSON Pointers it records. stateDir is the `mark1` state root —
@@ -316,6 +355,12 @@ func apply(settingsPath, stateDir, shim string, force bool) (ApplyResult, error)
 		arrays[i] = list
 		pointers[i] = fmt.Sprintf("/hooks/%s/%d", r.Event, idx)
 	}
+	curSL, hasSL := root.get(statusLineKey)
+	slWant, err := desiredStatusLine(shim, curSL)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	want, pointers = append(want, slWant), append(pointers, statusLinePointer)
 
 	canonWant, err := canonical(want)
 	if err != nil {
@@ -325,7 +370,7 @@ func apply(settingsPath, stateDir, shim string, force bool) (ApplyResult, error)
 
 	// §8.3 step 2: classify against what the file itself claims.
 	if raw, ok := root.get(managedKey); ok {
-		m, cur, err := currentChecksum(raw, hooks)
+		m, cur, err := currentChecksum(raw, root, hooks)
 		switch {
 		case err != nil || cur != m.Checksum:
 			// (d) a human edited inside our pointers. Stop — never overwrite.
@@ -346,6 +391,10 @@ func apply(settingsPath, stateDir, shim string, force bool) (ApplyResult, error)
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	// Before the target write, like the manifest: the sidecar is what revert restores the slot from.
+	if err := recordStatusLinePrev(stateDir, curSL, hasSL); err != nil {
+		return ApplyResult{}, err
+	}
 
 	for i, r := range hookRegistrations {
 		b, err := json.Marshal(arrays[i])
@@ -359,6 +408,7 @@ func apply(settingsPath, stateDir, shim string, force bool) (ApplyResult, error)
 		return ApplyResult{}, err
 	}
 	root.set("hooks", newHooks)
+	root.set(statusLineKey, slWant)
 	mb, err := json.Marshal(managed{
 		Version: 1, Agent: "claudecode", Fragment: "hooks",
 		Pointers: pointers, Checksum: desired,
@@ -395,12 +445,12 @@ func apply(settingsPath, stateDir, shim string, force bool) (ApplyResult, error)
 // compares against that payload, not the desired one — checking the desired
 // set instead would call every fragment revision damaged and jam the (c)
 // upgrade path.
-func currentChecksum(raw json.RawMessage, hooks *object) (managed, string, error) {
+func currentChecksum(raw json.RawMessage, root, hooks *object) (managed, string, error) {
 	var m managed
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return m, "", err
 	}
-	found, err := resolve(hooks, m.Pointers)
+	found, err := resolve(root, hooks, m.Pointers)
 	if err != nil {
 		return m, "", err
 	}
@@ -412,11 +462,20 @@ func currentChecksum(raw json.RawMessage, hooks *object) (managed, string, error
 }
 
 // resolve reads the values a recorded pointer set points at. Only the
-// `/hooks/<Event>/<index>` shape this fragment records is understood — a
-// pointer we never write is not a pointer we own.
-func resolve(hooks *object, pointers []string) ([]json.RawMessage, error) {
+// `/hooks/<Event>/<index>` shape this fragment records — plus the one
+// `/statusLine` slot — is understood; a pointer we never write is not a
+// pointer we own.
+func resolve(root, hooks *object, pointers []string) ([]json.RawMessage, error) {
 	out := make([]json.RawMessage, 0, len(pointers))
 	for _, p := range pointers {
+		if p == statusLinePointer {
+			raw, ok := root.get(statusLineKey)
+			if !ok {
+				return nil, fmt.Errorf("pointer %q: no status line", p)
+			}
+			out = append(out, raw)
+			continue
+		}
 		var event string
 		var idx int
 		if _, err := fmt.Sscanf(p, "/hooks/%s", &event); err != nil {
@@ -494,6 +553,11 @@ func writeAtomic(path string, data []byte) error {
 }
 
 func ManifestPath(stateDir string) string { return manifestPath(stateDir, "hooks") }
+
+// StatusLinePrevPath is the sidecar holding the user's own statusLine entry verbatim while ours holds the slot; the shim replays stdin to its `command` (rust/mark1-hookshim/src/statusline.rs) and Revert puts it back.
+func StatusLinePrevPath(stateDir string) string {
+	return filepath.Join(stateDir, "claude", "statusline.prev.json")
+}
 
 // manifestPath is 08 §8.2's `provisioned/<agent>/<fragment>.manifest.json`. The
 // fragment name is a parameter because this adapter now fences TWO fragments

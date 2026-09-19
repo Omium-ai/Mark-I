@@ -1,0 +1,20 @@
+{
+  "agent": "claudecode",
+  "tier": {
+    "id": "default_claude_max_20x",
+    "label": "Max 20x",
+    "fetched_at": "2026-09-10T09:12:45Z",
+    "organization_type": "claude_max",
+    "billing_type": "stripe_subscription",
+    "extra_usage_enabled": false
+  },
+  "windows": {
+    "five_hour": null,
+    "seven_day": null
+  },
+  "model": null,
+  "context_window": null,
+  "prompt_cache": null,
+  "source": "none",
+  "note": "Mark 1 never reads, stores, or transmits your Claude account token and never calls Anthropic on your behalf; your plan tier and usage limits are read from the files and status-line data that the unmodified Claude Code binary writes on your own machine, so Claude Code remains the only program that uses your subscription."
+}

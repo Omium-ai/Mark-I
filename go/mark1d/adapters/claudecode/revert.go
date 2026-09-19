@@ -151,14 +151,14 @@ func Inspect(stateDir string) (Status, error) {
 	}
 
 	if raw, ok := root.get(managedKey); ok {
-		mg, curSum, cerr := currentChecksum(raw, hooks)
-		st.Lines = linesAt(hooks, mg.Pointers)
+		mg, curSum, cerr := currentChecksum(raw, root, hooks)
+		st.Lines = linesAt(root, hooks, mg.Pointers)
 		switch {
 		case cerr != nil || curSum != mg.Checksum:
 			st.State = StateDamaged
 			st.Detail = CodeDamaged + ": values at the recorded pointers no longer match their checksum"
 			if len(st.Lines) == 0 {
-				st.Lines = linesAt(hooks, taggedPointers(hooks))
+				st.Lines = linesAt(root, hooks, taggedPointers(root, hooks))
 			}
 		case sum(cur) == m.PostImageHash:
 			st.State = StateOK
@@ -172,8 +172,8 @@ func Inspect(stateDir string) (Status, error) {
 	// No `_mark1_managed`, but tagged entries survive: the checksum object was
 	// deleted while our entries stayed. That is damage, not absence — reporting
 	// MISSING would make the next apply append a SECOND copy of every handler.
-	if ptrs := taggedPointers(hooks); len(ptrs) > 0 {
-		st.State, st.Lines = StateDamaged, linesAt(hooks, ptrs)
+	if ptrs := taggedPointers(root, hooks); len(ptrs) > 0 {
+		st.State, st.Lines = StateDamaged, linesAt(root, hooks, ptrs)
 		st.Detail = CodeDamaged + ": " + managedKey + " was removed but managed entries remain"
 		return st, nil
 	}
@@ -225,10 +225,14 @@ func Revert(stateDir string) (RevertResult, error) {
 	default:
 		// §8.4 step 3: the user edited the file after we did, so the pre-image
 		// is stale. Remove exactly our entries and nothing else.
-		if err := surgical(m, cur); err != nil {
+		if err := surgical(m, cur, stateDir); err != nil {
 			return res, err
 		}
 		res.Kind = "surgical"
+	}
+	// The slot is theirs again on every path above, so the shim must stop chaining; before the manifest for the same re-run reason.
+	if err := os.Remove(StatusLinePrevPath(stateDir)); err != nil && !os.IsNotExist(err) {
+		return res, err
 	}
 
 	// §8.4 step 4, and the reason it is step 4: a crash between the write above
@@ -247,7 +251,7 @@ func Revert(stateDir string) (RevertResult, error) {
 // goes stale the moment the user inserts a handler above ours, and deleting
 // what a stale index points at destroys THEIR config — the single failure this
 // whole design exists to prevent.
-func surgical(m Manifest, cur []byte) error {
+func surgical(m Manifest, cur []byte, stateDir string) error {
 	root, hooks, err := openTarget(cur)
 	if err != nil {
 		return err
@@ -256,6 +260,15 @@ func surgical(m Manifest, cur []byte) error {
 	if _, ok := root.get(managedKey); ok {
 		root.del(managedKey)
 		changed = true
+	}
+	if sl, ok := root.get(statusLineKey); ok && isOurs(sl) {
+		changed = true
+		if prev, err := os.ReadFile(StatusLinePrevPath(stateDir)); err == nil && json.Valid(prev) {
+			root.set(statusLineKey, prev)
+			root.owned[statusLineKey] = false // their bytes go back verbatim, not re-indented
+		} else {
+			root.del(statusLineKey) // the slot was empty when we took it
+		}
 	}
 	preEvents, preHadHooks := preHooks(m)
 	for _, event := range append([]string(nil), hooks.keys...) {
@@ -362,8 +375,11 @@ func isOurs(e json.RawMessage) bool {
 // taggedPointers finds every managed entry by tag, wherever it now sits. This
 // is the fallback identity for the damaged states, where the recorded pointer
 // list is absent or provably wrong.
-func taggedPointers(hooks *object) []string {
+func taggedPointers(root, hooks *object) []string {
 	var out []string
+	if sl, ok := root.get(statusLineKey); ok && isOurs(sl) {
+		out = append(out, statusLinePointer)
+	}
 	for _, event := range hooks.keys {
 		var list []json.RawMessage
 		if json.Unmarshal(hooks.vals[event], &list) != nil {
@@ -381,8 +397,8 @@ func taggedPointers(hooks *object) []string {
 // linesAt reads the bytes actually sitting at each pointer. A pointer that no
 // longer resolves yields no lines rather than a fabricated one — doctor shows
 // what is there, not what should be.
-func linesAt(hooks *object, pointers []string) []Line {
-	vals, err := resolve(hooks, pointers)
+func linesAt(root, hooks *object, pointers []string) []Line {
+	vals, err := resolve(root, hooks, pointers)
 	if err != nil {
 		return nil
 	}
