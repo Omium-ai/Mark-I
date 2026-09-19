@@ -79,6 +79,11 @@ func (a *Adapter) Compatibility(version string) (Compat, error) {
 	if version == "" {
 		return Incompatible, errors.New("claude version unsniffable")
 	}
+	if _, state, err := a.paths(); err == nil {
+		if err := adapters.HookShape(state, a.Name()); err != nil {
+			return Incompatible, err
+		}
+	}
 	home, err := a.home()
 	if err != nil {
 		return Incompatible, err

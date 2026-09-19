@@ -1323,17 +1323,20 @@ func armedAgents(idemKey []byte, stateDir string) []string {
 			out = append(out, "codex")
 		}
 	}
+	gm, oc, cp := &gemini.Adapter{StateDir: stateDir}, &opencode.Adapter{StateDir: stateDir}, &copilot.Adapter{StateDir: stateDir}
 	for _, a := range []struct {
-		name string
-		det  func() (adapters.Detection, error)
-		ok   func(string) bool
+		name   string
+		det    func() (adapters.Detection, error)
+		compat func(string) (adapters.Compat, error)
 	}{
-		{"gemini", (&gemini.Adapter{StateDir: stateDir}).Detect, gemini.Supported},
-		{"opencode", (&opencode.Adapter{StateDir: stateDir}).Detect, opencode.Supported},
-		{"copilot", (&copilot.Adapter{StateDir: stateDir}).Detect, copilot.Supported},
+		{"gemini", gm.Detect, gm.Compatibility},
+		{"opencode", oc.Detect, oc.Compatibility},
+		{"copilot", cp.Detect, cp.Compatibility},
 	} {
-		if d, err := a.det(); err == nil && d.Installed && a.ok(d.Version) {
-			out = append(out, a.name)
+		if d, err := a.det(); err == nil && d.Installed {
+			if c, _ := a.compat(d.Version); c.Admits() {
+				out = append(out, a.name)
+			}
 		}
 	}
 	return out
@@ -1342,25 +1345,14 @@ func armedAgents(idemKey []byte, stateDir string) []string {
 func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey []byte, adm *capture.Admitter, cov *coverage.Emitter, router *route.Emitter, seg *taskseg.Segmenter) error {
 	wsPath := filepath.Join(cfg.stateDir, "workspaces.json")
 	live := tailers.NewLiveSet()
-	cc := &claudecode.Adapter{}
+	cc := &claudecode.Adapter{StateDir: cfg.stateDir}
 	// The other three adapters each read ONE shared vendor tree with per-stream cwd containment, so one manager per adapter serves every enabled root.
 	type shared struct {
 		key   string
 		ok    bool
 		start func(root string) (*tailers.Manager, error)
 	}
-	cx, gm, oc, cp := &codex.Adapter{StateDir: cfg.stateDir}, &gemini.Adapter{}, &opencode.Adapter{}, &copilot.Adapter{}
-	sniff := func(name string, det func() (adapters.Detection, error), supported func(string) bool) bool {
-		d, err := det()
-		if err != nil || !d.Installed {
-			return false
-		}
-		if !supported(d.Version) {
-			log.Info("mark1d: agent not tailed — version outside the pinned corpus", "agent", name, "version", d.Version)
-			return false
-		}
-		return true
-	}
+	cx, gm, oc, cp := &codex.Adapter{StateDir: cfg.stateDir}, &gemini.Adapter{StateDir: cfg.stateDir}, &opencode.Adapter{StateDir: cfg.stateDir}, &copilot.Adapter{StateDir: cfg.stateDir}
 	// The probe form: a shape-checked version tails with a receipted unsupported_agent_version bypass, exactly as claudecode does below.
 	sniffCompat := func(name string, det func() (adapters.Detection, error), compat func(string) (adapters.Compat, error)) bool {
 		d, err := det()
@@ -1373,7 +1365,7 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 			return false
 		}
 		if c == adapters.CompatibleUnpinned {
-			log.Warn("mark1d: transcript capture UNVERIFIED — no conformance corpus for this version; its rollout shape passed the structural probe, capture proceeds and this window is receipted as unsupported_agent_version", "agent", name, "version", d.Version)
+			log.Warn("mark1d: transcript capture UNVERIFIED — no conformance corpus for this version; its artifact shape passed the structural probe, capture proceeds and this window is receipted as unsupported_agent_version", "agent", name, "version", d.Version)
 			if cerr := cov.Transition(ctx, m1pv1.CoverageKind_COVERAGE_KIND_BYPASS, coverage.DeviceWide(), coverage.ReasonUnsupportedAgentVersion, 0); cerr != nil {
 				log.Error("COVERAGE BYPASS NOT RECEIPTED — this is a gap, not a warning", "reason_code", coverage.ReasonUnsupportedAgentVersion, "err", cerr)
 			}
@@ -1432,13 +1424,13 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 		{"\x00codex", sniffCompat("codex", cx.Detect, cx.Compatibility), func(root string) (*tailers.Manager, error) {
 			return cx.StartTail(adapters.Workspace{Root: root}, live, codex.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: off.Unless(cfg.stateDir, "codex", router.Emit), Observe: tcfg.Observe, Log: log})
 		}},
-		{"\x00gemini", sniff("gemini", gm.Detect, gemini.Supported), func(root string) (*tailers.Manager, error) {
+		{"\x00gemini", sniffCompat("gemini", gm.Detect, gm.Compatibility), func(root string) (*tailers.Manager, error) {
 			return gm.StartTail(adapters.Workspace{Root: root}, live, gemini.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: off.Unless(cfg.stateDir, "gemini", router.Emit), Observe: tcfg.Observe, Log: log})
 		}},
-		{"\x00opencode", sniff("opencode", oc.Detect, opencode.Supported), func(root string) (*tailers.Manager, error) {
+		{"\x00opencode", sniffCompat("opencode", oc.Detect, oc.Compatibility), func(root string) (*tailers.Manager, error) {
 			return oc.StartTail(adapters.Workspace{Root: root}, live, opencode.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: off.Unless(cfg.stateDir, "opencode", router.Emit), Observe: tcfg.Observe, Log: log})
 		}},
-		{"\x00copilot", sniff("copilot", cp.Detect, copilot.Supported), func(root string) (*tailers.Manager, error) {
+		{"\x00copilot", sniffCompat("copilot", cp.Detect, cp.Compatibility), func(root string) (*tailers.Manager, error) {
 			return cp.StartTail(adapters.Workspace{Root: root}, live, copilot.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: off.Unless(cfg.stateDir, "copilot", router.Emit), Observe: tcfg.Observe, Log: log})
 		}},
 	}

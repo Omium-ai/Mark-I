@@ -282,6 +282,7 @@ func (s *Server) fragments() []fragment {
 func (s *Server) agents() []map[string]any {
 	d := s.cfg.StateDir
 	cc, cx := &claudecode.Adapter{StateDir: d}, &codex.Adapter{StateDir: d}
+	gm, oc, cp := &gemini.Adapter{StateDir: d}, &opencode.Adapter{StateDir: d}, &copilot.Adapter{StateDir: d}
 	detect := map[string]func() (adapters.Detection, func(string) string){
 		"claudecode": func() (adapters.Detection, func(string) string) {
 			return must(cc.Detect()), s.memoCompat("claudecode", cc.Compatibility)
@@ -290,13 +291,13 @@ func (s *Server) agents() []map[string]any {
 			return must(cx.Detect()), s.memoCompat("codex", cx.Compatibility)
 		},
 		"gemini": func() (adapters.Detection, func(string) string) {
-			return must((&gemini.Adapter{StateDir: d}).Detect()), pinned(gemini.Supported)
+			return must(gm.Detect()), s.memoCompat("gemini", gm.Compatibility)
 		},
 		"opencode": func() (adapters.Detection, func(string) string) {
-			return must((&opencode.Adapter{StateDir: d}).Detect()), pinned(opencode.Supported)
+			return must(oc.Detect()), s.memoCompat("opencode", oc.Compatibility)
 		},
 		"copilot": func() (adapters.Detection, func(string) string) {
-			return must((&copilot.Adapter{StateDir: d}).Detect()), pinned(copilot.Supported)
+			return must(cp.Detect()), s.memoCompat("copilot", cp.Compatibility)
 		},
 		"cursor": func() (adapters.Detection, func(string) string) {
 			return must((&cursor.Adapter{StateDir: d}).Detect()), pinned(cursor.Supported)
@@ -391,7 +392,7 @@ func claudeRecentProjects() []string {
 	return out
 }
 
-// memoCompat memoizes per agent and version: an unpinned version costs a transcript scan (compat.go probe), seconds on a real home dir.
+// memoCompat memoizes per agent and version: an unpinned version costs an artifact scan (each adapter's compat.go probe), seconds on a real home dir.
 // Unprobed is never memoized: "no transcript at this version yet" becomes a verdict after the user's first session.
 func (s *Server) memoCompat(agent string, probe func(string) (adapters.Compat, error)) func(string) string {
 	return func(v string) string {
@@ -413,6 +414,7 @@ func (s *Server) memoCompat(agent string, probe func(string) (adapters.Compat, e
 	}
 }
 
+// pinned is the exact-pin verdict for the one surface with no artifact to probe (cursor: hooks only).
 func pinned(supported func(string) bool) func(string) string {
 	return func(v string) string {
 		if supported(v) {

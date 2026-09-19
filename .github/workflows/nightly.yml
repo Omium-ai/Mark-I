@@ -49,3 +49,18 @@ jobs:
       - name: Store logs on failure
         if: failure()
         run: tail -n 200 .stores/log/*.log || true
+
+  pin-freshness:
+    name: adapter pin freshness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: extractions/setup-just@v2
+      - name: pin freshness (A4 §4)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: just pin-freshness | tee -a "$GITHUB_STEP_SUMMARY"

@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -27,7 +28,10 @@ import (
 )
 
 type Options struct {
-	Out string // conformance/hooks/claudecode root
+	Agent     string        // claudecode (driven, the default) | codex | gemini | opencode | copilot (harvested)
+	Out       string        // corpus root; empty is conformance/hooks/<agent>
+	Since     time.Duration // harvest: only artifacts modified within this window
+	Workspace string        // harvest: the real workspace root that becomes /home/devuser/workspace/acme-app
 }
 
 const (
@@ -50,7 +54,21 @@ var turns = []string{
 
 var hookEvents = []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "SubagentStop", "PreCompact", "SessionEnd"}
 
+// Record dispatches: claude is driven through canonical turns; the file-based agents are harvested (harvest.go).
 func Record(ctx context.Context, env *cli.Env, opts Options) error {
+	if opts.Agent == "" {
+		opts.Agent = "claudecode"
+	}
+	if opts.Out == "" {
+		opts.Out = filepath.Join("conformance", "hooks", opts.Agent)
+	}
+	if opts.Agent != "claudecode" {
+		return Harvest(env, opts)
+	}
+	return record(ctx, env, opts)
+}
+
+func record(ctx context.Context, env *cli.Env, opts Options) error {
 	cc := &claudecode.Adapter{}
 	d, err := cc.Detect()
 	if err != nil || !d.Installed || d.Version == "" {
@@ -227,16 +245,23 @@ func (r *recording) sanitizer() func([]byte) []byte {
 		d, _ := (&claudecode.Adapter{Home: "/"}).TranscriptDir(p)
 		return filepath.Base(d)
 	}
-	fixed := [][2]string{
+	return sanitizer([][2]string{
 		{r.ws, synthRoot}, {r.foreign, synthForeign}, {munge(r.ws), synthSlug},
 		{r.tmp, "/home/devuser"}, {munge(r.tmp), "-home-devuser"},
 		{r.home, "/home/devuser"}, {munge(r.home), "-home-devuser"},
 		{filepath.Base(r.home), "devuser"},
-	}
-	uuidRe := regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-	idRe := regexp.MustCompile(`\b(msg|req|toolu)_[A-Za-z0-9]{6,}`)
-	hexRe := regexp.MustCompile(`\b[0-9a-f]{16,17}\b`)
-	emailRe := regexp.MustCompile(`[\w.+-]+@[\w-]+(\.[\w-]+)+`)
+	}, parentSession, foreignSession)
+}
+
+var (
+	uuidRe  = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	idRe    = regexp.MustCompile(`\b(msg|req|toolu|resp|call|prt|ses|rs|fc)_[A-Za-z0-9]{6,}`)
+	hexRe   = regexp.MustCompile(`\b[0-9a-f]{16,17}\b`)
+	emailRe = regexp.MustCompile(`[\w.+-]+@[\w-]+(\.[\w-]+)+`)
+)
+
+// sanitizer applies fixed substitutions first, then stable synthetic ids; keep names the UUIDs left verbatim.
+func sanitizer(fixed [][2]string, keep ...string) func([]byte) []byte {
 	seen, counts := map[string]string{}, map[string]int{}
 	synth := func(kind, s string, mk func(n int) string) string {
 		if _, ok := seen[kind+s]; !ok {
@@ -252,7 +277,7 @@ func (r *recording) sanitizer() func([]byte) []byte {
 		}
 		s = emailRe.ReplaceAllString(s, "devuser@example.com")
 		s = uuidRe.ReplaceAllStringFunc(s, func(u string) string {
-			if u == parentSession || u == foreignSession {
+			if slices.Contains(keep, u) {
 				return u
 			}
 			return synth("uuid", u, func(n int) string { return fmt.Sprintf("aa000000-0000-4000-8000-%012d", n) })

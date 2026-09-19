@@ -53,14 +53,19 @@ func (r *probeRecord) missing() string {
 	return strings.Join(m, ", ")
 }
 
-// Compatibility is the admission: version ∈ SupportedVersions ⇒ Pinned; else the newest rollout
-// whose session_meta stamps this cli_version is probed for every field rollout.go reads.
+// Compatibility is the admission: version ∈ SupportedVersions ⇒ Pinned; else the shim's hook shape is
+// checked, then the newest rollout whose session_meta stamps this cli_version is probed for every field rollout.go reads.
 func (a *Adapter) Compatibility(version string) (adapters.Compat, error) {
 	if Supported(version) {
 		return adapters.Pinned, nil
 	}
 	if version == "" {
 		return adapters.Incompatible, errors.New("codex version unsniffable")
+	}
+	if _, state, err := a.paths(); err == nil {
+		if err := adapters.HookShape(state, a.Name()); err != nil {
+			return adapters.Incompatible, err
+		}
 	}
 	dir, err := a.SessionsDir()
 	if err != nil {

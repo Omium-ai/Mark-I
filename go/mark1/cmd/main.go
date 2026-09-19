@@ -182,13 +182,16 @@ func main() {
 	var corpusOpts corpus.Options
 	corpusRecordCmd := &cobra.Command{
 		Use:   "record",
-		Short: "Record a conformance corpus from the installed `claude` (12 §3.2 recording lane)",
+		Short: "Record a conformance corpus from the installed agent (12 §3.2 recording lane): claude is driven, codex/gemini/opencode/copilot are harvested from disk",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return corpus.Record(ctx, env, corpusOpts)
 		},
 	}
-	corpusRecordCmd.Flags().StringVar(&corpusOpts.Out, "out", "conformance/hooks/claudecode", "corpus root; writes v<installed-version>/ under it")
+	corpusRecordCmd.Flags().StringVar(&corpusOpts.Agent, "agent", "claudecode", "claudecode | codex | gemini | opencode | copilot")
+	corpusRecordCmd.Flags().StringVar(&corpusOpts.Out, "out", "", "corpus root; writes v<installed-version>/ under it (default conformance/hooks/<agent>)")
+	corpusRecordCmd.Flags().DurationVar(&corpusOpts.Since, "since", 24*time.Hour, "harvest: only artifacts modified within this window")
+	corpusRecordCmd.Flags().StringVar(&corpusOpts.Workspace, "workspace", "", "harvest: the real workspace root to rewrite as /home/devuser/workspace/acme-app (default: cwd)")
 	corpusCmd := &cobra.Command{Use: "corpus", Short: "Conformance corpus tooling"}
 	corpusCmd.AddCommand(corpusRecordCmd)
 

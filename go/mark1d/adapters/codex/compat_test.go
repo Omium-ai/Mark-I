@@ -65,6 +65,17 @@ func TestCompatibilityRefusesBadShapes(t *testing.T) {
 			}
 		})
 	}
+	t.Run("hook shape rename", func(t *testing.T) {
+		a := probeHome(t, metaLine, turnLine, replyLine, countLine, recordLine)
+		a.StateDir = t.TempDir()
+		if err := adapters.WriteShape(a.StateDir, "codex", "PreToolUse", map[string]string{"hook_event_name": "string"}, []string{"tool_use_id"}); err != nil {
+			t.Fatal(err)
+		}
+		c, err := a.Compatibility("9.9.9")
+		if c != adapters.Incompatible || err == nil || !strings.Contains(err.Error(), "PreToolUse") || !strings.Contains(err.Error(), "tool_use_id") {
+			t.Fatalf("got %v, %v; want Incompatible naming the hook field", c, err)
+		}
+	})
 	if c, err := probeHome(t, metaLine, turnLine, recordLine).Compatibility(""); c != adapters.Incompatible || err == nil {
 		t.Fatalf("unsniffable = %v, %v", c, err)
 	}

@@ -136,19 +136,30 @@ test-rust:
 # here on the same terms: a tag nobody wrote down is a tag nobody audits.
 #   unix   -> runs on the ubuntu/macos legs, NOT windows-2022. Everything genuinely tied to a
 #             uid, a mode bit or an AF_UNIX path: fabric/listener_test.go (0600/0700 perms),
-#             anchors/{catalog,runner}_test.go, tailers/tailer_test.go (dev/ino identity),
-#             adapters/claudecode/shim_e2e_test.go, and all of cmd/ (run() binds the fabric,
-#             which has no Windows listener — see NFR-PORTABILITY-002 and D-CA).
-#   linux  -> anchors/sandbox_linux_test.go; the namespace sandbox is a Linux kernel feature
-#             (sandbox_other.go is the !linux refusal it pairs with).
-#   darwin -> anchors/sandbox_darwin{,_test}.go (the sandbox-exec sandbox), sandbox_common.go and
-#             sandbox_probe_test.go (`linux || darwin`: the shared helper and the portable probes),
-#             sandbox_other.go (`!linux && !darwin`: the Windows refusal). The probes run on the
-#             macos-14 leg with M1_REQUIRE_SANDBOX=1, so a skipped probe there is a red leg.
+#             tailers/tailer_test.go (dev/ino identity), adapters/claudecode/shim_e2e_test.go,
+#             and all of cmd/ (run() binds the fabric, which has no Windows listener — see
+#             NFR-PORTABILITY-002 and D-CA). anchors/{catalog,runner,wire}_test.go carried it
+#             only because their fake tool was a sh script; they are tag-free now (a .cmd on
+#             windows) and their two mode-bit asserts are GOOS-guarded, so windows-2022 runs
+#             the catalog, consent, runner and wire audit against the real AppContainer sandbox.
+#   linux  -> anchors/sandbox_linux_test.go and sandbox_hardened_test.go; the namespace sandbox
+#             is a Linux kernel feature. sandbox_helper.go and sandbox_posix_test.go are
+#             `linux || darwin` (the re-exec helper, rlimits, AF_UNIX and one-way-valve probes).
+#   darwin -> anchors/sandbox_darwin{,_test}.go (the sandbox-exec sandbox), sandbox_helper.go and
+#             sandbox_posix_test.go (`linux || darwin`, above), sandbox_probe_test.go
+#             (`linux || darwin || windows`: the portable probes, one file so a probe added on one
+#             platform runs on all three), sandbox_other.go (`!linux && !darwin && !windows`: the
+#             refusal for anything else). The probes run on the macos-14 leg with
+#             M1_REQUIRE_SANDBOX=1, so a skipped probe there is a red leg.
 #   windows -> internal/procattr/procattr_{windows,other}{,_test}.go; CREATE_NO_WINDOW on every
 #             child the daemon spawns is a Win32 creation flag, so the Windows file carries the
 #             attribute and its test, and the !windows pair asserts the no-op. Both halves run on
 #             their own leg (windows-2022 and ubuntu/macos), so nothing is hidden from any leg.
+#             anchors/sandbox_windows.go (the AppContainer + job-object sandbox) and
+#             sandbox_appcontainer_test.go (its probes: named pipe denied, read outside the
+#             grants denied, job caps, ACL grant idempotence) plus the shared
+#             sandbox_probe_test.go run on windows-2022 with M1_REQUIRE_SANDBOX=1, the same
+#             inversion as the other two legs: a skipped probe there is a red leg.
 # Adding a platform tag to make a red leg green is the failure this row exists to catch: the
 # test that cannot run on Windows should be the one whose SUBJECT is unix, never the one whose
 # helper happened to live in a unix file (harness_test.go).
@@ -364,6 +375,12 @@ gates:
 # checking that a test exists means asking the three test runners, not grepping for a name.
 trace-check:
     uv run --frozen --all-packages python tools/trace-check
+
+# Nightly, not per PR: it goes red when upstream moves, which no diff can fix. Exit 1 = a pin is
+# past its limit (the LIMITS table at the top of the script), 2 = a lookup failed.
+# Pin freshness (A4 §4): how far each conformance/hooks/<agent>/v* pin trails upstream (GitHub releases, npm, cursor.com).
+pin-freshness:
+    uv run --frozen --all-packages python tools/ci/pin_freshness.py
 
 # The contract-sync rule (§10.3): a contract diff must carry its owning doc's diff.
 #

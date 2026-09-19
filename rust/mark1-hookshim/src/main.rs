@@ -21,6 +21,7 @@ mod emit;
 mod fabric;
 mod gate;
 mod maps;
+mod shape;
 mod spill;
 mod statusline;
 
@@ -114,6 +115,8 @@ fn run(started: Instant) {
         return;
     };
     let map = maps::load(home().as_deref());
+    // The hook-shape spill mark1d's compat probe reads (D-EE for hooks): types and missing names, never values.
+    shape::record(home().as_deref(), &map, &payload);
     // Unmapped hook name ⇒ emit nothing speculative (04 §5 step 2; adapters
     // never guess a field — 08 §5 rule 2).
     let Some(event) = emit::build(&map, &payload) else {
