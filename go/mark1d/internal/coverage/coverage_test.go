@@ -138,11 +138,14 @@ func TestEveryFrozenReasonCodeIsEmittable(t *testing.T) {
 	all := []string{
 		ReasonMark1Off, ReasonDiskHardStop, ReasonUserEnable, ReasonProxyBypass,
 		ReasonProxyFailed, ReasonUnsupportedAgentVersion, ReasonTranscriptRetentionGap,
-		ReasonAgentPause, ReasonAgentResume,
+		ReasonAgentPause, ReasonAgentResume, ReasonHistoryImport,
 	}
 	if len(all) != len(reasonKind) {
-		t.Fatalf("the vocabulary is the seven frozen values in proto/m1p/v1/intelligence.proto plus agent_pause/agent_resume; "+
+		t.Fatalf("the vocabulary is the seven frozen values in proto/m1p/v1/intelligence.proto plus agent_pause/agent_resume/history_import; "+
 			"this package knows %d and the test lists %d", len(reasonKind), len(all))
+	}
+	if reasonKind[ReasonHistoryImport] != m1pv1.CoverageKind_COVERAGE_KIND_BYPASS {
+		t.Fatal("history_import is a closed BYPASS window: backfilled transcript time was never live-captured")
 	}
 	if reasonKind[ReasonAgentPause] != m1pv1.CoverageKind_COVERAGE_KIND_DISABLE || reasonKind[ReasonAgentResume] != m1pv1.CoverageKind_COVERAGE_KIND_ENABLE {
 		t.Fatal("agent_pause is a DISABLE and agent_resume an ENABLE, the same kinds mark1_off/user_enable carry")

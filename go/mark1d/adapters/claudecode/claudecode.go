@@ -256,6 +256,8 @@ type TailConfig struct {
 	Observe      func(*m1pv1.Event) // tailers.Config.Observe: the segmenter's task_id stamp
 	Emit         func(context.Context, *m1pv1.Event) error
 	Log          *slog.Logger
+	// BackfillWindow caps first-tail history (tailers.BackfillWindow in production); 0 imports everything.
+	BackfillWindow time.Duration
 }
 
 // StartTail builds the tailer manager for one enabled workspace. The root
@@ -277,14 +279,15 @@ func (a *Adapter) StartTail(ws adapters.Workspace, set tailers.WorkspaceSet, cfg
 		return nil, err
 	}
 	return tailers.NewManager(tailers.Config{
-		Dir:          dir,
-		StateDir:     cfg.StateDir,
-		Allowed:      set.Allowed,
-		UsageIdemKey: cfg.UsageIdemKey,
-		Observe:      cfg.Observe,
-		Emit:         cfg.Emit,
-		Log:          cfg.Log,
-		Agent:        "claudecode",
-		Roots:        set.Roots,
+		Dir:            dir,
+		StateDir:       cfg.StateDir,
+		Allowed:        set.Allowed,
+		UsageIdemKey:   cfg.UsageIdemKey,
+		Observe:        cfg.Observe,
+		Emit:           cfg.Emit,
+		Log:            cfg.Log,
+		Agent:          "claudecode",
+		Roots:          set.Roots,
+		BackfillWindow: cfg.BackfillWindow,
 	})
 }

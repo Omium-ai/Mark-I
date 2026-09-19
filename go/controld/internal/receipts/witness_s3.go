@@ -39,6 +39,9 @@ type S3Publisher struct {
 	opts   S3PublisherOptions
 }
 
+// String names the destination for the boot line; never credentials.
+func (p *S3Publisher) String() string { return "s3://" + p.opts.Bucket }
+
 func NewS3Publisher(ctx context.Context, o S3PublisherOptions) (*S3Publisher, error) {
 	if o.Bucket == "" {
 		return nil, fmt.Errorf("receipts: witness bucket is required")

@@ -95,6 +95,9 @@ func (j *QuarantineSweep) Clock(now func() time.Time, tick <-chan time.Time) {
 
 // Run sweeps at entry and every 24 h until ctx ends.
 func (j *QuarantineSweep) Run(ctx context.Context) {
+	if ids, err := j.tenants(ctx); err == nil {
+		log.Printf("ingest: quarantine sweep started: %d tenants, retention %s, every %s (m1_080)", len(ids), QuarantineRetention, sweepEvery)
+	}
 	tick := j.tick
 	if tick == nil {
 		t := time.NewTicker(sweepEvery)

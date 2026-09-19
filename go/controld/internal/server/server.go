@@ -97,7 +97,7 @@ func (s *Server) ReadyHandler() http.Handler {
 func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{
 		Addr:    s.addr,
-		Handler: s.mux,
+		Handler: RequestLog(s.mux),
 		// The §8.3 inbound timeouts: read header 5 s, full request 60 s,
 		// response write 30 s.
 		ReadHeaderTimeout: 5 * time.Second,

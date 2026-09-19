@@ -1421,11 +1421,12 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 		}
 	}
 	tcfg := claudecode.TailConfig{
-		StateDir:     filepath.Join(cfg.stateDir, "cursors"),
-		UsageIdemKey: idemKey,
-		Emit:         off.Unless(cfg.stateDir, "claudecode", router.Emit),
-		Observe:      func(ev *m1pv1.Event) { seg.Observe(ev, nil) },
-		Log:          log,
+		StateDir:       filepath.Join(cfg.stateDir, "cursors"),
+		UsageIdemKey:   idemKey,
+		Emit:           off.Unless(cfg.stateDir, "claudecode", router.Emit),
+		Observe:        func(ev *m1pv1.Event) { seg.Observe(ev, nil) },
+		Log:            log,
+		BackfillWindow: tailers.BackfillWindow,
 	}
 	singles = []shared{
 		{"\x00codex", sniffCompat("codex", cx.Detect, cx.Compatibility), func(root string) (*tailers.Manager, error) {

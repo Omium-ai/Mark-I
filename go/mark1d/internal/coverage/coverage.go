@@ -29,9 +29,10 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// The reason_code vocabulary, frozen at nine values in
+// The reason_code vocabulary: nine values frozen in
 // proto/m1p/v1/intelligence.proto and mirrored VERBATIM by m1_043's `reason`
-// column. 04 §2.7 is its only authority; a tenth code is a doc change first.
+// column, plus history_import (founder ruling 2026-09-19; proto/04 §2.7 comment
+// update pending). 04 §2.7 is its only authority; a new code is a doc change first.
 // The two agent_* codes are POST /v1/agents/{name}/pause|resume (desktop spec
 // §5.9); the wire carries no agent field, so the agent name stays in the local
 // journal line and the transition lands device-wide, exactly as `mark1 off --all` does.
@@ -45,6 +46,8 @@ const (
 	ReasonTranscriptRetentionGap  = "transcript_retention_gap"
 	ReasonAgentPause              = "agent_pause"
 	ReasonAgentResume             = "agent_resume"
+	// ReasonHistoryImport (founder ruling 2026-09-19): a closed BYPASS window covering transcript history the tailer backfilled at first tail; the event carries the session_id so the app can label that session's earlier Usage as imported, not live-captured.
+	ReasonHistoryImport = "history_import"
 )
 
 // reasonKind pairs each frozen code with the ONE kind it can legally carry.
@@ -64,6 +67,7 @@ var reasonKind = map[string]m1pv1.CoverageKind{
 	ReasonTranscriptRetentionGap:  m1pv1.CoverageKind_COVERAGE_KIND_BYPASS,
 	ReasonAgentPause:              m1pv1.CoverageKind_COVERAGE_KIND_DISABLE,
 	ReasonAgentResume:             m1pv1.CoverageKind_COVERAGE_KIND_ENABLE,
+	ReasonHistoryImport:           m1pv1.CoverageKind_COVERAGE_KIND_BYPASS,
 }
 
 // WorkspaceIDLen is m1_043's CHECK (octet_length(workspace_digest) = 32),

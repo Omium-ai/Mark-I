@@ -47,6 +47,8 @@ type Config struct {
 	// Agent names the vendor in Sessions(); Roots (the oracle's enabled roots) lets each session carry the root that admitted it. Both optional.
 	Agent string
 	Roots func() []string
+	// BackfillWindow bounds how much history a never-tailed transcript imports (founder ruling 2026-09-19: BackfillWindow). 0 imports everything, today's behaviour, which corpus replays rely on.
+	BackfillWindow time.Duration
 }
 
 // SessionInfo is one admitted session as the control API needs it: the vendor, the enabled root its cwd fell under, and when this manager first opened one of its streams.
@@ -389,7 +391,7 @@ func (m *Manager) open(path string, role Role, session uuid.UUID) {
 	if m.cfg.Format.NewParser != nil {
 		str.parse = m.cfg.Format.NewParser()
 	}
-	t, err := newTailer(path, m.cfg.StateDir, str)
+	t, err := newTailer(path, m.cfg.StateDir, str, m.cfg.Now(), m.cfg.BackfillWindow)
 	if err != nil {
 		m.cfg.Log.Error("tailers: open failed", "path", path, "err", err)
 		return

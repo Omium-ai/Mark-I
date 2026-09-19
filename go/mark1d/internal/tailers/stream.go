@@ -16,11 +16,15 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// BackfillWindow is the founder ruling of 2026-09-19: a first tail imports at most this much transcript history.
+const BackfillWindow = 30 * 24 * time.Hour
 
 // Role of a transcript stream. The sidechain rule is role-dependent: a Usage
 // event is attributed to the transcript in which the API call ORIGINATED
@@ -72,6 +76,11 @@ type stream struct {
 
 	// parse is the vendor line parser (Format.NewParser); nil is claudecode's.
 	parse func(line []byte) (Line, bool)
+
+	// importAt is the first-tail instant when a backfill window applies: a line stamped before it is history, before importCutoff it is dropped. Zero = resumed from a cursor or no window, nothing is history.
+	importAt, importCutoff time.Time
+	importOldest           time.Time // stamp of the oldest line admitted as history; zero until one is
+	importMarked           bool      // the history_import marker precedes the first backfilled emission, once
 }
 
 // Line is one vendor usage line reduced to the fields every adapter's dedupe
@@ -123,6 +132,17 @@ func (s *stream) consume(line []byte, now time.Time) []*m1pv1.Event {
 	if s.role == RoleParent && l.Sidechain {
 		return nil
 	}
+	if !s.importAt.IsZero() {
+		// Unstamped lines carry no age evidence and pass as live.
+		if ts, err := time.Parse(time.RFC3339Nano, l.Timestamp); err == nil && ts.Before(s.importAt) {
+			if ts.Before(s.importCutoff) {
+				return nil
+			}
+			if s.importOldest.IsZero() {
+				s.importOldest = ts
+			}
+		}
+	}
 	key := pendingKey{l.MessageID, l.RequestID}
 	ev := s.buildUsage(&l)
 	for i := range s.pending {
@@ -153,7 +173,11 @@ func (s *stream) flush() []*m1pv1.Event {
 	if len(s.pending) == 0 {
 		return nil
 	}
-	out := make([]*m1pv1.Event, 0, len(s.pending))
+	out := make([]*m1pv1.Event, 0, len(s.pending)+1)
+	if !s.importOldest.IsZero() && !s.importMarked {
+		s.importMarked = true
+		out = append(out, s.historyImport())
+	}
 	if s.emitted == nil {
 		s.emitted = map[pendingKey]*m1pv1.Usage{}
 	}
@@ -163,6 +187,20 @@ func (s *stream) flush() []*m1pv1.Event {
 	}
 	s.pending = nil
 	return out
+}
+
+// historyImport is the backfill marker: a closed BYPASS window from the oldest imported line to the first-tail instant, on this session, so the app can label every Usage of the session stamped before occurred_at as imported history rather than live capture. DeviceWide because the tailer holds no tenant path key; the session_id is the join.
+func (s *stream) historyImport() *m1pv1.Event {
+	return &m1pv1.Event{
+		SessionId:  s.session[:],
+		OccurredAt: timestamppb.New(s.importAt),
+		Body: &m1pv1.Event_CoverageTransition{CoverageTransition: &m1pv1.CoverageTransition{
+			Kind:        m1pv1.CoverageKind_COVERAGE_KIND_BYPASS,
+			WorkspaceId: coverage.DeviceWide(),
+			DurationMs:  uint64(s.importAt.Sub(s.importOldest).Milliseconds()), //nolint:gosec // G115: importOldest < importAt by construction
+			ReasonCode:  coverage.ReasonHistoryImport,
+		}},
+	}
 }
 
 // quiet flushes iff the stream has been line-silent past the 2 s debounce.

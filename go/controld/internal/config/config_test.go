@@ -82,6 +82,28 @@ func TestWitnessBucketRequiresTenants(t *testing.T) {
 	}
 }
 
+// A malformed WITNESS_TENANTS entry refuses boot naming the entry; the loops it feeds would otherwise skip a tenant silently.
+func TestWitnessTenantsParseStrictly(t *testing.T) {
+	setRequired(t)
+	t.Setenv("WITNESS_BUCKET", "mark1-witness")
+	for _, bad := range []string{
+		"11111111-1111-1111-1111-111111111111,not-a-uuid",
+		"11111111111111111111111111111111",              // hex without dashes: uuid.Parse accepts it, the canonical form does not
+		"urn:uuid:11111111-1111-1111-1111-111111111111", // urn form, same
+		"00000000-0000-0000-0000-000000000000",          // nil tenant
+	} {
+		t.Setenv("WITNESS_TENANTS", bad)
+		entry := bad[strings.LastIndex(bad, ",")+1:]
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "WITNESS_TENANTS") || !strings.Contains(err.Error(), entry) {
+			t.Fatalf("%q: want R1 refusal naming the entry %q, got %v", bad, entry, err)
+		}
+	}
+	t.Setenv("WITNESS_TENANTS", "11111111-1111-1111-1111-111111111111, 22222222-2222-2222-2222-222222222222")
+	if c, err := Load(); err != nil || len(c.WitnessTenants) != 2 {
+		t.Fatalf("canonical entries must load: %v %+v", err, c.WitnessTenants)
+	}
+}
+
 // WITNESS_RETAIN=0 makes witness_s3.go omit the object-lock headers, so the
 // head publishes mutable and the job still reports success — the same
 // looks-healthy-doing-nothing shape as the refusal above, and the one config

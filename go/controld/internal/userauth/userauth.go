@@ -19,6 +19,7 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/server"
 )
 
 // Audience is the aud every Mark 1 user token must carry.
@@ -137,6 +138,7 @@ func Middleware(v *Verifier, obsCfg obs.Config, requireRole string) func(http.Ha
 				writeErr(w, http.StatusForbidden, "M1E-1001", "caller lacks role "+requireRole)
 				return
 			}
+			server.Stamp(r.Context(), claims.TenantID, uuid.Nil)
 			metered.ServeHTTP(w, r.WithContext(WithClaims(r.Context(), claims)))
 		})
 	}

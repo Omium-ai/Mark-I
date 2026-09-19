@@ -31,7 +31,8 @@ type Tailer struct {
 	gone bool  // path vanished (vendor retention sweep); drained and done
 }
 
-func newTailer(path, stateDir string, str stream) (*Tailer, error) {
+// newTailer opens a stream. window > 0 bounds a FIRST tail (no cursor) to that much history: an untouched-for-longer file starts at EOF, an in-window file drops lines older than the window and marks the rest as imported (stream.historyImport).
+func newTailer(path, stateDir string, str stream, now time.Time, window time.Duration) (*Tailer, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -52,6 +53,12 @@ func newTailer(path, stateDir string, str stream) (*Tailer, error) {
 	// response is the correct one.
 	if c, ok := loadCursor(stateDir, id); ok && c.Offset <= fi.Size() {
 		t.off = c.Offset
+	} else if window > 0 {
+		t.str.importAt, t.str.importCutoff = now, now.Add(-window)
+		// ponytail: mtime stands in for the newest assistant line's stamp (appends bump it); the per-line cutoff in consume is the correctness path.
+		if fi.ModTime().Before(t.str.importCutoff) {
+			t.off = fi.Size()
+		}
 	}
 	return t, nil
 }

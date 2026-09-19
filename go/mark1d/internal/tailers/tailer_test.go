@@ -23,7 +23,7 @@ func usageLine(msg, req string, out uint64) string {
 
 func newTestTailer(t *testing.T, path, state string) *Tailer {
 	t.Helper()
-	tl, err := newTailer(path, state, stream{role: RoleParent, session: testSession, idemKey: testIdemKey})
+	tl, err := newTailer(path, state, stream{role: RoleParent, session: testSession, idemKey: testIdemKey}, time.Now(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,7 +12,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/s3land"
 )
 
-// Run sweeps once at entry and then once per tick, never on its own clock: two fake "days" drive exactly three passes.
+// Run sweeps once at entry and then once per tick, never on its own clock: two fake "days" drive exactly three passes (the boot line's tenant lookup is the one extra source call, at entry only).
 func TestQuarantineSweepRunsAtEntryAndOnEveryTick(t *testing.T) {
 	tick := make(chan time.Time)
 	passes := make(chan struct{}, 8)
@@ -37,7 +37,7 @@ func TestQuarantineSweepRunsAtEntryAndOnEveryTick(t *testing.T) {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	await(1)
+	await(2)
 	tick <- time.Time{}
 	await(1)
 	tick <- time.Time{}

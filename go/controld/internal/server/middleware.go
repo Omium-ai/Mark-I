@@ -56,6 +56,7 @@ func Chain(v auth.Verifier, obsCfg obs.Config, onAuthFailure func(reason string)
 			}
 			// The tenancy stamp (05 §2.1 stage 3): claims — never the
 			// envelope — travel the request context from here on.
+			Stamp(r.Context(), claims.TenantID, claims.DeviceID)
 			metered.ServeHTTP(w, r.WithContext(auth.WithClaims(r.Context(), claims)))
 		})
 	}

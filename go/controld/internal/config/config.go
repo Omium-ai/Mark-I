@@ -14,6 +14,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Swappable only so tests can observe the refusal; production always dies.
@@ -279,6 +281,10 @@ func Load() (Config, error) {
 	if raw := os.Getenv("WITNESS_TENANTS"); raw != "" {
 		for _, s := range strings.Split(raw, ",") {
 			if s = strings.TrimSpace(s); s != "" {
+				// Strict canonical form: a typo here silently drops a tenant from every witness/sweep/rollout loop, so it refuses boot naming the entry.
+				if id, err := uuid.Parse(s); err != nil || id == uuid.Nil || !strings.EqualFold(id.String(), s) {
+					return Config{}, fmt.Errorf("config: WITNESS_TENANTS entry %q is not a canonical tenant uuid (boot refusal R1)", s)
+				}
 				c.WitnessTenants = append(c.WitnessTenants, s)
 			}
 		}

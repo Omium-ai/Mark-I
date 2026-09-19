@@ -101,6 +101,9 @@ func (j *WitnessJob) Clock(now func() time.Time, tick <-chan time.Time) {
 // per-tenant advisory xact lock + the freshness check), so extra replicas
 // running this loop skip work instead of double-publishing (05 §8.1).
 func (j *WitnessJob) Run(ctx context.Context) {
+	if ids, err := j.tenants(ctx); err == nil {
+		log.Printf("receipts: witness started: %d tenants, publisher %v, every %s (m1_003)", len(ids), j.pub, j.interval)
+	}
 	tick := j.tick
 	if tick == nil {
 		t := time.NewTicker(j.interval)
