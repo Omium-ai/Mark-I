@@ -65,9 +65,9 @@ func TestEffectsFromBatchProjectsOnlyE1Excerpts(t *testing.T) {
 // With no receipt row reachable, EVERY E1 excerpt is refused and paged: the door fails closed.
 func TestExcerptWithoutAReceiptRowIsRefusedAsASecurityEvent(t *testing.T) {
 	var pages []string
-	s := New(nullDB{}, &fakeChain{}, func(_, _, _ uuid.UUID, detail string, _ time.Time) {
+	s, _ := newTestSidefx(&fakeChain{}, func(_, _, _ uuid.UUID, detail string, _ time.Time) {
 		pages = append(pages, detail)
-	}, 1, 8)
+	})
 	t.Cleanup(s.Close)
 	tenant, device := testTenant(t), uuid.New()
 	before := excerptRefusalsTotal(t, "unknown_receipt")

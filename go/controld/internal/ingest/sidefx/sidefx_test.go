@@ -28,8 +28,9 @@ func (nullDB) WithTenant(context.Context, querychoke.TenantID, func(pgx.Tx) erro
 }
 
 type fakeChain struct {
-	appended []receipts.CheckpointEvent
-	refuse   *receipts.RefusalError
+	appended  []receipts.CheckpointEvent
+	refuse    *receipts.RefusalError
+	runSealed bool // newTestSidefx sets it: the seal's tx body (Consume) runs against the memory store
 	// inChain answers AlreadyAppended: the set of origin signatures the fake
 	// chain "already holds" (replay/at-least-once dedupe, keyed like the real
 	// store — the deterministic Ed25519 signature bytes).
@@ -42,10 +43,14 @@ func (f *fakeChain) AppendCheckpoint(_ context.Context, _ querychoke.TenantID, e
 		return receipts.Appended{}, f.refuse
 	}
 	f.appended = append(f.appended, ev)
-	// sealed is exercised for real in the integration test; here the tx is
-	// unavailable and coverage inserts are the only thing inside it.
-	_ = sealed
-	return receipts.Appended{Seq: int64(len(f.appended))}, nil
+	// sealed runs with no tx: the memory leaf store consumes without one; the coverage inserts inside it are the integration test's business.
+	app := receipts.Appended{Seq: int64(len(f.appended))}
+	if f.runSealed {
+		if err := sealed(nil, app); err != nil {
+			return receipts.Appended{}, err
+		}
+	}
+	return app, nil
 }
 
 func (f *fakeChain) AlreadyAppended(_ context.Context, _ querychoke.TenantID, originSig []byte) (bool, error) {
@@ -99,7 +104,7 @@ func checkpointEffect(t *testing.T, sealedIDs []uuid.UUID, claimedSeq int64) Eff
 
 func TestPendingLeavesSealAndConsumeInOrder(t *testing.T) {
 	chain := &fakeChain{}
-	s := New(nullDB{}, chain, nil, 1, 8)
+	s, _ := newTestSidefx(chain, nil)
 	t.Cleanup(s.Close)
 	tenant, device := testTenant(t), uuid.New()
 
@@ -123,7 +128,7 @@ func TestPendingLeavesSealAndConsumeInOrder(t *testing.T) {
 }
 
 func TestReplayedLeafIsIdempotent(t *testing.T) {
-	s := New(nullDB{}, &fakeChain{}, nil, 1, 8)
+	s, _ := newTestSidefx(&fakeChain{}, nil)
 	t.Cleanup(s.Close)
 	tenant, device := testTenant(t), uuid.New()
 	id := uuidV7(t)
@@ -138,7 +143,7 @@ func TestMerkleMismatchRefusesAndKeepsLeaves(t *testing.T) {
 	chain := &fakeChain{}
 	var securityFired bool
 	sec := func(uuid.UUID, uuid.UUID, uuid.UUID, string, time.Time) { securityFired = true }
-	s := New(nullDB{}, chain, sec, 1, 8)
+	s, _ := newTestSidefx(chain, sec)
 	t.Cleanup(s.Close)
 	tenant, device := testTenant(t), uuid.New()
 
@@ -171,7 +176,7 @@ func TestChainRefusalSecurityOnlyForTamperShapes(t *testing.T) {
 	} {
 		chain := &fakeChain{refuse: &receipts.RefusalError{Code: tc.code, Detail: "x"}}
 		fired := false
-		s := New(nullDB{}, chain, func(uuid.UUID, uuid.UUID, uuid.UUID, string, time.Time) { fired = true }, 1, 8)
+		s, _ := newTestSidefx(chain, func(uuid.UUID, uuid.UUID, uuid.UUID, string, time.Time) { fired = true })
 		ids := []uuid.UUID{uuidV7(t)}
 		s.Apply(context.Background(), tenant, device, time.Now(), "",
 			[]Effect{leafEffect(ids[0]), checkpointEffect(t, ids, 1)})
@@ -194,7 +199,7 @@ func TestChainRefusalSecurityOnlyForTamperShapes(t *testing.T) {
 func TestReplayedCheckpointAfterRestartConsumesPrefix(t *testing.T) {
 	chain := &fakeChain{inChain: map[string]bool{"sig-c1": true}}
 	var securityFired bool
-	s := New(nullDB{}, chain, func(uuid.UUID, uuid.UUID, uuid.UUID, string, time.Time) { securityFired = true }, 1, 8)
+	s, _ := newTestSidefx(chain, func(uuid.UUID, uuid.UUID, uuid.UUID, string, time.Time) { securityFired = true })
 	t.Cleanup(s.Close)
 	tenant, device := testTenant(t), uuid.New()
 
@@ -238,7 +243,7 @@ func TestReplayedCheckpointAfterRestartConsumesPrefix(t *testing.T) {
 func TestDuplicateCheckpointAfterConsumeSkipsQuietly(t *testing.T) {
 	chain := &fakeChain{inChain: map[string]bool{}}
 	var securityFired bool
-	s := New(nullDB{}, chain, func(uuid.UUID, uuid.UUID, uuid.UUID, string, time.Time) { securityFired = true }, 1, 8)
+	s, _ := newTestSidefx(chain, func(uuid.UUID, uuid.UUID, uuid.UUID, string, time.Time) { securityFired = true })
 	t.Cleanup(s.Close)
 	tenant, device := testTenant(t), uuid.New()
 
@@ -334,8 +339,9 @@ func TestEnqueueBlockingWaitsOnFullQueueNeverDrops(t *testing.T) {
 		t.Fatalf("EnqueueBlocking after the queue drained: %v", err)
 	}
 	s.Close()
-	if got := int(gate.applied.Load()); got != accepted+1 {
-		t.Fatalf("applied %d jobs, want %d (accepted %d + 1 blocking): replay dropped effects", got, accepted+1, accepted)
+	// two DB entries per job: last_seen and the leaf landing (m1_083)
+	if got := int(gate.applied.Load()); got != 2*(accepted+1) {
+		t.Fatalf("applied %d DB entries, want %d (accepted %d + 1 blocking, two each): replay dropped effects", got, 2*(accepted+1), accepted)
 	}
 }
 

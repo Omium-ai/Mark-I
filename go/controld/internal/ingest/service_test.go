@@ -250,6 +250,7 @@ func TestReplayOfAServiceBatchSkipsStageEleven(t *testing.T) {
 		t.Fatal(err)
 	}
 	sfx := sidefx.New(h.db, nil, nil, 1, 100)
+	sfx.SetLeafStore(sidefx.NewMemoryLeafStore())
 	now := time.Now().UTC()
 	n, err := Replay(context.Background(), h.tomb, h.store, h.ins, sfx, tenant, now.AddDate(0, 0, -1), now.AddDate(0, 0, 1))
 	sfx.Close()

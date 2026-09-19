@@ -70,7 +70,7 @@ func TestEffectsFromBatchMapsQuarantineDeletionAtMillisecondPrecision(t *testing
 // landed leaf of the next checkpoint, it just carries no receipt to append.
 func TestQuarantineDeletionMalformedShapesAreSecurityEvents(t *testing.T) {
 	var pages []string
-	s := New(nullDB{}, &fakeChain{}, func(_, _, _ uuid.UUID, detail string, _ time.Time) { pages = append(pages, detail) }, 1, 8)
+	s, mem := newTestSidefx(&fakeChain{}, func(_, _, _ uuid.UUID, detail string, _ time.Time) { pages = append(pages, detail) })
 	t.Cleanup(s.Close)
 	tenant, device := testTenant(t), uuid.New()
 	before := testutil.ToFloat64(deletionRefusals.WithLabelValues(string(receipts.DefectPayloadMismatch)))
@@ -107,9 +107,7 @@ func TestQuarantineDeletionMalformedShapesAreSecurityEvents(t *testing.T) {
 	if got := s.PendingLeafCount(tenant, device); got != len(mutate) {
 		t.Fatalf("pending leaves = %d, want %d: a refused deletion is still a landed event", got, len(mutate))
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, l := range s.pending[pendKey{tenant: tenant.UUID(), device: device}] {
+	for _, l := range mem.pending(device) {
 		if l.del != nil {
 			t.Fatal("a refused deletion must carry nothing into the seal")
 		}

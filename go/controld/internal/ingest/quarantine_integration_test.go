@@ -204,6 +204,7 @@ func setupQuarantineRig(t *testing.T, rs *scanner.Ruleset) *quarantineRig {
 	proj := chproj.New(r.ins, 1, 64)
 	t.Cleanup(proj.Close)
 	sfx := sidefx.New(&fakeDB{}, nil, nil, 1, 64)
+	sfx.SetLeafStore(sidefx.NewMemoryLeafStore())
 	t.Cleanup(sfx.Close)
 	r.mod = New(Deps{
 		Verifier: auth.NewHMACVerifier(testKey, auth.StaticRevocations{}),

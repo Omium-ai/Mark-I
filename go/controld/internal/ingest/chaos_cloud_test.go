@@ -364,6 +364,7 @@ func newChaosRig(t *testing.T) *chaosRig {
 	r.conn = conn
 	r.proj = chproj.New(conn, 2, 256)
 	sfx := sidefx.New(&fakeDB{}, nil, nil, 1, 256)
+	sfx.SetLeafStore(sidefx.NewMemoryLeafStore())
 	t.Cleanup(sfx.Close)
 	r.mod = New(Deps{
 		Verifier: auth.NewHMACVerifier(testKey, auth.StaticRevocations{}),

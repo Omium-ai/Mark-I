@@ -91,7 +91,9 @@ type CheckpointEvent struct {
 	ClaimedCheckpointSeq int64
 	MerkleRoot           [32]byte
 	LeafCount            int
-	OriginSig            []byte
+	// LastEventID is the seal's last leaf (ReceiptCheckpoint.last_event_id): how sidefx knows the leaf window it reads is this seal's and not a shorter one still landing. uuid.Nil when the edge did not say.
+	LastEventID uuid.UUID
+	OriginSig   []byte
 	// IssuedAt is the envelope's device-stamped occurred_at. The payload's
 	// issued_at string is its RFC 3339 UTC seconds rendering — pinned here
 	// because the device must produce the identical bytes when it signs.

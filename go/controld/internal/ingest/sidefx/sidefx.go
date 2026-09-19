@@ -145,6 +145,8 @@ type QuarantineDeletion struct {
 // Effect is one event's stage-11 consequence, in spool order.
 type Effect struct {
 	EventID    uuid.UUID
+	BatchID    uuid.UUID // the upload's device-minted UUIDv7: with Index, the leaf's spool order (m1_083)
+	Index      int
 	Coverage   *Coverage                 // CoverageTransition events
 	Checkpoint *receipts.CheckpointEvent // ReceiptCheckpoint events
 	Excerpt    *Excerpt                  // EvidenceExcerpt events at tier E1
@@ -156,7 +158,8 @@ type Effect struct {
 // fallbackAt stands in for a missing device timestamp.
 func EffectsFromBatch(b *m1pv1.Batch, fallbackAt time.Time) []Effect {
 	effects := make([]Effect, 0, len(b.GetEvents()))
-	for _, ev := range b.GetEvents() {
+	batchID, _ := uuid.FromBytes(b.GetBatchId())
+	for i, ev := range b.GetEvents() {
 		id, err := uuid.FromBytes(ev.GetEventId())
 		if err != nil {
 			continue // stage 6 already refused these; unreachable post-ack
@@ -165,15 +168,17 @@ func EffectsFromBatch(b *m1pv1.Batch, fallbackAt time.Time) []Effect {
 		if ts := ev.GetOccurredAt(); ts != nil {
 			occurred = ts.AsTime()
 		}
-		e := Effect{EventID: id}
+		e := Effect{EventID: id, BatchID: batchID, Index: i}
 		switch body := ev.GetBody().(type) {
 		case *m1pv1.Event_ReceiptCheckpoint:
 			cp := body.ReceiptCheckpoint
 			var root [32]byte
 			copy(root[:], cp.GetMerkleRoot())
+			last, _ := uuid.FromBytes(cp.GetLastEventId())
 			e.Checkpoint = &receipts.CheckpointEvent{
 				EventID:     id,
 				DeviceKeyID: cp.GetKeyId(),
+				LastEventID: last,
 				// A device may claim any uint64 here, and >MaxInt64 wraps negative. That is
 				// survivable ONLY because receipts.store rejects unless the claim EQUALS the
 				// tenant's next seq, which is always positive — so every wrapped value fails
@@ -240,12 +245,12 @@ type job struct {
 	effects []Effect
 }
 
-type pendKey struct{ tenant, device uuid.UUID }
-
 type leaf struct {
-	id  uuid.UUID
-	cov *Coverage
-	del *QuarantineDeletion // verified at Apply; nil when refused
+	id    uuid.UUID
+	batch uuid.UUID // the upload's device-minted UUIDv7: spool order across pods (m1_083)
+	idx   int
+	cov   *Coverage
+	del   *QuarantineDeletion // verified at Apply; nil when refused
 }
 
 // Sidefx applies the per-batch side effects on a small async pool (stage 11
@@ -257,13 +262,10 @@ type Sidefx struct {
 	db       DB
 	chain    ChainAppender
 	security Security
+	leaves   LeafStore // m1_083: shared across replicas and restarts
 	queues   []chan job
 	wg       sync.WaitGroup
 	closed   sync.Once
-
-	mu      sync.Mutex
-	pending map[pendKey][]leaf
-	seen    map[pendKey]map[uuid.UUID]bool // pending-set dedupe: idempotent on event_id (05 §2.1)
 }
 
 func New(db DB, chain ChainAppender, security Security, workers, depth int) *Sidefx {
@@ -272,9 +274,8 @@ func New(db DB, chain ChainAppender, security Security, workers, depth int) *Sid
 	}
 	s := &Sidefx{
 		db: db, chain: chain, security: security,
-		queues:  make([]chan job, workers),
-		pending: map[pendKey][]leaf{},
-		seen:    map[pendKey]map[uuid.UUID]bool{},
+		leaves: pgLeaves{db: db},
+		queues: make([]chan job, workers),
 	}
 	if s.security == nil {
 		s.security = func(tenant, device, event uuid.UUID, detail string, at time.Time) {
@@ -349,10 +350,11 @@ func (s *Sidefx) Apply(ctx context.Context, tenant querychoke.TenantID, device u
 	if err := s.ApplyLastSeen(ctx, tenant, device, seenAt, edgeVer); err != nil {
 		log.Printf("sidefx: last_seen update failed (tenant %s): %v", tenant, err)
 	}
+	// Leaves land BEFORE any checkpoint in the batch is applied: a checkpoint seals the batch before it, and its own batch's leaves must be in the store when the next one arrives on whichever pod.
+	var landed []leaf
 	for i := range effects {
 		e := &effects[i]
 		if e.Checkpoint != nil {
-			s.applyCheckpoint(ctx, tenant, device, e.Checkpoint)
 			continue
 		}
 		if e.Excerpt != nil {
@@ -365,64 +367,98 @@ func (s *Sidefx) Apply(ctx context.Context, tenant querychoke.TenantID, device u
 		// Every non-checkpoint landed event is a leaf of the device's NEXT
 		// checkpoint; the checkpoint announcement itself is sealed AFTER its
 		// tree and is deliberately not a leaf of any tree.
-		s.addLeaf(tenant, device, leaf{id: e.EventID, cov: e.Coverage, del: del})
+		landed = append(landed, leaf{id: e.EventID, batch: e.BatchID, idx: e.Index, cov: e.Coverage, del: del})
+	}
+	if err := s.leaves.Add(ctx, tenant, device, landed); err != nil {
+		log.Printf("sidefx: leaves not landed (tenant %s, %d leaves): %v — replay re-derives (05 §2.5)", tenant, len(landed), err)
+		return
+	}
+	pendingLeaves.Add(float64(len(landed)))
+	for i := range effects {
+		if cp := effects[i].Checkpoint; cp != nil {
+			s.applyCheckpoint(ctx, tenant, device, cp)
+		}
 	}
 }
 
-func (s *Sidefx) addLeaf(tenant querychoke.TenantID, device uuid.UUID, l leaf) {
-	k := pendKey{tenant: tenant.UUID(), device: device}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.seen[k] == nil {
-		s.seen[k] = map[uuid.UUID]bool{}
-	}
-	if s.seen[k][l.id] {
-		return // replayed batch: the leaf is already pending (idempotent on event_id)
-	}
-	s.seen[k][l.id] = true
-	s.pending[k] = append(s.pending[k], l)
-	pendingLeaves.Inc()
-}
+// SetLeafStore swaps the m1_083 store for another (tests: NewMemoryLeafStore); call before the first Apply.
+func (s *Sidefx) SetLeafStore(l LeafStore) { s.leaves = l }
 
-// PendingLeafCount reports one device's queue depth (tests; checkpoint_hint
-// would read the same number).
+// PendingLeafCount reports one device's unconsumed leaves (tests).
 func (s *Sidefx) PendingLeafCount(tenant querychoke.TenantID, device uuid.UUID) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.pending[pendKey{tenant: tenant.UUID(), device: device}])
+	w, err := s.leaves.Window(context.Background(), tenant, device, math.MaxInt32)
+	if err != nil {
+		return -1
+	}
+	return len(w)
 }
+
+// leafWindowRetries × leafWindowWait bounds how long a checkpoint waits for its own batch's leaves to land from another pod (stage 10–11 are post-ack and async on whichever pod acked).
+const (
+	leafWindowRetries = 8
+	leafWindowWait    = 500 * time.Millisecond
+	leafKeep          = 7 * 24 * time.Hour
+)
 
 func (s *Sidefx) applyCheckpoint(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, cp *receipts.CheckpointEvent) {
 	cp.DeviceID = device // identity comes from verified claims, never the event (08 §2.1)
 
-	k := pendKey{tenant: tenant.UUID(), device: device}
-	s.mu.Lock()
-	queue := s.pending[k]
-	s.mu.Unlock()
-
-	if len(queue) < cp.LeafCount || cp.LeafCount <= 0 {
-		// Before refusing, ask the chain: a checkpoint re-delivered AFTER its
-		// original seal consumed the leaves (at-least-once ingest, 05 §2.5
-		// replay) arrives with a short — or foreign — queue and is a
-		// duplicate, not a defect.
-		if dup, dupErr := s.chain.AlreadyAppended(ctx, tenant, cp.OriginSig); dupErr == nil && dup {
-			log.Printf("sidefx: checkpoint %s already in the chain; duplicate delivery skipped", cp.EventID)
-			return
+	// A checkpoint re-delivered AFTER its original seal (at-least-once ingest, 05 §2.5 replay) is a duplicate, not a defect. Its leaves are consumed already — unless replay re-landed them into a store that had lost them (the table's first day, a restore), where they would head every later window and wedge the device behind merkle_mismatch: a window that IS this seal's tree is consumed as the seal would have.
+	if dup, dupErr := s.chain.AlreadyAppended(ctx, tenant, cp.OriginSig); dupErr == nil && dup {
+		if w, err := s.leaves.Window(ctx, tenant, device, cp.LeafCount); err == nil && len(w) == cp.LeafCount {
+			ids := make([]uuid.UUID, len(w))
+			leaves := make([][]byte, len(w))
+			for i, l := range w {
+				ids[i], leaves[i] = l.id, l.id[:]
+			}
+			if root, err := receipts.MerkleRoot(leaves); err == nil && root == cp.MerkleRoot {
+				if err := s.leaves.Consume(ctx, nil, tenant, device, ids, cp.ClaimedCheckpointSeq); err != nil {
+					log.Printf("sidefx: checkpoint %s replayed prefix not consumed: %v", cp.EventID, err)
+				} else {
+					log.Printf("sidefx: checkpoint %s already in the chain; replayed prefix consumed", cp.EventID)
+					return
+				}
+			}
 		}
-		// A restart emptied the queue (or the seal names events this server
-		// never landed). Fail-closed on integrity: no countersignature over a
-		// tree we cannot recompute; replay from the landing objects re-derives
-		// the set (05 §2.5).
-		checkpointRefusals.WithLabelValues(string(receipts.DefectMerkleMismatch)).Inc()
-		log.Printf("sidefx: checkpoint %s refused: %d leaf(s) pending, seal claims %d (replay re-derives)",
-			cp.EventID, len(queue), cp.LeafCount)
+		log.Printf("sidefx: checkpoint %s already in the chain; duplicate delivery skipped", cp.EventID)
 		return
 	}
-	sealed := queue[:cp.LeafCount]
+	if cp.LeafCount <= 0 {
+		checkpointRefusals.WithLabelValues(string(receipts.DefectMerkleMismatch)).Inc()
+		log.Printf("sidefx: checkpoint %s refused: seal claims %d leaves", cp.EventID, cp.LeafCount)
+		return
+	}
+	// The seal's leaves are the oldest unconsumed ones in spool order, exactly LeafCount of them, ending where the seal says it ends. Short or ending elsewhere ⇒ the batch before this one is still landing on another pod: wait, bounded.
+	var sealed []leaf
+	for try := 0; ; try++ {
+		w, err := s.leaves.Window(ctx, tenant, device, cp.LeafCount)
+		if err != nil {
+			log.Printf("sidefx: checkpoint %s: leaf window read failed: %v (replay re-derives)", cp.EventID, err)
+			return
+		}
+		if len(w) == cp.LeafCount && (cp.LastEventID == uuid.Nil || w[len(w)-1].id == cp.LastEventID) {
+			sealed = w
+			break
+		}
+		if try >= leafWindowRetries || ctx.Err() != nil {
+			// Fail-closed on integrity: no countersignature over a tree we cannot recompute; replay from the landing objects re-derives the set (05 §2.5).
+			checkpointRefusals.WithLabelValues(string(receipts.DefectMerkleMismatch)).Inc()
+			log.Printf("sidefx: checkpoint %s refused: %d leaf(s) landed, seal claims %d ending at %s (replay re-derives)",
+				cp.EventID, len(w), cp.LeafCount, cp.LastEventID)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(leafWindowWait):
+		}
+	}
 	leaves := make([][]byte, len(sealed))
+	ids := make([]uuid.UUID, len(sealed))
 	for i, l := range sealed {
 		id := l.id
 		leaves[i] = id[:]
+		ids[i] = l.id
 	}
 	root, err := receipts.MerkleRoot(leaves)
 	if err != nil || root != cp.MerkleRoot {
@@ -470,40 +506,17 @@ func (s *Sidefx) applyCheckpoint(ctx context.Context, tenant querychoke.TenantID
 				}
 			}
 		}
-		return nil
+		// Consumed in the seal's own transaction: a refused or failed seal leaves the set intact for the re-seal or the replay; a consumed leaf stays consumed, so a replayed batch never re-enters it (idempotent on event_id, 05 §2.1 stage 11).
+		return s.leaves.Consume(ctx, tx, tenant, device, ids, r.Seq)
 	})
-	consume := func() {
-		s.mu.Lock()
-		s.pending[k] = s.pending[k][cp.LeafCount:]
-		s.mu.Unlock()
-		pendingLeaves.Sub(float64(cp.LeafCount))
-	}
 	switch refusal, isRefusal := receipts.AsRefusal(err); {
 	case err == nil:
 		checkpointsAppended.Inc()
-		// Consume ONLY on success or proven-duplicate (below): a refused or
-		// failed seal leaves the set intact so a re-seal or replay can still
-		// land it. Sealed ids STAY in `seen` — a replayed batch must not
-		// re-enter already-sealed leaves into the next tree (idempotent on
-		// event_id, 05 §2.1 stage 11).
-		// ponytail: seen grows per device for the process lifetime; add an
-		// epoch sweep if a long-lived pod's memory ever notices.
-		consume()
-	case isRefusal:
-		// A restart erased `seen`, replay re-admitted the sealed leaves, and
-		// this is their checkpoint coming around again: the local root check
-		// above proved the queue prefix IS this seal's leaf set, and the
-		// chain holding the identical origin signature proves the seal
-		// already landed. Consume the prefix exactly as success would have —
-		// left in place it offsets queue[:LeafCount] for every later honest
-		// seal, wedging the device behind endless merkle_mismatch pages. A
-		// live stale-head seal (raced by another device) is NOT in the chain
-		// and falls through: its leaves stay for the 08 §3.4 re-seal.
-		if dup, dupErr := s.chain.AlreadyAppended(ctx, tenant, cp.OriginSig); dupErr == nil && dup {
-			log.Printf("sidefx: checkpoint %s already in the chain; replayed prefix consumed", cp.EventID)
-			consume()
-			return
+		pendingLeaves.Sub(float64(cp.LeafCount))
+		if err := s.leaves.Sweep(ctx, tenant, leafKeep); err != nil {
+			log.Printf("sidefx: leaf sweep failed (tenant %s): %v", tenant, err)
 		}
+	case isRefusal:
 		checkpointRefusals.WithLabelValues(string(refusal.Code)).Inc()
 		if refusal.Code == receipts.DefectBadSignature || refusal.Code == receipts.DefectUnknownKey {
 			// A signature that does not verify or a key that is not this

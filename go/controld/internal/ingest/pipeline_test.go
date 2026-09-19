@@ -246,6 +246,7 @@ func newHarnessFull(t *testing.T, reg registry.Registry, dk DeviceKeys) *harness
 	}
 	h.proj = chproj.New(h.ins, 1, 100)
 	h.sfx = sidefx.New(h.db, nil, nil, 1, 100)
+	h.sfx.SetLeafStore(sidefx.NewMemoryLeafStore())
 	h.verifier = auth.NewHMACVerifier(testKey, auth.StaticRevocations{})
 	h.token = auth.Mint(testKey, h.tenant, h.device, time.Hour)
 	m := New(Deps{
@@ -1542,6 +1543,7 @@ func TestReplayFromS3AloneReconstructsAckedEvents(t *testing.T) {
 	rebuiltIns := &fakeInserter{}
 	rebuiltDB := &fakeDB{}
 	rebuiltSfx := sidefx.New(rebuiltDB, nil, nil, 1, 100)
+	rebuiltSfx.SetLeafStore(sidefx.NewMemoryLeafStore())
 	if rebuiltIns.count() != 0 || rebuiltDB.calls != 0 ||
 		rebuiltSfx.PendingLeafCount(tenant, h.device) != 0 || rebuiltSfx.PendingLeafCount(tenant, otherDevice) != 0 {
 		t.Fatal("the wiped ledger is not empty — the rebuild would be reading the live projection, not S3")

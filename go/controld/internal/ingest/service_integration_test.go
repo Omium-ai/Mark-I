@@ -232,6 +232,7 @@ func TestIntegrationServiceVerdictReentersTheLedger(t *testing.T) {
 	ctx := context.Background()
 	proj := chproj.New(write, 2, 256)
 	sfx := sidefx.New(&fakeDB{}, nil, nil, 1, 256)
+	sfx.SetLeafStore(sidefx.NewMemoryLeafStore())
 	t.Cleanup(sfx.Close)
 	mux := http.NewServeMux()
 	New(Deps{

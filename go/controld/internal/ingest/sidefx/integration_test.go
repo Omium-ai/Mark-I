@@ -434,44 +434,38 @@ func TestIntegrationCoverageInsertSurvivesAResealAfterRestart(t *testing.T) {
 		t.Fatalf("first delivery left no coverage row: %v", err)
 	}
 
-	// ── Restart + 05 §2.5 replay: cold seen, cold pending, and a seal built
-	// against the head the first append advanced.
+	// ── Restart + 05 §2.5 replay. The leaf set is m1_083 now: a restart forgets
+	// nothing, the re-delivered batch (same leaf, same seal bytes) is a duplicate
+	// the chain answers, and a FRESH seal over the already-sealed leaf finds no
+	// window and is refused — one leaf is sealed exactly once, so the coverage
+	// row is inserted exactly once and keeps the receipt that sealed it.
 	s2 := sidefx.New(h.db, h.store, nil, 1, 8)
 	t.Cleanup(s2.Close)
-	seal2 := h.sealCheckpoint(t, h.deviceA, []uuid.UUID{covID}, at.Add(time.Minute))
-	if bytes.Equal(seal2.OriginSig, seal1.OriginSig) {
-		t.Fatal("the re-seal reuses the first seal's signature bytes, so AlreadyAppended (sidefx.go:367) " +
-			"would answer it: this is a re-delivery, not the fresh seal the test needs")
-	}
 	before = coverageRowsTotal(t)
 	s2.Apply(ctx, h.tenantA, h.deviceA, at, "", []sidefx.Effect{
 		{EventID: covID, Coverage: cov},
+		{EventID: seal1.EventID, Checkpoint: &seal1},
+	})
+	seal2 := h.sealCheckpoint(t, h.deviceA, []uuid.UUID{covID}, at.Add(time.Minute))
+	if bytes.Equal(seal2.OriginSig, seal1.OriginSig) {
+		t.Fatal("the re-seal reuses the first seal's signature bytes: this is a re-delivery, not the fresh seal the test needs")
+	}
+	s2.Apply(ctx, h.tenantA, h.deviceA, at, "", []sidefx.Effect{
 		{EventID: seal2.EventID, Checkpoint: &seal2},
 	})
 
-	// The insert loop provably RAN: sealed() is called only after the receipt
-	// insert and inside the same tx (store.go:249-259), so a second receipt on
-	// the chain means the loop reached line 388 and returned nil. Without ON
-	// CONFLICT the unique violation aborts that tx and this count stays at 1.
 	var receipts2 int64
 	if err := h.admin.QueryRow(ctx, `SELECT count(*) FROM m1_receipts`).Scan(&receipts2); err != nil {
 		t.Fatal(err)
 	}
-	if receipts2 != 2 {
-		t.Fatalf("m1_receipts holds %d row(s), want 2 — the re-seal's transaction did not commit, "+
-			"which is what a coverage insert without ON CONFLICT (event_id) DO NOTHING does to it", receipts2)
+	if receipts2 != 1 {
+		t.Fatalf("m1_receipts holds %d row(s), want 1 — a leaf sealed once is sealed once; the replayed leaf stayed consumed (m1_083)", receipts2)
 	}
 	if n := s2.PendingLeafCount(h.tenantA, h.deviceA); n != 0 {
-		t.Fatalf("%d leaf/leaves still pending: the re-seal did not consume the coverage leaf, so the "+
-			"insert loop did not iterate over it", n)
+		t.Fatalf("%d leaf/leaves pending: the replayed, already-consumed leaf re-entered the set", n)
 	}
-
-	// ...and inserted nothing. RowsAffected 0 on a loop that ran IS the conflict
-	// path; the two assertions above are what make "0" mean that rather than
-	// "the loop never executed".
 	if again := coverageRowsTotal(t) - before; again != 0 {
-		t.Fatalf("the re-seal inserted %v coverage row(s); at-least-once ingest just double-counted a gap "+
-			"(m1_043:48)", again)
+		t.Fatalf("the replay inserted %v coverage row(s); at-least-once ingest just double-counted a gap (m1_043:48)", again)
 	}
 
 	var rows int64
@@ -484,10 +478,50 @@ func TestIntegrationCoverageInsertSurvivesAResealAfterRestart(t *testing.T) {
 	if rows != 1 {
 		t.Fatalf("coverage_transitions holds %d rows for one event_id, want 1", rows)
 	}
-	// DO NOTHING, not DO UPDATE: the surviving row still names the receipt that
-	// originally sealed it. An upsert would re-point receipt_id at the re-seal
-	// and quietly rewrite evidence the append-only trigger exists to protect.
 	if receiptNow != firstReceipt.String() {
 		t.Fatalf("the coverage row now names receipt %s, not the %s that sealed it", receiptNow, firstReceipt)
+	}
+}
+
+// The bug m1_083 exists for: controld runs replicas: 2, a device's batch N lands on one pod and the
+// checkpoint sealing it arrives on the other. With the leaf set in each pod's memory every checkpoint
+// refused as merkle_mismatch (555 security rows on one tenant in a day; "Server pending" on every
+// receipt in the app). Two Sidefx over one database are two pods.
+func TestIntegrationCheckpointSealsLeavesAnotherReplicaLanded(t *testing.T) {
+	h := setupPG(t)
+	ctx := context.Background()
+	at := time.Date(2026, 9, 19, 23, 0, 0, 0, time.UTC)
+	podA := sidefx.New(h.db, h.store, nil, 1, 8)
+	t.Cleanup(podA.Close)
+	podB := sidefx.New(h.db, h.store, nil, 1, 8)
+	t.Cleanup(podB.Close)
+
+	batch1 := uuid.Must(uuid.NewV7())
+	ids := []uuid.UUID{uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())}
+	podA.Apply(ctx, h.tenantA, h.deviceA, at, "", []sidefx.Effect{
+		{EventID: ids[0], BatchID: batch1, Index: 0},
+		{EventID: ids[1], BatchID: batch1, Index: 1},
+		{EventID: ids[2], BatchID: batch1, Index: 2},
+	})
+	seal := h.sealCheckpoint(t, h.deviceA, ids, at.Add(time.Second))
+	seal.LastEventID = ids[2]
+	var paged []string
+	podB = sidefx.New(h.db, h.store, func(_, _, _ uuid.UUID, detail string, _ time.Time) { paged = append(paged, detail) }, 1, 8)
+	t.Cleanup(podB.Close)
+	podB.Apply(ctx, h.tenantA, h.deviceA, at, "", []sidefx.Effect{
+		{EventID: seal.EventID, BatchID: uuid.Must(uuid.NewV7()), Index: 0, Checkpoint: &seal},
+	})
+	if len(paged) != 0 {
+		t.Fatalf("the other pod's leaves paged security: %q", paged)
+	}
+	var receipts int64
+	if err := h.admin.QueryRow(ctx, `SELECT count(*) FROM m1_receipts`).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if receipts != 1 {
+		t.Fatalf("m1_receipts holds %d row(s), want 1: the checkpoint did not seal leaves the other replica landed", receipts)
+	}
+	if n := podA.PendingLeafCount(h.tenantA, h.deviceA); n != 0 {
+		t.Fatalf("%d leaf/leaves still pending on pod A after pod B sealed them", n)
 	}
 }
