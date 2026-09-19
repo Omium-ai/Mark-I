@@ -54,6 +54,9 @@ var ErrNoProxyBinary = errors.New("supervise: " + proxyBinary + " not found")
 // MCP has nothing to serve — an un-installed machine, named as such.
 var ErrNoCortexdBinary = errors.New("supervise: " + cortexdBinary + " not found")
 
+// ErrNoVerifierBinary: Run the verifier refuses with M1E-9500 until the binary is beside mark1d, on PATH, or named by MARK1_VERIFIER.
+var ErrNoVerifierBinary = errors.New("supervise: mark1-verifier not found")
+
 // GatewayFlags is 04 §3.4's gateway arm passed through verbatim (main.rs config() validates; its stderr is ours); nil ⇒ `--mode sidecar`.
 type GatewayFlags struct {
 	Bind     string // host:port the mTLS listener binds
@@ -226,6 +229,11 @@ func FindProxy() (string, error) { return findBinary(proxyBinary, proxyBinaryEnv
 // MARK1_CORTEXD as its dev seam.
 func FindCortexd() (string, error) {
 	return findBinary(cortexdBinary, cortexdBinaryEnv, ErrNoCortexdBinary)
+}
+
+// FindVerifier: the offline receipt verifier ships beside mark1d since edge/v0.1.4; MARK1_VERIFIER is its dev seam.
+func FindVerifier() (string, error) {
+	return findBinary("mark1-verifier", "MARK1_VERIFIER", ErrNoVerifierBinary)
 }
 
 func findBinary(name, envVar string, missing error) (string, error) {

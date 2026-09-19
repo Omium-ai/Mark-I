@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/supervise"
+
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/procattr"
 
 	"github.com/google/uuid"
@@ -1112,11 +1114,11 @@ func (s *Server) verifyReceipts(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusBadRequest, "M1E-2001", "body: "+err.Error())
 		return
 	}
-	verifier := os.Getenv("MARK1_VERIFIER")
+	verifier := os.Getenv("MARK1_VERIFIER") // an operator's path is taken verbatim; a wrong one fails at run, as before
 	if verifier == "" {
-		var err error
-		if verifier, err = exec.LookPath("mark1-verifier"); err != nil {
-			refuse(w, http.StatusServiceUnavailable, "M1E-9500", "mark1-verifier not on PATH — install it (tools/verifier) or set MARK1_VERIFIER")
+		var verr error
+		if verifier, verr = supervise.FindVerifier(); verr != nil {
+			refuse(w, http.StatusServiceUnavailable, "M1E-9500", "mark1-verifier is not beside mark1d and not on PATH; set MARK1_VERIFIER to name one")
 			return
 		}
 	}
