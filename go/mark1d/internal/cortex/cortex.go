@@ -48,6 +48,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/procattr"
+
 	"github.com/google/uuid"
 	"lukechampine.com/blake3"
 
@@ -412,6 +414,7 @@ func (p *Plane) child(bin, root string) supervise.Child {
 				"--session-file", file,
 				"--memory-file", memory.CustodyPath(p.cfg.StateDir),
 				"--ranker-file", RankerFile(p.cfg.StateDir))
+			procattr.Hide(cmd)
 			cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 			cmd.Cancel = func() error {
 				// SIGINT is the only stop cortexd listens for (tokio ctrl_c,

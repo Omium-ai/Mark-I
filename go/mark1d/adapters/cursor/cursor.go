@@ -19,6 +19,8 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/procattr"
+
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 )
 
@@ -97,6 +99,7 @@ func (a *Adapter) Detect() (adapters.Detection, error) {
 		d.Installed = true
 		ctx, cancel := context.WithTimeout(context.Background(), versionSniffTimeout)
 		cmd := exec.CommandContext(ctx, bin, "--version") //nolint:gosec // G204: bin is LookPath over two fixed names — the operator's own PATH, no shell
+		procattr.Hide(cmd)
 		var buf bytes.Buffer
 		cmd.Stdout = &capWriter{w: &buf, remaining: versionSniffCap}
 		err = cmd.Run()

@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/procattr"
+
 	"github.com/google/uuid"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
@@ -1138,6 +1140,7 @@ func (s *Server) verifyReceipts(w http.ResponseWriter, r *http.Request) {
 	}
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, verifier, args...) //nolint:gosec // G204: MARK1_VERIFIER or LookPath, args as a slice, no shell
+	procattr.Hide(cmd)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	var xe *exec.ExitError

@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/procattr"
+
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
@@ -123,6 +125,7 @@ func ProxyChild(cfg ProxyConfig) (Child, error) {
 				return nil, err
 			}
 			cmd := exec.CommandContext(ctx, bin, cfg.Gateway.args()...) //nolint:gosec // G204: bin is FindProxy() or an operator-set MARK1_PROXY; args are a fixed slice, no shell
+			procattr.Hide(cmd)
 			cmd.Env = env
 			// The proxy's own diagnostics go where the daemon's do. Dropping
 			// them would make a proxy that refuses to start at all (hardening
