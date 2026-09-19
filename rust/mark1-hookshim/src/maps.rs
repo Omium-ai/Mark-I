@@ -21,17 +21,23 @@ const BUILTIN_OPENCODE: &str = include_str!("../maps/opencode.json");
 const BUILTIN_COPILOT: &str = include_str!("../maps/copilot.json");
 const BUILTIN_CURSOR: &str = include_str!("../maps/cursor.json");
 
-/// Which agent exec'd us: `MARK1_AGENT`, set by that agent's registered
-/// command line (codex's and cursor's fragments write `env MARK1_AGENT=<agent>
-/// <shim>`, gemini's and copilot's hook entries carry it in `env`, opencode's
-/// plugin sets it on spawn); unset is claudecode, whose fragment predates the
-/// variable. The payloads are otherwise indistinguishable — all carry
-/// `hook_event_name` and `session_id` — so nothing here sniffs shape, which is
-/// also why Cursor running a claudecode entry (it loads ~/.claude/settings.json
-/// too) maps to nothing: its `stop` is not claudecode's `Stop`. An unknown name
-/// selects no builtin: emit nothing, never guess (08 §5 rule 2).
+/// Which agent exec'd us: argv[1] (cursor's fragment writes `<shim> cursor`,
+/// the one spelling every OS shell accepts), else `MARK1_AGENT` (codex's
+/// fragment, gemini's and copilot's hook entries, opencode's plugin), else
+/// claudecode, whose fragment predates both. The payloads are otherwise
+/// indistinguishable — all carry `hook_event_name` and `session_id` — so
+/// nothing here sniffs shape, which is also why Cursor running a claudecode
+/// entry (it loads ~/.claude/settings.json too) maps to nothing: its `stop`
+/// is not claudecode's `Stop`. An unknown name selects no builtin: emit
+/// nothing, never guess (08 §5 rule 2).
 fn agent() -> String {
-    std::env::var("MARK1_AGENT").unwrap_or_else(|_| "claudecode".to_owned())
+    agent_from(std::env::args().nth(1), std::env::var("MARK1_AGENT").ok())
+}
+
+fn agent_from(arg: Option<String>, env: Option<String>) -> String {
+    arg.filter(|a| !a.is_empty())
+        .or(env)
+        .unwrap_or_else(|| "claudecode".to_owned())
 }
 
 fn builtin(agent: &str) -> Option<&'static str> {
@@ -52,8 +58,23 @@ pub struct FieldMap {
     pub agent_version: String,
     /// Vendor field naming the hook event (`hook_event_name` on claudecode).
     pub event_field: String,
-    pub session_id_field: String,
+    /// Vendor field(s) carrying the session id, tried in order; a string or a list in the map.
+    #[serde(deserialize_with = "one_or_many")]
+    pub session_id_field: Vec<String>,
     pub events: HashMap<String, EventRule>,
+}
+
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
 }
 
 #[derive(Deserialize)]
@@ -125,7 +146,7 @@ pub fn load(home: Option<&Path>) -> FieldMap {
             agent,
             agent_version: String::new(),
             event_field: String::new(),
-            session_id_field: String::new(),
+            session_id_field: Vec::new(),
             events: HashMap::new(),
         })
 }
@@ -228,6 +249,20 @@ mod codex_map {
                 "{none}: mapped-to-nothing must emit nothing"
             );
         }
+    }
+
+    #[test]
+    fn agent_comes_from_argv_then_env_then_claudecode() {
+        assert_eq!(
+            agent_from(Some("cursor".into()), Some("codex".into())),
+            "cursor"
+        );
+        assert_eq!(
+            agent_from(Some(String::new()), Some("codex".into())),
+            "codex"
+        );
+        assert_eq!(agent_from(None, Some("codex".into())), "codex");
+        assert_eq!(agent_from(None, None), "claudecode");
     }
 
     #[test]
@@ -542,7 +577,29 @@ mod cursor_map {
         let map: FieldMap = serde_json::from_str(BUILTIN_CURSOR).unwrap();
         assert_eq!(map.agent, "cursor");
         assert_eq!(map.agent_version, "2026.09.10-fd3934a");
+        assert_eq!(map.session_id_field, ["session_id", "conversation_id"]);
         assert_map_covers_corpus(&map, FIXTURES);
+    }
+
+    /// The IDE's non-session hooks carry `conversation_id` and no `session_id`
+    /// (docs: `session_id` is listed on sessionStart/sessionEnd only).
+    #[test]
+    fn cursor_session_id_falls_back_to_conversation_id() {
+        let map: FieldMap = serde_json::from_str(BUILTIN_CURSOR).unwrap();
+        let mut body = fixture("preToolUse");
+        body.as_object_mut().unwrap().remove("session_id");
+        let ev = crate::emit::build(&map, &body).expect("conversation_id alone must still emit");
+        assert_eq!(
+            ev.session_id,
+            uuid::Uuid::parse_str("cc0e0000-0000-4000-8000-00000000aa01")
+                .unwrap()
+                .as_bytes()
+        );
+        body.as_object_mut().unwrap().remove("conversation_id");
+        assert!(
+            crate::emit::build(&map, &body).is_none(),
+            "neither id: emit nothing"
+        );
     }
 
     #[test]

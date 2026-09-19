@@ -111,20 +111,32 @@ func BootstrapSections(r bootstrapRegime) ([]byte, error) {
 
 // shimMap is rust/mark1-hookshim/maps/<agent>.json (maps.rs FieldMap), the subset the bundle grammar can carry.
 type shimMap struct {
-	Agent          string `json:"agent"`
-	AgentVersion   string `json:"agent_version"`
-	EventField     string `json:"event_field"`
-	SessionIDField string `json:"session_id_field"`
+	Agent          string    `json:"agent"`
+	AgentVersion   string    `json:"agent_version"`
+	EventField     string    `json:"event_field"`
+	SessionIDField oneOrMany `json:"session_id_field"`
 	Events         map[string]struct {
 		Fields map[string]string `json:"fields"`
 	} `json:"events"`
+}
+
+// oneOrMany is maps.rs's session_id_field: a string or an ordered fallback list.
+type oneOrMany []string
+
+func (o *oneOrMany) UnmarshalJSON(b []byte) error {
+	var one string
+	if json.Unmarshal(b, &one) == nil {
+		*o = oneOrMany{one}
+		return nil
+	}
+	return json.Unmarshal(b, (*[]string)(o))
 }
 
 func pointerOf(field string) string {
 	return "/" + strings.ReplaceAll(strings.ReplaceAll(field, "~", "~0"), "/", "~1")
 }
 
-// shimAgentMaps flattens each shipped map into 07's `hook_fields` (m1p-field ⇒ pointer): `event`, `session_id`, and `<event>.<logical>` per event rule.
+// shimAgentMaps flattens each shipped map into 07's `hook_fields` (m1p-field ⇒ pointer): `event`, `session_id` (fallbacks as `session_id.<n>`), and `<event>.<logical>` per event rule.
 func shimAgentMaps() ([]AgentMap, error) {
 	names, err := fs.Glob(shimMaps, "maps/*.json")
 	if err != nil {
@@ -141,7 +153,14 @@ func shimAgentMaps() ([]AgentMap, error) {
 		if err := json.Unmarshal(raw, &m); err != nil {
 			return nil, fmt.Errorf("policydist: %s: %w", name, err)
 		}
-		fields := map[string]string{"event": pointerOf(m.EventField), "session_id": pointerOf(m.SessionIDField)}
+		fields := map[string]string{"event": pointerOf(m.EventField)}
+		for i, f := range m.SessionIDField {
+			key := "session_id"
+			if i > 0 {
+				key = fmt.Sprintf("session_id.%d", i)
+			}
+			fields[key] = pointerOf(f)
+		}
 		for event, rule := range m.Events {
 			for logical, vendor := range rule.Fields {
 				fields[strings.ToLower(event)+"."+logical] = pointerOf(vendor)

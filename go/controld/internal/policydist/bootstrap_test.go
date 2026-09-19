@@ -182,8 +182,11 @@ func TestBootstrapMapsMirrorTheShim(t *testing.T) {
 		if err := json.Unmarshal(raw, &m); err != nil {
 			t.Fatal(err)
 		}
-		if a.AgentVersion != m.AgentVersion || a.HookFields["event"] != "/"+m.EventField || a.HookFields["session_id"] != "/"+m.SessionIDField {
+		if a.AgentVersion != m.AgentVersion || a.HookFields["event"] != "/"+m.EventField || a.HookFields["session_id"] != "/"+m.SessionIDField[0] {
 			t.Fatalf("agents[%d] %s: %+v", i, a.AgentID, a)
+		}
+		if a.AgentID == "cursor" && (len(m.SessionIDField) != 2 || a.HookFields["session_id.1"] != "/conversation_id") {
+			t.Fatalf("cursor session_id fallback: %+v", a.HookFields)
 		}
 		for event, rule := range m.Events {
 			for logical, vendor := range rule.Fields {

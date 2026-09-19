@@ -1004,7 +1004,7 @@ func TestEnableProvisionsCopilotAndCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(c), `"_mark1"`) || !strings.Contains(string(c), "MARK1_AGENT=cursor") || !strings.Contains(string(c), "echo hi") {
+	if !strings.Contains(string(c), `"_mark1"`) || !strings.Contains(string(c), "mark1-hookshim cursor") || !strings.Contains(string(c), "echo hi") {
 		t.Fatalf("cursor hooks.json after enable:\n%s", c)
 	}
 	for _, m := range []string{copilot.ManifestPath(env.StateDir), cursor.ManifestPath(env.StateDir)} {

@@ -1,7 +1,7 @@
 // Package cursor is the Phase-5 observe/gate adapter (08 §5.6): version sniff
 // over both vendor surfaces (`cursor-agent --version`, then `cursor --version`),
 // the 08 §8 fence into ~/.cursor/hooks.json (8 handlers through the shim,
-// MARK1_AGENT on the command line), and nothing else — every request Cursor
+// the agent as its argv[1]), and nothing else — every request Cursor
 // makes transits Cursor's backend in every regime, so the wire proxy and model
 // rewrite are a permanent NO-GO and no durable local Usage surface exists
 // (docs/spikes/cursor-observe-gate.md). Pinned to

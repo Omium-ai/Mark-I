@@ -10,29 +10,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 )
 
-// Compat is the tailer's admission verdict for the installed Claude Code
-// (D-EE): Pinned has a recorded corpus; CompatibleUnpinned passed the
-// structural probe and captures under a receipted unsupported_agent_version
-// window; Incompatible is today's refusal.
-type Compat int
+// Compat is adapters.Compat; the names stay in this package for its callers.
+type Compat = adapters.Compat
 
 const (
-	Incompatible Compat = iota
-	Pinned
-	CompatibleUnpinned
+	Incompatible       = adapters.Incompatible
+	Unprobed           = adapters.Unprobed
+	Pinned             = adapters.Pinned
+	CompatibleUnpinned = adapters.CompatibleUnpinned
 )
-
-func (c Compat) String() string {
-	switch c {
-	case Pinned:
-		return "pinned"
-	case CompatibleUnpinned:
-		return "compatible_unpinned"
-	}
-	return "incompatible"
-}
 
 // probeLine is every field the pinned corpus's selfcheck.py and
 // expectations.json rely on, as pointers so absence and a wrong type are both
@@ -94,10 +84,15 @@ func (a *Adapter) Compatibility(version string) (Compat, error) {
 		return Incompatible, err
 	}
 	if err := probe(filepath.Join(home, ".claude", "projects"), version); err != nil {
+		if errors.Is(err, errUnprobed) {
+			return Unprobed, err
+		}
 		return Incompatible, err
 	}
 	return CompatibleUnpinned, nil
 }
+
+var errUnprobed = errors.New("no transcript at this version yet")
 
 // probe scans transcripts newest-first for the first assistant usage line
 // stamped with version and checks it against probeLine.
@@ -132,7 +127,7 @@ func probe(projects, version string) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("no claude %s transcript under %s yet; run one session, then restart mark1d", version, projects)
+	return fmt.Errorf("%w: no claude %s transcript under %s; run one session, then restart mark1d", errUnprobed, version, projects)
 }
 
 // candidate returns the first assistant line carrying usage and this version.

@@ -14,10 +14,10 @@ use crate::maps::{EventRule, FieldMap};
 pub fn build(map: &FieldMap, payload: &serde_json::Value) -> Option<pb::Event> {
     let rule = map.rule(payload)?;
     let body = body_for(map, rule, payload)?;
-    let session_id = payload
-        .get(&map.session_id_field)?
-        .as_str()
-        .and_then(|s| uuid::Uuid::parse_str(s).ok())?;
+    let session_id = map
+        .session_id_field
+        .iter()
+        .find_map(|f| uuid::Uuid::parse_str(payload.get(f)?.as_str()?).ok())?;
     Some(pb::Event {
         event_id: uuid::Uuid::now_v7().as_bytes().to_vec(),
         session_id: session_id.as_bytes().to_vec(),

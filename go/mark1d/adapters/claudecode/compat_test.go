@@ -39,11 +39,10 @@ func TestCompatibilityStructuralProbeAdmitsUnpinned(t *testing.T) {
 
 func TestCompatibilityRefusesBadShapes(t *testing.T) {
 	cases := map[string]struct{ line, want string }{
-		"missing usage field":     {strings.Replace(probeGood, `"cache_read_input_tokens":10143,`, "", 1), "usage.cache_read_input_tokens"},
-		"missing requestId":       {strings.Replace(probeGood, `"requestId":"req_01A",`, "", 1), "requestId"},
-		"missing cwd":             {strings.Replace(probeGood, `"cwd":"/home/devuser/workspace/acme-app",`, "", 1), "cwd"},
-		"mistyped tokens":         {strings.Replace(probeGood, `"output_tokens":4`, `"output_tokens":"4"`, 1), "mistyped"},
-		"no line of that version": {strings.Replace(probeGood, `"version":"9.9.9"`, `"version":"8.8.8"`, 1), "no claude 9.9.9 transcript"},
+		"missing usage field": {strings.Replace(probeGood, `"cache_read_input_tokens":10143,`, "", 1), "usage.cache_read_input_tokens"},
+		"missing requestId":   {strings.Replace(probeGood, `"requestId":"req_01A",`, "", 1), "requestId"},
+		"missing cwd":         {strings.Replace(probeGood, `"cwd":"/home/devuser/workspace/acme-app",`, "", 1), "cwd"},
+		"mistyped tokens":     {strings.Replace(probeGood, `"output_tokens":4`, `"output_tokens":"4"`, 1), "mistyped"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -56,5 +55,13 @@ func TestCompatibilityRefusesBadShapes(t *testing.T) {
 	}
 	if c, err := probeHome(t, probeGood).Compatibility(""); c != Incompatible || err == nil {
 		t.Fatalf("unsniffable = %v, %v", c, err)
+	}
+}
+
+func TestCompatibilityUnprobedUntilATranscriptExists(t *testing.T) {
+	a := probeHome(t, strings.Replace(probeGood, `"version":"9.9.9"`, `"version":"8.8.8"`, 1))
+	c, err := a.Compatibility("9.9.9")
+	if c != Unprobed || err == nil || !strings.Contains(err.Error(), "no claude 9.9.9 transcript") || c.Admits() {
+		t.Fatalf("no line of that version = %v, %v; want Unprobed, refused at the tail gate", c, err)
 	}
 }

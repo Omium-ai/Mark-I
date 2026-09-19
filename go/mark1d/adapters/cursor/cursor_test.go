@@ -180,7 +180,7 @@ func TestFragmentParsesAsCursorHooksFile(t *testing.T) {
 		if len(entries) != 1 || entries[0].Mark1 != tagValue || entries[0].Timeout <= 0 {
 			t.Fatalf("%s: %+v", ev, entries)
 		}
-		if entries[0].Command != "env MARK1_AGENT=cursor "+DefaultShimPath {
+		if entries[0].Command != DefaultShimPath+" cursor" {
 			t.Fatalf("%s command: %q", ev, entries[0].Command)
 		}
 	}

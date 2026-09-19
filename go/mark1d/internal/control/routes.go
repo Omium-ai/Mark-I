@@ -265,11 +265,13 @@ func (s *Server) fragments() []fragment {
 // ponytail: six `--version` execs per call (~3 s on a dev box, same as `mark1 doctor`); cache on PATH mtime if the app ever polls this.
 func (s *Server) agents() []map[string]any {
 	d := s.cfg.StateDir
-	cc := &claudecode.Adapter{StateDir: d}
+	cc, cx := &claudecode.Adapter{StateDir: d}, &codex.Adapter{StateDir: d}
 	detect := map[string]func() (adapters.Detection, func(string) string){
-		"claudecode": func() (adapters.Detection, func(string) string) { return must(cc.Detect()), s.claudeCompat(cc) },
+		"claudecode": func() (adapters.Detection, func(string) string) {
+			return must(cc.Detect()), s.memoCompat("claudecode", cc.Compatibility)
+		},
 		"codex": func() (adapters.Detection, func(string) string) {
-			return must((&codex.Adapter{StateDir: d}).Detect()), pinned(codex.Supported)
+			return must(cx.Detect()), s.memoCompat("codex", cx.Compatibility)
 		},
 		"gemini": func() (adapters.Detection, func(string) string) {
 			return must((&gemini.Adapter{StateDir: d}).Detect()), pinned(gemini.Supported)
@@ -373,23 +375,24 @@ func claudeRecentProjects() []string {
 	return out
 }
 
-// claudeCompat memoizes per version: an unpinned version costs a transcript scan (compat.go probe), seconds on a real ~/.claude.
-func (s *Server) claudeCompat(cc *claudecode.Adapter) func(string) string {
+// memoCompat memoizes per agent and version: an unpinned version costs a transcript scan (compat.go probe), seconds on a real home dir.
+// Unprobed is never memoized: "no transcript at this version yet" becomes a verdict after the user's first session.
+func (s *Server) memoCompat(agent string, probe func(string) (adapters.Compat, error)) func(string) string {
 	return func(v string) string {
+		key := agent + "@" + v
 		s.mu.Lock()
-		c, ok := s.compat[v]
+		c, ok := s.compat[key]
 		s.mu.Unlock()
 		if ok {
 			return c
 		}
-		k, _ := cc.Compatibility(v)
+		k, _ := probe(v)
 		c = k.String()
-		if k == claudecode.Incompatible {
-			return c // not memoised: "no transcript at this version yet" becomes compatible after the user's first session
+		if k != adapters.Unprobed {
+			s.mu.Lock()
+			s.compat[key] = c
+			s.mu.Unlock()
 		}
-		s.mu.Lock()
-		s.compat[v] = c
-		s.mu.Unlock()
 		return c
 	}
 }

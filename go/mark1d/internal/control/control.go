@@ -44,8 +44,8 @@ type Server struct {
 	reconcile func()
 	enrolled  func()
 	shutdown  func()
-	compat    map[string]string
-	files     sync.Mutex // ponytail: serializes this process's read-modify-writes only; a concurrent `mark1 enable` races exactly as two CLIs do today
+	compat    map[string]string // "<agent>@<version>" -> verdict
+	files     sync.Mutex        // ponytail: serializes this process's read-modify-writes only; a concurrent `mark1 enable` races exactly as two CLIs do today
 }
 
 func Path(stateDir string) string { return filepath.Join(stateDir, "run", "control.json") }

@@ -3,7 +3,7 @@
   "agent": "cursor",
   "agent_version": "2026.09.10-fd3934a",
   "event_field": "hook_event_name",
-  "session_id_field": "session_id",
+  "session_id_field": ["session_id", "conversation_id"],
   "events": {
     "sessionStart": { "kind": "session_start", "fields": {} },
     "beforeSubmitPrompt": { "kind": "turn_human", "fields": {} },

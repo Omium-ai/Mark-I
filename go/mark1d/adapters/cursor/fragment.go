@@ -47,8 +47,8 @@ const DefaultShimPath = "~/.omium/mark1/bin/mark1-hookshim"
 const (
 	entryTag = "_mark1"
 	tagValue = "v1"
-	// agentEnv tells the shim which agent_maps entry this payload is (maps.rs).
-	agentEnv = "MARK1_AGENT=cursor"
+	// agentArg is argv[1] to the shim: which agent_maps entry this payload is (maps.rs). Cursor has no commandWindows key and `env` is not a cmd.exe builtin, so the agent rides the command line on every OS.
+	agentArg = "cursor"
 
 	CodeNoTarget        = "M1E-7101"
 	CodeDamaged         = "M1E-7102"
@@ -215,7 +215,7 @@ func rawOrdered(o *object) json.RawMessage {
 func desiredEntries(shim string) ([]json.RawMessage, error) {
 	out := make([]json.RawMessage, 0, len(hookRegistrations))
 	for _, r := range hookRegistrations {
-		b, err := json.Marshal(entry{"env " + agentEnv + " " + shim, r.Timeout, tagValue})
+		b, err := json.Marshal(entry{shim + " " + agentArg, r.Timeout, tagValue})
 		if err != nil {
 			return nil, err
 		}

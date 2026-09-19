@@ -1313,8 +1313,14 @@ func armedAgents(idemKey []byte, stateDir string) []string {
 	var out []string
 	cc := &claudecode.Adapter{StateDir: stateDir}
 	if d, err := cc.Detect(); err == nil {
-		if c, _ := cc.Compatibility(d.Version); c != claudecode.Incompatible {
+		if c, _ := cc.Compatibility(d.Version); c.Admits() {
 			out = append(out, "claudecode")
+		}
+	}
+	cx := &codex.Adapter{StateDir: stateDir}
+	if d, err := cx.Detect(); err == nil && d.Installed {
+		if c, _ := cx.Compatibility(d.Version); c.Admits() {
+			out = append(out, "codex")
 		}
 	}
 	for _, a := range []struct {
@@ -1322,7 +1328,6 @@ func armedAgents(idemKey []byte, stateDir string) []string {
 		det  func() (adapters.Detection, error)
 		ok   func(string) bool
 	}{
-		{"codex", (&codex.Adapter{StateDir: stateDir}).Detect, codex.Supported},
 		{"gemini", (&gemini.Adapter{StateDir: stateDir}).Detect, gemini.Supported},
 		{"opencode", (&opencode.Adapter{StateDir: stateDir}).Detect, opencode.Supported},
 		{"copilot", (&copilot.Adapter{StateDir: stateDir}).Detect, copilot.Supported},
@@ -1356,6 +1361,25 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 		}
 		return true
 	}
+	// The probe form: a shape-checked version tails with a receipted unsupported_agent_version bypass, exactly as claudecode does below.
+	sniffCompat := func(name string, det func() (adapters.Detection, error), compat func(string) (adapters.Compat, error)) bool {
+		d, err := det()
+		if err != nil || !d.Installed {
+			return false
+		}
+		c, why := compat(d.Version)
+		if !c.Admits() {
+			log.Info("mark1d: agent not tailed", "agent", name, "version", d.Version, "compat", c.String(), "probe", why)
+			return false
+		}
+		if c == adapters.CompatibleUnpinned {
+			log.Warn("mark1d: transcript capture UNVERIFIED — no conformance corpus for this version; its rollout shape passed the structural probe, capture proceeds and this window is receipted as unsupported_agent_version", "agent", name, "version", d.Version)
+			if cerr := cov.Transition(ctx, m1pv1.CoverageKind_COVERAGE_KIND_BYPASS, coverage.DeviceWide(), coverage.ReasonUnsupportedAgentVersion, 0); cerr != nil {
+				log.Error("COVERAGE BYPASS NOT RECEIPTED — this is a gap, not a warning", "reason_code", coverage.ReasonUnsupportedAgentVersion, "err", cerr)
+			}
+		}
+		return true
+	}
 	var singles []shared
 	// FR-AGENT-002, before a single line is read: version-sniff, and refuse the
 	// whole surface when the sniff lands outside the fixture set. Returning nil
@@ -1365,7 +1389,7 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 	// This costs one bounded `claude --version` exec per daemon start.
 	d, err := cc.Detect()
 	compat, why := cc.Compatibility(d.Version)
-	if err != nil || compat == claudecode.Incompatible {
+	if err != nil || !compat.Admits() {
 		adm.AccountDropped(dropUnsupportedAgentVersion, spool.ClassBilling, 1)
 		log.Error("mark1d: transcript capture DISABLED — no conformance fixture pins this Claude Code version and its transcript shape failed the structural probe (D-EE), and the tailer's field names are compiled, so parsing it could report token counts that are silently wrong",
 			"version", d.Version, "installed", d.Installed, "err", err, "probe", why,
@@ -1404,7 +1428,7 @@ func tailWorkspaces(ctx context.Context, log *slog.Logger, cfg config, idemKey [
 		Log:          log,
 	}
 	singles = []shared{
-		{"\x00codex", sniff("codex", cx.Detect, codex.Supported), func(root string) (*tailers.Manager, error) {
+		{"\x00codex", sniffCompat("codex", cx.Detect, cx.Compatibility), func(root string) (*tailers.Manager, error) {
 			return cx.StartTail(adapters.Workspace{Root: root}, live, codex.TailConfig{StateDir: tcfg.StateDir, UsageIdemKey: idemKey, Emit: off.Unless(cfg.stateDir, "codex", router.Emit), Observe: tcfg.Observe, Log: log})
 		}},
 		{"\x00gemini", sniff("gemini", gm.Detect, gemini.Supported), func(root string) (*tailers.Manager, error) {
