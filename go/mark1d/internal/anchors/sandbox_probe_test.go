@@ -153,6 +153,20 @@ func TestSandboxWriteConfinement(t *testing.T) {
 			t.Fatalf("worktree write denied (exit %d) — anchors need their own worktree", res.ExitCode)
 		}
 	})
+	t.Run("write to /dev/null allowed", func(t *testing.T) {
+		// git opens /dev/null read-write at start; with it denied every diff read failed (exit 128) on real Linux, so no anchor ever had a baseline boundary.
+		if runtime.GOOS != "linux" {
+			t.Skip("Landlock-only concern")
+		}
+		spec := probeSpec(t, worktree, "write", map[string]string{"MARK1_ANCHOR_TEST_PATH": "/dev/null"})
+		res, err := runProbeSpec(t, sb, spec)
+		if err != nil {
+			t.Fatalf("run: %v (stderr: %s)", err, res.Stderr)
+		}
+		if res.ExitCode != 0 {
+			t.Fatalf("/dev/null write denied (exit %d) — git cannot start under this confinement", res.ExitCode)
+		}
+	})
 }
 
 func TestSandboxKillsCPUHog(t *testing.T) {
@@ -371,7 +385,10 @@ func TestSandboxProbesNotVacuous(t *testing.T) {
 	if os.Getenv("M1_REQUIRE_SANDBOX") != "1" {
 		t.Skip("M1_REQUIRE_SANDBOX unset; the probes above may legitimately skip here")
 	}
-	want := int32(12) // 10 runProbeSpec/KillSwitch runs above + 2 in the platform file (posix: unix sockets, one-way valve; windows: named pipe, read denial); +1 for the linux/amd64-only x32 probe (sandbox_linux_test.go)
+	want := int32(12) // 10 runProbeSpec/KillSwitch runs above + 2 in the platform file (posix: unix sockets, one-way valve; windows: named pipe, read denial); +1 for the linux-only /dev/null write probe; +1 for the linux/amd64-only x32 probe (sandbox_linux_test.go)
+	if runtime.GOOS == "linux" {
+		want++
+	}
 	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
 		want++
 	}

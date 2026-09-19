@@ -309,17 +309,32 @@ func applyLandlock(mask uint64, writable []string) error {
 		return fmt.Errorf("create_ruleset: %v", errno)
 	}
 	defer func() { _ = unix.Close(int(fd)) }()
-	for _, dir := range writable {
-		dfd, err := unix.Open(dir, unix.O_PATH|unix.O_CLOEXEC, 0)
+	allow := func(path string, access uint64, required bool) error {
+		dfd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC, 0)
 		if err != nil {
-			return fmt.Errorf("open %s: %v", dir, err)
+			if !required {
+				return nil
+			}
+			return fmt.Errorf("open %s: %v", path, err)
 		}
-		rule := unix.LandlockPathBeneathAttr{Allowed_access: mask, Parent_fd: int32(dfd)} //nolint:gosec // G115: dfd is a Linux fd, which is int32 by definition
-		_, _, errno = unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE,
+		rule := unix.LandlockPathBeneathAttr{Allowed_access: access, Parent_fd: int32(dfd)} //nolint:gosec // G115: dfd is a Linux fd, which is int32 by definition
+		_, _, errno := unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE,
 			fd, unix.LANDLOCK_RULE_PATH_BENEATH, uintptr(unsafe.Pointer(&rule)), 0, 0, 0) //nolint:gosec // G103: raw syscall, no wrapper exists
 		_ = unix.Close(dfd)
 		if errno != 0 {
-			return fmt.Errorf("add_rule %s: %v", dir, errno)
+			return fmt.Errorf("add_rule %s: %v", path, errno)
+		}
+		return nil
+	}
+	for _, dir := range writable {
+		if err := allow(dir, mask, true); err != nil {
+			return err
+		}
+	}
+	// The write-side device files every toolchain opens: git opens /dev/null O_RDWR at start and died with "could not open '/dev/null'" (the diff facts were empty on every real Linux run, so the baseline boundary and the suppression audit never existed). Writes to these reach no file.
+	for _, dev := range []string{"/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty"} {
+		if err := allow(dev, mask&unix.LANDLOCK_ACCESS_FS_WRITE_FILE, false); err != nil {
+			return err
 		}
 	}
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
