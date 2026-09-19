@@ -554,6 +554,11 @@ func writeAtomic(path string, data []byte) error {
 
 func ManifestPath(stateDir string) string { return manifestPath(stateDir, "hooks") }
 
+// StatusLineOffPath is the marker that keeps Mark 1's own one-liner out of the footer: the shim (statusline.rs chain) still files the rate-limit feed and still replays the user's own command, it just prints nothing of its own. The slot itself stays fenced exactly as before, so consent hashes and revert are untouched.
+func StatusLineOffPath(stateDir string) string {
+	return filepath.Join(stateDir, "claude", "statusline.off")
+}
+
 // StatusLinePrevPath is the sidecar holding the user's own statusLine entry verbatim while ours holds the slot; the shim replays stdin to its `command` (rust/mark1-hookshim/src/statusline.rs) and Revert puts it back.
 func StatusLinePrevPath(stateDir string) string {
 	return filepath.Join(stateDir, "claude", "statusline.prev.json")

@@ -918,7 +918,8 @@ func (s *Server) optIns() (map[string]any, error) {
 		tests[e.Path] = anchors.TestsOptedIn(e.Path)
 	}
 	a := s.readOptIn()
-	return map[string]any{"stop_gate": a.StopGate, "exploration": a.Exploration, "tests_by_project": tests, "consents": consents.Read(s.cfg.StateDir)}, nil
+	_, offErr := os.Stat(claudecode.StatusLineOffPath(s.cfg.StateDir))
+	return map[string]any{"stop_gate": a.StopGate, "exploration": a.Exploration, "tests_by_project": tests, "consents": consents.Read(s.cfg.StateDir), "statusline": offErr != nil}, nil
 }
 
 func (s *Server) getOptIns(w http.ResponseWriter, _ *http.Request) {
@@ -941,6 +942,7 @@ type optInBody struct {
 	Exploration    *bool           `json:"exploration"`
 	TestsByProject map[string]bool `json:"tests_by_project"`
 	Consents       *consentsPatch  `json:"consents"`
+	StatusLine     *bool           `json:"statusline"` // Mark 1's own line in Claude Code's footer; off = the marker file the shim honours
 }
 
 // setConsents merges a partial consents object into gates/consents.json and journals the change in consent.jsonl like every other consent this API records.
@@ -1013,6 +1015,21 @@ func (s *Server) putOptIns(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			refuse(w, http.StatusBadRequest, "M1E-2001", "tests_by_project: "+err.Error())
+			return
+		}
+	}
+	if body.StatusLine != nil {
+		off := claudecode.StatusLineOffPath(s.cfg.StateDir)
+		var err error
+		if *body.StatusLine {
+			if err = os.Remove(off); errors.Is(err, os.ErrNotExist) {
+				err = nil
+			}
+		} else if err = os.MkdirAll(filepath.Dir(off), 0o700); err == nil {
+			err = writeAtomic(off, []byte("off\n"))
+		}
+		if err != nil {
+			internal(w, err)
 			return
 		}
 	}

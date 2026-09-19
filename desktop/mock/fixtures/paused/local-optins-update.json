@@ -9,5 +9,6 @@
     "e1": true,
     "cloud_judge": true,
     "training": true
-  }
+  },
+  "statusline": true
 }

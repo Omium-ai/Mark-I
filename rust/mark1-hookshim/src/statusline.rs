@@ -91,7 +91,7 @@ fn trim(path: &Path) {
     let _ = file.write_all(&data[cut + 1..]);
 }
 
-/// Replays stdin to the user's previous status-line command, recorded by the adapter at provision (StatusLinePrevPath); nothing recorded ⇒ Mark 1's own one-liner, so the footer never goes blank.
+/// Replays stdin to the user's previous status-line command, recorded by the adapter at provision (StatusLinePrevPath); nothing recorded ⇒ Mark 1's own one-liner, so the footer never goes blank — unless `statusline.off` (the app's switch, claudecode.StatusLineOffPath) says the person wants nothing of ours there.
 fn chain(dir: &Path, raw: &[u8]) {
     let prev = std::fs::read(dir.join("statusline.prev.json")).ok();
     let cmd = prev
@@ -99,7 +99,9 @@ fn chain(dir: &Path, raw: &[u8]) {
         .and_then(|b| serde_json::from_slice::<Value>(b).ok())
         .and_then(|v| v.get("command")?.as_str().map(str::to_owned));
     let Some(cmd) = cmd else {
-        let _ = std::io::stdout().write_all(own_line(raw).as_bytes());
+        if !dir.join("statusline.off").exists() {
+            let _ = std::io::stdout().write_all(own_line(raw).as_bytes());
+        }
         return;
     };
     let Ok(mut child) = shell(&cmd).stdin(Stdio::piped()).spawn() else {

@@ -475,10 +475,12 @@ const REVIEWED_SINKS: &[(&str, &str, &str)] = &[
     // files the {rate_limits, model, context_window, prompt_cache} slice to the 0600
     // ~/.omium/mark1/claude/ratelimits.jsonl; `trim` rewrites that same file; `chain` replays
     // stdin to the status-line command the user had before Mark 1 took the slot (a local
-    // child), or prints Mark 1's own one-liner to stdout. Nothing leaves the machine.
+    // child), or prints Mark 1's own one-liner to stdout — unless the app's statusline.off marker
+    // exists (re-reviewed 2026-09-19: one more read of a local marker file, the same two sinks).
+    // Nothing leaves the machine.
     ("mark1-hookshim/src/statusline.rs", "append", "bde702fcbf93c02f"),
     ("mark1-hookshim/src/statusline.rs", "trim", "7f6332810d04dd43"),
-    ("mark1-hookshim/src/statusline.rs", "chain", "5cfbed4c3f60f02c"),
+    ("mark1-hookshim/src/statusline.rs", "chain", "cb457bf6fbe13132"),
     // Hook-shape file (2026-09-19): key -> JSON type name plus the map's missing vendor keys, never a
     // value from the payload, to the 0600 ~/.omium/mark1/shape/<agent>/<event>.json. Both cfg arms.
     ("mark1-hookshim/src/shape.rs", "write_private", "f603d2077f954bd4"),

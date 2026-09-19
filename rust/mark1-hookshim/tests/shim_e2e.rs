@@ -1456,6 +1456,31 @@ fn statusline_off_still_chains_but_records_nothing() {
 }
 
 #[test]
+fn statusline_off_marker_prints_nothing_of_ours_but_still_records() {
+    let env = TestEnv::new();
+    let dir = env.home.path().join(".omium/mark1/claude");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("statusline.off"), b"off\n").unwrap();
+    let (ok, chatter, _wall) = env.statusline(STATUSLINE_STDIN.as_bytes(), &[]);
+    assert!(ok);
+    assert!(
+        chatter.is_empty(),
+        "the app's switch keeps Mark 1's own line out of the footer, got {:?}",
+        String::from_utf8_lossy(&chatter)
+    );
+    assert!(
+        env.ratelimits_path().exists(),
+        "the plan feed is not what the switch turns off"
+    );
+    env.install_statusline_prev("printf theirs");
+    let (_, chatter, _) = env.statusline(STATUSLINE_STDIN.as_bytes(), &[]);
+    assert_eq!(
+        chatter, b"theirs",
+        "their own line is never the switch's business"
+    );
+}
+
+#[test]
 fn statusline_keeps_the_newest_2000_lines() {
     let env = TestEnv::new();
     let dir = env.home.path().join(".omium/mark1/claude");
