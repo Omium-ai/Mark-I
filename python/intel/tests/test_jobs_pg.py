@@ -198,3 +198,24 @@ async def test_rls_isolation_on_job_runs(pool):
                 )
     assert (await _row(pool, tenant_b, "solo")) is None
     assert (await _row(pool, tenant_a, "solo"))["outcome"] == "succeeded"
+
+
+async def test_job_key_receipt_records_success_with_null_receipt_id(pool):
+    """tvo.rollup_verify returns the write's job_key, not a receipt UUID; job_runs.receipt_id is a
+    uuid column, so the runner stores NULL and the row still reads succeeded — it must never crash
+    the run and leave the row 'running' (prod 2026-09-19: every hourly rollup did exactly that)."""
+    tenant = await _mk_tenant(pool)
+    job = Job("tvo.rollup_verify", "x:y", "hourly")
+
+    async def rollup(ctx) -> str:
+        return "tvo.rollup_tenant_day:2026-09-18:2026-09-19:" + "ab" * 32
+
+    assert (
+        await run_one(pool, None, job, rollup, tenant_id=tenant, window_start=WINDOW) == "succeeded"
+    )
+    row = await _row(pool, tenant, "tvo.rollup_verify")
+    assert (row["outcome"], row["receipt_id"], row["error"]) == ("succeeded", None, None)
+    assert (
+        await run_one(pool, None, job, rollup, tenant_id=tenant, window_start=WINDOW)
+        == "already_done"
+    )

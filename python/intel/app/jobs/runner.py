@@ -1,6 +1,7 @@
 """The runner (06 §7.3): one `job_runs` row per (job, tenant, window); retry = attempts+1."""
 
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -131,6 +132,10 @@ async def run_one(
                 repr(exc)[:2000],
             )
         return outcome
+    # job_runs.receipt_id is a uuid (m1_067); a job whose receipt is a job_key (tvo.rollup_verify:
+    # "tvo.rollup_tenant_day:<day>:<day>:<hash>", already the ledger's dedup token) records NULL
+    # rather than crashing the run and leaving the row 'running' for the 2 h lease (prod 09-19).
+    stored = _as_uuid(receipt_id)
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant_id)
         await conn.execute(
@@ -139,10 +144,19 @@ async def run_one(
             job.name,
             tenant_id,
             window_start,
-            receipt_id,
+            stored,
         )
     log.info("%s %s %s: succeeded receipt=%s", job.name, tenant_id, window_start, receipt_id)
     return "succeeded"
+
+
+def _as_uuid(ref: str | None) -> uuid.UUID | None:
+    if ref is None:
+        return None
+    try:
+        return uuid.UUID(str(ref))
+    except ValueError:
+        return None
 
 
 async def run_many(
