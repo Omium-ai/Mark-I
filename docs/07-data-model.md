@@ -439,20 +439,37 @@ enum CoverageKind {
   COVERAGE_KIND_BYPASS = 3;  // capture degraded (e.g. proxy auto-bypass)
 }
 
-// Sampled record of the OAuth-provenance guard. Refusal is provable, not
-// asserted: sample_rate is carried so honest rates reconstruct.
+// Sampled record of the OAuth-provenance guard — and, since 2026-09-20, of the
+// verify plane's own decisions on a task. Refusal is provable, not asserted:
+// sample_rate is carried so honest rates reconstruct.
 message GuardDecision {
   GuardOutcome outcome = 1;     // [P0]
   bytes cred_fingerprint = 2;   // [P1] HMAC_tenant of the enrollment-matched
                                 //      credential fingerprint, 32 bytes
   double sample_rate = 3;       // [P0] probability this decision was emitted
-  string reason_code = 4;       // [P0] "unprovisioned_cred" | "oauth_marker" | ...
+  string reason_code = 4;       // [P0] "unprovisioned_cred" | "oauth_marker" |
+                                //      "stop_gate_block" | "knee_arrest" | ...
+  // [P1] The verify plane's decisions (04 §2.3), on the task the event names:
+  // a Stop the gate refused (stop_gate_block) and a retry loop the knee ended
+  // (knee_arrest). tokens_saved_estimate is the edge's ESTIMATE of what the
+  // decision kept the agent from spending — a block saves the follow-up
+  // request the human would have sent (one more read of the context, at the
+  // session's newest request size), an arrest saves the next attempt at the
+  // task's mean attempt cost. Labelled an estimate wherever it is summed;
+  // 0 when the edge had no usage to size it from. These rows are what the
+  // app's arrests, blocks and tokens-saved read (querychoke savings.v1,
+  // interventions.v3, app_sessions.v5) — before them nothing was recorded and
+  // every such figure was 0.
+  uint64 tokens_saved_estimate = 5;
+  uint32 attempt = 6;
 }
 
 enum GuardOutcome {
   GUARD_OUTCOME_UNSPECIFIED = 0;
   GUARD_OUTCOME_FORWARDED = 1;
   GUARD_OUTCOME_REFUSED = 2;  // 403, no override path exists in the binary
+  GUARD_OUTCOME_BLOCKED = 3;  // the stop-gate refused a Stop: the agent keeps working
+  GUARD_OUTCOME_ARRESTED = 4; // the knee ended a retry loop: the human is told
 }
 
 // Edge announcement of a checkpoint (contract C13): batch N events / T
