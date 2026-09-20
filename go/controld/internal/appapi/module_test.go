@@ -88,7 +88,10 @@ func (r *rig) seedReport(tenant uuid.UUID) {
 		"retry_loop_tokens": uint64(10), "reexploration_tokens": uint64(20), "over_model_tokens": uint64(30),
 		"observed_ms": uint64(980), "bypass_ms": uint64(20), "disabled_ms": uint64(0), "dropped_billing": uint64(0),
 	})
-	r.run.add("dropped_by_tenant_day", tenant, map[string]any{"dropped_billing": uint64(0), "events_billing_ingested": uint64(100)})
+	// billing rows on every day of the week: each closed day without a rollup is then a genuinely missing one (the golden's six)
+	for i := 6; i >= 0; i-- {
+		r.run.add("dropped_by_tenant_day", tenant, map[string]any{"day": time.Now().UTC().AddDate(0, 0, -i).Format(time.DateOnly), "dropped_billing": uint64(0), "events_billing_ingested": uint64(100)})
+	}
 }
 
 func (r *rig) get(path, token string) *httptest.ResponseRecorder {
