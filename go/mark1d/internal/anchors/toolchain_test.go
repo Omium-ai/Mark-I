@@ -30,23 +30,30 @@ func TestToolchainEnvIsOfflineAndCacheScoped(t *testing.T) {
 
 // A node script from node_modules/.bin needs node on the sandbox PATH; with nvm/fnm/volta it lives nowhere near the tool. No node ⇒ nothing extra, the sniff then fails honestly.
 func TestNodeToolsGetNodeOnPath(t *testing.T) {
-	prev := lookNode
-	t.Cleanup(func() { lookNode = prev })
-	lookNode = func() (string, error) {
-		return filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin", "node"), nil
+	prev := lookRuntime
+	t.Cleanup(func() { lookRuntime = prev })
+	nodeDir := filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin")
+	bunDir := filepath.Join("/", "home", "u", ".bun", "bin")
+	lookRuntime = func(name string) (string, error) {
+		switch name {
+		case "node":
+			return filepath.Join(nodeDir, "node"), nil
+		case "bun":
+			return filepath.Join(bunDir, "bun"), nil
+		}
+		return "", os.ErrNotExist
 	}
 	tsc := filepath.Join("/", "repo", "node_modules", ".bin", "tsc")
-	got := toolchainEnv("tsc", "", tsc)["PATH"]
-	want := filepath.Dir(tsc) + string(os.PathListSeparator) + filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin")
-	if got != want {
+	sep := string(os.PathListSeparator)
+	if got, want := toolchainEnv("tsc", "", tsc)["PATH"], filepath.Dir(tsc)+sep+nodeDir+sep+bunDir; got != want {
 		t.Fatalf("PATH %q, want %q", got, want)
 	}
-	if toolchainEnv("eslint", "", filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin", "eslint"))["PATH"] != filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin") {
+	if toolchainEnv("eslint", "", filepath.Join(nodeDir, "eslint"))["PATH"] != nodeDir+sep+bunDir {
 		t.Fatal("a tool beside node repeats no dir")
 	}
-	lookNode = func() (string, error) { return "", os.ErrNotExist }
+	lookRuntime = func(string) (string, error) { return "", os.ErrNotExist }
 	if toolchainEnv("tsc", "", tsc) != nil {
-		t.Fatal("no node ⇒ nothing extra")
+		t.Fatal("no runtime ⇒ nothing extra")
 	}
 }
 

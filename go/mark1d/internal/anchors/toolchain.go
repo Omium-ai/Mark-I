@@ -3,23 +3,29 @@ package anchors
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 )
 
-// lookNode is adapters.LookPath("node") — nvm/fnm/volta dirs included; a test seam.
-var lookNode = func() (string, error) { return adapters.LookPath("node", "") }
+// lookRuntime is adapters.LookPath — nvm/fnm/volta/bun dirs included; a test seam.
+var lookRuntime = func(name string) (string, error) { return adapters.LookPath(name, "") }
 
-// nodeEnv puts node's own directory on the sandbox PATH for a tool that is a node script (`#!/usr/bin/env node`: tsc, eslint, npm from node_modules/.bin). The sandbox PATH is the tool's directory alone, and with nvm/fnm/volta node lives nowhere near it.
+// nodeEnv puts the JavaScript runtimes' own directories on the sandbox PATH for a tool that is a script from node_modules/.bin (`#!/usr/bin/env node`, or bun's shims, which exec `bun`: the founder's Vite site answered "bun is not installed"). The sandbox PATH is the tool's directory alone, and with nvm/fnm/volta/bun the runtime lives nowhere near it. Neither installed ⇒ nothing extra, and the sniff fails honestly.
 func nodeEnv(binaryPath string) map[string]string {
-	node, err := lookNode()
-	if err != nil {
-		return nil
-	}
 	dirs := []string{filepath.Dir(binaryPath)}
-	if d := filepath.Dir(node); d != dirs[0] {
-		dirs = append(dirs, d)
+	for _, rt := range []string{"node", "bun"} {
+		p, err := lookRuntime(rt)
+		if err != nil {
+			continue
+		}
+		if d := filepath.Dir(p); !slices.Contains(dirs, d) {
+			dirs = append(dirs, d)
+		}
+	}
+	if len(dirs) == 1 {
+		return nil
 	}
 	return map[string]string{"PATH": strings.Join(dirs, string(os.PathListSeparator))}
 }
