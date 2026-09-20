@@ -869,8 +869,8 @@ type consentBody struct {
 	AllStatic bool `json:"all_static"`
 }
 
-// candidatesAwait is how long a consent-all waits for a just-enabled root to appear in candidates.json (watchAnchors derives it within a wsReloadTick plus the tool sniffs).
-const candidatesAwait = 12 * time.Second
+// candidatesAwait is how long a consent-all waits for a just-enabled root to appear in candidates.json (watchAnchors derives it within a wsReloadTick plus the tool sniffs) — under the app's 10 s request timeout, so a slow derivation answers 409 and the app's "Turn on N checks" covers it rather than a timed-out call.
+const candidatesAwait = 8 * time.Second
 
 // postConsentAllStatic approves every static candidate of one project in a single approvals.jsonl pass and answers the project's rows.
 func (s *Server) postConsentAllStatic(w http.ResponseWriter, project string) {
