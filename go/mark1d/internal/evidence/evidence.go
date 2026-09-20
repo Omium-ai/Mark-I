@@ -32,8 +32,13 @@ func (s *Store) Put(task [16]byte, anchorID string, stdout, stderr, diff []byte)
 	if s == nil {
 		return "", nil
 	}
-	run := filepath.Join(s.dir, hex.EncodeToString(task[:]), anchorID+"-"+strconv.FormatInt(time.Now().UnixNano(), 10))
-	if err := os.MkdirAll(run, 0o700); err != nil {
+	parent := filepath.Join(s.dir, hex.EncodeToString(task[:]))
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return "", err
+	}
+	// MkdirTemp, not the nanosecond clock alone: two runs of one anchor inside a Windows clock tick (≈1 ms) named the same dir and the second overwrote the first
+	run, err := os.MkdirTemp(parent, anchorID+"-"+strconv.FormatInt(time.Now().UnixNano(), 10)+"-")
+	if err != nil {
 		return "", err
 	}
 	for name, b := range map[string][]byte{"stdout": stdout, "stderr": stderr, "diff": diff} {

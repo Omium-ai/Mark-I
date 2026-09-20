@@ -452,7 +452,7 @@ func goPatterns(worktree string) []string {
 		case inUse, strings.HasPrefix(line, "use "):
 			dir := strings.TrimSpace(strings.TrimPrefix(line, "use "))
 			dir = strings.Trim(dir, `"`)
-			if dir == "" || filepath.IsAbs(dir) || strings.HasPrefix(dir, "..") {
+			if dir == "" || filepath.IsAbs(dir) || strings.HasPrefix(dir, "/") || strings.HasPrefix(dir, "\\") || strings.HasPrefix(dir, "..") {
 				continue
 			}
 			out = append(out, "./"+strings.TrimPrefix(filepath.ToSlash(filepath.Clean(dir)), "./")+"/...")
