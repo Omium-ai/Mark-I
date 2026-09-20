@@ -9,10 +9,12 @@ import (
 	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"maps"
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -150,8 +152,8 @@ func (s *Segmenter) Observe(ev *m1pv1.Event, files []string) []*m1pv1.Event {
 	case *m1pv1.Event_ToolUse:
 		return s.tool(sid, ss, files)
 	case *m1pv1.Event_Usage:
-		// The numerator meets the denominator here: an unaddressed Usage takes the currently open task (D-AA's zero-sentinel resolution), so tvo_task has rows.
-		if len(ev.TaskId) == 0 && ss.cur != nil {
+		// The numerator meets the denominator here: an unaddressed Usage takes the currently open task (D-AA's zero-sentinel resolution), so tvo_task has rows — unless it was spent before the task existed: a first tail replays a session's history (30 d) under whatever task is open at import time, and that put 537 M tokens of the founder's past week on one task opened that minute (and a day's attempt window held rows of a task whose opener lay after it, which refused the day's rollup by name). Such a Usage stays unaddressed history.
+		if len(ev.TaskId) == 0 && ss.cur != nil && !spentBefore(ev, ss.cur.id) {
 			id := ss.cur.id
 			ev.TaskId = id[:]
 		}
@@ -321,6 +323,19 @@ func (s *Segmenter) end(sid [16]byte, ss *session) []*m1pv1.Event {
 	delete(s.sessions, sid)
 	return out
 }
+
+// spentBefore: the Usage's own time lies more than a turn's slack before the task's mint (its UUIDv7 timestamp).
+func spentBefore(ev *m1pv1.Event, id TaskID) bool {
+	at := ev.GetOccurredAt()
+	if at == nil {
+		return false
+	}
+	minted := int64(binary.BigEndian.Uint64(id[:8]) >> 16) //nolint:gosec // G115: 48 bits of milliseconds
+	return at.AsTime().UnixMilli() < minted-usageSlack.Milliseconds()
+}
+
+// usageSlack covers a Usage the agent spent on the prompt that minted the task (the transcript line precedes the mint by the request itself).
+const usageSlack = 2 * time.Minute
 
 func (s *Segmenter) mint(sid [16]byte, ss *session, parent *task, seed []string) []*m1pv1.Event {
 	id, err := uuid.NewV7()

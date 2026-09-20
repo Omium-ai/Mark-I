@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
@@ -479,6 +481,32 @@ func TestUsageStampTakesTheOpenTaskAndKeepsAPriorStamp(t *testing.T) {
 	s.Observe(late, nil)
 	if string(late.TaskId) != string(live.TaskId) {
 		t.Fatalf("post-SessionEnd Usage lost its task: %x vs %x", late.TaskId, live.TaskId)
+	}
+}
+
+// A Usage spent before the open task was minted (a first tail's history replay) stays unaddressed; one spent on the prompt that minted it, a little before, is the task's.
+func TestUsageSpentBeforeTheTaskStaysHistory(t *testing.T) {
+	s, id := newSeg(), sid(t)
+	for _, st := range []step{prompt(), tool("a.go")} {
+		s.Observe(st.event(id), nil)
+	}
+	at := func(d time.Duration) *m1pv1.Event {
+		return &m1pv1.Event{SessionId: id[:], OccurredAt: timestamppb.New(time.Now().Add(d)), Body: &m1pv1.Event_Usage{Usage: &m1pv1.Usage{}}}
+	}
+	old := at(-48 * time.Hour)
+	s.Observe(old, nil)
+	if len(old.TaskId) != 0 {
+		t.Fatalf("two-day-old history took today's task: %x", old.TaskId)
+	}
+	recent := at(-30 * time.Second)
+	s.Observe(recent, nil)
+	if len(recent.TaskId) != 16 {
+		t.Fatal("a Usage from the minting prompt lost its task")
+	}
+	untimed := &m1pv1.Event{SessionId: id[:], Body: &m1pv1.Event_Usage{Usage: &m1pv1.Usage{}}}
+	s.Observe(untimed, nil)
+	if len(untimed.TaskId) != 16 {
+		t.Fatal("a Usage without a time is live, not history")
 	}
 }
 
