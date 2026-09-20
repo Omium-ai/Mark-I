@@ -34,23 +34,32 @@ func (b enrolledBearer) Token(context.Context) (string, error) {
 
 // relayNow is one bounded attempt, off the request path; the loop is the retry.
 // ponytail: two concurrent attempts can PUT the same record twice (an extra m1_082 row, never a lost revocation: each marks relayed only the bytes it sent); a mutex if the duplicate rows ever matter.
-func (s *Server) relayNow() {
+func (s *Server) relayNow() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := s.relayConsents(ctx); err != nil {
 		s.cfg.Log.Warn("consents: relay to controld failed; the record stays pending", "err", err)
+		return false
 	}
+	return true
 }
 
+// relayLoop retries a failed relay with a backoff (a minute, doubling to an hour): a route the gateway does not serve yet is not coming back in the next sixty seconds, and one warning a minute was the founder's whole app log.
 func (s *Server) relayLoop(stop <-chan struct{}) {
-	t := time.NewTicker(consentRelayEvery)
+	wait := consentRelayEvery
+	t := time.NewTimer(wait)
 	defer t.Stop()
 	for {
 		select {
 		case <-stop:
 			return
 		case <-t.C:
-			s.relayNow()
+			if s.relayNow() {
+				wait = consentRelayEvery
+			} else {
+				wait = min(wait*2, time.Hour)
+			}
+			t.Reset(wait)
 		}
 	}
 }
