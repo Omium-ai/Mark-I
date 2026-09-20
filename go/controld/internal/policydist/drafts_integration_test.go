@@ -93,15 +93,10 @@ func TestIntegrationDraftPublisher(t *testing.T) {
 		if plan.Seq != 1 || plan.CanaryCohort.Percent != WidenSteps[0] || plan.WidenCriteria.AckCoverageMin != WidenCoverage || plan.Rollback == "" {
 			t.Fatalf("plan: %+v", plan)
 		}
-		// The cohort is the controller's own assignment over the active fleet (06 §10.4: the OPE unit).
-		want := 0
-		for _, dev := range []uuid.UUID{h.deviceA1, h.deviceA2} {
-			if InCohort([]byte("it-salt"), dev, WidenSteps[0]) {
-				want++
-			}
-		}
-		if len(plan.CanaryCohort.Devices) != want {
-			t.Fatalf("cohort devices %v, want %d of A1/A2", plan.CanaryCohort.Devices, want)
+		// The cohort is the controller's own assignment over the active fleet (06 §10.4: the OPE unit), min-one rule included.
+		want := CohortOf([]byte("it-salt"), []uuid.UUID{h.deviceA1, h.deviceA2}, WidenSteps[0])
+		if len(plan.CanaryCohort.Devices) != len(want) || len(want) == 0 {
+			t.Fatalf("cohort devices %v, want %v of A1/A2", plan.CanaryCohort.Devices, want)
 		}
 		if h.adminCount("policy_bundles") != 1 || h.adminCount("tlog_leaves") != 1 {
 			t.Fatalf("publication must land in the catalog and the log exactly once")
