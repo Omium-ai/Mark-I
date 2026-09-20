@@ -5,9 +5,9 @@ func init() { v1Templates = append(v1Templates, appTemplates...) }
 
 var appTemplates = []template{
 	{
-		// appapi GET /sessions (desktop spec §5.2): one row per session over [from, to]; project = SessionStart.workspace_id hex, capture_paths the protojson enum names; arrests are task-bearing GuardDecision rows (the `interventions` reading); history_import marks a session the tailer imported from transcript history (its history_import CoverageTransition, stamped at import time, is kept out of started_at/ended_at). arrests/blocks/tokens_saved are the verify plane's GuardDecision rows on a task (policy.proto: knee_arrest, stop_gate_block, tokens_saved_estimate). tasks_verified counts tasks with a verdict whose posterior MODE is satisfied: the Chow band withholds the satisfied WORD below 8/9 (bootstrap rows top out near 0.7, 06 §3.1), so the wire says refused for a task every anchor passed — the outcome count is the evidence, the certificate is the trail's. ponytail: agent/project/cursor filters are applied by the handler over this window scan; push them into the template when a tenant's window outgrows the row limit.
+		// appapi GET /sessions (desktop spec §5.2): one row per session over [from, to]; project = SessionStart.workspace_id hex, capture_paths the protojson enum names; arrests are task-bearing GuardDecision rows (the `interventions` reading); history_import marks a session the tailer imported from transcript history (its history_import CoverageTransition, stamped at import time, is kept out of started_at/ended_at). arrests/blocks/tokens_saved are the verify plane's GuardDecision rows on a task (policy.proto: knee_arrest, stop_gate_block, tokens_saved_estimate). tasks_verified counts tasks with a verdict whose posterior MODE is satisfied: the Chow band withholds the satisfied WORD below 8/9 (bootstrap rows top out near 0.7, 06 §3.1), so the wire says refused for a task every anchor passed — the outcome count is the evidence, the certificate is the trail's. A session that never counted a token, opened a task or drew a decision (a hook-only session outside every enabled root, a proxy handshake) is not listed: 122 of the founder's 141 rows were such. ponytail: agent/project/cursor filters are applied by the handler over this window scan; push them into the template when a tenant's window outgrows the row limit.
 		name:    "app_sessions",
-		version: "app_sessions.v5",
+		version: "app_sessions.v6",
 		body: `SELECT e.session_id AS session_id,
        coalesce(nullIf(anyIf(JSONExtractString(e.payload, 'agent'), e.event_type = 'SessionStart'), ''), anyIf(e.agent, e.agent != '')) AS agent,
        hex(base64Decode(maxIf(JSONExtractString(e.payload, 'workspace_id'), e.event_type = 'SessionStart'))) AS project,
@@ -38,6 +38,7 @@ FROM (SELECT event_id, session_id, task_id, occurred_at, event_type, agent, payl
         AND session_id != toUUID('00000000-0000-0000-0000-000000000000')
       LIMIT 1 BY event_id) AS e
 GROUP BY e.session_id
+HAVING tokens_in + tokens_out + tokens_cache_read + tokens_cache_create > 0 OR tasks > 0 OR arrests > 0 OR blocks > 0
 ORDER BY e.session_id DESC`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},

@@ -534,6 +534,42 @@ func TestIntegrationReadTemplatesReturnOnlyCallingTenant(t *testing.T) {
 	}
 }
 
+// The app's session list hides a session that never counted a token, opened a task or drew a decision (hook-only sessions outside every enabled root): a bare SessionStart row is not a session anyone can act on.
+func TestIntegrationAppSessionsHideEmptySessions(t *testing.T) {
+	rig := setupQC(t)
+	ctx := context.Background()
+	tenant := uuid.New()
+	full, bare := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	seed(t, rig, rig.ingest, tenant, full, 100, 0)
+	at := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	cols := []string{
+		"tenant_id", "occurred_at", "session_id", "event_id", "seq", "session_epoch",
+		"device_id", "event_type", "event_class", "agent", "input_tokens", "output_tokens", "cost_basis", "payload",
+	}
+	if err := rig.ingest.InsertRows(ctx, "m1p_events", cols, [][]any{
+		{tenant, at, bare, uuid.Must(uuid.NewV7()), uint64(1), uint32(1),
+			uuid.New(), "SessionStart", "diagnostic", "claudecode", uint64(0), uint64(0), "quota", `{"agent":"claudecode"}`},
+	}); err != nil {
+		t.Fatalf("seed bare session: %v", err)
+	}
+	reg, err := LoadTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl, _ := reg.Lookup("app_sessions")
+	q, err := Build(mustTenant(t, tenant), tpl, Params{"from": "2026-08-28", "to": "2026-08-28"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := rig.runner.Run(ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows.Rows) != 1 || fmt.Sprint(rows.Rows[0]["session_id"]) != full.String() {
+		t.Fatalf("app_sessions listed %v, want only the session with usage %s", rows.Rows, full)
+	}
+}
+
 // dummyParamsForDay is dummyParams pinned to the seeded day so the live
 // sweep actually scans the populated range — `to` is the day after, so a
 // half-open [from, to) template (tvo_task_window) scans it as well.
