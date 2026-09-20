@@ -14,24 +14,62 @@ use serde::{Deserialize, Serialize};
 // Ignore rules — .gitignore + .mark1ignore, gitignore syntax (04 §0.3 inv. 3)
 // ---------------------------------------------------------------------------
 
-/// Root-level `.gitignore` + `.mark1ignore` matcher over the gitignore subset
-/// that matters for scope: comments/blanks, `dir/` dir-only, leading-`/`
-/// anchoring, `*`/`?` segment globs, `**` cross-segment.
+/// `.gitignore` + `.mark1ignore` matcher over the gitignore subset that
+/// matters for scope: comments/blanks, `dir/` dir-only, leading-`/`
+/// anchoring, `*`/`?` segment globs, `**` cross-segment. Every directory's
+/// ignore files apply below it (a folder enabled over many repositories reads
+/// each repository's own), and a built-in list of dependency and build trees
+/// is never indexed regardless — `node_modules` alone put the founder's
+/// cortexd at 9.5 GiB over his workspace.
 ///
 /// Negation (`!`) is deliberately unsupported: honoring the ignore without the
 /// un-ignore can only make cortexd read LESS than git would — the failure
 /// direction the privacy invariant wants ("nothing outside enrolled roots is
-/// read", 04 §0.3). ponytail: nested per-directory ignore files,
-/// `.git/info/exclude`, and the global `core.excludesFile` are all unread —
-/// only the two root-level files scope the walk; the rest land with the
-/// monorepo lane. Root-level files cover the Phase-2 fixture sizes.
+/// read", 04 §0.3). ponytail: `.git/info/exclude` and the global
+/// `core.excludesFile` are unread.
 #[derive(Debug, Default, Clone)]
 pub struct IgnoreSet {
     rules: Vec<Rule>,
 }
 
+/// Never indexed at any depth: dependency, build, cache and VCS trees. `.git`
+/// is a file in a linked worktree, so it is not dir-only.
+const BUILTIN_IGNORES: &[&str] = &[
+    ".git",
+    "node_modules/",
+    "target/",
+    ".venv/",
+    "venv/",
+    "__pycache__/",
+    ".mypy_cache/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".tox/",
+    ".nox/",
+    "site-packages/",
+    ".cache/",
+    ".next/",
+    ".nuxt/",
+    ".turbo/",
+    ".parcel-cache/",
+    ".pnpm-store/",
+    ".yarn/",
+    "dist/",
+    "build/",
+    "out/",
+    "coverage/",
+    ".terraform/",
+    ".gradle/",
+    ".idea/",
+    ".DS_Store",
+];
+
 #[derive(Debug, Clone)]
 struct Rule {
+    /// The directory (root-relative segments) whose ignore file wrote the
+    /// rule; empty for the root and the built-ins. The rule applies to paths
+    /// below it, matched relative to it.
+    base: Vec<String>,
     /// Leading `/` in the pattern: match from the root only.
     anchored: bool,
     /// Trailing `/`: directories only.
@@ -40,44 +78,82 @@ struct Rule {
 }
 
 impl IgnoreSet {
+    /// The root's ignore files, the built-ins, then every nested ignore file a
+    /// directory-only walk finds (pruned by the rules gathered above it, so
+    /// `node_modules` is never descended to look for one).
     pub fn load(root: &Path) -> std::io::Result<IgnoreSet> {
-        let mut rules = Vec::new();
+        let mut set = IgnoreSet {
+            rules: BUILTIN_IGNORES
+                .iter()
+                .filter_map(|l| Rule::parse(l, &[]))
+                .collect(),
+        };
+        set.read_dir_files(root, &[])?;
+        set.collect_nested(root, root)?;
+        Ok(set)
+    }
+
+    fn read_dir_files(&mut self, dir: &Path, base: &[String]) -> std::io::Result<()> {
         for name in [".gitignore", ".mark1ignore"] {
-            let path = root.join(name);
-            match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    for line in text.lines() {
-                        if let Some(rule) = Rule::parse(line) {
-                            rules.push(rule);
-                        }
-                    }
-                }
+            match std::fs::read_to_string(dir.join(name)) {
+                Ok(text) => self
+                    .rules
+                    .extend(text.lines().filter_map(|l| Rule::parse(l, base))),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
             }
         }
-        Ok(IgnoreSet { rules })
+        Ok(())
+    }
+
+    fn collect_nested(&mut self, root: &Path, from: &Path) -> std::io::Result<()> {
+        let entries = match std::fs::read_dir(from) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let abs = entry.path();
+            let Some(rel) = abs
+                .strip_prefix(root)
+                .ok()
+                .and_then(|r| r.to_str())
+                .map(|r| r.replace('\\', "/"))
+            else {
+                continue;
+            };
+            let meta = entry.metadata()?;
+            if meta.is_symlink() || !meta.is_dir() || self.matches(&rel, true) {
+                continue;
+            }
+            let base: Vec<String> = rel.split('/').map(str::to_string).collect();
+            self.read_dir_files(&abs, &base)?;
+            self.collect_nested(root, &abs)?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
     pub fn from_lines(lines: &[&str]) -> IgnoreSet {
         IgnoreSet {
-            rules: lines.iter().filter_map(|l| Rule::parse(l)).collect(),
+            rules: lines.iter().filter_map(|l| Rule::parse(l, &[])).collect(),
         }
     }
 
-    /// `rel` uses `/` separators, no leading slash. `.git` is always ignored.
+    /// `rel` uses `/` separators, no leading slash.
     pub fn matches(&self, rel: &str, is_dir: bool) -> bool {
         let segs: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
-        if segs.first() == Some(&".git") {
-            return true;
-        }
         // A path is ignored if any of its ancestors is an ignored directory —
         // git semantics: an ignored dir's contents are unconditionally out.
         for end in 1..=segs.len() {
             let prefix_is_dir = if end == segs.len() { is_dir } else { true };
             for rule in &self.rules {
-                if rule.matches(&segs[..end], prefix_is_dir) {
+                let b = rule.base.len();
+                if b < end
+                    && rule.base.iter().zip(&segs[..b]).all(|(x, y)| x == y)
+                    && rule.matches(&segs[b..end], prefix_is_dir)
+                {
                     return true;
                 }
             }
@@ -87,7 +163,7 @@ impl IgnoreSet {
 }
 
 impl Rule {
-    fn parse(line: &str) -> Option<Rule> {
+    fn parse(line: &str, base: &[String]) -> Option<Rule> {
         let line = line.trim_end();
         if line.is_empty() || line.starts_with('#') {
             return None;
@@ -111,6 +187,7 @@ impl Rule {
             return None;
         }
         Some(Rule {
+            base: base.to_vec(),
             anchored,
             dir_only,
             segs,
@@ -427,11 +504,14 @@ fn depth(dir: &str) -> usize {
 }
 
 fn hash_file(path: &Path) -> std::io::Result<[u8; 32]> {
-    // ponytail: whole-file read; blake3 mmap/rayon when multi-GB artifacts in
-    // worktrees show up in profiles. Hashing is bounded by the walk skipping
-    // nothing — L0 covers every non-ignored byte by contract (04 §6.7).
-    let bytes = std::fs::read(path)?;
-    Ok(*blake3::hash(&bytes).as_bytes())
+    // Streamed, never a whole-file read: a workspace holds multi-GB archives
+    // and datasets (the founder's did), and one of them in memory at a time
+    // is a 9 GiB resident indexer. L0 still covers every non-ignored byte
+    // (04 §6.7); only the buffer is bounded.
+    let mut f = std::fs::File::open(path)?;
+    let mut h = blake3::Hasher::new();
+    std::io::copy(&mut f, &mut h)?;
+    Ok(*h.finalize().as_bytes())
 }
 
 fn mtime_nanos(meta: &std::fs::Metadata) -> u128 {
@@ -539,7 +619,47 @@ mod tests {
         assert!(!ig.matches("sub/secret.txt", false)); // anchored
         assert!(ig.matches("docs/a/b/gen", true));
         assert!(ig.matches("keep.log", false)); // *.log wins; negation unsupported
-        assert!(ig.matches(".git/config", false)); // always
+    }
+
+    // A folder enabled over several repositories reads each repository's own ignore file below it, and the built-ins prune dependency trees at any depth — the walk never even looks inside them for ignore files.
+    #[test]
+    fn nested_ignores_and_builtins_scope_the_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        std::fs::create_dir_all(r.join("app/node_modules/x")).unwrap();
+        std::fs::write(r.join("app/node_modules/x/index.js"), b"x").unwrap();
+        std::fs::create_dir_all(r.join("app/src")).unwrap();
+        std::fs::write(r.join("app/src/main.ts"), b"m").unwrap();
+        std::fs::create_dir_all(r.join("app/generated")).unwrap();
+        std::fs::write(r.join("app/generated/a.ts"), b"g").unwrap();
+        std::fs::write(r.join("app/.gitignore"), b"generated/\n*.log\n").unwrap();
+        std::fs::create_dir_all(r.join("svc/.git")).unwrap();
+        std::fs::write(r.join("svc/.git/HEAD"), b"ref").unwrap();
+        std::fs::write(r.join("svc/main.go"), b"p").unwrap();
+        std::fs::write(r.join("svc/run.log"), b"l").unwrap(); // app's *.log does not reach here
+        std::fs::create_dir_all(r.join("backup/target")).unwrap();
+        std::fs::write(r.join("backup/target/big.bin"), b"b").unwrap();
+        let ig = IgnoreSet::load(r).unwrap();
+        assert!(ig.matches("app/node_modules", true));
+        assert!(ig.matches("app/node_modules/x/index.js", false));
+        assert!(ig.matches("app/generated/a.ts", false));
+        assert!(ig.matches("svc/.git/HEAD", false));
+        assert!(ig.matches("backup/target/big.bin", false));
+        assert!(!ig.matches("app/src/main.ts", false));
+        assert!(!ig.matches("svc/main.go", false));
+        assert!(!ig.matches("svc/run.log", false));
+        let tree = MerkleTree::full_scan(r, &ig, None).unwrap();
+        let mut seen: Vec<&str> = tree.files.keys().map(String::as_str).collect();
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec![
+                "app/.gitignore",
+                "app/src/main.ts",
+                "svc/main.go",
+                "svc/run.log"
+            ]
+        );
     }
 
     #[test]
