@@ -557,3 +557,26 @@ func TestHeadURL(t *testing.T) {
 		t.Fatal("a relative ingest URL yielded a head URL")
 	}
 }
+
+// The head race has a clock on it: inside headRace the edge chains to its own last seal (the server applies post-ack); past it, a server head still behind `last` means that seal was refused and the edge rechains to the server's head — the founder's device sat at checkpoint_seq 1314 against a server head of 6, every seal refused broken_link.
+func TestSealerRechainsToTheServerHeadOnceTheRaceIsOver(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, nil) // the fake server's head never moves: checkpoint_seq headCkpt
+	clock := time.Unix(1767225600, 0)
+	h.sealer.now = func() time.Time { return clock }
+	h.sealer.Seal(ctx, [][]byte{leaf(1)})
+	first := h.sealer.last.checkpointSeq
+	if first != headCkpt+1 {
+		t.Fatalf("first seal claims %d, want %d", first, headCkpt+1)
+	}
+	clock = clock.Add(headRace / 2)
+	h.sealer.Seal(ctx, [][]byte{leaf(2)})
+	if got := h.sealer.last.checkpointSeq; got != first+1 {
+		t.Fatalf("inside the race the edge chains to its own last seal: got %d, want %d", got, first+1)
+	}
+	clock = clock.Add(headRace * 2)
+	h.sealer.Seal(ctx, [][]byte{leaf(3)})
+	if got := h.sealer.last.checkpointSeq; got != headCkpt+1 {
+		t.Fatalf("past the race with the server head still behind, the edge must rechain to it: got %d, want %d", got, headCkpt+1)
+	}
+}

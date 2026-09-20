@@ -10,7 +10,7 @@ import (
 
 // pendingLeaves lists one device's unconsumed leaves (deletion_test reads the deletion a refused row carries).
 func (m *memLeaves) pending(device uuid.UUID) []leaf {
-	w, _ := m.Window(context.Background(), querychoke.TenantID{}, device, 1<<30)
+	w, _ := m.Window(context.Background(), querychoke.TenantID{}, device, uuid.Nil, uuid.Nil, 1<<30)
 	return w
 }
 

@@ -72,6 +72,9 @@ type Config struct {
 // checkpoint it has emitted. NOT safe for concurrent use: uplink's Run
 // goroutine is the sole caller, and Flush runs only after Run has returned
 // (uplink.Uplink's own contract).
+// headRace bounds how long the edge trusts its own last seal over the server's head: controld applies a checkpoint post-ack within a second or two; past this the seal was refused.
+const headRace = 15 * time.Second
+
 type Sealer struct {
 	key      identity.DeviceKey
 	keyID    string
@@ -94,6 +97,7 @@ type Sealer struct {
 	// in the spool, still ahead of the server, and still the head the first
 	// post-restart seal must chain to.
 	last     chainHead
+	lastAt   time.Time // when last was sealed: the head race is over once the server has had headRace to apply it
 	lastPath string
 
 	// pending holds leaves whose seal was refused by an I/O path that can clear.
@@ -203,7 +207,7 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 		s.retain(leaves, err)
 		return
 	}
-	if head.checkpointSeq < s.last.checkpointSeq {
+	if head.checkpointSeq < s.last.checkpointSeq && s.now().Sub(s.lastAt) < headRace {
 		// The head race: controld applies a batch's checkpoint POST-ack, on a
 		// per-device queue (sidefx.Enqueue/Apply), so the head read right after
 		// the ack may predate the checkpoint that rode in that very batch — or
@@ -218,6 +222,14 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 		// server's newer truth (our checkpoint applied, or another device's
 		// seal outran it) and wins as before.
 		head = s.last
+	} else if head.checkpointSeq < s.last.checkpointSeq {
+		// The race is long over and the server still has not applied `last`: it refused it post-ack (a merkle
+		// mismatch, a stale head of its own) and said nothing the edge could hear. Chaining to `last` again would
+		// claim a seq the chain will never reach — the founder's device sat at checkpoint_seq 1314 against a
+		// server head of 6, every seal refused broken_link, every receipt "Server pending". The server's head is
+		// the truth; the refused seal's leaves stay unreceipted, which is what they are.
+		s.log.Warn("receipt: last seal never landed; chaining to the server's head", "last_checkpoint_seq", s.last.checkpointSeq, "server_checkpoint_seq", head.checkpointSeq)
+		s.last = head
 	}
 	// One instant, used twice: the payload's issued_at string and the envelope's
 	// occurred_at. The server rebuilds the string from the envelope with its own
@@ -266,6 +278,7 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 	}
 	s.pending = nil
 	s.last = chainHead{seq: cp.Seq, hash: signed.ReceiptHash, checkpointSeq: cp.CheckpointSeq}
+	s.lastAt = s.now()
 	if err := s.saveLast(); err != nil {
 		// The seal already happened; this only narrows what a restart knows.
 		s.log.Warn("receipt: last-sealed head not persisted — a restart before the server applies it may re-mint its checkpoint_seq",
@@ -324,6 +337,7 @@ type lastHeadFile struct {
 	Seq           int64  `json:"seq"`
 	Hash          string `json:"hash"`
 	CheckpointSeq int64  `json:"checkpoint_seq"`
+	SealedAt      string `json:"sealed_at,omitempty"` // RFC 3339; absent in files older than headRace ⇒ the race is treated as over
 }
 
 // loadLast reads lastPath. Absent ⇒ zero, silently (first boot). Unreadable or
@@ -352,6 +366,9 @@ func (s *Sealer) loadLast() chainHead {
 			"path", s.lastPath, "err", err)
 		return chainHead{}
 	}
+	if at, aerr := time.Parse(time.RFC3339Nano, f.SealedAt); aerr == nil {
+		s.lastAt = at
+	}
 	return chainHead{seq: f.Seq, hash: [32]byte(raw), checkpointSeq: f.CheckpointSeq}
 }
 
@@ -370,6 +387,7 @@ func (s *Sealer) saveLast() error {
 	}
 	b, err := json.Marshal(lastHeadFile{
 		Seq: s.last.seq, Hash: hex.EncodeToString(s.last.hash[:]), CheckpointSeq: s.last.checkpointSeq,
+		SealedAt: s.lastAt.UTC().Format(time.RFC3339Nano),
 	})
 	if err != nil {
 		return err

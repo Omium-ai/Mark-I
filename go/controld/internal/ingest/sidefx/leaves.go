@@ -16,8 +16,8 @@ import (
 type LeafStore interface {
 	// Add lands a batch's leaves; a leaf already there (replay) is left as it is, consumed or not.
 	Add(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, leaves []leaf) error
-	// Window is the oldest n unconsumed leaves in spool order — a seal's leaf set when its count and last id agree.
-	Window(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, n int) ([]leaf, error)
+	// Window is a seal's leaf set: the unconsumed leaves from first to last in spool order, at most n; with first/last nil, the oldest n unconsumed.
+	Window(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, first, last uuid.UUID, n int) ([]leaf, error)
 	// Consume marks ids sealed under seq — inside the seal's own transaction when tx is given, in one of the store's own otherwise (a re-delivered seal the chain already holds).
 	Consume(ctx context.Context, tx pgx.Tx, tenant querychoke.TenantID, device uuid.UUID, ids []uuid.UUID, seq int64) error
 	// Sweep drops consumed leaves older than keep; the landing object is the durable truth (05 §2.5).
@@ -63,15 +63,30 @@ func (p pgLeaves) Add(ctx context.Context, tenant querychoke.TenantID, device uu
 	})
 }
 
-func (p pgLeaves) Window(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, n int) ([]leaf, error) {
+func (p pgLeaves) Window(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, first, last uuid.UUID, n int) ([]leaf, error) {
 	var out []leaf
 	err := p.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `
-			SELECT event_id, batch_id, idx, coverage, deletion
-			FROM m1_checkpoint_leaves
-			WHERE tenant_id = $1 AND device_id = $2 AND consumed_seq IS NULL
-			ORDER BY batch_id, idx
-			LIMIT $3`, tenant.UUID(), device, n)
+		var rows pgx.Rows
+		var err error
+		if first != uuid.Nil && last != uuid.Nil {
+			// the span the seal names, by the two leaves' spool positions; either missing ⇒ no rows (still landing)
+			rows, err = tx.Query(ctx, `
+				WITH f AS (SELECT batch_id, idx FROM m1_checkpoint_leaves WHERE tenant_id = $1 AND device_id = $2 AND event_id = $3),
+				     l AS (SELECT batch_id, idx FROM m1_checkpoint_leaves WHERE tenant_id = $1 AND device_id = $2 AND event_id = $4)
+				SELECT e.event_id, e.batch_id, e.idx, e.coverage, e.deletion
+				FROM m1_checkpoint_leaves e, f, l
+				WHERE e.tenant_id = $1 AND e.device_id = $2 AND e.consumed_seq IS NULL
+				  AND (e.batch_id, e.idx) >= (f.batch_id, f.idx) AND (e.batch_id, e.idx) <= (l.batch_id, l.idx)
+				ORDER BY e.batch_id, e.idx
+				LIMIT $5`, tenant.UUID(), device, first, last, n)
+		} else {
+			rows, err = tx.Query(ctx, `
+				SELECT event_id, batch_id, idx, coverage, deletion
+				FROM m1_checkpoint_leaves
+				WHERE tenant_id = $1 AND device_id = $2 AND consumed_seq IS NULL
+				ORDER BY batch_id, idx
+				LIMIT $3`, tenant.UUID(), device, n)
+		}
 		if err != nil {
 			return err
 		}
@@ -115,10 +130,11 @@ func (p pgLeaves) Consume(ctx context.Context, tx pgx.Tx, tenant querychoke.Tena
 	return p.db.WithTenant(ctx, tenant, consume)
 }
 
+// Sweep drops consumed leaves older than keep, and unconsumed ones older than 4×keep: a leaf no seal has claimed in a month was orphaned by a refused seal and will never be.
 func (p pgLeaves) Sweep(ctx context.Context, tenant querychoke.TenantID, keep time.Duration) error {
 	return p.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `DELETE FROM m1_checkpoint_leaves WHERE tenant_id = $1 AND consumed_seq IS NOT NULL AND landed_at < $2`,
-			tenant.UUID(), time.Now().Add(-keep))
+		_, err := tx.Exec(ctx, `DELETE FROM m1_checkpoint_leaves WHERE tenant_id = $1 AND ((consumed_seq IS NOT NULL AND landed_at < $2) OR landed_at < $3)`,
+			tenant.UUID(), time.Now().Add(-keep), time.Now().Add(-4*keep))
 		return err
 	})
 }

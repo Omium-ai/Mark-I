@@ -46,7 +46,7 @@ func (m *memLeaves) Add(_ context.Context, _ querychoke.TenantID, device uuid.UU
 	return nil
 }
 
-func (m *memLeaves) Window(_ context.Context, _ querychoke.TenantID, device uuid.UUID, n int) ([]leaf, error) {
+func (m *memLeaves) Window(_ context.Context, _ querychoke.TenantID, device uuid.UUID, first, last uuid.UUID, n int) ([]leaf, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []leaf
@@ -56,11 +56,27 @@ func (m *memLeaves) Window(_ context.Context, _ querychoke.TenantID, device uuid
 			rows[j], rows[j-1] = rows[j-1], rows[j]
 		}
 	}
-	for _, r := range rows {
-		if r.consumed {
-			continue
+	span := first == uuid.Nil || last == uuid.Nil
+	if !span { // both must be present, else nothing (still landing)
+		f, l := false, false
+		for _, r := range rows {
+			f, l = f || r.id == first, l || r.id == last
 		}
-		out = append(out, r.leaf)
+		if !f || !l {
+			return nil, nil
+		}
+	}
+	inSpan := span
+	for _, r := range rows {
+		if !span && r.id == first {
+			inSpan = true
+		}
+		if inSpan && !r.consumed {
+			out = append(out, r.leaf)
+		}
+		if !span && r.id == last {
+			break
+		}
 		if len(out) == n {
 			break
 		}

@@ -261,7 +261,56 @@ func (h *pgHarness) sealCheckpoint(t *testing.T, device uuid.UUID, leaves []uuid
 	return receipts.CheckpointEvent{
 		EventID: id, DeviceID: device, DeviceKeyID: h.deviceKey.KeyID(),
 		ClaimedCheckpointSeq: ckpt + 1, MerkleRoot: root, LeafCount: len(leaves),
+		FirstEventID: leaves[0], LastEventID: leaves[len(leaves)-1],
 		OriginSig: signed.DeviceSig, IssuedAt: issuedAt,
+	}
+}
+
+// The wedge the span read exists for: a seal the chain refused (here: a stale checkpoint_seq) leaves its leaves unconsumed at the head; the device moves on and its next seal names only its own batch's leaves. Read as "the oldest N", every later window would start at the orphans and never match; read as the span the seal names, it seals.
+func TestIntegrationOrphanedLeavesAtTheHeadNeverShiftALaterSeal(t *testing.T) {
+	h := setupPG(t)
+	ctx := context.Background()
+	at := time.Date(2026, 9, 20, 1, 0, 0, 0, time.UTC)
+	s := sidefx.New(h.db, h.store, nil, 1, 8)
+	t.Cleanup(s.Close)
+
+	orphanBatch := uuid.Must(uuid.NewV7())
+	orphans := []uuid.UUID{uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())}
+	s.Apply(ctx, h.tenantA, h.deviceA, at, "", []sidefx.Effect{
+		{EventID: orphans[0], BatchID: orphanBatch, Index: 0},
+		{EventID: orphans[1], BatchID: orphanBatch, Index: 1},
+	})
+	stale := h.sealCheckpoint(t, h.deviceA, orphans, at.Add(time.Second))
+	stale.ClaimedCheckpointSeq += 1000 // the founder's device: a chain the server never advanced
+	s.Apply(ctx, h.tenantA, h.deviceA, at, "", []sidefx.Effect{{EventID: stale.EventID, BatchID: uuid.Must(uuid.NewV7()), Index: 0, Checkpoint: &stale}})
+	if n := s.PendingLeafCount(h.tenantA, h.deviceA); n != 2 {
+		t.Fatalf("the refused seal's leaves must stay (a re-seal may still claim them): %d pending", n)
+	}
+
+	liveBatch := uuid.Must(uuid.NewV7())
+	live := []uuid.UUID{uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())}
+	s.Apply(ctx, h.tenantA, h.deviceA, at, "", []sidefx.Effect{
+		{EventID: live[0], BatchID: liveBatch, Index: 0},
+		{EventID: live[1], BatchID: liveBatch, Index: 1},
+		{EventID: live[2], BatchID: liveBatch, Index: 2},
+	})
+	seal := h.sealCheckpoint(t, h.deviceA, live, at.Add(2*time.Second))
+	var paged []string
+	s2 := sidefx.New(h.db, h.store, func(_, _, _ uuid.UUID, detail string, _ time.Time) { paged = append(paged, detail) }, 1, 8)
+	t.Cleanup(s2.Close)
+	s2.Apply(ctx, h.tenantA, h.deviceA, at, "", []sidefx.Effect{{EventID: seal.EventID, BatchID: uuid.Must(uuid.NewV7()), Index: 0, Checkpoint: &seal}})
+	if len(paged) != 0 {
+		t.Fatalf("the live seal paged security: %q", paged)
+	}
+	var receipts int64
+	if err := h.admin.QueryRow(ctx, `SELECT count(*) FROM m1_receipts`).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if receipts != 1 {
+		t.Fatalf("m1_receipts holds %d row(s), want 1: the orphans at the head shifted the live seal's window", receipts)
+	}
+	if n := s.PendingLeafCount(h.tenantA, h.deviceA); n != 2 {
+		t.Fatalf("%d pending, want the 2 orphans alone", n)
 	}
 }
 
