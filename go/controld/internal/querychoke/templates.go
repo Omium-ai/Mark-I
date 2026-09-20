@@ -183,6 +183,24 @@ ORDER BY tokens_saved_estimate DESC`,
 		timeout:  timeoutReport,
 	},
 	{
+		// GET /reports/tvo guarantee gate: tasks with a certified (stage-final, noise-certified) satisfied verdict in the window. Zero ⇒ the noise certificate is still bootstrapping and the report stays indicative, whatever the mode-counted outcomes say.
+		name:    "certified_outcomes",
+		version: "certified_outcomes.v1",
+		body: `SELECT uniqExact(e.task_id) AS certified
+FROM (SELECT event_id, task_id
+      FROM m1p_events
+      WHERE {{tenant_pred}}
+        AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
+        AND event_type = 'VerdictEvent'
+        AND verdict = 'satisfied' AND verdict_stage = 'certified'
+        AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+      LIMIT 1 BY event_id) AS e`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: 1,
+		timeout:  timeoutReport,
+	},
+	{
 		// GET /reports/tvo tokens_saved: the verify plane's decisions on a task, by reason (knee_arrest, stop_gate_block), with the edge's savings estimate summed — an estimate, labelled so on every surface that shows it.
 		name:    "savings",
 		version: "savings.v1",
@@ -236,17 +254,23 @@ ORDER BY day, session_id`,
 	{
 		// reader.py attempt_window over [from, to): 07's attempt = span between stage-final verdicts in (session_epoch, seq) order, tail folded into the last verdicted attempt; verifier_tokens 0 (no witness row exists); task_seg_version lifted from the TaskOpen payload.
 		// A task opened before the window whose attempts continue into it (the ADR-0001 midnight split at task grain) carries its TaskOpen — and so its task_seg_version — from up to seven days back, and one opened the day after (usage a first tail replayed from history under the task open at import time, before taskseg left such usage unaddressed) from one day ahead, for tasks the window holds rows for; reader.py refused the whole day by name otherwise (the founder's every hourly rollup since 03:00).
+		// v4 adds the terminal verdict's posterior: the rollup counts an outcome verified when its posterior MODE is satisfied (the Chow band withholds the satisfied WORD below 8/9, unreachable while the bundle has one correlation group — app_sessions reads the same way), and the certified word is the guarantee-grade gate on top.
 		name:    "tvo_task_window",
-		version: "tvo_task_window.v3",
+		version: "tvo_task_window.v4",
 		body: `SELECT e.task_id AS task_id,
        e.attempt_n AS attempt_n,
        sum(e.input_tokens + e.output_tokens + e.cache_creation_input_tokens + e.cache_read_input_tokens) AS gen_tokens,
        toUInt64(0) AS verifier_tokens,
        argMaxIf(e.verdict, (e.session_epoch, e.seq), e.verdict != '')       AS fused_verdict,
        argMaxIf(e.verdict_stage, (e.session_epoch, e.seq), e.verdict != '') AS verdict_stage,
+       toFloat64(argMaxIf(e.p_satisfied, (e.session_epoch, e.seq), e.verdict != '')) AS p_satisfied,
+       toFloat64(argMaxIf(e.p_violated, (e.session_epoch, e.seq), e.verdict != ''))  AS p_violated,
+       toFloat64(argMaxIf(e.p_refused, (e.session_epoch, e.seq), e.verdict != ''))   AS p_refused,
+       toFloat64(argMaxIf(e.p_error, (e.session_epoch, e.seq), e.verdict != ''))     AS p_error,
        any(e.task_seg_version) AS task_seg_version,
        toFloat64(sum(e.cost_usd)) AS cost_usd
 FROM (SELECT task_id, session_epoch, seq, verdict, verdict_stage, cost_usd, event_type, in_window,
+             p_satisfied, p_violated, p_refused, p_error,
              input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
              least(1 + countIf(verdict != '' AND verdict_stage IN ('certified', 'revised'))
                        OVER (PARTITION BY task_id ORDER BY session_epoch, seq
@@ -257,6 +281,7 @@ FROM (SELECT task_id, session_epoch, seq, verdict, verdict_stage, cost_usd, even
              countIf(in_window AND event_type != 'TaskOpen') OVER (PARTITION BY task_id) AS live_rows
       FROM (SELECT event_id, task_id, session_epoch, seq, verdict, verdict_stage, cost_usd, payload, event_type,
                    toDate(occurred_at) >= {from:Date} AND toDate(occurred_at) < {to:Date} AS in_window,
+                   p_satisfied, p_violated, p_refused, p_error,
                    input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
             FROM m1p_events
             WHERE {{tenant_pred}}

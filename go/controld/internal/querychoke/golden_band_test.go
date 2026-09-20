@@ -23,6 +23,8 @@ type bandGoldenCase struct {
 	DroppedBilling        uint64 `json:"dropped_billing"`
 	EventsBillingIngested uint64 `json:"events_billing_ingested"`
 	Verified              uint64 `json:"verified"`
+	// Certified defaults to Verified: every older case has certified outcomes; a case that sets it to 0 locks the bootstrapping refusal.
+	Certified *uint64 `json:"certified"`
 	CostBasis             string `json:"cost_basis"`
 	PricePinned           bool   `json:"price_pinned"`
 	ShadowPriceConfirmed  bool   `json:"shadow_price_confirmed"`
@@ -62,7 +64,11 @@ func TestConfVectorsTVOBandGolden(t *testing.T) {
 			if math.Abs(lower-c.Expect.CoverageLower) > 1e-12 {
 				t.Fatalf("coverage_lower %v, want %v", lower, c.Expect.CoverageLower)
 			}
-			refusals := guaranteeRefusals(lower, c.Verified, c.CostBasis, c.PricePinned, c.ShadowPriceConfirmed)
+			certified := c.Verified
+			if c.Certified != nil {
+				certified = *c.Certified
+			}
+			refusals := guaranteeRefusals(lower, c.Verified, certified, c.CostBasis, c.PricePinned, c.ShadowPriceConfirmed)
 			if (len(refusals) == 0) != c.Expect.GuaranteeGrade {
 				t.Fatalf("guarantee_grade %v, want %v (refusals %q)",
 					len(refusals) == 0, c.Expect.GuaranteeGrade, refusals)

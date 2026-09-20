@@ -33,6 +33,11 @@ class AttemptRow:
     verifier_tokens: int  # judge tokens + amortized anchor cost (v's numerator, 06 §8.1)
     fused_verdict: str  # satisfied | violated | refused | error
     verdict_stage: str  # provisional | certified | revised
+    # The terminal verdict's posterior mode — "satisfied" | "violated" | "refused" | "error" | ""
+    # (unknown). The Chow band withholds the satisfied WORD below 8/9, unreachable while the
+    # bootstrap bundle has one correlation group (06 §3.1), so the mode is what an outcome
+    # count reads; the certified word stays the guarantee-grade gate.
+    mode: str = ""
 
 
 @dataclass(frozen=True)

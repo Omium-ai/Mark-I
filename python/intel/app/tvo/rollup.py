@@ -103,31 +103,31 @@ def compute_rollup_rows(
             f"{sorted(by_version)} — restate each version separately"
         )
 
-    terminal: dict[str, tuple[str, str]] = {}
+    terminal: dict[str, tuple[str, str, str]] = {}
     by_task: dict[str, list] = {}
     for a in ledger.attempts:
         by_task.setdefault(a.task_id, []).append(a)
     for task, rows in by_task.items():
         last = max(rows, key=lambda a: a.attempt_n)
-        terminal[task] = (last.fused_verdict, last.verdict_stage)
+        terminal[task] = (last.fused_verdict, last.verdict_stage, last.mode)
+
+    # An outcome is verified when the certified word says satisfied OR the terminal posterior's
+    # mode does: the Chow band withholds the word below 8/9, unreachable while the bootstrap
+    # bundle has one correlation group (06 §3.1), and every clean task read refused — the
+    # report's TVO was 0 for every tenant. The certified count is the guarantee-grade gate,
+    # read live by the report (certified_outcomes template), not this row.
+    def resolved(word: str, stage: str, mode: str) -> str:
+        if word in ("satisfied", "violated") and stage in _CERTIFIED_STAGES:
+            return word
+        return mode if mode in ("satisfied", "violated") else ""
 
     versions = list(by_version)
     rows_out: list[dict[str, Any]] = []
     for version, tasks in by_version.items():
         task_set = set(tasks)
         attempts = [a for a in ledger.attempts if a.task_id in task_set]
-        verified = sorted(
-            t
-            for t in tasks
-            if terminal[t][0] == "satisfied" and terminal[t][1] in _CERTIFIED_STAGES
-        )
-        unresolved = sorted(
-            t
-            for t in tasks
-            if not (
-                terminal[t][0] in ("satisfied", "violated") and terminal[t][1] in _CERTIFIED_STAGES
-            )
-        )
+        verified = sorted(t for t in tasks if resolved(*terminal[t]) == "satisfied")
+        unresolved = sorted(t for t in tasks if resolved(*terminal[t]) == "")
         # ponytail: coverage durations are surface-time, not version-attributable — they
         # ride the LATEST version's row (zeros elsewhere) so a cutover day sums correctly
         # across its rows; per-version attribution would be an invented split.

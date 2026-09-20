@@ -74,7 +74,7 @@
         "coverage_lower": 0.99,
         "guarantee_grade": false,
         "refusals": [
-          "cost basis unresolved: no pinned model_prices row for usd (06 §8.4)"
+          "cost basis unresolved: no pinned model_prices row for usd (06 \u00a78.4)"
         ]
       }
     },
@@ -99,7 +99,7 @@
     },
     {
       "name": "floor_and_unpinned_basis_are_both_stated_in_order",
-      "_why": "report.py states EVERY refusal (06 §8.5), floor first; the joined wire field is '; '-separated. Order is part of the contract.",
+      "_why": "report.py states EVERY refusal (06 \u00a78.5), floor first; the joined wire field is '; '-separated. Order is part of the contract.",
       "observed_ms": 500,
       "bypass_ms": 500,
       "disabled_ms": 0,
@@ -114,7 +114,7 @@
         "guarantee_grade": false,
         "refusals": [
           "M1E-5004 coverage below floor: coverage_lower=0.5000 < 0.95",
-          "cost basis unresolved: no pinned model_prices row for usd (06 §8.4)"
+          "cost basis unresolved: no pinned model_prices row for usd (06 \u00a78.4)"
         ]
       }
     },
@@ -157,6 +157,26 @@
         "guarantee_grade": true,
         "refusals": []
       }
+    },
+    {
+      "name": "bootstrapping_certificate_renders_the_number_and_refuses_the_guarantee",
+      "observed_ms": 980000,
+      "bypass_ms": 10000,
+      "disabled_ms": 10000,
+      "dropped_billing": 0,
+      "events_billing_ingested": 500,
+      "verified": 42,
+      "cost_basis": "usd",
+      "price_pinned": true,
+      "expect": {
+        "coverage": 0.98,
+        "coverage_lower": 0.98,
+        "guarantee_grade": false,
+        "refusals": [
+          "noise certificate is 'bootstrapping', not 'certified'"
+        ]
+      },
+      "certified": 0
     }
   ]
 }

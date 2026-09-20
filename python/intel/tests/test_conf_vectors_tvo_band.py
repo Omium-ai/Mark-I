@@ -51,13 +51,14 @@ def test_conf_vectors_tvo_band_golden(case: dict):
     # A certified result with clean inputs: the fixture isolates the band + basis
     # refusals, the two conditions the Go surface evaluates too (its extra
     # zero-verified and missing-day refusals are handler-level, tested in Go).
+    certified = int(case.get("certified", case["verified"]))
     result = TvoResult(
         tvo=1.0,
         break_even_v=0.0,
         inputs=TvoInputs(c=1.0, v=0.0, p=1.0, alpha=1.0, beta=0.0, d=0.0),
         attempts=int(case["verified"]),
-        certified_attempts=int(case["verified"]),
-        cert_status="certified",
+        certified_attempts=certified,
+        cert_status="certified" if certified > 0 else "bootstrapping",
     )
     price = ModelPrice("model_prices.golden", 0.0, 0.0, 0.0, 0.0) if case["price_pinned"] else None
     report = assemble_report(

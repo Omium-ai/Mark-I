@@ -212,3 +212,38 @@ async def test_version_cutover_day_is_two_jobs_two_rows():
     # And a single restatement label across a cutover day is ambiguous — refused.
     with pytest.raises(ValueError, match="restate each version separately"):
         await _run(choke, series="task_seg.v1-restated.2")
+
+
+async def test_posterior_mode_counts_an_outcome_the_chow_band_withholds():
+    """A bootstrap verdict reads `refused` at PROVISIONAL stage (one correlation group tops out
+    near 0.7 < 8/9) although every anchor passed; its posterior mode is satisfied, and that is
+    what the outcome count reads. The certified word stays the guarantee-grade gate, read live
+    by the report, so nothing here claims certification."""
+    rows = [
+        dict(
+            TVO_ROWS[2],
+            task_id="t3",
+            fused_verdict="refused",
+            p_satisfied=0.71,
+            p_violated=0.2,
+            p_refused=0.06,
+            p_error=0.03,
+        ),
+        dict(
+            TVO_ROWS[2],
+            task_id="t4",
+            fused_verdict="refused",
+            p_satisfied=0.2,
+            p_violated=0.7,
+            p_refused=0.07,
+            p_error=0.03,
+        ),
+        dict(
+            TVO_ROWS[2], task_id="t5", fused_verdict="refused"
+        ),  # no posterior columns (an older choke): still unresolved
+    ]
+    choke = make_choke(rows=rows)
+    await _run(choke)
+    ((_, row, _),) = [r for r in choke.requests if r[0] == "tvo_rollup_tenant_day"]
+    assert row["tasks_verified"] == ["t3"]
+    assert row["tasks_unresolved"] == ["t5"]  # t4 resolved violated by its mode

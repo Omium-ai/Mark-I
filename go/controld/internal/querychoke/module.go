@@ -391,6 +391,22 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	}
 	covFraction, covLower := coverageBand(observed, bypass, disabled, droppedBilling, billingIngested)
 
+	// certified outcomes: tasks whose stage-final verdict is certified and satisfied over the window — the guarantee-grade gate, read live (the rollup's tasks_verified counts by posterior mode so the number renders in bootstrap).
+	var certified uint64
+	if certTpl, err := m.reg.Lookup("certified_outcomes"); err != nil {
+		writeErr(w, http.StatusInternalServerError, "M1E-9500", "registry miswired")
+		return
+	} else if certQ, err := Build(tid, certTpl, Params{"from": from, "to": to}); err != nil {
+		writeErr(w, http.StatusBadRequest, "M1E-2001", err.Error())
+		return
+	} else if certRows, ok := m.run(w, r, certQ); !ok {
+		return
+	} else {
+		for _, row := range certRows.Rows {
+			certified += asU64(row["certified"])
+		}
+	}
+
 	// tokens_saved: the verify plane's own decisions over the window (savings.v1), an ESTIMATE from the edge (policy.proto GuardDecision.tokens_saved_estimate); re-exploration and routing have no witness at v1 and say 0.
 	var savedArrests, savedBlocks, nBlocks, nArrests uint64
 	if savTpl, err := m.reg.Lookup("savings"); err != nil {
@@ -422,7 +438,7 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	if len(missingDays) > 0 {
 		refusals = append(refusals, fmt.Sprintf("M1E-5004 rollup missing for %d day(s) in window", len(missingDays)))
 	}
-	refusals = append(refusals, guaranteeRefusals(covLower, verified, costBasis, pricePinned, shadowConfirmed)...)
+	refusals = append(refusals, guaranteeRefusals(covLower, verified, certified, costBasis, pricePinned, shadowConfirmed)...)
 
 	resp := map[string]any{
 		"tvo":   ratio(float64(tokensTotal), float64(verified)),
@@ -480,11 +496,15 @@ func coverageBand(observedMS, bypassMS, disabledMS, droppedBilling, eventsBillin
 // M1E-2001; here the rollup rows still render, so only the guarantee is
 // refused). Strings and order match report.py exactly — the golden fixture
 // asserts them byte-for-byte.
-func guaranteeRefusals(coverageLower float64, verified uint64, costBasis string, pricePinned, shadowConfirmed bool) []string {
+func guaranteeRefusals(coverageLower float64, verified, certified uint64, costBasis string, pricePinned, shadowConfirmed bool) []string {
 	var out []string
 	if coverageLower < coverageFloor {
 		out = append(out, fmt.Sprintf(
 			"M1E-5004 coverage below floor: coverage_lower=%.4f < %v", coverageLower, coverageFloor))
+	}
+	// report.py's certification refusal, evaluated here from the ledger: verified outcomes count by posterior mode (the number renders), a guarantee needs at least one certified satisfied verdict in the window — none ⇒ the status is bootstrapping (06 §5.4).
+	if certified == 0 {
+		out = append(out, "noise certificate is 'bootstrapping', not 'certified'")
 	}
 	if costBasis == costBasisQuota && !shadowConfirmed {
 		out = append(out, "cost basis unresolved: shadow price S unconfirmed by tenant (D22)")

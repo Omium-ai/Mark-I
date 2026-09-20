@@ -106,6 +106,14 @@ class CoverageInputs:
     events_billing_ingested: int
 
 
+def _posterior_mode(row: Mapping[str, Any]) -> str:
+    """The terminal verdict's posterior mode from the template's p_* columns (v4); '' when the
+    row carries none (an older choke, the cross-language fixture) or the posterior is all zero."""
+    ps = {k: float(row.get(f"p_{k}") or 0.0) for k in ("satisfied", "violated", "refused", "error")}
+    best = max(ps, key=ps.get)  # type: ignore[arg-type]
+    return best if ps[best] > 0 else ""
+
+
 def _require(row: Mapping[str, Any], key: str, template: str) -> Any:
     # A missing column is a broken template contract, not user error — fail loudly with
     # the template name so the drift is attributable to the choke-side registry entry.
@@ -226,6 +234,7 @@ class QuerychokeReader:
                     verifier_tokens=int(_require(row, "verifier_tokens", "tvo_task_window")),
                     fused_verdict=str(_require(row, "fused_verdict", "tvo_task_window")),
                     verdict_stage=str(_require(row, "verdict_stage", "tvo_task_window")),
+                    mode=_posterior_mode(row),
                 )
             )
             version = str(_require(row, "task_seg_version", "tvo_task_window"))

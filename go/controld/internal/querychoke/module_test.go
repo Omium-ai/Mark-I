@@ -39,6 +39,9 @@ func (f *fakeRunner) Run(_ context.Context, q Query) (*Rows, error) {
 	if r, ok := f.byTemplate[q.Template().Name()]; ok {
 		return r, nil
 	}
+	if q.Template().Name() == "certified_outcomes" {
+		return &Rows{Rows: []map[string]any{{"certified": uint64(1)}}}, nil // a certified tenant unless a test says otherwise
+	}
 	return f.rows, nil
 }
 
@@ -278,6 +281,17 @@ func TestTVOReportContract(t *testing.T) {
 	if len(resp["missing_days"].([]any)) != 6 {
 		t.Fatalf("missing days must be enumerated: %s", w.Body.String())
 	}
+
+	// No certified satisfied verdict in the window: the number renders (outcomes count by posterior mode), the guarantee is refused with report.py's own words.
+	run.byTemplate["certified_outcomes"] = &Rows{Rows: []map[string]any{{"certified": uint64(0)}}}
+	w = do(mux, "GET", "/api/v1/reports/tvo?window=1d", bearer, "")
+	resp = map[string]any{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["tvo"].(float64) != 100 || resp["guarantee_grade"] != false ||
+		!strings.Contains(resp["refusal"].(string), "noise certificate is 'bootstrapping', not 'certified'") {
+		t.Fatalf("bootstrapping certificate must render the number and refuse the guarantee: %s", w.Body.String())
+	}
+	delete(run.byTemplate, "certified_outcomes")
 
 	// A day with no billing rows (before the tenant existed, a quiet weekend) and today (never closed yet) are not missing rollups: a fresh tenant's first report must not refuse for the six days before it signed up.
 	run.byTemplate["dropped_by_tenant_day"] = &Rows{Rows: []map[string]any{{
