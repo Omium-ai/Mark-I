@@ -6,7 +6,6 @@ import (
 	"testing"
 )
 
-
 // The home directory, / and a drive root are never offered as the project to watch.
 func TestTooBroadRoots(t *testing.T) {
 	home, _ := os.UserHomeDir()
