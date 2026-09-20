@@ -452,8 +452,9 @@ ORDER BY e.session_epoch, e.seq, e.event_id`,
 	},
 	{
 		// policy_compiler/jobs.py read_attempts over [from, to): tvo_task_window's attempt arithmetic plus the two CPVS keys (06 §10.1) — task_class lifted from the TaskOpen payload (TaskOpen.task_class, "*" from the edge until a classifier exists) onto every attempt of the task, model_id the attempt's latest Usage model; token classes split as knee.py's AttemptCost names them; verifier_spend_usd 0 (no witness row); cost_basis chproj's per-tenant m1_075 stamp ('' for a tenant without a regime row, which CertifiedAttempt refuses loudly).
+		// v2 drops an attempt no row of which carries a cost basis (a verdict-only attempt: no Usage between two stage-final verdicts) — it cannot be costed, and one such row refused the founder's whole nightly compile (CertifiedAttempt.cost_basis '').
 		name:    "policy_compiler_attempts",
-		version: "policy_compiler_attempts.v1",
+		version: "policy_compiler_attempts.v2",
 		body: `SELECT e.task_id AS task_id,
        any(e.task_class) AS task_class,
        argMaxIf(e.model, (e.session_epoch, e.seq), e.event_type = 'Usage' AND e.model != '') AS model_id,
@@ -483,7 +484,7 @@ FROM (SELECT task_id, session_epoch, seq, event_type, model, verdict, verdict_st
               AND event_type IN ('Usage', 'VerdictEvent', 'TaskOpen')
             LIMIT 1 BY event_id) AS d) AS e
 GROUP BY e.task_id, e.attempt_n
-HAVING fused_verdict != ''
+HAVING fused_verdict != '' AND cost_basis != ''
 ORDER BY e.task_id, e.attempt_n`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},

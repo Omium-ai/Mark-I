@@ -44,6 +44,8 @@ async def export(ctx: Any, *, http: httpx.AsyncClient | None = None) -> str | No
     the receipt is never ahead of the bytes it attests."""
     root = getattr(ctx.settings, "corpus_root_uri", None)
     pepper = getattr(ctx.settings, "tenant_hmac_pepper", None)
+    if pepper is not None and hasattr(pepper, "get_secret_value"):
+        pepper = pepper.get_secret_value()
     if not (root and pepper):
         raise RuntimeError(
             "INTEL_CORPUS_ROOT_URI and INTEL_TENANT_HMAC_PEPPER are required: corpus.export "

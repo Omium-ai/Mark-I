@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     # limping along without them would silently serve nothing.
     querychoke_base_url: str
     adjudicator_base_url: str
+    # corpus.export's two inputs (06 §13): the export root (s3://<bucket> or a local path) and
+    # the tenant-root pepper (hex; controld's enroll.TenantRoot derives from the same bytes).
+    # Optional: absent, the job parks with its own refusal — but they were never declared
+    # here, so the chart's INTEL_CORPUS_ROOT_URI / INTEL_TENANT_HMAC_PEPPER were read by
+    # nothing and every nightly export failed in prod with "required".
+    corpus_root_uri: str | None = None
+    tenant_hmac_pepper: SecretStr | None = None
 
     @property
     def pg_dsn_app(self) -> str:
