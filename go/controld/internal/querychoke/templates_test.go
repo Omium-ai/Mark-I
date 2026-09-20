@@ -186,7 +186,10 @@ func TestTvoTaskWindowServesAttemptWindow(t *testing.T) {
 		"ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING", // an attempt closes ON its verdict row
 		"greatest(1, countIf(",                             // the tail folds into the last attempt
 		"verdict_stage IN ('certified', 'revised')",        // provisional never splits an attempt
-		"toDate(occurred_at) >= {from:Date} AND toDate(occurred_at) < {to:Date}",
+		"toDate(occurred_at) < {to:Date}",
+		"AND toDate(occurred_at) >= {from:Date})",                                         // usage and verdicts: the window itself
+		"event_type = 'TaskOpen' AND toDate(occurred_at) >= {from:Date} - INTERVAL 7 DAY", // a task's opener from before the window (ADR-0001 midnight split at task grain)
+		"WHERE e.in_window OR (e.event_type = 'TaskOpen' AND e.live_rows > 0)",            // and only for tasks the window holds rows for
 		"task_id != toUUID('00000000-0000-0000-0000-000000000000')",
 		"JSONExtractString(payload, 'task_seg_version')", // chproj projects no column for it
 	}

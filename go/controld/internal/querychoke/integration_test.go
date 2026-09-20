@@ -534,6 +534,49 @@ func TestIntegrationReadTemplatesReturnOnlyCallingTenant(t *testing.T) {
 	}
 }
 
+// A task opened before midnight whose attempts run into the next day (ADR-0001 midnight split at task grain): the next day's attempt window carries the opener's task_seg_version — reader.py refused the founder's every hourly rollup by name without it — and a task whose opener alone falls in the lookback stays out.
+func TestIntegrationTvoTaskWindowCarriesThePreWindowOpener(t *testing.T) {
+	rig := setupQC(t)
+	ctx := context.Background()
+	tenant := uuid.New()
+	session, device := uuid.Must(uuid.NewV7()), uuid.New()
+	straddling, stale := uuid.New(), uuid.New()
+	day0 := time.Date(2026, 8, 27, 23, 50, 0, 0, time.UTC)
+	day1 := time.Date(2026, 8, 28, 0, 10, 0, 0, time.UTC)
+	cols := []string{
+		"tenant_id", "occurred_at", "session_id", "event_id", "seq", "session_epoch",
+		"device_id", "event_type", "event_class", "agent", "input_tokens", "output_tokens", "cost_basis", "task_id", "payload",
+	}
+	if err := rig.ingest.InsertRows(ctx, "m1p_events", cols, [][]any{
+		{tenant, day0, session, uuid.Must(uuid.NewV7()), uint64(1), uint32(1), device, "TaskOpen", "diagnostic", "claudecode", uint64(0), uint64(0), "quota", straddling, `{"task_seg_version":"task_seg.v1"}`},
+		{tenant, day1, session, uuid.Must(uuid.NewV7()), uint64(2), uint32(1), device, "Usage", "billing", "claudecode", uint64(70), uint64(5), "quota", straddling, `{}`},
+		{tenant, day0, session, uuid.Must(uuid.NewV7()), uint64(3), uint32(1), device, "TaskOpen", "diagnostic", "claudecode", uint64(0), uint64(0), "quota", stale, `{"task_seg_version":"task_seg.v1"}`},
+		{tenant, day0, session, uuid.Must(uuid.NewV7()), uint64(4), uint32(1), device, "Usage", "billing", "claudecode", uint64(9), uint64(1), "quota", stale, `{}`},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	reg, err := LoadTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl, _ := reg.Lookup("tvo_task_window")
+	q, err := Build(mustTenant(t, tenant), tpl, Params{"from": "2026-08-28", "to": "2026-08-29"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := rig.runner.Run(ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows.Rows) != 1 {
+		t.Fatalf("day 1 attempt window: %d rows, want the straddling task alone: %v", len(rows.Rows), rows.Rows)
+	}
+	r := rows.Rows[0]
+	if fmt.Sprint(r["task_id"]) != straddling.String() || fmt.Sprint(r["task_seg_version"]) != "task_seg.v1" || asU64(r["gen_tokens"]) != 75 {
+		t.Fatalf("straddling task row %v: want its opener's task_seg_version and day-1 tokens only", r)
+	}
+}
+
 // The app's session list hides a session that never counted a token, opened a task or drew a decision (hook-only sessions outside every enabled root): a bare SessionStart row is not a session anyone can act on.
 func TestIntegrationAppSessionsHideEmptySessions(t *testing.T) {
 	rig := setupQC(t)
