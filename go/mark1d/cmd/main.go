@@ -793,12 +793,19 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		_ = sp.Close()
 		return err
 	}
-	// One runner today, so every enabled root's L0 push lands on the same
-	// SetL0Root -- the anchorWorktree ceiling cortex.go's header records.
 	for _, root := range cxRoots {
-		cx.OnRoot(root, runner.SetL0Root)
+		root := root
+		cx.OnRoot(root, func(h []byte) { runner.SetL0RootFor(root, h) })
 	}
 	sched := anchors.NewScheduler(runner, nil, anchors.ConsentPath(cfg.stateDir), "", log)
+	sched.WorktreeFor = func(session [16]byte) string {
+		if cwd, ok := sessionCwd.Load(session); ok {
+			if root, ok := enabledRootFor(cfg.stateDir, cfg.workspace, cwd.(string)); ok {
+				return root
+			}
+		}
+		return ""
+	}
 	sched.Start(ctx)
 	// The consent surface (anchors/candidates.go): derive for every enabled
 	// root, apply the CLI's approvals, publish candidates.json, arm the plane.
@@ -1316,17 +1323,23 @@ func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *a
 		} else {
 			published = true
 		}
-		worktree := ""
-		var enabled []anchors.CatalogEntry
+		// Every enabled root is armed with its own catalog; a session runs the one its hook cwd sits in (sched.WorktreeFor), the first root when it sits in none. Before this only roots[0] ever verified anything — a tester's second project ran no anchors at all.
+		catalogs := map[string][]anchors.CatalogEntry{}
+		var union []anchors.CatalogEntry
+		for _, root := range roots {
+			enabled := anchors.Reconcile(derived[root], consented).Enabled
+			catalogs[root] = enabled
+			union = append(union, enabled...)
+			if len(enabled) > 0 {
+				log.Info("mark1d: anchor plane armed", "worktree", root, "anchors", len(enabled))
+			}
+		}
+		def := ""
 		if len(roots) > 0 {
-			worktree = roots[0]
-			enabled = anchors.Reconcile(derived[worktree], consented).Enabled
+			def = roots[0]
 		}
-		sched.SetCatalog(worktree, enabled)
-		votes.SetCatalog(enabled)
-		if len(enabled) > 0 {
-			log.Info("mark1d: anchor plane armed", "worktree", worktree, "anchors", len(enabled))
-		}
+		sched.SetCatalogs(def, catalogs)
+		votes.SetCatalog(union)
 	}
 }
 

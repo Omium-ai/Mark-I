@@ -618,7 +618,7 @@ func TestSchedulerSlowQueueIsQuickestFirst(t *testing.T) {
 	}}
 	s := NewScheduler(NewRunner(sb, &fakeEmitter{}, nil, true), []CatalogEntry{slowA, slowB}, consentFor(t, slowA, slowB), wt, nil)
 	s.IdleAfter = time.Hour
-	if got := s.slowOrder(); got[0].ID != slowB.ID {
+	if got := s.slowOrder(wt); got[0].ID != slowB.ID {
 		t.Fatalf("never-run anchors put static checks before test suites, got %s first", got[0].ID)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -628,8 +628,55 @@ func TestSchedulerSlowQueueIsQuickestFirst(t *testing.T) {
 	sctx, scancel := context.WithTimeout(ctx, 5*time.Second)
 	s.Settle(sctx, testSession, testTask)
 	scancel()
-	if got := s.slowOrder(); got[0].ID != slowB.ID {
+	if got := s.slowOrder(wt); got[0].ID != slowB.ID {
 		t.Fatalf("after a slow cargo-test the next Stop must queue go-vet first, got %s", got[0].ID)
+	}
+}
+
+// Two enabled roots, two catalogs: a session runs the anchors of the worktree its hook cwd names, a session no cwd places runs the default's — never another project's.
+func TestSchedulerRunsEachSessionsOwnWorktree(t *testing.T) {
+	e, wtA := enabledRuff(t)
+	wtB := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wtB, "pyproject.toml"), []byte("[tool.ruff]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eB := e
+	eB.ID = "ruff@cat-1" // same tool, second project
+	var mu sync.Mutex
+	var ran []string
+	sb := &fakeSandbox{run: func(spec RunSpec) (RunResult, error) {
+		mu.Lock()
+		ran = append(ran, spec.WorktreeRO)
+		mu.Unlock()
+		return RunResult{ExitCode: 0}, nil
+	}}
+	s := NewScheduler(NewRunner(sb, &fakeEmitter{}, nil, false), nil, consentFor(t, e), "", nil)
+	s.SetCatalogs(wtA, map[string][]CatalogEntry{wtA: {e}, wtB: {eB}})
+	s.Debounce = 10 * time.Millisecond
+	s.IdleAfter = time.Hour
+	sessA, sessB, sessNone := [16]byte{1}, [16]byte{2}, [16]byte{3}
+	s.WorktreeFor = func(sid [16]byte) string {
+		switch sid {
+		case sessA:
+			return wtA
+		case sessB:
+			return wtB
+		}
+		return ""
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+	for _, sid := range [][16]byte{sessA, sessB, sessNone} {
+		s.NoteToolUse(sid, testTask)
+		sctx, scancel := context.WithTimeout(ctx, 5*time.Second)
+		s.Settle(sctx, sid, testTask)
+		scancel()
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ran) != 3 || ran[0] != wtA || ran[1] != wtB || ran[2] != wtA {
+		t.Fatalf("worktrees run %v, want [%s %s %s]", ran, wtA, wtB, wtA)
 	}
 }
 

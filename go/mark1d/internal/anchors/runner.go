@@ -287,8 +287,8 @@ type Runner struct {
 	// OnDropped receives the Dropped{reason} accounting for an excerpt refused at the door (wired to capture.AccountDropped); nil is legal.
 	OnDropped func(reason string)
 
-	mu     sync.Mutex
-	l0root []byte // latest cortexd L0 root; nil ⇒ integrity incomplete
+	mu      sync.Mutex
+	l0roots map[string][]byte // per worktree ("" = the single-root form): latest cortexd L0 root; absent ⇒ integrity incomplete
 	// signer mints AnchorVote.signature (verify.proto field 5, founder ruling
 	// 2026-09-16); nil ⇒ votes stay unsigned, the same fail-soft posture
 	// receipt sealing already has with no enrolled device key.
@@ -313,11 +313,18 @@ func NewRunner(sb Sandbox, emit Emitter, outputHMACKey []byte, testOptIn bool) *
 // on every index-clock bump. nil clears it (cortexd down). While absent,
 // votes carry an EMPTY worktree_merkle_root — never a placeholder — which is
 // the "incomplete integrity" state: emitted, fusion-visible, never certifies.
-func (r *Runner) SetL0Root(root []byte) {
+func (r *Runner) SetL0Root(root []byte) { r.SetL0RootFor("", root) }
+
+// SetL0RootFor is SetL0Root per worktree: every enabled root has its own cortexd index and its own merkle root, and a vote on one worktree must never carry another's.
+func (r *Runner) SetL0RootFor(worktree string, root []byte) {
 	r.mu.Lock()
-	r.l0root = append([]byte(nil), root...)
+	if r.l0roots == nil {
+		r.l0roots = map[string][]byte{}
+	}
 	if root == nil {
-		r.l0root = nil
+		delete(r.l0roots, worktree)
+	} else {
+		r.l0roots[worktree] = append([]byte(nil), root...)
 	}
 	r.mu.Unlock()
 }
@@ -395,7 +402,7 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 	var d diffFacts
 	if preHash, preErr := hashFile(e.BinaryPath); preErr != nil || !bytes.Equal(preHash, e.BinaryHash) || !aliasIntact(e) {
 		integrity = &m1pv1.AnchorIntegrity{
-			WorktreeMerkleRoot:   r.currentL0Root(), // empty ⇒ incomplete, never certifies
+			WorktreeMerkleRoot:   r.currentL0Root(worktree), // empty ⇒ incomplete, never certifies
 			ResolvedBinaryHashes: map[string][]byte{tool: preHash},
 			EnvScrubAttestation:  envAttestation(RunResult{}, env), // attests the INTENDED env; nothing ran
 			Tamper:               true,
@@ -419,7 +426,7 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 		// scheduling ever shows up in a latency profile.
 		runHash, hashErr := hashFile(e.BinaryPath)
 		integrity = &m1pv1.AnchorIntegrity{
-			WorktreeMerkleRoot:   r.currentL0Root(), // empty ⇒ incomplete, never certifies
+			WorktreeMerkleRoot:   r.currentL0Root(worktree), // empty ⇒ incomplete, never certifies
 			ResolvedBinaryHashes: map[string][]byte{tool: runHash},
 			EnvScrubAttestation:  envAttestation(res, env),
 			Tamper:               hashErr != nil || !bytes.Equal(runHash, e.BinaryHash),
@@ -465,10 +472,13 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 	return r.emit.Admit(ctx, ev)
 }
 
-func (r *Runner) currentL0Root() []byte {
+func (r *Runner) currentL0Root(worktree string) []byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]byte(nil), r.l0root...)
+	if h, ok := r.l0roots[worktree]; ok {
+		return append([]byte(nil), h...)
+	}
+	return append([]byte(nil), r.l0roots[""]...)
 }
 
 // SetSigner arms per-vote signing with the device origin key -- the same key

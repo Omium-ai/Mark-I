@@ -35,15 +35,18 @@ type timerKey struct {
 // a PostToolUse debounce, slow anchors only at idle or Stop. It never computes
 // verdicts and never blocks a caller — every run lands on the bounded queue.
 type Scheduler struct {
-	runner  *Runner
-	entries []CatalogEntry // Reconcile().Enabled — the only legal source
+	runner *Runner
+	// catalogs is Reconcile().Enabled per enabled worktree — the only legal source. One worktree per session: WorktreeFor names it (the hook's cwd), else the default (the first root, the single-project form).
+	catalogs map[string][]CatalogEntry
+	def      string
+	// WorktreeFor resolves a session to the enabled root it works in; nil or "" ⇒ the default worktree. Wired by the daemon from Hello.cwd.
+	WorktreeFor func(session [16]byte) string
 	// consentPath is re-read before every run: entries above are a snapshot
 	// for the Scheduler's whole lifetime, but consent is not — a revocation
 	// must stop the NEXT run (doc.go "NOTHING RUNS WITHOUT CONSENT"), not the
 	// next daemon restart. The store is one small file; per-run re-read is
 	// the whole propagation mechanism.
 	consentPath string
-	worktree    string
 	log         *slog.Logger
 
 	// Debounce/IdleAfter default to the 04 §2.2 constants; test seams.
@@ -56,15 +59,16 @@ type Scheduler struct {
 	mu           sync.Mutex
 	lastActivity time.Time
 	timers       map[timerKey]*time.Timer // fast debounce, coalesced per (task, anchor)
-	dirty        map[taskKey]bool         // slow work owed since last idle drain
+	dirty        map[taskKey]string       // slow work owed since last idle drain, by the task's worktree
 	inflight     map[taskKey]int          // runs queued or executing, what Settle waits on
 	lastTook     map[string]time.Duration // per anchor, its newest run's wall time: the slow queue's order
 	work         chan workItem
 }
 
 type workItem struct {
-	entry CatalogEntry
-	tk    taskKey
+	entry    CatalogEntry
+	tk       taskKey
+	worktree string
 }
 
 // NewScheduler wires runner + the Enabled catalog. Entries with any other
@@ -78,14 +82,14 @@ func NewScheduler(r *Runner, enabled []CatalogEntry, consentPath, worktree strin
 	}
 	return &Scheduler{
 		runner:      r,
-		entries:     enabled,
+		catalogs:    map[string][]CatalogEntry{worktree: enabled},
+		def:         worktree,
 		consentPath: consentPath,
-		worktree:    worktree,
 		log:         log,
 		Debounce:    defaultDebounce,
 		IdleAfter:   defaultIdleAfter,
 		timers:      map[timerKey]*time.Timer{},
-		dirty:       map[taskKey]bool{},
+		dirty:       map[taskKey]string{},
 		inflight:    map[taskKey]int{},
 		lastTook:    map[string]time.Duration{},
 		work:        make(chan workItem, workQueueCap),
@@ -97,9 +101,31 @@ func NewScheduler(r *Runner, enabled []CatalogEntry, consentPath, worktree strin
 // that only armed at the next restart would be the M1E-5001 bug wearing a
 // prompt. Same provenance rule as NewScheduler: Reconcile().Enabled only.
 func (s *Scheduler) SetCatalog(worktree string, enabled []CatalogEntry) {
+	s.SetCatalogs(worktree, map[string][]CatalogEntry{worktree: enabled})
+}
+
+// SetCatalogs is SetCatalog for every enabled worktree at once (the daemon's multi-project form): def is the worktree a session resolves to when WorktreeFor names none.
+func (s *Scheduler) SetCatalogs(def string, catalogs map[string][]CatalogEntry) {
 	s.mu.Lock()
-	s.entries, s.worktree = enabled, worktree
+	s.catalogs, s.def = catalogs, def
 	s.mu.Unlock()
+}
+
+// worktreeOf is the session's enabled root: WorktreeFor's answer when it names a worktree the catalogs know, else the default.
+func (s *Scheduler) worktreeOf(session [16]byte) string {
+	if s.WorktreeFor != nil {
+		if wt := s.WorktreeFor(session); wt != "" {
+			s.mu.Lock()
+			_, known := s.catalogs[wt]
+			s.mu.Unlock()
+			if known {
+				return wt
+			}
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.def
 }
 
 // Start launches the workers and the idle watcher. ctx is the kill switch:
@@ -118,11 +144,12 @@ func (s *Scheduler) Start(ctx context.Context) {
 // (task, anchor): only the latest event matters, a burst yields one run.
 func (s *Scheduler) NoteToolUse(session, task [16]byte) {
 	tk := taskKey{session, task}
+	wt := s.worktreeOf(session)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastActivity = time.Now()
-	s.dirty[tk] = true
-	for _, e := range s.entries {
+	s.dirty[tk] = wt
+	for _, e := range s.catalogs[wt] {
 		if e.Class != ClassFast {
 			continue
 		}
@@ -136,7 +163,7 @@ func (s *Scheduler) NoteToolUse(session, task [16]byte) {
 			s.mu.Lock()
 			delete(s.timers, k)
 			s.mu.Unlock()
-			s.enqueue(workItem{entry: e, tk: tk})
+			s.enqueue(workItem{entry: e, tk: tk, worktree: wt})
 		})
 	}
 }
@@ -146,11 +173,11 @@ func (s *Scheduler) NoteToolUse(session, task [16]byte) {
 func (s *Scheduler) Stop(session, task [16]byte) {
 	tk := taskKey{session, task}
 	s.mu.Lock()
-	owed := s.dirty[tk]
+	wt, owed := s.dirty[tk]
 	delete(s.dirty, tk)
 	s.mu.Unlock()
 	if owed {
-		s.enqueueSlow(tk)
+		s.enqueueSlow(tk, wt)
 	}
 }
 
@@ -199,30 +226,30 @@ func (s *Scheduler) idleLoop(ctx context.Context) {
 			s.mu.Unlock()
 			continue
 		}
-		var drain []taskKey
-		for tk := range s.dirty {
-			drain = append(drain, tk)
+		drain := map[taskKey]string{}
+		for tk, wt := range s.dirty {
+			drain[tk] = wt
 			delete(s.dirty, tk)
 		}
 		s.mu.Unlock()
-		for _, tk := range drain {
-			s.enqueueSlow(tk)
+		for tk, wt := range drain {
+			s.enqueueSlow(tk, wt)
 		}
 	}
 }
 
 // enqueueSlow queues the task's slow anchors quickest-first by their newest run's wall time (never run ⇒ first): the gate's Settle has a budget, and a test suite that takes minutes must not stand in front of a `go vet` that takes one second — the founder's cargo-test did, and a vet error the agent had just written sailed through its Stop.
-func (s *Scheduler) enqueueSlow(tk taskKey) {
-	for _, e := range s.slowOrder() {
-		s.enqueue(workItem{entry: e, tk: tk})
+func (s *Scheduler) enqueueSlow(tk taskKey, wt string) {
+	for _, e := range s.slowOrder(wt) {
+		s.enqueue(workItem{entry: e, tk: tk, worktree: wt})
 	}
 }
 
-func (s *Scheduler) slowOrder() []CatalogEntry {
+func (s *Scheduler) slowOrder(wt string) []CatalogEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var slow []CatalogEntry
-	for _, e := range s.entries {
+	for _, e := range s.catalogs[wt] {
 		if e.Class == ClassSlow {
 			slow = append(slow, e)
 		}
@@ -271,11 +298,8 @@ func (s *Scheduler) runItem(ctx context.Context, w workItem) {
 	// Fail-open per run: one anchor's failure never blocks another's
 	// schedule (04 §2.2). ErrRefused and infra errors are logged; the
 	// VERDICT_ERROR vote (when one was emitted) carries the truth.
-	s.mu.Lock()
-	worktree := s.worktree
-	s.mu.Unlock()
 	start := time.Now()
-	if err := s.runner.RunOne(ctx, w.entry, w.tk.session, w.tk.task, worktree); err != nil {
+	if err := s.runner.RunOne(ctx, w.entry, w.tk.session, w.tk.task, w.worktree); err != nil {
 		s.log.Warn("anchors: run failed", "anchor", w.entry.ID, "err", err)
 	}
 	s.mu.Lock()
