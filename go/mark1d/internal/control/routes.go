@@ -849,6 +849,60 @@ type consentBody struct {
 	ID        string `json:"id"`
 	ExecHash  string `json:"exec_hash"`
 	Consented *bool  `json:"consented"`
+	// AllStatic consents every side-effect-free anchor of Project at once (the app's "Watch & verify"); tests stay opt-in. Waits for a just-enabled root's candidates.
+	AllStatic bool `json:"all_static"`
+}
+
+// candidatesAwait is how long a consent-all waits for a just-enabled root to appear in candidates.json (watchAnchors derives it within a wsReloadTick plus the tool sniffs).
+const candidatesAwait = 12 * time.Second
+
+// postConsentAllStatic approves every static candidate of one project in a single approvals.jsonl pass and answers the project's rows.
+func (s *Server) postConsentAllStatic(w http.ResponseWriter, project string) {
+	if project == "" {
+		refuse(w, http.StatusBadRequest, "M1E-2001", "project is required with all_static")
+		return
+	}
+	var ws *anchors.WorkspaceCandidates
+	for deadline := time.Now().Add(candidatesAwait); ws == nil; time.Sleep(250 * time.Millisecond) {
+		if c, err := s.candidates(); err == nil {
+			for i := range c.Workspaces {
+				if c.Workspaces[i].Path == project {
+					ws = &c.Workspaces[i]
+					break
+				}
+			}
+		}
+		if ws == nil && time.Now().After(deadline) {
+			refuse(w, http.StatusConflict, "M1E-2001", "daemon has not published candidates for "+project+" yet; re-read GET /v1/anchors")
+			return
+		}
+	}
+	name, uid := osUser()
+	s.files.Lock()
+	var err error
+	for _, a := range ws.Anchors {
+		if a.SideEffect != anchors.SideEffectStatic || a.Consented {
+			continue
+		}
+		err = errors.Join(err, appendJSONL(anchors.ApprovalsPath(s.cfg.StateDir), anchors.Approval{TS: now(), User: name, UID: uid, Workspace: project, ID: a.ID, ExecHash: a.ExecHash}))
+	}
+	s.files.Unlock()
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	s.mu.Lock()
+	step := s.reconcile
+	s.mu.Unlock()
+	if step != nil {
+		step()
+	}
+	rows, err := s.anchorRows(project)
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	writeJSON(w, rows)
 }
 
 // postConsent appends the same approvals.jsonl line `mark1 enable` writes and the daemon's reconcile step applies it; consented:false revokes in the store directly.
@@ -858,13 +912,17 @@ func (s *Server) postConsent(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-	if body.ID == "" {
-		refuse(w, http.StatusBadRequest, "M1E-2001", "id is required")
-		return
-	}
 	project := ""
 	if body.Project != "" {
 		project, _ = canonical(body.Project)
+	}
+	if body.AllStatic {
+		s.postConsentAllStatic(w, project)
+		return
+	}
+	if body.ID == "" {
+		refuse(w, http.StatusBadRequest, "M1E-2001", "id is required")
+		return
 	}
 	c, err := s.candidates()
 	if err != nil {

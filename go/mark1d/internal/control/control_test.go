@@ -518,6 +518,58 @@ func TestAnchorsConsentGoesThroughTheDaemonsReconcile(t *testing.T) {
 	want(t, resp, body, http.StatusConflict, "M1E-2001")
 }
 
+// TestAnchorsConsentAllStatic: the app's "Watch & verify" — one call consents every static candidate of a project, never a test one, and waits for a root whose candidates are still being derived.
+func TestAnchorsConsentAllStatic(t *testing.T) {
+	s, dir := newServer(t)
+	repo, _ := canonical(t.TempDir())
+	ruff := catalogEntry()
+	vet := catalogEntry()
+	vet.ID, vet.Tool, vet.Argv = "go-vet@cat-1", "go", []string{"go", "vet"}
+	pytest := catalogEntry()
+	pytest.ID, pytest.Tool, pytest.Argv, pytest.SideEffect = "pytest@cat-1", "pytest", []string{"pytest"}, anchors.SideEffectTest
+	derived := map[string][]anchors.CatalogEntry{repo: {ruff, vet, pytest}}
+	publish := func() {
+		consented, err := anchors.LoadConsent(anchors.ConsentPath(dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := anchors.PublishCandidates(anchors.CandidatesPath(dir), consented, derived, nil, anchors.SandboxStatus{Available: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var offset int64
+	s.SetReconcile(func() {
+		off, _, err := anchors.ApplyApprovals(anchors.ConsentPath(dir), anchors.ApprovalsPath(dir), offset, derived, time.Now(), slog.Default())
+		if err != nil {
+			t.Error(err)
+		}
+		offset = off
+		publish()
+	})
+	// candidates land 400 ms after the call, as after a fresh enable
+	time.AfterFunc(400*time.Millisecond, publish)
+	resp, body := call(t, s, http.MethodPost, "/v1/anchors/consent", map[string]any{"project": repo, "all_static": true})
+	want(t, resp, body, http.StatusOK, "")
+	var rows []map[string]any
+	decodeTo(t, body, &rows)
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r["id"].(string)] = r["consented"].(bool)
+	}
+	if len(got) != 3 || !got["ruff@cat-1"] || !got["go-vet@cat-1"] || got["pytest@cat-1"] {
+		t.Fatalf("consent-all rows %s", body)
+	}
+	if n := len(readLines(t, anchors.ApprovalsPath(dir))); n != 2 {
+		t.Fatalf("%d approval lines, want the two static anchors", n)
+	}
+	// a second call approves nothing new
+	resp, body = call(t, s, http.MethodPost, "/v1/anchors/consent", map[string]any{"project": repo, "all_static": true})
+	want(t, resp, body, http.StatusOK, "")
+	if n := len(readLines(t, anchors.ApprovalsPath(dir))); n != 2 {
+		t.Fatalf("%d approval lines after a repeat, want 2", n)
+	}
+}
+
 func mustConsent(t *testing.T, dir string) []anchors.ConsentRecord {
 	t.Helper()
 	recs, err := anchors.LoadConsent(anchors.ConsentPath(dir))
