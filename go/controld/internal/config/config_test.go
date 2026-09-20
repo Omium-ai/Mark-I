@@ -64,13 +64,12 @@ func TestChainSeedRequiredUnlessDevMode(t *testing.T) {
 	}
 }
 
-// A witness bucket with no tenant list would run an hourly job that
-// witnesses nothing and looks healthy doing it — refused at boot.
-func TestWitnessBucketRequiresTenants(t *testing.T) {
+// A witness bucket needs no tenant list: the loops enumerate m1_tenant_directory and WITNESS_TENANTS only pins extra ids.
+func TestWitnessBucketRequiresNoTenantList(t *testing.T) {
 	setRequired(t)
 	t.Setenv("WITNESS_BUCKET", "mark1-witness")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "WITNESS_TENANTS") {
-		t.Fatalf("want R1 refusal naming WITNESS_TENANTS, got %v", err)
+	if c, err := Load(); err != nil || len(c.WitnessTenants) != 0 {
+		t.Fatalf("a bucket without a pinned list must boot: %v %+v", err, c.WitnessTenants)
 	}
 	t.Setenv("WITNESS_TENANTS", "11111111-1111-1111-1111-111111111111, 22222222-2222-2222-2222-222222222222")
 	c, err := Load()

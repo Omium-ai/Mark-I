@@ -10,7 +10,8 @@ helm lint . --values values.prod.example.yaml --quiet >/dev/null || fail "helm l
 $T > "$out/r.yaml"
 
 grep -q 'controld_app' "$out/r.yaml" || fail "controld role missing"
-grep -q '^  suspend: true' "$out/r.yaml" || fail "CronJobs must be suspended with no tenants"
+grep -q '^  suspend: false' "$out/r.yaml" || fail "CronJobs run for every directory tenant (m1_084) regardless of the pinned list"
+grep -q -- '"--tenant", "all"' "$out/r.yaml" || fail "every CronJob enumerates the tenant directory"
 grep -q 'WITNESS_' "$out/r.yaml" && fail "no WITNESS_* env without tenants"
 grep -qE '[0-9]e\+[0-9]' "$out/r.yaml" && fail "big ints float-formatted (quote them in values)"
 grep -q 'INTEL_PG_DSN' "$out/r.yaml" && grep -q '\$(MARK1_PG_PASSWORD)@' "$out/r.yaml" || fail "python DSN must expand the secret password"
@@ -43,10 +44,8 @@ PY
 $T --set 'tenants={11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222}' \
    --set config.s3.witnessBucket=b > "$out/t.yaml"
 grep -q 'value: "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222"' "$out/t.yaml" || fail "WITNESS_TENANTS must be the comma-joined list"
-[ "$(grep -c -- '"--tenant", "11111111-1111-1111-1111-111111111111", "--tenant", "22222222' "$out/t.yaml")" = 3 ] || fail "every CronJob must pass each tenant"
 grep -q '^  suspend: true' "$out/t.yaml" && fail "CronJobs must run once tenants exist"
 
-$T --set config.s3.witnessBucket=b >/dev/null 2>&1 && fail "witness bucket without tenants must not render"
 $T --set controld.imageTag= >/dev/null 2>&1 && fail "empty imageTag must not render"
 $T --set config.postgresql.host= >/dev/null 2>&1 && fail "empty postgres host must not render"
 

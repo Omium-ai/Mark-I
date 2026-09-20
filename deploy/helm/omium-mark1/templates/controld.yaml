@@ -1,8 +1,5 @@
 {{- if .Values.controld.enabled }}
 {{- $c := .Values.controld }}
-{{- if and .Values.config.s3.witnessBucket (not .Values.tenants) }}
-{{- fail "config.s3.witnessBucket is set but tenants is empty: controld refuses to boot (WITNESS_BUCKET without WITNESS_TENANTS, config.go R1)" }}
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -289,9 +289,7 @@ func Load() (Config, error) {
 			}
 		}
 	}
-	if c.WitnessBucket != "" && len(c.WitnessTenants) == 0 {
-		return Config{}, fmt.Errorf("config: WITNESS_BUCKET set but WITNESS_TENANTS empty — a witness job with no tenants publishes nothing and hides it (boot refusal R1)")
-	}
+	// WITNESS_TENANTS is now a pin on top of m1_tenant_directory (receipts.DirectoryTenants), so a bucket without a list is legal.
 
 	var err error
 	if c.WitnessRetain, err = durationOr("WITNESS_RETAIN", 8760*time.Hour); err != nil {
