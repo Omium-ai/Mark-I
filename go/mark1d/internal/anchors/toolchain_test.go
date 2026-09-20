@@ -31,7 +31,9 @@ func TestToolchainEnvIsOfflineAndCacheScoped(t *testing.T) {
 func TestNodeToolsGetNodeOnPath(t *testing.T) {
 	prev := lookNode
 	t.Cleanup(func() { lookNode = prev })
-	lookNode = func() (string, error) { return filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin", "node"), nil }
+	lookNode = func() (string, error) {
+		return filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin", "node"), nil
+	}
 	tsc := filepath.Join("/", "repo", "node_modules", ".bin", "tsc")
 	got := toolchainEnv("tsc", "", tsc)["PATH"]
 	want := filepath.Dir(tsc) + string(os.PathListSeparator) + filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin")
