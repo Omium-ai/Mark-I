@@ -550,6 +550,20 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	}
 	adm.Tap = ctl.Hub().Publish
 	ctl.Hub().SetSessionResolver(tailers.Resolve)
+	ctl.Hub().SetTokensFile(filepath.Join(cfg.stateDir, "run", "session-tokens.json"))
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				ctl.Hub().FlushTokens()
+				return
+			case <-t.C:
+				ctl.Hub().FlushTokens()
+			}
+		}
+	}()
 	ctl.Hub().SetLocator(control.LocateClaude)
 
 	// Self-monitoring is an EdgeHealth event through the one admission door,

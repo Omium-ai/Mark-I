@@ -51,11 +51,15 @@ type frame struct {
 
 // Hub is the tap on capture's one admission door: SSE fan-out plus the live-session table.
 type Hub struct {
-	mu          sync.Mutex
-	subs        map[chan frame]struct{}
-	sessions    map[[16]byte]*LiveSession
-	cwds        map[[16]byte]string
-	locate      func(sid [16]byte) (agent, cwd string, ok bool)
+	mu       sync.Mutex
+	subs     map[chan frame]struct{}
+	sessions map[[16]byte]*LiveSession
+	cwds     map[[16]byte]string
+	locate   func(sid [16]byte) (agent, cwd string, ok bool)
+	// tokensFile persists each live session's token count across daemon restarts (a restart zeroed the founder's live card mid-session); seeds carries what the last run knew.
+	tokensFile  string
+	seeds       map[string]uint64
+	tokensDirty bool
 	verify      []map[string]any  // GET /v1/verify/events rows, arrival order
 	checkpoints []map[string]any  // GET /v1/receipts rows, arrival order
 	lastRun     map[string]string // anchor id -> occurred_at of its newest vote since boot
@@ -63,6 +67,37 @@ type Hub struct {
 	lastRequest map[[16]byte]uint64
 	taskTokens  map[[16]byte]uint64
 	resolver    func(id uuid.UUID) (agent, root string, ok bool)
+}
+
+// SetTokensFile arms the per-session token persistence at path: the last run's counts seed a session's live card, and counts flush every few seconds while they change.
+func (h *Hub) SetTokensFile(path string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.tokensFile = path
+	h.seeds = map[string]uint64{}
+	if b, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(b, &h.seeds)
+	}
+}
+
+// FlushTokens writes the live sessions' token counts when they changed; called on a ticker by the daemon and at shutdown.
+func (h *Hub) FlushTokens() {
+	h.mu.Lock()
+	if h.tokensFile == "" || !h.tokensDirty {
+		h.mu.Unlock()
+		return
+	}
+	out := map[string]uint64{}
+	for id, s := range h.sessions {
+		out[uuid.UUID(id).String()] = s.Tokens
+	}
+	h.tokensDirty = false
+	path := h.tokensFile
+	h.mu.Unlock()
+	if b, err := json.Marshal(out); err == nil {
+		_ = os.WriteFile(path+".tmp", b, 0o600)
+		_ = os.Rename(path+".tmp", path)
+	}
 }
 
 // SetCwd records a session's hook cwd (Hello.cwd) so live can say where an unwatched agent is running.
@@ -283,7 +318,7 @@ func (h *Hub) track(ev *m1pv1.Event) {
 	copy(sid[:], ev.GetSessionId())
 	switch b := ev.GetBody().(type) {
 	case *m1pv1.Event_SessionStart:
-		h.sessions[sid] = &LiveSession{Agent: b.SessionStart.GetAgent(), SessionID: uuid.UUID(sid).String(), started: time.Now(), seen: time.Now()}
+		h.sessions[sid] = &LiveSession{Agent: b.SessionStart.GetAgent(), SessionID: uuid.UUID(sid).String(), Tokens: h.seeds[uuid.UUID(sid).String()], started: time.Now(), seen: time.Now()}
 		for len(h.sessions) > maxLiveSessions {
 			var oldest [16]byte
 			var at time.Time
@@ -300,7 +335,8 @@ func (h *Hub) track(ev *m1pv1.Event) {
 	case *m1pv1.Event_Usage, *m1pv1.Event_ToolUse, *m1pv1.Event_Turn:
 		// a session the daemon did not see start (it restarted mid-session — the founder's live list emptied on every restart) is live from its first event; live() names the agent and project through the resolver
 		if h.sessions[sid] == nil {
-			h.sessions[sid] = &LiveSession{SessionID: uuid.UUID(sid).String(), started: time.Now(), seen: time.Now()}
+			id := uuid.UUID(sid).String()
+			h.sessions[sid] = &LiveSession{SessionID: id, Tokens: h.seeds[id], started: time.Now(), seen: time.Now()}
 		}
 	}
 	switch b := ev.GetBody().(type) {
@@ -309,6 +345,7 @@ func (h *Hub) track(ev *m1pv1.Event) {
 		total := u.GetInputTokens() + u.GetOutputTokens() + u.GetCacheCreationInputTokens() + u.GetCacheReadInputTokens()
 		if s := h.sessions[sid]; s != nil {
 			s.Tokens += total
+			h.tokensDirty = true
 		}
 		h.lastRequest[sid] = total
 		if len(ev.GetTaskId()) == 16 {
