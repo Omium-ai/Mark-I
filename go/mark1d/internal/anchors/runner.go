@@ -370,7 +370,7 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 			cacheDir = ""
 		}
 	}
-	maps.Copy(env, toolchainEnv(detectors[e.Kind].binary, cacheDir))
+	maps.Copy(env, toolchainEnv(detectors[e.Kind].binary, cacheDir, e.BinaryPath))
 	spec := RunSpec{
 		Argv:       e.Argv,
 		WorktreeRO: worktree,
@@ -478,7 +478,14 @@ func (r *Runner) currentL0Root(worktree string) []byte {
 	if h, ok := r.l0roots[worktree]; ok {
 		return append([]byte(nil), h...)
 	}
-	return append([]byte(nil), r.l0roots[""]...)
+	// a nested worktree (a repo inside an enabled folder) is covered by its enclosing root's merkle
+	best := ""
+	for root := range r.l0roots {
+		if root != "" && Within(root, worktree) && len(root) > len(best) {
+			best = root
+		}
+	}
+	return append([]byte(nil), r.l0roots[best]...)
 }
 
 // SetSigner arms per-vote signing with the device origin key -- the same key

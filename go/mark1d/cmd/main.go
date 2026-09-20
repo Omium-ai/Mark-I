@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -802,6 +803,9 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	sched.WorktreeFor = func(session [16]byte) string {
 		if cwd, ok := sessionCwd.Load(session); ok {
 			if root, ok := enabledRootFor(cfg.stateDir, cfg.workspace, cwd.(string)); ok {
+				if wt := anchors.GitTop(realPath(cwd.(string))); sched.Known(wt) {
+					return wt
+				}
 				return root
 			}
 		}
@@ -813,7 +817,24 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// The first step runs HERE, synchronously, so the boot derivation precedes
 	// the first ToolUse the fabric can deliver; watchAnchors re-runs it on
 	// workspaces.json / approvals.jsonl change and on the tick.
-	anchorStep := reconcileAnchors(log, cfg, sb, sched, votes)
+	// the repositories sessions have been seen in below an enabled root, each its own worktree for derivation
+	seenWorktrees := func(roots []string) []string {
+		set := map[string]bool{}
+		sessionCwd.Range(func(_, v any) bool {
+			cwd := realPath(v.(string))
+			for _, root := range roots {
+				if anchors.Within(root, cwd) {
+					if wt := anchors.GitTop(cwd); wt != root && !set[wt] {
+						set[wt] = true
+					}
+					break
+				}
+			}
+			return true
+		})
+		return slices.Sorted(maps.Keys(set))
+	}
+	anchorStep := reconcileAnchors(log, cfg, sb, sched, votes, seenWorktrees)
 	var stepMu sync.Mutex
 	step := func() { stepMu.Lock(); defer stepMu.Unlock(); anchorStep() }
 	step()
@@ -937,8 +958,12 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	srv.Sync = sp.Sync // FlushAck attests to fsynced records (NFR-DURABILITY-004)
 	srv.OnHello = func(session [16]byte, cwd string) {
 		if cwd != "" {
-			sessionCwd.Store(session, cwd)
+			prev, _ := sessionCwd.Swap(session, cwd)
 			ctl.Hub().SetCwd(session, cwd)
+			// a repository this daemon has not derived yet: wake the reconcile so its anchors arm now, not at the next tick
+			if wt := anchors.GitTop(realPath(cwd)); (prev == nil || anchors.GitTop(realPath(prev.(string))) != wt) && !sched.Known(wt) {
+				go step()
+			}
 		}
 	}
 	ctl.WorkspaceID = cov.WorkspaceID
@@ -1280,7 +1305,7 @@ const anchorRederiveEvery = time.Minute
 // says which workspace a session belongs to, so a per-workspace scheduler would
 // have no way to pick between them; revisit when Hello carries a cwd. The
 // candidates file, unlike the scheduler, is per workspace already.
-func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *anchors.Scheduler, votes *anchors.Votes) func() {
+func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *anchors.Scheduler, votes *anchors.Votes, worktrees func([]string) []string) func() {
 	consentPath := anchors.ConsentPath(cfg.stateDir)
 	approvalsPath := anchors.ApprovalsPath(cfg.stateDir)
 	candidatesPath := anchors.CandidatesPath(cfg.stateDir)
@@ -1292,10 +1317,15 @@ func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *a
 	published := false
 	return func() {
 		roots := enabledRoots(cfg)
-		rederived := !slices.Equal(roots, lastRoots) || time.Since(lastDerive) >= anchorRederiveEvery
+		// every enabled root, plus each repository a session has been seen working in below one (a parent folder enabled over many repos derives nothing at its own top)
+		all := roots
+		if worktrees != nil {
+			all = append(append([]string{}, roots...), worktrees(roots)...)
+		}
+		rederived := !slices.Equal(all, lastRoots) || time.Since(lastDerive) >= anchorRederiveEvery
 		if rederived {
 			next, nextLooked := map[string][]anchors.CatalogEntry{}, map[string][]anchors.Miss{}
-			for _, root := range roots {
+			for _, root := range all {
 				d, err := anchors.Explain(sb, root)
 				if err != nil {
 					log.Error("mark1d: anchor derivation failed; workspace publishes no candidates", "worktree", root, "err", err)
@@ -1303,7 +1333,7 @@ func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *a
 				}
 				next[root], nextLooked[root] = d.Entries, d.Looked
 			}
-			derived, looked, lastRoots, lastDerive = next, nextLooked, roots, time.Now()
+			derived, looked, lastRoots, lastDerive = next, nextLooked, all, time.Now()
 		}
 		off, approved, err := anchors.ApplyApprovals(consentPath, approvalsPath, approvalsOffset, derived, time.Now(), log)
 		if err != nil {
@@ -1328,7 +1358,7 @@ func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *a
 		// Every enabled root is armed with its own catalog; a session runs the one its hook cwd sits in (sched.WorktreeFor), the first root when it sits in none. Before this only roots[0] ever verified anything — a tester's second project ran no anchors at all.
 		catalogs := map[string][]anchors.CatalogEntry{}
 		var union []anchors.CatalogEntry
-		for _, root := range roots {
+		for _, root := range all {
 			enabled := anchors.Reconcile(derived[root], consented).Enabled
 			catalogs[root] = enabled
 			union = append(union, enabled...)

@@ -56,7 +56,8 @@ type Limits struct {
 // DefaultLimits returns the 04 §1.4 defaults per cost class: 60 s fast /
 // 600 s slow wall (CPU capped likewise), memory.max 512 MiB.
 func DefaultLimits(c Class) Limits {
-	wall, mem := 60*time.Second, uint64(512<<20)
+	// 1 GiB, not 512 MiB: node 24 reserves its V8 cage under RLIMIT_DATA and traps below ~1 GiB on `tsc --version` (founder's box, 2026-09-20); ruff and go vet never notice
+	wall, mem := 60*time.Second, uint64(1<<30)
 	if c == ClassSlow {
 		wall, mem = 600*time.Second, 4<<30 // compilers: rustc alone passes 512 MiB of data on a mid-size crate
 	}

@@ -784,10 +784,11 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, revertReport(map[string]any{"removed": true, "path": root, "receipted_transition_id": nil}, done, notReverted))
 }
 
-func anchorRow(c anchors.Candidate, lastRun map[string]string) map[string]any {
+// anchorRow renders one candidate; worktree is the repository below the project it was derived in, "" for the project itself.
+func anchorRow(c anchors.Candidate, worktree string, lastRun map[string]string) map[string]any {
 	row := map[string]any{
 		"id": c.ID, "tool": c.Tool, "version": c.ToolVersion, "side_effect": c.SideEffect,
-		"consented": c.Consented, "exec_hash": c.ExecHash, "latency_class": c.Class, "last_run": nil,
+		"consented": c.Consented, "exec_hash": c.ExecHash, "latency_class": c.Class, "last_run": nil, "worktree": worktree,
 	}
 	if at, ok := lastRun[c.ID]; ok {
 		row["last_run"] = at
@@ -815,11 +816,15 @@ func (s *Server) anchorRows(project string) ([]map[string]any, error) {
 	rows := []map[string]any{}
 	lastRun := s.hub.lastRuns()
 	for _, ws := range c.Workspaces {
-		if project != "" && ws.Path != project {
+		if project != "" && !anchors.Within(project, ws.Path) {
 			continue
 		}
+		worktree := ""
+		if project != "" && ws.Path != project {
+			worktree, _ = filepath.Rel(project, ws.Path)
+		}
 		for _, a := range ws.Anchors {
-			rows = append(rows, anchorRow(a, lastRun))
+			rows = append(rows, anchorRow(a, worktree, lastRun))
 		}
 	}
 	return rows, nil
@@ -862,17 +867,16 @@ func (s *Server) postConsentAllStatic(w http.ResponseWriter, project string) {
 		refuse(w, http.StatusBadRequest, "M1E-2001", "project is required with all_static")
 		return
 	}
-	var ws *anchors.WorkspaceCandidates
-	for deadline := time.Now().Add(candidatesAwait); ws == nil; time.Sleep(250 * time.Millisecond) {
+	var wss []anchors.WorkspaceCandidates
+	for deadline := time.Now().Add(candidatesAwait); len(wss) == 0; time.Sleep(250 * time.Millisecond) {
 		if c, err := s.candidates(); err == nil {
-			for i := range c.Workspaces {
-				if c.Workspaces[i].Path == project {
-					ws = &c.Workspaces[i]
-					break
+			for _, ws := range c.Workspaces {
+				if anchors.Within(project, ws.Path) {
+					wss = append(wss, ws)
 				}
 			}
 		}
-		if ws == nil && time.Now().After(deadline) {
+		if len(wss) == 0 && time.Now().After(deadline) {
 			refuse(w, http.StatusConflict, "M1E-2001", "daemon has not published candidates for "+project+" yet; re-read GET /v1/anchors")
 			return
 		}
@@ -880,11 +884,13 @@ func (s *Server) postConsentAllStatic(w http.ResponseWriter, project string) {
 	name, uid := osUser()
 	s.files.Lock()
 	var err error
-	for _, a := range ws.Anchors {
-		if a.SideEffect != anchors.SideEffectStatic || a.Consented {
-			continue
+	for _, ws := range wss {
+		for _, a := range ws.Anchors {
+			if a.SideEffect != anchors.SideEffectStatic || a.Consented {
+				continue
+			}
+			err = errors.Join(err, appendJSONL(anchors.ApprovalsPath(s.cfg.StateDir), anchors.Approval{TS: now(), User: name, UID: uid, Workspace: ws.Path, ID: a.ID, ExecHash: a.ExecHash}))
 		}
-		err = errors.Join(err, appendJSONL(anchors.ApprovalsPath(s.cfg.StateDir), anchors.Approval{TS: now(), User: name, UID: uid, Workspace: project, ID: a.ID, ExecHash: a.ExecHash}))
 	}
 	s.files.Unlock()
 	if err != nil {
@@ -932,7 +938,7 @@ func (s *Server) postConsent(w http.ResponseWriter, r *http.Request) {
 	execHash := ""
 	for _, ws := range c.Workspaces {
 		for _, a := range ws.Anchors {
-			if a.ID == body.ID && (body.ExecHash == "" || a.ExecHash == body.ExecHash) && (project == "" || ws.Path == project) && execHash == "" {
+			if a.ID == body.ID && (body.ExecHash == "" || a.ExecHash == body.ExecHash) && (project == "" || anchors.Within(project, ws.Path)) && execHash == "" {
 				execHash = a.ExecHash
 			}
 		}

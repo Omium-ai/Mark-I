@@ -111,6 +111,14 @@ func (s *Scheduler) SetCatalogs(def string, catalogs map[string][]CatalogEntry) 
 	s.mu.Unlock()
 }
 
+// Known reports whether SetCatalogs armed wt.
+func (s *Scheduler) Known(wt string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.catalogs[wt]
+	return ok
+}
+
 // worktreeOf is the session's enabled root: WorktreeFor's answer when it names a worktree the catalogs know, else the default.
 func (s *Scheduler) worktreeOf(session [16]byte) string {
 	if s.WorktreeFor != nil {

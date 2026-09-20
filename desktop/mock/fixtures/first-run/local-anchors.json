@@ -7,7 +7,8 @@
     "consented": false,
     "exec_hash": "9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e9f1c2b7e71adc40e",
     "last_run": null,
-    "latency_class": "fast"
+    "latency_class": "fast",
+    "worktree": ""
   },
   {
     "id": "eslint@cat-1",
@@ -17,7 +18,8 @@
     "consented": false,
     "exec_hash": "2b7ec1471adc40e92b7ec1471adc40e92b7ec1471adc40e92b7ec1471adc40e9",
     "last_run": null,
-    "latency_class": "fast"
+    "latency_class": "fast",
+    "worktree": ""
   },
   {
     "id": "tsc@cat-1",
@@ -27,7 +29,8 @@
     "consented": false,
     "exec_hash": "71adf30c40e9b1c271adf30c40e9b1c271adf30c40e9b1c271adf30c40e9b1c2",
     "last_run": null,
-    "latency_class": "fast"
+    "latency_class": "fast",
+    "worktree": ""
   },
   {
     "id": "pytest@cat-1",
@@ -37,6 +40,7 @@
     "consented": false,
     "exec_hash": "c40e9b1c271adf30c40e9b1c271adf30c40e9b1c271adf30c40e9b1c271adf30",
     "last_run": null,
-    "latency_class": "slow"
+    "latency_class": "slow",
+    "worktree": ""
   }
 ]

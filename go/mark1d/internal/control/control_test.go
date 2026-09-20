@@ -570,6 +570,47 @@ func TestAnchorsConsentAllStatic(t *testing.T) {
 	}
 }
 
+// TestAnchorsOfWorktreesBelowAProject: a repository a session works in below an enabled folder derives its own candidates; the project's anchor list carries them with the worktree named, and consent-all reaches them.
+func TestAnchorsOfWorktreesBelowAProject(t *testing.T) {
+	s, dir := newServer(t)
+	parent, _ := canonical(t.TempDir())
+	repo := filepath.Join(parent, "svc")
+	vet := catalogEntry()
+	vet.ID, vet.Tool, vet.Argv = "go-vet@cat-1", "go", []string{"go", "vet"}
+	derived := map[string][]anchors.CatalogEntry{parent: {}, repo: {vet}}
+	publish := func() {
+		consented, err := anchors.LoadConsent(anchors.ConsentPath(dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := anchors.PublishCandidates(anchors.CandidatesPath(dir), consented, derived, nil, anchors.SandboxStatus{Available: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish()
+	var rows []map[string]any
+	_, body := call(t, s, http.MethodGet, "/v1/anchors?project="+parent, nil)
+	decodeTo(t, body, &rows)
+	if len(rows) != 1 || rows[0]["id"] != "go-vet@cat-1" || rows[0]["worktree"] != "svc" {
+		t.Fatalf("parent's anchors must include the repository below it, named: %s", body)
+	}
+	var offset int64
+	s.SetReconcile(func() {
+		off, _, err := anchors.ApplyApprovals(anchors.ConsentPath(dir), anchors.ApprovalsPath(dir), offset, derived, time.Now(), slog.Default())
+		if err != nil {
+			t.Error(err)
+		}
+		offset = off
+		publish()
+	})
+	resp, body := call(t, s, http.MethodPost, "/v1/anchors/consent", map[string]any{"project": parent, "all_static": true})
+	want(t, resp, body, http.StatusOK, "")
+	decodeTo(t, body, &rows)
+	if len(rows) != 1 || rows[0]["consented"] != true {
+		t.Fatalf("consent-all over the parent must reach the repository below: %s", body)
+	}
+}
+
 func mustConsent(t *testing.T, dir string) []anchors.ConsentRecord {
 	t.Helper()
 	recs, err := anchors.LoadConsent(anchors.ConsentPath(dir))

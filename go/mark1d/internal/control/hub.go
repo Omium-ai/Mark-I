@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protojson"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 )
 
@@ -371,7 +370,7 @@ func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSessio
 				}
 			}
 			if out[i].Cwd != "" {
-				out[i].EnablePath = gitTop(out[i].Cwd)
+				out[i].EnablePath = anchors.GitTop(out[i].Cwd)
 			}
 		}
 	}()
@@ -405,20 +404,6 @@ func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSessio
 		h.mu.Unlock()
 	}
 	return out
-}
-
-// gitTop is the nearest ancestor of dir holding a .git entry, else dir itself.
-func gitTop(dir string) string {
-	for d := dir; ; {
-		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
-			return d
-		}
-		parent := filepath.Dir(d)
-		if parent == d {
-			return dir
-		}
-		d = parent
-	}
 }
 
 func (h *Hub) lastRuns() map[string]string {

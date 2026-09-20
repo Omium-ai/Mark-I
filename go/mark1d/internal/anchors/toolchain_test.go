@@ -11,19 +11,39 @@ func TestToolchainEnvIsOfflineAndCacheScoped(t *testing.T) {
 	t.Setenv("CARGO_HOME", "/c")
 	t.Setenv("RUSTUP_HOME", "/r")
 	t.Setenv("GOMODCACHE", "/m")
-	cargo := toolchainEnv("cargo", "/cache/cargo-check")
+	cargo := toolchainEnv("cargo", "/cache/cargo-check", "/usr/bin/cargo")
 	if cargo["CARGO_HOME"] != "/c" || cargo["RUSTUP_HOME"] != "/r" || cargo["CARGO_NET_OFFLINE"] != "true" || len(cargo) != 3 {
 		t.Fatalf("cargo env %v", cargo)
 	}
-	gov := toolchainEnv("go", "/cache/go-vet")
+	gov := toolchainEnv("go", "/cache/go-vet", "/usr/local/go/bin/go")
 	if gov["GOMODCACHE"] != "/m" || gov["GOPROXY"] != "off" || gov["GOTOOLCHAIN"] != "" || gov["GOCACHE"] != filepath.Join("/cache/go-vet", "go-build") {
 		t.Fatalf("go env %v", gov)
 	}
-	if _, ok := toolchainEnv("go", "")["GOCACHE"]; ok {
+	if _, ok := toolchainEnv("go", "", "/usr/local/go/bin/go")["GOCACHE"]; ok {
 		t.Fatal("no cache dir ⇒ GOCACHE stays the sandbox's cold default")
 	}
-	if toolchainEnv("ruff", "/cache/ruff") != nil {
+	if toolchainEnv("ruff", "/cache/ruff", "/usr/bin/ruff") != nil {
 		t.Fatal("a linter inherits nothing")
+	}
+}
+
+// A node script from node_modules/.bin needs node on the sandbox PATH; with nvm/fnm/volta it lives nowhere near the tool. No node ⇒ nothing extra, the sniff then fails honestly.
+func TestNodeToolsGetNodeOnPath(t *testing.T) {
+	prev := lookNode
+	t.Cleanup(func() { lookNode = prev })
+	lookNode = func() (string, error) { return filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin", "node"), nil }
+	tsc := filepath.Join("/", "repo", "node_modules", ".bin", "tsc")
+	got := toolchainEnv("tsc", "", tsc)["PATH"]
+	want := filepath.Dir(tsc) + string(os.PathListSeparator) + filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin")
+	if got != want {
+		t.Fatalf("PATH %q, want %q", got, want)
+	}
+	if toolchainEnv("eslint", "", filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin", "eslint"))["PATH"] != filepath.Join("/", "home", "u", ".nvm", "versions", "node", "v22", "bin") {
+		t.Fatal("a tool beside node repeats no dir")
+	}
+	lookNode = func() (string, error) { return "", os.ErrNotExist }
+	if toolchainEnv("tsc", "", tsc) != nil {
+		t.Fatal("no node ⇒ nothing extra")
 	}
 }
 

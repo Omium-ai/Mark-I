@@ -224,6 +224,26 @@ var detectors = map[Kind]detector{
 	},
 }
 
+// GitTop is the nearest ancestor of dir holding a .git entry (a repository or a linked worktree), else dir itself.
+func GitTop(dir string) string {
+	for d := dir; ; {
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			return d
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return dir
+		}
+		d = parent
+	}
+}
+
+// Within reports whether path is root or below it.
+func Within(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // RepoOptInPath is the FR-VERIFY-003 / 04 §2.2 per-repo opt-in: <workspace>/.mark1/anchors.json {"tests": true}.
 func RepoOptInPath(worktree string) string { return filepath.Join(worktree, ".mark1", "anchors.json") }
 
@@ -358,7 +378,7 @@ func Explain(sb Sandbox, worktree string) (Derivation, error) {
 			miss(d, bin+" is unreadable") // unreadable binary cannot be consent-hashed, so cannot exist
 			continue
 		}
-		version, err := sniffVersion(sb, abs, prefix, d.versionArgs, toolchainEnv(d.binary, ""))
+		version, err := sniffVersion(sb, abs, prefix, d.versionArgs, toolchainEnv(d.binary, "", prefix[0]))
 		if errors.Is(err, ErrSandboxUnavailable) && (!sb.Status().Available || d.execsRepoCode || d.sideEffect == SideEffectTest) {
 			miss(d, "the sandbox cannot run it here: "+sb.Status().Reason) // the run would be refused exactly like the sniff was
 			continue
