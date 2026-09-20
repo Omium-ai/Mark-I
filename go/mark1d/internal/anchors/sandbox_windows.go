@@ -129,6 +129,7 @@ func (s *WindowsSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, erro
 	}
 	defer func() { _ = os.RemoveAll(scratch) }()
 	env = windowsEnv(env, scratch)
+	ensureACDirs(scratch) // before the child starts: go's work dir is %TEMP%, which Windows redirects under Packages\<family>\AC — attestedEnv made these dirs only AFTER the run, and go vet on the founder's Windows failed "creating work dir"
 	for _, root := range writableRoots(spec, scratch) {
 		if root == scratch { // inherits scratchRoot's ACE; the worktree and the build cache are granted per run
 			continue
@@ -354,8 +355,7 @@ func windowsEnv(env []string, scratch string) []string {
 // comspec: cmd.exe from COMSPEC, else System32's.
 // attestedEnv is what the child actually sees: Windows redirects an AppContainer's LOCALAPPDATA to <LOCALAPPDATA>\Packages\<family>\AC and TEMP/TMP to its Temp (observed on windows-2022), so the attestation names those paths and the dirs exist for the child's writes.
 func attestedEnv(env []string, scratch string) []string {
-	ac := filepath.Join(scratch, "Packages", strings.ToLower(appContainerName), "AC")
-	_ = os.MkdirAll(filepath.Join(ac, "Temp"), 0o700)
+	ac := ensureACDirs(scratch)
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
 		k, _, _ := strings.Cut(kv, "=")
@@ -368,6 +368,13 @@ func attestedEnv(env []string, scratch string) []string {
 		out = append(out, kv)
 	}
 	return out
+}
+
+// ensureACDirs makes the AppContainer's redirected LOCALAPPDATA and Temp under scratch and returns the AC root.
+func ensureACDirs(scratch string) string {
+	ac := filepath.Join(scratch, "Packages", strings.ToLower(appContainerName), "AC")
+	_ = os.MkdirAll(filepath.Join(ac, "Temp"), 0o700)
+	return ac
 }
 
 // envBlock is the CREATE_UNICODE_ENVIRONMENT block: K=V\0 … \0.
