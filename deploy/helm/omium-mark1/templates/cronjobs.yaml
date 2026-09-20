@@ -19,7 +19,7 @@ metadata:
 spec:
   schedule: {{ $j.schedule | quote }}
   timeZone: Etc/UTC
-  suspend: {{ empty $.Values.tenants }}
+  suspend: false
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 600
   successfulJobsHistoryLimit: 3
@@ -45,7 +45,8 @@ spec:
           - name: jobs
             {{- include "omium.containerSecurityContext" (dict "root" $ "svc" $j.svc) | nindent 12 }}
             image: {{ include "mark1.image" (dict "root" $ "name" $j.image "tag" $svc.imageTag "key" (printf "%s.imageTag" $j.svc)) }}
-            command: ["python", "-m", "app.jobs", "run", "--all", {{ $j.cadence | quote }}{{ range $.Values.tenants }}, "--tenant", {{ . | quote }}{{ end }}]
+            # every active tenant from m1_tenant_directory (m1_084): a tester's tenant born after the static list gets its rollups too; the list stays for the witness
+            command: ["python", "-m", "app.jobs", "run", "--all", {{ $j.cadence | quote }}, "--tenant", "all"]
             env:
             {{- include $j.env $ | nindent 12 }}
             {{- if $j.anthropic }}
