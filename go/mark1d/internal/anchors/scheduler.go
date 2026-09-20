@@ -3,6 +3,7 @@ package anchors
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 )
@@ -57,6 +58,7 @@ type Scheduler struct {
 	timers       map[timerKey]*time.Timer // fast debounce, coalesced per (task, anchor)
 	dirty        map[taskKey]bool         // slow work owed since last idle drain
 	inflight     map[taskKey]int          // runs queued or executing, what Settle waits on
+	lastTook     map[string]time.Duration // per anchor, its newest run's wall time: the slow queue's order
 	work         chan workItem
 }
 
@@ -85,6 +87,7 @@ func NewScheduler(r *Runner, enabled []CatalogEntry, consentPath, worktree strin
 		timers:      map[timerKey]*time.Timer{},
 		dirty:       map[taskKey]bool{},
 		inflight:    map[taskKey]int{},
+		lastTook:    map[string]time.Duration{},
 		work:        make(chan workItem, workQueueCap),
 	}
 }
@@ -208,15 +211,31 @@ func (s *Scheduler) idleLoop(ctx context.Context) {
 	}
 }
 
+// enqueueSlow queues the task's slow anchors quickest-first by their newest run's wall time (never run ⇒ first): the gate's Settle has a budget, and a test suite that takes minutes must not stand in front of a `go vet` that takes one second — the founder's cargo-test did, and a vet error the agent had just written sailed through its Stop.
 func (s *Scheduler) enqueueSlow(tk taskKey) {
+	for _, e := range s.slowOrder() {
+		s.enqueue(workItem{entry: e, tk: tk})
+	}
+}
+
+func (s *Scheduler) slowOrder() []CatalogEntry {
 	s.mu.Lock()
-	entries := s.entries
-	s.mu.Unlock()
-	for _, e := range entries {
+	defer s.mu.Unlock()
+	var slow []CatalogEntry
+	for _, e := range s.entries {
 		if e.Class == ClassSlow {
-			s.enqueue(workItem{entry: e, tk: tk})
+			slow = append(slow, e)
 		}
 	}
+	// never run ⇒ static checks before test suites: the one prior a fresh daemon has
+	sort.SliceStable(slow, func(i, j int) bool {
+		ti, tj := s.lastTook[slow[i].ID], s.lastTook[slow[j].ID]
+		if ti != tj {
+			return ti < tj
+		}
+		return slow[i].SideEffect != SideEffectTest && slow[j].SideEffect == SideEffectTest
+	})
+	return slow
 }
 
 // enqueue never blocks a trigger path. A full queue drops the run and logs —
@@ -255,9 +274,13 @@ func (s *Scheduler) runItem(ctx context.Context, w workItem) {
 	s.mu.Lock()
 	worktree := s.worktree
 	s.mu.Unlock()
+	start := time.Now()
 	if err := s.runner.RunOne(ctx, w.entry, w.tk.session, w.tk.task, worktree); err != nil {
 		s.log.Warn("anchors: run failed", "anchor", w.entry.ID, "err", err)
 	}
+	s.mu.Lock()
+	s.lastTook[w.entry.ID] = time.Since(start)
+	s.mu.Unlock()
 }
 
 func (s *Scheduler) worker(ctx context.Context) {

@@ -600,6 +600,39 @@ func TestSchedulerSettleWaitsForTheOwedRun(t *testing.T) {
 	}
 }
 
+// The slow queue is quickest-first by the newest run's wall time: after one round in which cargo-test took long and go-vet did not, the next Stop queues go-vet first.
+func TestSchedulerSlowQueueIsQuickestFirst(t *testing.T) {
+	e, wt := enabledRuff(t)
+	slowA := e
+	slowA.ID, slowA.Kind, slowA.Tool, slowA.Class = "cargo-test@cat-1", KindCargoTest, "cargo-test", ClassSlow
+	slowA.SideEffect = SideEffectTest
+	slowA.Argv = []string{e.Argv[0], "test"}
+	slowB := e
+	slowB.ID, slowB.Kind, slowB.Tool, slowB.Class = "go-vet@cat-1", KindGoVet, "go-vet", ClassSlow
+	slowB.Argv = []string{e.Argv[0], "vet"}
+	sb := &fakeSandbox{run: func(spec RunSpec) (RunResult, error) {
+		if spec.Argv[1] == "test" {
+			time.Sleep(120 * time.Millisecond)
+		}
+		return RunResult{ExitCode: 0}, nil
+	}}
+	s := NewScheduler(NewRunner(sb, &fakeEmitter{}, nil, true), []CatalogEntry{slowA, slowB}, consentFor(t, slowA, slowB), wt, nil)
+	s.IdleAfter = time.Hour
+	if got := s.slowOrder(); got[0].ID != slowB.ID {
+		t.Fatalf("never-run anchors put static checks before test suites, got %s first", got[0].ID)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+	s.NoteToolUse(testSession, testTask)
+	sctx, scancel := context.WithTimeout(ctx, 5*time.Second)
+	s.Settle(sctx, testSession, testTask)
+	scancel()
+	if got := s.slowOrder(); got[0].ID != slowB.ID {
+		t.Fatalf("after a slow cargo-test the next Stop must queue go-vet first, got %s", got[0].ID)
+	}
+}
+
 // TestSchedulerConsentRevocationStopsRuns pins doc.go's "NOTHING RUNS WITHOUT
 // CONSENT" against the Scheduler's lifetime: entries are snapshotted at
 // construction, and the runner's pre-exec binary-hash gate catches a swapped
