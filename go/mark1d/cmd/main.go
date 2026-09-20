@@ -1292,7 +1292,8 @@ func enabledRoots(cfg config) []string {
 // (04 §2.2) and must reach candidates.json without a restart. Derivation is
 // five sandboxed `--version` execs per workspace — fine at this cadence, not
 // at wsReloadTick.
-const anchorRederiveEvery = time.Minute
+// ten minutes, not one: every seen worktree re-sniffs its tools each pass (a tester hopping between repos would spawn dozens of sandboxed execs a minute); a new root or worktree re-derives at once regardless
+const anchorRederiveEvery = 10 * time.Minute
 
 // reconcileAnchors returns the one idempotent step behind the consent surface
 // (anchors/candidates.go): re-read the enabled roots, re-derive when they
