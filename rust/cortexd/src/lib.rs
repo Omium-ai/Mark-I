@@ -116,7 +116,8 @@ fn secure_store_dir(store: &std::path::Path) -> std::io::Result<()> {
 /// Returns the set of paths whose content changed vs the previous merkle.
 pub fn full_index(shared: &Arc<Shared>, cas: &cas::Cas) -> Result<Vec<String>, CortexError> {
     shared.stale.store(true, Ordering::SeqCst);
-    let ignore = l0_merkle::IgnoreSet::load(&shared.root)?;
+    let ignore = Arc::new(l0_merkle::IgnoreSet::load(&shared.root)?);
+    *shared.ignore.write_recover() = Arc::clone(&ignore);
 
     // Warm restart (04 §6.2): persisted l0.merkle lets an unchanged file skip
     // rehashing (size+mtime match); the CAS makes re-tagging a probe, not a parse.
@@ -154,7 +155,17 @@ pub fn incremental_index(
     cas: &cas::Cas,
     changed_paths: &[String],
 ) -> Result<(), CortexError> {
-    let ignore = l0_merkle::IgnoreSet::load(&shared.root)?;
+    let ignore = if changed_paths.iter().any(|p| {
+        p.rsplit('/')
+            .next()
+            .is_some_and(|n| n == ".gitignore" || n == ".mark1ignore")
+    }) {
+        let fresh = Arc::new(l0_merkle::IgnoreSet::load(&shared.root)?);
+        *shared.ignore.write_recover() = Arc::clone(&fresh);
+        fresh
+    } else {
+        Arc::clone(&shared.ignore.read_recover())
+    };
     let (mut merkle, mut tags) = {
         let idx = shared.index.read_recover();
         (idx.merkle.clone(), idx.tags.clone())

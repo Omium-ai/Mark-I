@@ -379,6 +379,17 @@ impl MerkleTree {
                 Ok(meta) if meta.is_file() => {
                     let size = meta.len();
                     let mtime_ns = mtime_nanos(&meta);
+                    // The same stat pair as the last look is the same file: a
+                    // read of it is not a change. Rehashing here read the file,
+                    // which the watcher reported, which rehashed it — cortexd
+                    // burned a core per repository for as long as it ran.
+                    if self
+                        .files
+                        .get(rel)
+                        .is_some_and(|e| e.size == size && e.mtime_ns == mtime_ns)
+                    {
+                        continue;
+                    }
                     self.files_rehashed += 1;
                     let hash = hash_file(&abs)?;
                     let prev = self.files.insert(
@@ -568,6 +579,19 @@ fn walk(
 // notify watcher → WatchMsg channel (04 §6.1 head of the pipeline)
 // ---------------------------------------------------------------------------
 
+/// A read is not a change: inotify reports every open/read/close of a file
+/// (an agent's `cat`, an anchor's lint, this indexer's own hashing) as an
+/// Access event, and indexing on those fed the indexer its own reads.
+fn watch_msg(event: notify::Event) -> Option<crate::WatchMsg> {
+    if event.need_rescan() {
+        return Some(crate::WatchMsg::Overflow);
+    }
+    if matches!(event.kind, notify::EventKind::Access(_)) {
+        return None;
+    }
+    Some(crate::WatchMsg::Changed(event.paths))
+}
+
 /// Start the recursive watcher; events land on `tx` for the single writer
 /// task to debounce. Overflow maps to WatchMsg::Overflow (04 §6.6: full
 /// rescan, never guess which events were lost).
@@ -579,13 +603,9 @@ pub fn start_watcher(
     let mut watcher =
         notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
             Ok(event) => {
-                let overflow = event.need_rescan();
-                let msg = if overflow {
-                    crate::WatchMsg::Overflow
-                } else {
-                    crate::WatchMsg::Changed(event.paths)
-                };
-                let _ = tx.send(msg); // receiver gone ⇒ shutting down
+                if let Some(msg) = watch_msg(event) {
+                    let _ = tx.send(msg); // receiver gone ⇒ shutting down
+                }
             }
             Err(e) => {
                 let _ = tx.send(crate::WatchMsg::Overflow);
@@ -599,6 +619,7 @@ pub fn start_watcher(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn ignore_subset_semantics() {
@@ -698,6 +719,33 @@ mod tests {
         let full = MerkleTree::full_scan(dir.path(), &ig, None).unwrap();
         assert_eq!(tree.root(), full.root());
         assert_eq!(tree.dir_hash("b"), full.dir_hash("b"));
+    }
+
+    // A watcher event that is only a read never reaches the indexer; a touched file's stat pair unchanged is not rehashed.
+    #[test]
+    fn reads_are_not_changes() {
+        use notify::event::{AccessKind, ModifyKind};
+        let p = vec![PathBuf::from("/r/a.txt")];
+        let access =
+            notify::Event::new(notify::EventKind::Access(AccessKind::Read)).add_path(p[0].clone());
+        assert!(watch_msg(access).is_none());
+        let modify =
+            notify::Event::new(notify::EventKind::Modify(ModifyKind::Any)).add_path(p[0].clone());
+        assert!(matches!(watch_msg(modify), Some(crate::WatchMsg::Changed(ps)) if ps == p));
+        let over =
+            notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        assert!(matches!(watch_msg(over), Some(crate::WatchMsg::Overflow)));
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x.txt"), b"one").unwrap();
+        let ig = IgnoreSet::default();
+        let mut tree = MerkleTree::full_scan(dir.path(), &ig, None).unwrap();
+        tree.files_rehashed = 0;
+        let touched = tree
+            .update_paths(dir.path(), &ig, &["x.txt".into()])
+            .unwrap();
+        assert!(touched.is_empty());
+        assert_eq!(tree.files_rehashed, 0);
     }
 
     #[test]

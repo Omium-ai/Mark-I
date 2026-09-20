@@ -91,6 +91,10 @@ pub struct Shared {
     pub ranker_file: OnceLock<PathBuf>,
     /// Ranker files refused by `RankerWeights::new` or the parser (served PPR order).
     pub ranker_rejected: AtomicU64,
+    /// The ignore set of the last full pass: loading it walks every directory
+    /// for nested ignore files, so an incremental pass reuses it and reloads
+    /// only when an ignore file itself changed.
+    pub ignore: RwLock<Arc<crate::l0_merkle::IgnoreSet>>,
 }
 
 impl Shared {
@@ -117,6 +121,7 @@ impl Shared {
             ranker: RwLock::new(None),
             ranker_file: OnceLock::new(),
             ranker_rejected: AtomicU64::new(0),
+            ignore: RwLock::new(Arc::new(crate::l0_merkle::IgnoreSet::default())),
         }
     }
 
