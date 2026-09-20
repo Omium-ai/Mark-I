@@ -937,6 +937,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	srv.OnHello = func(session [16]byte, cwd string) {
 		if cwd != "" {
 			sessionCwd.Store(session, cwd)
+			ctl.Hub().SetCwd(session, cwd)
 		}
 	}
 	ctl.WorkspaceID = cov.WorkspaceID

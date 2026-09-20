@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -33,8 +35,12 @@ type LiveSession struct {
 	Project   string `json:"project"`
 	SessionID string `json:"session_id"`
 	Tokens    uint64 `json:"tokens"`
-	started   time.Time
-	seen      time.Time
+	// Cwd is the hook process's directory (Hello.cwd); Watched is false when no enabled root contains it, and EnablePath is the root to offer (the git top level above cwd, else cwd).
+	Cwd        string `json:"cwd,omitempty"`
+	Watched    bool   `json:"watched"`
+	EnablePath string `json:"enable_path,omitempty"`
+	started    time.Time
+	seen       time.Time
 }
 
 type frame struct {
@@ -47,6 +53,7 @@ type Hub struct {
 	mu          sync.Mutex
 	subs        map[chan frame]struct{}
 	sessions    map[[16]byte]*LiveSession
+	cwds        map[[16]byte]string
 	verify      []map[string]any  // GET /v1/verify/events rows, arrival order
 	checkpoints []map[string]any  // GET /v1/receipts rows, arrival order
 	lastRun     map[string]string // anchor id -> occurred_at of its newest vote since boot
@@ -54,6 +61,13 @@ type Hub struct {
 	lastRequest map[[16]byte]uint64
 	taskTokens  map[[16]byte]uint64
 	resolver    func(id uuid.UUID) (agent, root string, ok bool)
+}
+
+// SetCwd records a session's hook cwd (Hello.cwd) so live can say where an unwatched agent is running.
+func (h *Hub) SetCwd(session [16]byte, cwd string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cwds[session] = cwd
 }
 
 // SetSessionResolver installs the tailer fleet's session table (tailers.Resolve): live consults it before the transcript-head fallback, since a derived session id's cwd is known only to its vendor's tailer.
@@ -64,7 +78,7 @@ func (h *Hub) SetSessionResolver(f func(id uuid.UUID) (agent, root string, ok bo
 }
 
 func NewHub() *Hub {
-	return &Hub{subs: map[chan frame]struct{}{}, sessions: map[[16]byte]*LiveSession{}, lastRun: map[string]string{}, lastRequest: map[[16]byte]uint64{}, taskTokens: map[[16]byte]uint64{}}
+	return &Hub{subs: map[chan frame]struct{}{}, sessions: map[[16]byte]*LiveSession{}, cwds: map[[16]byte]string{}, lastRun: map[string]string{}, lastRequest: map[[16]byte]uint64{}, taskTokens: map[[16]byte]uint64{}}
 }
 
 // EstimateBlock is what a Stop the gate refused saved: the follow-up request the human would have sent re-reads the context, so one request at this session's newest size. 0 when no usage has been seen.
@@ -325,13 +339,23 @@ func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSessio
 	for id, s := range h.sessions {
 		if time.Since(s.seen) > liveIdleTTL {
 			delete(h.sessions, id)
+			delete(h.cwds, id)
 			continue
 		}
 		out = append(out, *s)
+		out[len(out)-1].Cwd = h.cwds[id]
 		ids = append(ids, id)
 	}
 	resolver := h.resolver
 	h.mu.Unlock()
+	defer func() {
+		for i := range out {
+			out[i].Watched = out[i].Project != ""
+			if !out[i].Watched && out[i].Cwd != "" {
+				out[i].EnablePath = gitTop(out[i].Cwd)
+			}
+		}
+	}()
 	for i := range out {
 		if out[i].Project != "" {
 			continue
@@ -362,6 +386,20 @@ func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSessio
 		h.mu.Unlock()
 	}
 	return out
+}
+
+// gitTop is the nearest ancestor of dir holding a .git entry, else dir itself.
+func gitTop(dir string) string {
+	for d := dir; ; {
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			return d
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return dir
+		}
+		d = parent
+	}
 }
 
 func (h *Hub) lastRuns() map[string]string {
