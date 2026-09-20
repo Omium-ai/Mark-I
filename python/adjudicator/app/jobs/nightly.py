@@ -25,7 +25,6 @@ from app.choke import run_template
 from app.db import set_local_tenant
 from app.gold.rotate import MAX_AGE_DAYS, GoldLabel, fresh_fraction, scoring_window
 from app.gold.score import score_agreement
-from app.gold.select import freeze_gold_set
 from app.registry.catalog import list_verifiers
 from app.spectral.estimate import Estimate, estimate
 from app.spectral.moments import ABSTAIN, ACCEPT, REJECT
@@ -68,16 +67,65 @@ async def _members(conn: asyncpg.Connection, gold_set_id: UUID) -> list[GoldLabe
 
 
 async def gold_refresh(ctx: Any) -> None:
-    """Freeze the open set once it has formed (§5.3 ≥ 50 labels); certs cite frozen sets only."""
+    """Snapshot each formed open set (§5.3 ≥ 50 labels in the D17 window) into a NEW frozen
+    set. certs_recompute cites only the latest frozen set, so the snapshot is what a
+    certificate measures against, while the open set keeps accumulating toward the D15 200
+    gate; freezing the open set in place capped every set at the night it crossed 50 and the
+    gate was unreachable. A night with nothing new mints nothing."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=MAX_AGE_DAYS)
     async with ctx.pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, ctx.tenant_id)
-        open_set = await _latest_set(conn, ctx.tenant_id, frozen=False)
-        n = len(await _members(conn, open_set["id"])) if open_set else 0
-    if open_set is None or n < GOLD_BOOTSTRAP_MIN:
-        log.info("gold.refresh %s: nothing to freeze (open set has %d labels)", ctx.tenant_id, n)
-        return None
-    await freeze_gold_set(ctx.pool, ctx.tenant_id, open_set["id"])
-    log.info("gold.refresh %s: froze set %s with %d labels", ctx.tenant_id, open_set["id"], n)
+        open_sets = await conn.fetch(
+            "SELECT id, agent FROM gold_sets WHERE tenant_id = $1 AND frozen_at IS NULL "
+            "ORDER BY created_at",
+            UUID(ctx.tenant_id),
+        )
+        for open_set in open_sets:
+            window = scoring_window(await _members(conn, open_set["id"]), now)
+            if len(window) < GOLD_BOOTSTRAP_MIN:
+                log.info(
+                    "gold.refresh %s: %s open set has %d labels, nothing to freeze",
+                    ctx.tenant_id,
+                    open_set["agent"],
+                    len(window),
+                )
+                continue
+            frozen = await conn.fetchrow(
+                "SELECT id FROM gold_sets WHERE tenant_id = $1 AND agent = $2 "
+                "AND frozen_at IS NOT NULL ORDER BY frozen_at DESC LIMIT 1",
+                UUID(ctx.tenant_id),
+                open_set["agent"],
+            )
+            if frozen and set(await _members(conn, frozen["id"])) == set(window):
+                log.info(
+                    "gold.refresh %s: %s unchanged since the last snapshot",
+                    ctx.tenant_id,
+                    open_set["agent"],
+                )
+                continue
+            new_id = await conn.fetchval(
+                "INSERT INTO gold_sets (tenant_id, agent, frozen_at) VALUES ($1, $2, now()) "
+                "RETURNING id",
+                UUID(ctx.tenant_id),
+                open_set["agent"],
+            )
+            await conn.execute(
+                "INSERT INTO gold_set_members "
+                "(gold_set_id, tenant_id, task_digest, true_label, label_source, labeled_at) "
+                "SELECT $1, tenant_id, task_digest, true_label, label_source, labeled_at "
+                "FROM gold_set_members WHERE gold_set_id = $2 AND labeled_at > $3",
+                new_id,
+                open_set["id"],
+                cutoff,
+            )
+            log.info(
+                "gold.refresh %s: froze snapshot %s of %s with %d labels",
+                ctx.tenant_id,
+                new_id,
+                open_set["agent"],
+                len(window),
+            )
     return None
 
 

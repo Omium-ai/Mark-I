@@ -18,7 +18,7 @@ from app.certs.state_machine import GOLD_BOOTSTRAP_MIN
 from app.db import _tenant_guc_reset, set_local_tenant
 from app.gold.select import add_members, create_gold_set
 from app.jobs import JOBS
-from app.jobs.nightly import certs_recompute, spectral_estimate
+from app.jobs.nightly import certs_recompute, gold_refresh, spectral_estimate
 from app.jobs.registry import validate
 from app.jobs.runner import run_many
 from pydantic import SecretStr
@@ -123,7 +123,8 @@ async def test_cascade_freezes_a_formed_set_and_ledgers_both_jobs(pool):
         "certs.recompute": "succeeded",
     }
     sets, certs, runs = await _tenant_state(pool, tenant)
-    assert [s["frozen_at"] is not None for s in sets] == [True]
+    # The open set keeps accumulating; the night mints one frozen snapshot beside it.
+    assert sorted(s["frozen_at"] is not None for s in sets) == [False, True]
     # 50 labels formed + the estimator ran (an honest empty window) ⇒ bootstrapping, one
     # row per live verifier, carrying the run's failed gates; never identifiable.
     assert certs and {(c["status"], c["identifiable"]) for c in certs} == {("bootstrapping", False)}
@@ -134,7 +135,7 @@ async def test_cascade_freezes_a_formed_set_and_ledgers_both_jobs(pool):
         ("spectral.estimate", "succeeded", 1),
     ]
 
-    frozen_at = sets[0]["frozen_at"]
+    frozen_at = [s["frozen_at"] for s in sets if s["frozen_at"] is not None]
     second = _mine(await run_many(pool, SETTINGS, list(JOBS), targets, tenant_id=tenant, now=NOW))
     assert second == {
         "gold.refresh": "already_done",
@@ -142,8 +143,38 @@ async def test_cascade_freezes_a_formed_set_and_ledgers_both_jobs(pool):
         "certs.recompute": "already_done",
     }
     sets, _, runs = await _tenant_state(pool, tenant)
-    assert sets[0]["frozen_at"] == frozen_at
+    assert [s["frozen_at"] for s in sets if s["frozen_at"] is not None] == frozen_at
     assert {(r["attempts"], r["requested"]) for r in runs if r["job"] in MINE} == {(1, 2)}
+
+
+async def test_snapshots_grow_with_the_open_set(pool):
+    """gold.refresh mints a new frozen snapshot only when the open set grew; the latest
+    snapshot (what certs cite) carries every label, so the D15 200 gate is reachable."""
+    tenant = await _mk_tenant(pool)
+    gold_set = await create_gold_set(pool, tenant, "claudecode")
+    labels = [(random.randbytes(32), "satisfied", "human") for _ in range(GOLD_BOOTSTRAP_MIN)]
+    await add_members(pool, tenant, gold_set, labels)
+    await gold_refresh(SimpleNamespace(pool=pool, tenant_id=tenant))
+    await gold_refresh(
+        SimpleNamespace(pool=pool, tenant_id=tenant)
+    )  # unchanged: no second snapshot
+    await add_members(
+        pool, tenant, gold_set, [(random.randbytes(32), "violated", "human") for _ in range(10)]
+    )
+    await gold_refresh(SimpleNamespace(pool=pool, tenant_id=tenant))
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant)
+        rows = await conn.fetch(
+            "SELECT s.frozen_at, count(m.*) AS n FROM gold_sets s "
+            "LEFT JOIN gold_set_members m ON m.gold_set_id = s.id "
+            "WHERE s.tenant_id = $1 GROUP BY s.id, s.frozen_at ORDER BY s.frozen_at NULLS FIRST",
+            UUID(tenant),
+        )
+    assert [(r["frozen_at"] is not None, r["n"]) for r in rows] == [
+        (False, 60),
+        (True, 50),
+        (True, 60),
+    ]
 
 
 async def test_unformed_set_stays_open(pool):

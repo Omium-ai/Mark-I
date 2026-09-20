@@ -9,7 +9,9 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hkdf"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -44,6 +46,12 @@ type pgRig struct {
 	schema  *schemaSet
 	orgID   uuid.UUID
 	userKey *ecdsa.PrivateKey
+	run     *fakeRunner
+}
+
+// itTenantRoot mirrors enroll.TenantRoot under a fixed pepper: the labels route digests (session, task) under it.
+func itTenantRoot(tenant uuid.UUID) ([]byte, error) {
+	return hkdf.Key(sha256.New, bytes.Repeat([]byte{0x55}, 32), nil, "mark1-tenant-root-v1:"+tenant.String(), 32)
 }
 
 func setupPG(t *testing.T) *pgRig {
@@ -156,12 +164,13 @@ func setupPG(t *testing.T) *pgRig {
 		Verifier: verifier, ObsCfg: obsCfg, Registry: reg, Runner: run,
 		Reports: querychoke.New(querychoke.Deps{Registry: reg, Runner: run, Verifier: verifier, ObsCfg: obsCfg}),
 		PG:      db, Regimes: querychoke.PGRegimes{DB: db},
+		TenantRoot: itTenantRoot,
 	})
 	mux := http.NewServeMux()
 	m.RegisterRoutes(mux)
 	api := httptest.NewServer(mux)
 	t.Cleanup(api.Close)
-	return &pgRig{t: t, admin: admin, db: db, store: store, api: api, schema: loadSchemas(t), orgID: orgID, userKey: userKey}
+	return &pgRig{t: t, admin: admin, db: db, store: store, api: api, schema: loadSchemas(t), orgID: orgID, userKey: userKey, run: run}
 }
 
 // userToken mints the platform's Mark 1 user token (ES256, aud mark1) for sub over tenant.

@@ -295,13 +295,14 @@ func main() {
 		IntelBaseURL:      cfg.IntelBaseURL,
 		IntelServiceToken: cfg.IntelServiceToken,
 	}), appapi.New(appapi.Deps{ // desktop app read surface (mark1-desktop-app-spec §5, §7.2)
-		Verifier: reads,
-		ObsCfg:   obsCfg,
-		Registry: tmpl,
-		Runner:   chRunner,
-		Reports:  qc,
-		PG:       tenantDB,
-		Regimes:  querychoke.PGRegimes{DB: tenantDB},
+		Verifier:   reads,
+		ObsCfg:     obsCfg,
+		Registry:   tmpl,
+		Runner:     chRunner,
+		Reports:    qc,
+		PG:         tenantDB,
+		Regimes:    querychoke.PGRegimes{DB: tenantDB},
+		TenantRoot: enrollMod.TenantRoot,
 	}))
 
 	// The hourly witness-head job (m1_003; 05 §4.4). Runs only when a

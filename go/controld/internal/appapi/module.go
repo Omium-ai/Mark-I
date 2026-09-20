@@ -33,6 +33,8 @@ type Deps struct {
 	PG      querychoke.TenantDB
 	// Regimes resolves the m1_075 row for /me; nil answers regime null.
 	Regimes querychoke.RegimeSource
+	// TenantRoot is enroll's HKDF tenant root (04 §2.9): human gold labels digest (session, task) under it; nil refuses labels.
+	TenantRoot func(uuid.UUID) ([]byte, error)
 }
 
 type Module struct {
@@ -62,6 +64,8 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/sessions/{id}", chain(http.HandlerFunc(m.handleSessionDetail)))
 	mux.Handle("GET /api/v1/moments", chain(http.HandlerFunc(m.handleMoments)))
 	mux.Handle("GET /api/v1/verify/certificates", chain(http.HandlerFunc(m.handleCertificates)))
+	mux.Handle("GET /api/v1/verify/labels", chain(http.HandlerFunc(m.handleLabels)))
+	mux.Handle("POST /api/v1/verify/labels", chain(http.HandlerFunc(m.handleLabel)))
 	mux.Handle("GET /api/v1/route/decisions", chain(http.HandlerFunc(m.handleRouteDecisions)))
 	mux.Handle("GET /api/v1/route/bundle", chain(http.HandlerFunc(m.handleRouteBundle)))
 	mux.Handle("GET /api/v1/me", chain(http.HandlerFunc(m.handleMe)))

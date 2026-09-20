@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/labels.json",
+  "title": "GET|POST /api/v1/verify/labels",
+  "description": "How far the tenant's gold set has formed (m1_021 gold_set_members, 06 §5.1): every strong label, the human ones among them, the open (accumulating) set, the latest frozen snapshot a certificate cites, and the two gates (§5.3 bootstrapping at 50, D15 certified at 200). A POST answers the same body plus what it recorded.",
+  "type": "object",
+  "required": ["labels", "human", "open", "frozen", "bootstrap_at", "certify_at"],
+  "additionalProperties": false,
+  "properties": {
+    "labels": { "type": "integer", "minimum": 0 },
+    "human": { "type": "integer", "minimum": 0 },
+    "open": { "type": "integer", "minimum": 0 },
+    "frozen": { "type": "integer", "minimum": 0 },
+    "bootstrap_at": { "type": "integer", "enum": [50] },
+    "certify_at": { "type": "integer", "enum": [200] },
+    "recorded": { "type": "boolean", "enum": [true] },
+    "label": { "type": "string", "enum": ["satisfied", "violated", "refused", "error"] }
+  }
+}

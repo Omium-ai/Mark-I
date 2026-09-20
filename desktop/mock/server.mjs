@@ -51,6 +51,8 @@ export const CLOUD_ROUTES = [
   ['POST', '/api/v1/memory/artifacts/art_pit_7/share', 'cloud-memory-share'],
   ['POST', '/api/v1/memory/artifacts/art_pit_7/unshare', 'cloud-memory-unshare'],
   ['GET', '/api/v1/verify/certificates', 'cloud-verify-certificates'],
+  ['GET', '/api/v1/verify/labels', 'cloud-verify-labels'],
+  ['POST', '/api/v1/verify/labels', 'cloud-verify-labels'],
   ['GET', '/api/v1/route/decisions', 'cloud-route-decisions'],
   ['GET', '/api/v1/route/bundle', 'cloud-route-bundle'],
   ['GET', '/api/v1/receipts/export', 'cloud-receipts-export'],

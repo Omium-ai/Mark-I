@@ -184,6 +184,24 @@ ORDER BY tokens_saved_estimate DESC`,
 		timeout:  timeoutReport,
 	},
 	{
+		// POST /api/v1/verify/labels: the task a human gold label names must exist for the token's tenant and be closed — selection strictly after completion (06 §5.1), so a label can never touch the run it describes; agent keys m1_021's gold_sets.agent.
+		name:    "task_for_label",
+		version: "task_for_label.v1",
+		body: `SELECT any(e.agent) AS agent, countIf(e.event_type = 'TaskClose') AS closed
+FROM (SELECT event_id, agent, event_type
+      FROM m1p_events
+      WHERE {{tenant_pred}}
+        AND session_id = {session_id:UUID}
+        AND task_id = {task_id:UUID}
+        AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+        AND event_type IN ('TaskOpen', 'TaskClose')
+      LIMIT 1 BY event_id) AS e`,
+		params:   map[string]paramSpec{"session_id": {kind: pUUID}, "task_id": {kind: pUUID}},
+		readSet:  []string{"m1p_events"},
+		rowLimit: 1,
+		timeout:  timeoutReport,
+	},
+	{
 		// GET /reports/tvo guarantee gate: tasks with a certified (stage-final, noise-certified) satisfied verdict in the window. Zero ⇒ the noise certificate is still bootstrapping and the report stays indicative, whatever the mode-counted outcomes say.
 		name:    "certified_outcomes",
 		version: "certified_outcomes.v1",
