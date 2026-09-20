@@ -1070,9 +1070,13 @@ func TestIntegrationPersonalTenantApprove(t *testing.T) {
 			approval != "omium_user" || subject != "omium:u-alice" {
 			t.Fatalf("rows: kind=%s owner=%s status=%s org=%v approval=%s subject=%s", kind, owner, status, orgID, approval, subject)
 		}
-		var regimes int64
-		if err := h.admin.QueryRow(ctx, `SELECT count(*) FROM m1_tenant_regimes WHERE tenant_id = $1`, personal).Scan(&regimes); err != nil || regimes != 0 {
-			t.Fatalf("regime seeded: %d %v", regimes, err)
+		// m1_085: a personal tenant reads in quota basis from its first day — tokens per outcome, no dollar shadow price claimed, window limit the not-yet-fitted sentinel.
+		var basis, setBy string
+		var shadow float64
+		var window int64
+		if err := h.admin.QueryRow(ctx, `SELECT cost_basis, set_by, shadow_price_usd, window_limit_tokens FROM m1_tenant_regimes WHERE tenant_id = $1`, personal).Scan(&basis, &setBy, &shadow, &window); err != nil ||
+			basis != "quota" || setBy != "enroll:personal-default" || shadow != 0 || window != 1 {
+			t.Fatalf("personal regime: basis=%s set_by=%s shadow=%v window=%d err=%v", basis, setBy, shadow, window, err)
 		}
 	})
 

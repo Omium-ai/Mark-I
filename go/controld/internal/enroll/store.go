@@ -64,7 +64,7 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
-// ensurePersonalTenant seeds no m1_tenant_regimes row: a cost basis is a founder-visible fact, not a default.
+// ensurePersonalTenant seeds the personal regime with the tenant (m1_085): one developer on a subscription reads in quota basis — tokens per outcome, shadow price 0 (no dollar claim; D22's confirmation is what a tenant supplies when it wants one), window limit the not-yet-fitted sentinel. Without the row every personal report defaulted to usd and refused for a price it could never pin.
 func (m *Module) ensurePersonalTenant(ctx context.Context, tenant uuid.UUID, owner string) (string, error) {
 	tid, err := tenantIDFor(tenant)
 	if err != nil {
@@ -76,6 +76,12 @@ func (m *Module) ensurePersonalTenant(ctx context.Context, tenant uuid.UUID, own
 			INSERT INTO m1_tenants (id, kind, owner_subject, name)
 			VALUES ($1, 'personal', $2, 'personal')
 			ON CONFLICT (id) DO NOTHING`, tenant, owner); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO m1_tenant_regimes (tenant_id, cost_basis, price_model_id, window_limit_tokens, shadow_price_usd, v_default, set_by)
+			VALUES ($1, 'quota', NULL, 1, 0, 1, 'enroll:personal-default')
+			ON CONFLICT (tenant_id) DO NOTHING`, tenant); err != nil {
 			return err
 		}
 		return tx.QueryRow(ctx, `SELECT status FROM m1_tenants WHERE id = $1`, tenant).Scan(&status)
