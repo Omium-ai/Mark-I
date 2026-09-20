@@ -24,11 +24,11 @@ type bandGoldenCase struct {
 	EventsBillingIngested uint64 `json:"events_billing_ingested"`
 	Verified              uint64 `json:"verified"`
 	// Certified defaults to Verified: every older case has certified outcomes; a case that sets it to 0 locks the bootstrapping refusal.
-	Certified *uint64 `json:"certified"`
-	CostBasis             string `json:"cost_basis"`
-	PricePinned           bool   `json:"price_pinned"`
-	ShadowPriceConfirmed  bool   `json:"shadow_price_confirmed"`
-	Expect                struct {
+	Certified            *uint64 `json:"certified"`
+	CostBasis            string  `json:"cost_basis"`
+	PricePinned          bool    `json:"price_pinned"`
+	ShadowPriceConfirmed bool    `json:"shadow_price_confirmed"`
+	Expect               struct {
 		Coverage       float64  `json:"coverage"`
 		CoverageLower  float64  `json:"coverage_lower"`
 		GuaranteeGrade bool     `json:"guarantee_grade"`
