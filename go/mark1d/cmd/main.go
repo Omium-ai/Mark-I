@@ -1327,7 +1327,12 @@ func reconcileAnchors(log *slog.Logger, cfg config, sb anchors.Sandbox, sched *a
 		// every enabled root, plus each repository a session has been seen working in below one (a parent folder enabled over many repos derives nothing at its own top)
 		all := roots
 		if worktrees != nil {
-			all = append(append([]string{}, roots...), worktrees(roots)...)
+			all = append([]string{}, roots...)
+			for _, wt := range worktrees(roots) {
+				if !slices.Contains(all, wt) { // a repository enabled as its own root and seen below another
+					all = append(all, wt)
+				}
+			}
 		}
 		rederived := !slices.Equal(all, lastRoots) || time.Since(lastDerive) >= anchorRederiveEvery
 		if rederived {
