@@ -574,9 +574,18 @@ func TestSealerRechainsToTheServerHeadOnceTheRaceIsOver(t *testing.T) {
 	if got := h.sealer.last.checkpointSeq; got != first+1 {
 		t.Fatalf("inside the race the edge chains to its own last seal: got %d, want %d", got, first+1)
 	}
-	clock = clock.Add(headRace * 2)
-	h.sealer.Seal(ctx, [][]byte{leaf(3)})
-	if got := h.sealer.last.checkpointSeq; got != headCkpt+1 {
-		t.Fatalf("past the race with the server head still behind, the edge must rechain to it: got %d, want %d", got, headCkpt+1)
+	// seals every few seconds must not restart the clock: the head has not moved since the first sighting
+	var claims []int64
+	for i := 0; i < 4; i++ {
+		clock = clock.Add(headRace / 3)
+		h.sealer.Seal(ctx, [][]byte{leaf(byte(10 + i))})
+		claims = append(claims, h.sealer.last.checkpointSeq)
+	}
+	rechained := false
+	for _, c := range claims {
+		rechained = rechained || c == headCkpt+1
+	}
+	if !rechained {
+		t.Fatalf("past the race with the server head still behind, the edge must rechain to it: claims %v, want one at %d", claims, headCkpt+1)
 	}
 }

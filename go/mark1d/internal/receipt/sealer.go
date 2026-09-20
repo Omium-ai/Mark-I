@@ -72,6 +72,16 @@ type Config struct {
 // checkpoint it has emitted. NOT safe for concurrent use: uplink's Run
 // goroutine is the sole caller, and Flush runs only after Run has returned
 // (uplink.Uplink's own contract).
+// raceOver: the server's head has sat behind `last` WITHOUT MOVING for headRace. A moving head is the server catching up (the race); a head that has not advanced while the edge kept sealing is a refused seal — measured from the first sighting, not the newest seal, or a device that seals every few seconds would never notice.
+func (s *Sealer) raceOver(head chainHead) bool {
+	now := s.now()
+	if s.lagSince.IsZero() || head.checkpointSeq > s.lagHead {
+		s.lagSince, s.lagHead = now, head.checkpointSeq
+		return false
+	}
+	return now.Sub(s.lagSince) >= headRace
+}
+
 // headRace bounds how long the edge trusts its own last seal over the server's head: controld applies a checkpoint post-ack within a second or two; past this the seal was refused.
 const headRace = 15 * time.Second
 
@@ -96,8 +106,11 @@ type Sealer struct {
 	// and loaded by New: a checkpoint admitted just before a restart is still
 	// in the spool, still ahead of the server, and still the head the first
 	// post-restart seal must chain to.
-	last     chainHead
-	lastAt   time.Time // when last was sealed: the head race is over once the server has had headRace to apply it
+	last   chainHead
+	lastAt time.Time // when last was sealed
+	// lagSince is when the server's head was first seen behind `last` without moving since: the head race is over once that has lasted headRace, whatever the edge sealed meanwhile.
+	lagSince time.Time
+	lagHead  int64
 	lastPath string
 
 	// pending holds leaves whose seal was refused by an I/O path that can clear.
@@ -207,7 +220,7 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 		s.retain(leaves, err)
 		return
 	}
-	if head.checkpointSeq < s.last.checkpointSeq && s.now().Sub(s.lastAt) < headRace {
+	if head.checkpointSeq < s.last.checkpointSeq && !s.raceOver(head) {
 		// The head race: controld applies a batch's checkpoint POST-ack, on a
 		// per-device queue (sidefx.Enqueue/Apply), so the head read right after
 		// the ack may predate the checkpoint that rode in that very batch — or
@@ -230,6 +243,7 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 		// the truth; the refused seal's leaves stay unreceipted, which is what they are.
 		s.log.Warn("receipt: last seal never landed; chaining to the server's head", "last_checkpoint_seq", s.last.checkpointSeq, "server_checkpoint_seq", head.checkpointSeq)
 		s.last = head
+		s.lagSince = time.Time{}
 	}
 	// One instant, used twice: the payload's issued_at string and the envelope's
 	// occurred_at. The server rebuilds the string from the envelope with its own
