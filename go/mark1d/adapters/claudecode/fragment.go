@@ -42,7 +42,10 @@ var hookRegistrations = []struct {
 // DefaultShimPath is 08 §8.1's command string, transcribed exactly — the
 // vendor expands the leading `~`; an absolute path would make the fragment
 // machine-specific and its checksum unshareable.
-const DefaultShimPath = "~/.omium/mark1/bin/mark1-hookshim"
+const DefaultShimPath = "~/.omium/mark1/bin/" + shimName
+
+// shimName is how an entry of ours is recognised when its tag is gone.
+const shimName = "mark1-hookshim"
 
 const (
 	managedKey = "_mark1_managed" // 08 §8.1 sibling checksum object
@@ -122,12 +125,18 @@ func sum(b []byte) string { s := blake3.Sum256(b); return "blake3:" + hex.Encode
 // keys sorted and no whitespace. Round-tripping through `any` is what makes
 // the desired fragment and the on-disk one comparable — the file's spacing
 // and key order must not change the checksum.
+// canonical hashes the values without their `_mark1` tags: Claude Code strips
+// unknown keys when it rewrites settings.json, and a tag it dropped is not a
+// human edit.
 func canonical(vals []json.RawMessage) ([]byte, error) {
 	out := make([]any, 0, len(vals))
 	for _, v := range vals {
 		var a any
 		if err := json.Unmarshal(v, &a); err != nil {
 			return nil, err
+		}
+		if o, ok := a.(map[string]any); ok {
+			delete(o, entryTag)
 		}
 		out = append(out, a)
 	}
@@ -372,15 +381,19 @@ func apply(settingsPath, stateDir, shim string, force bool) (ApplyResult, error)
 	if raw, ok := root.get(managedKey); ok {
 		m, cur, err := currentChecksum(raw, root, hooks)
 		switch {
+		case err == nil && cur == desired && equalStrings(m.Pointers, pointers):
+			// (b) present and current ⇒ exit unchanged, no write at all. A stale
+			// recorded checksum over the same values (an older release's hash
+			// form, or tags Claude Code dropped) is refreshed below, not damage.
+			if m.Checksum == desired {
+				return ApplyResult{Changed: false, Checksum: desired, Pointers: pointers}, nil
+			}
 		case err != nil || cur != m.Checksum:
 			// (d) a human edited inside our pointers. Stop — never overwrite.
 			// force is `mark1 doctor --fix`, the one sanctioned repair.
 			if !force {
 				return ApplyResult{}, ErrDamaged
 			}
-		case m.Checksum == desired && equalStrings(m.Pointers, pointers):
-			// (b) present and current ⇒ exit unchanged, no write at all.
-			return ApplyResult{Changed: false, Checksum: desired, Pointers: pointers}, nil
 		}
 	}
 

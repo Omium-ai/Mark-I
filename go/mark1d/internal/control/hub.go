@@ -54,6 +54,7 @@ type Hub struct {
 	subs        map[chan frame]struct{}
 	sessions    map[[16]byte]*LiveSession
 	cwds        map[[16]byte]string
+	locate      func(sid [16]byte) (agent, cwd string, ok bool)
 	verify      []map[string]any  // GET /v1/verify/events rows, arrival order
 	checkpoints []map[string]any  // GET /v1/receipts rows, arrival order
 	lastRun     map[string]string // anchor id -> occurred_at of its newest vote since boot
@@ -68,6 +69,13 @@ func (h *Hub) SetCwd(session [16]byte, cwd string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.cwds[session] = cwd
+}
+
+// SetLocator installs the fallback for a session no enabled root claims: the agent and the session's own root (its transcript's first cwd) so the app can offer to watch it. nil is legal.
+func (h *Hub) SetLocator(f func(sid [16]byte) (agent, cwd string, ok bool)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.locate = f
 }
 
 // SetSessionResolver installs the tailer fleet's session table (tailers.Resolve): live consults it before the transcript-head fallback, since a derived session id's cwd is known only to its vendor's tailer.
@@ -346,12 +354,23 @@ func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSessio
 		out[len(out)-1].Cwd = h.cwds[id]
 		ids = append(ids, id)
 	}
-	resolver := h.resolver
+	resolver, locate := h.resolver, h.locate
 	h.mu.Unlock()
 	defer func() {
 		for i := range out {
 			out[i].Watched = out[i].Project != ""
-			if !out[i].Watched && out[i].Cwd != "" {
+			if out[i].Watched {
+				continue
+			}
+			if locate != nil {
+				if agent, cwd, ok := locate(ids[i]); ok {
+					out[i].Cwd = cwd
+					if out[i].Agent == "" {
+						out[i].Agent = agent
+					}
+				}
+			}
+			if out[i].Cwd != "" {
 				out[i].EnablePath = gitTop(out[i].Cwd)
 			}
 		}

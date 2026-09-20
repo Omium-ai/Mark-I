@@ -248,6 +248,65 @@ func TestFragmentDamagedRefusesWrite(t *testing.T) {
 	}
 }
 
+// TestFragmentSurvivesClaudeCodeRewrite: Claude Code rewrites settings.json on
+// every settings change and drops `_mark1` as an unknown key. That is not a
+// human edit: the next apply reconciles the managed block in place, with no
+// second copy of the hooks and no refusal.
+func TestFragmentSurvivesClaudeCodeRewrite(t *testing.T) {
+	path, state := writeSettings(t, userSettings)
+	if _, err := ApplyFragment(path, state, ""); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	strip := func(v any) {
+		if o, ok := v.(map[string]any); ok {
+			delete(o, entryTag)
+		}
+	}
+	strip(doc[statusLineKey])
+	for _, list := range doc["hooks"].(map[string]any) {
+		for _, e := range list.([]any) {
+			strip(e)
+		}
+	}
+	// and the managed block as a release that hashed the tags recorded it
+	doc[managedKey].(map[string]any)["checksum"] = "blake3:" + strings.Repeat("0", 64)
+	rewritten, _ := json.MarshalIndent(doc, "", "  ")
+	if strings.Contains(string(rewritten), entryTag+`"`) {
+		t.Fatal("fixture drift: a tag survived the strip")
+	}
+	if err := os.WriteFile(path, rewritten, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ApplyFragment(path, state, "")
+	if err != nil {
+		t.Fatalf("apply after Claude Code stripped the tags: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(after), `"Stop"`); n != 1 {
+		t.Fatalf("Stop registered %d times after the reconcile", n)
+	}
+	if n := strings.Count(string(after), DefaultShimPath+`"`); n != len(hookRegistrations) {
+		t.Fatalf("%d shim hook entries after the reconcile, want %d:\n%s", n, len(hookRegistrations), after)
+	}
+	if !res.Changed {
+		t.Fatal("the managed block was not refreshed")
+	}
+	if res2, err := ApplyFragment(path, state, ""); err != nil || res2.Changed {
+		t.Fatalf("third apply: changed=%v err=%v, want a no-op", res2.Changed, err)
+	}
+}
+
 // TestFragmentRefusesDuplicateKeys: a settings object with the same key twice
 // is legal JSON that every decoder collapses differently. 08 §8.1 promises we
 // never touch a key we do not list in `pointers`, and rewriting this file

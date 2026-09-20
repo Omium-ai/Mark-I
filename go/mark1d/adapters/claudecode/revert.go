@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // State is 08 §7.4's vocabulary, verbatim. There is no fifth value: anything
@@ -364,12 +365,29 @@ func openTarget(b []byte) (root, hooks *object, err error) {
 
 // isOurs identifies a hook entry by the per-entry `_mark1` tag 08 §8.1 puts on
 // every one precisely so it stays identifiable when `_mark1_managed` is
-// damaged or the array has been reordered under us.
+// damaged or the array has been reordered under us — or, when Claude Code has
+// rewritten settings.json and dropped the tag as an unknown key (it does on
+// every settings change), by the shim it invokes.
 func isOurs(e json.RawMessage) bool {
 	var probe struct {
-		Mark1 string `json:"_mark1"`
+		Mark1   string `json:"_mark1"`
+		Command string `json:"command"`
+		Hooks   []struct {
+			Command string `json:"command"`
+		} `json:"hooks"`
 	}
-	return json.Unmarshal(e, &probe) == nil && probe.Mark1 != ""
+	if json.Unmarshal(e, &probe) != nil {
+		return false
+	}
+	if probe.Mark1 != "" || strings.Contains(probe.Command, shimName) {
+		return true
+	}
+	for _, h := range probe.Hooks {
+		if strings.Contains(h.Command, shimName) {
+			return true
+		}
+	}
+	return false
 }
 
 // taggedPointers finds every managed entry by tag, wherever it now sits. This

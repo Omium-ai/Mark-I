@@ -161,6 +161,28 @@ func (s *Server) projectOf(roots []string) func(agent string, sid [16]byte) stri
 	}
 }
 
+// LocateClaude finds a session's transcript under any ~/.claude/projects/* dir (an unwatched session lives outside every enabled root, so the tailers never met it) and answers its first cwd: the session's own root, which the hook's shell cwd is not.
+func LocateClaude(sid [16]byte) (agent, cwd string, ok bool) {
+	dir, err := (&claudecode.Adapter{}).TranscriptDir("/")
+	if err != nil {
+		return "", "", false
+	}
+	entries, err := os.ReadDir(filepath.Dir(dir))
+	if err != nil {
+		return "", "", false
+	}
+	name := uuid.UUID(sid).String() + ".jsonl"
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if cwd, ok := streamCwd(filepath.Join(filepath.Dir(dir), e.Name(), name)); ok {
+			return "claudecode", cwd, true
+		}
+	}
+	return "", "", false
+}
+
 // within is the tailer's own containment oracle (enabled root + .mark1ignore), so attribution never claims a stream capture would refuse.
 func within(root, cwd string) bool {
 	set, err := tailers.NewWorkspaceSet(root)

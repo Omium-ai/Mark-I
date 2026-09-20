@@ -549,6 +549,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	}
 	adm.Tap = ctl.Hub().Publish
 	ctl.Hub().SetSessionResolver(tailers.Resolve)
+	ctl.Hub().SetLocator(control.LocateClaude)
 
 	// Self-monitoring is an EdgeHealth event through the one admission door,
 	// not a metrics port (11 §0.4). Every consumer below takes it as a nilable
