@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -370,7 +372,9 @@ func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSessio
 				}
 			}
 			if out[i].Cwd != "" {
-				out[i].EnablePath = anchors.GitTop(out[i].Cwd)
+				if p := anchors.GitTop(out[i].Cwd); !tooBroad(p) {
+					out[i].EnablePath = p
+				}
 			}
 		}
 	}()
@@ -404,6 +408,15 @@ func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSessio
 		h.mu.Unlock()
 	}
 	return out
+}
+
+// tooBroad: the home directory, the filesystem root or a drive root is never offered as a project — an agent started there is told to start inside one.
+func tooBroad(p string) bool {
+	clean := filepath.Clean(p)
+	if home, err := os.UserHomeDir(); err == nil && clean == filepath.Clean(home) {
+		return true
+	}
+	return clean == filepath.Dir(clean) || filepath.VolumeName(clean)+string(filepath.Separator) == clean
 }
 
 func (h *Hub) lastRuns() map[string]string {
