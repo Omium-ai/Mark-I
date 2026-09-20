@@ -183,6 +183,12 @@ func LocateClaude(sid [16]byte) (agent, cwd string, ok bool) {
 	return "", "", false
 }
 
+// isWSLShare: a Windows path into a WSL distro's filesystem (\\wsl.localhost\… or \\wsl$\…).
+func isWSLShare(p string) bool {
+	l := strings.ToLower(strings.ReplaceAll(p, "/", "\\"))
+	return strings.HasPrefix(l, `\\wsl.localhost\`) || strings.HasPrefix(l, `\\wsl$\`)
+}
+
 // within is the tailer's own containment oracle (enabled root + .mark1ignore), so attribution never claims a stream capture would refuse.
 func within(root, cwd string) bool {
 	set, err := tailers.NewWorkspaceSet(root)
@@ -615,6 +621,11 @@ func (s *Server) postProject(w http.ResponseWriter, r *http.Request) {
 	fi, err := os.Stat(body.Path)
 	if err != nil || !fi.IsDir() {
 		refuse(w, http.StatusBadRequest, "M1E-2001", "path is not a directory")
+		return
+	}
+	if isWSLShare(body.Path) {
+		// the founder's host daemon crawled his WSL workspace over the 9P bridge: every read is a network round trip, the index took the CPU, and the WSL lane exists for exactly this folder
+		refuse(w, http.StatusBadRequest, "M1E-2001", "this folder lives in WSL; run Mark 1's daemon in WSL (Settings → Advanced → Daemon runs in) and add it there")
 		return
 	}
 	root, err := canonical(body.Path)
