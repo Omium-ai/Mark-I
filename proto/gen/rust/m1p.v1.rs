@@ -1365,6 +1365,12 @@ pub struct GuardDecision {
     pub tokens_saved_estimate: u64,
     #[prost(uint32, tag="6")]
     pub attempt: u32,
+    /// \[P1\] What the block named (FR-VERIFY-011's continuation reason, verbatim):
+    /// "<tool>:<diagnostic_code> errors=N warnings=N files=N" per failing anchor,
+    /// "; "-joined — the typed EvidenceRecord vocabulary, never a path, never an
+    /// excerpt. Empty on an arrest. The app's feed shows it beside the block.
+    #[prost(string, tag="7")]
+    pub evidence: ::prost::alloc::string::String,
 }
 // ---------------------------------------------------------------------------
 // Bundle ACK — the other half of policy distribution (05 §4.3, 08 §3.2)

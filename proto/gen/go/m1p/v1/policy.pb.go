@@ -175,8 +175,13 @@ type GuardDecision struct {
 	// no usage to size it from.
 	TokensSavedEstimate uint64 `protobuf:"varint,5,opt,name=tokens_saved_estimate,json=tokensSavedEstimate,proto3" json:"tokens_saved_estimate,omitempty"`
 	Attempt             uint32 `protobuf:"varint,6,opt,name=attempt,proto3" json:"attempt,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// [P1] What the block named (FR-VERIFY-011's continuation reason, verbatim):
+	// "<tool>:<diagnostic_code> errors=N warnings=N files=N" per failing anchor,
+	// "; "-joined — the typed EvidenceRecord vocabulary, never a path, never an
+	// excerpt. Empty on an arrest. The app's feed shows it beside the block.
+	Evidence      string `protobuf:"bytes,7,opt,name=evidence,proto3" json:"evidence,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GuardDecision) Reset() {
@@ -249,6 +254,13 @@ func (x *GuardDecision) GetAttempt() uint32 {
 		return x.Attempt
 	}
 	return 0
+}
+
+func (x *GuardDecision) GetEvidence() string {
+	if x != nil {
+		return x.Evidence
+	}
+	return ""
 }
 
 // What an edge reports after it verified (or refused) a distributed bundle.
@@ -420,7 +432,7 @@ var File_m1p_v1_policy_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_policy_proto_rawDesc = "" +
 	"\n" +
-	"\x13m1p/v1/policy.proto\x12\x06m1p.v1\"\xfa\x01\n" +
+	"\x13m1p/v1/policy.proto\x12\x06m1p.v1\"\x96\x02\n" +
 	"\rGuardDecision\x12.\n" +
 	"\aoutcome\x18\x01 \x01(\x0e2\x14.m1p.v1.GuardOutcomeR\aoutcome\x12)\n" +
 	"\x10cred_fingerprint\x18\x02 \x01(\fR\x0fcredFingerprint\x12\x1f\n" +
@@ -429,7 +441,8 @@ const file_m1p_v1_policy_proto_rawDesc = "" +
 	"\vreason_code\x18\x04 \x01(\tR\n" +
 	"reasonCode\x122\n" +
 	"\x15tokens_saved_estimate\x18\x05 \x01(\x04R\x13tokensSavedEstimate\x12\x18\n" +
-	"\aattempt\x18\x06 \x01(\rR\aattempt\"\xbc\x01\n" +
+	"\aattempt\x18\x06 \x01(\rR\aattempt\x12\x1a\n" +
+	"\bevidence\x18\a \x01(\tR\bevidence\"\xbc\x01\n" +
 	"\tBundleAck\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\tR\achannel\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1f\n" +

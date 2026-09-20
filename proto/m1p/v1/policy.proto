@@ -107,6 +107,11 @@ message GuardDecision {
   // no usage to size it from.
   uint64 tokens_saved_estimate = 5;
   uint32 attempt = 6;
+  // [P1] What the block named (FR-VERIFY-011's continuation reason, verbatim):
+  // "<tool>:<diagnostic_code> errors=N warnings=N files=N" per failing anchor,
+  // "; "-joined — the typed EvidenceRecord vocabulary, never a path, never an
+  // excerpt. Empty on an arrest. The app's feed shows it beside the block.
+  string evidence = 7;
 }
 
 // 07 §3, verbatim, plus the verify plane's two outcomes.

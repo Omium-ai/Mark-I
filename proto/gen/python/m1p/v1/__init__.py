@@ -970,6 +970,13 @@ class GuardDecision(betterproto.Message):
     """
 
     attempt: int = betterproto.uint32_field(6)
+    evidence: str = betterproto.string_field(7)
+    """
+    [P1] What the block named (FR-VERIFY-011's continuation reason, verbatim):
+     "<tool>:<diagnostic_code> errors=N warnings=N files=N" per failing anchor,
+     "; "-joined — the typed EvidenceRecord vocabulary, never a path, never an
+     excerpt. Empty on an arrest. The app's feed shows it beside the block.
+    """
 
 
 @dataclass(eq=False, repr=False)

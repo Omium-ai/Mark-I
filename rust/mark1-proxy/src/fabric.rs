@@ -417,6 +417,7 @@ mod tests {
             sample_rate: 1.0,
             tokens_saved_estimate: 0,
             attempt: 0,
+            evidence: String::new(),
             reason_code: crate::guard::REASON_UNPROVISIONED.to_owned(),
         });
     }

@@ -188,6 +188,7 @@ type guardPayload struct {
 	TokensSavedEstimate uint64 `json:"tokens_saved_estimate"`
 	ReasonCode          string `json:"reason_code"`
 	Attempt             uint32 `json:"attempt"`
+	Evidence            string `json:"evidence"`
 }
 
 func isFinal(stage string) bool { return stage == "certified" || stage == "revised" }
@@ -306,6 +307,8 @@ type arrestDetail struct {
 	BundleSeq           uint64 `json:"bundle_seq"`
 	TokensSavedEstimate uint64 `json:"tokens_saved_estimate"`
 	Attempt             uint32 `json:"attempt"`
+	// Evidence is what the block named (GuardDecision.evidence): "<tool>:<code> errors=N …" per failing anchor; empty on an arrest and on rows from before the field.
+	Evidence string `json:"evidence,omitempty"`
 }
 
 type routeDetail struct {
@@ -335,7 +338,7 @@ func momentFromRow(row map[string]any, since time.Time) (moment, bool) {
 	case "GuardDecision":
 		var p guardPayload
 		_ = json.Unmarshal(payload, &p)
-		d := &arrestDetail{BundleSeq: asU64(row["bundle_seq"]), TokensSavedEstimate: p.TokensSavedEstimate, Attempt: p.Attempt}
+		d := &arrestDetail{BundleSeq: asU64(row["bundle_seq"]), TokensSavedEstimate: p.TokensSavedEstimate, Attempt: p.Attempt, Evidence: p.Evidence}
 		if p.ReasonCode == "stop_gate_block" {
 			mo.Kind, mo.Block = "block", d
 		} else {

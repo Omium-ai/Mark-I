@@ -455,6 +455,7 @@ impl Guard {
                 sample_rate: self.sampling.forward,
                 tokens_saved_estimate: 0,
                 attempt: 0,
+                evidence: String::new(),
                 reason_code: String::new(),
             });
         let decision = if off {
@@ -485,6 +486,7 @@ pub fn refused_record(refusal: Refusal, fingerprint: Option<[u8; 32]>) -> pb::Gu
         sample_rate: REFUSED_SAMPLE_RATE,
         tokens_saved_estimate: 0,
         attempt: 0,
+        evidence: String::new(),
         reason_code: refusal.reason_code().to_owned(),
     }
 }
