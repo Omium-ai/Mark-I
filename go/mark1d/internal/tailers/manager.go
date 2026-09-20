@@ -335,7 +335,22 @@ func (m *Manager) discover() {
 		m.cfg.Format.Discover(m.cfg.Dir, m.open)
 		return
 	}
-	entries, err := os.ReadDir(m.cfg.Dir)
+	// A session started in a SUBFOLDER of the enabled root writes to its own munged dir (<root munge>-<rest>), a sibling of Dir: those are this workspace's too — the founder's sessions in a package dir read "0 tokens" — and Allowed re-checks every stream's own cwd against the root, so the lossy munge admits nothing on its own.
+	m.discoverDir(m.cfg.Dir)
+	parent, base := filepath.Dir(m.cfg.Dir), filepath.Base(m.cfg.Dir)
+	siblings, err := os.ReadDir(parent)
+	if err != nil {
+		return
+	}
+	for _, e := range siblings {
+		if e.IsDir() && strings.HasPrefix(e.Name(), base+"-") {
+			m.discoverDir(filepath.Join(parent, e.Name()))
+		}
+	}
+}
+
+func (m *Manager) discoverDir(dir string) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return // dir not there yet — the tick retries
 	}
@@ -346,14 +361,14 @@ func (m *Manager) discover() {
 			if !ok {
 				continue
 			}
-			m.open(filepath.Join(m.cfg.Dir, name), RoleParent, session)
+			m.open(filepath.Join(dir, name), RoleParent, session)
 			continue
 		}
 		session, err := uuid.Parse(name)
 		if err != nil {
 			continue
 		}
-		subDir := filepath.Join(m.cfg.Dir, name, "subagents")
+		subDir := filepath.Join(dir, name, "subagents")
 		subs, err := os.ReadDir(subDir)
 		if err != nil {
 			continue

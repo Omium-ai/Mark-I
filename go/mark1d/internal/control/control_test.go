@@ -278,8 +278,22 @@ func TestStatusFields(t *testing.T) {
 	if _, err := time.Parse(time.RFC3339, st.Since); err != nil {
 		t.Fatalf("since %q: %v", st.Since, err)
 	}
-	if len(st.AgentsLive) != 1 || st.AgentsLive[0].Agent != "claudecode" || st.AgentsLive[0].Tokens != 20 || st.AgentsLive[0].SessionID != "01000000-0000-0000-0000-000000000000" || st.AgentsLive[0].Project != "" {
-		t.Fatalf("agents_live %+v (no transcript names this session, so project is unattributed, not guessed)", st.AgentsLive)
+	// session 1: started and spending; session 2: ended; session 3: never seen starting (the daemon restarted mid-session) yet spending — live, with the agent and project left for the resolver, never guessed
+	live := map[string]struct {
+		agent  string
+		tokens uint64
+	}{}
+	for _, a := range st.AgentsLive {
+		live[a.SessionID] = struct {
+			agent  string
+			tokens uint64
+		}{a.Agent, a.Tokens}
+		if a.Project != "" {
+			t.Fatalf("no transcript names these sessions, so project is unattributed, not guessed: %+v", a)
+		}
+	}
+	if len(live) != 2 || live["01000000-0000-0000-0000-000000000000"].agent != "claudecode" || live["01000000-0000-0000-0000-000000000000"].tokens != 20 || live["03000000-0000-0000-0000-000000000000"].agent != "" || live["03000000-0000-0000-0000-000000000000"].tokens != 99 {
+		t.Fatalf("agents_live %+v", st.AgentsLive)
 	}
 	if err := os.WriteFile(off.Marker(dir), nil, 0o600); err != nil {
 		t.Fatal(err)

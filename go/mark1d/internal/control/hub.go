@@ -274,6 +274,13 @@ func (h *Hub) track(ev *m1pv1.Event) {
 	case *m1pv1.Event_SessionEnd:
 		delete(h.sessions, sid)
 		delete(h.lastRequest, sid)
+	case *m1pv1.Event_Usage, *m1pv1.Event_ToolUse, *m1pv1.Event_Turn:
+		// a session the daemon did not see start (it restarted mid-session — the founder's live list emptied on every restart) is live from its first event; live() names the agent and project through the resolver
+		if h.sessions[sid] == nil {
+			h.sessions[sid] = &LiveSession{SessionID: uuid.UUID(sid).String(), started: time.Now(), seen: time.Now()}
+		}
+	}
+	switch b := ev.GetBody().(type) {
 	case *m1pv1.Event_Usage:
 		u := b.Usage
 		total := u.GetInputTokens() + u.GetOutputTokens() + u.GetCacheCreationInputTokens() + u.GetCacheReadInputTokens()
@@ -331,8 +338,11 @@ func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSessio
 		}
 		p := ""
 		if resolver != nil {
-			if agent, root, ok := resolver(ids[i]); ok && (agent == "" || agent == out[i].Agent) {
+			if agent, root, ok := resolver(ids[i]); ok && (agent == "" || out[i].Agent == "" || agent == out[i].Agent) {
 				p = root
+				if out[i].Agent == "" {
+					out[i].Agent = agent
+				}
 			}
 		}
 		if p == "" && resolve != nil {
@@ -345,6 +355,9 @@ func (h *Hub) live(resolve func(agent string, sid [16]byte) string) []LiveSessio
 		h.mu.Lock()
 		if s := h.sessions[ids[i]]; s != nil {
 			s.Project = p
+			if s.Agent == "" {
+				s.Agent = out[i].Agent
+			}
 		}
 		h.mu.Unlock()
 	}

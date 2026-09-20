@@ -300,3 +300,28 @@ func mustWrite(t *testing.T, path, body string) {
 		t.Fatal(err)
 	}
 }
+
+// A session started in a subfolder of the enabled root writes to a SIBLING vendor dir (<root munge>-<rest>): it is this workspace's session and is tailed; a sibling whose stream cwd lies outside the root (the lossy munge's collision, …/repo-other) is not.
+func TestManagerTailsTheRootsSubfolderDirsAndNothingBeside(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "packages", "web")
+	other := root + "-other"
+	mustMkdir(t, sub)
+	mustMkdir(t, other)
+	projects := t.TempDir()
+	vendor := filepath.Join(projects, "root")
+	mustMkdir(t, vendor)
+	mustMkdir(t, filepath.Join(projects, "root-packages-web"))
+	mustMkdir(t, filepath.Join(projects, "root-other"))
+	s1, s2, s3 := uuid.New(), uuid.New(), uuid.New()
+	mustWrite(t, filepath.Join(vendor, s1.String()+".jsonl"), cwdUsageLine(root, s1, "m-root", "r1", 1))
+	mustWrite(t, filepath.Join(projects, "root-packages-web", s2.String()+".jsonl"), cwdUsageLine(sub, s2, "m-sub", "r2", 1))
+	mustWrite(t, filepath.Join(projects, "root-other", s3.String()+".jsonl"), cwdUsageLine(other, s3, "m-other", "r3", 1))
+	got := runManagerOnce(t, root, vendor)
+	if !got["m-root"] || !got["m-sub"] {
+		t.Fatalf("root and subfolder sessions must both be tailed: %v", got)
+	}
+	if got["m-other"] {
+		t.Fatalf("a sibling dir whose cwd is outside the root was tailed: %v", got)
+	}
+}
