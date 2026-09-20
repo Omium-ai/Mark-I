@@ -3,6 +3,7 @@ package anchors
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -27,8 +28,9 @@ const (
 type taskKey struct{ session, task [16]byte }
 
 type timerKey struct {
-	tk taskKey
-	id string
+	tk       taskKey
+	id       string
+	worktree string
 }
 
 // Scheduler is the activity-aware trigger seam (04 §2.2): fast anchors fire on
@@ -58,10 +60,10 @@ type Scheduler struct {
 
 	mu           sync.Mutex
 	lastActivity time.Time
-	timers       map[timerKey]*time.Timer // fast debounce, coalesced per (task, anchor)
-	dirty        map[taskKey]string       // slow work owed since last idle drain, by the task's worktree
-	inflight     map[taskKey]int          // runs queued or executing, what Settle waits on
-	lastTook     map[string]time.Duration // per anchor, its newest run's wall time: the slow queue's order
+	timers       map[timerKey]*time.Timer    // fast debounce, coalesced per (task, anchor)
+	dirty        map[taskKey]map[string]bool // slow work owed since last idle drain, by the task's worktrees
+	inflight     map[taskKey]int             // runs queued or executing, what Settle waits on
+	lastTook     map[string]time.Duration    // per anchor, its newest run's wall time: the slow queue's order
 	work         chan workItem
 }
 
@@ -89,7 +91,7 @@ func NewScheduler(r *Runner, enabled []CatalogEntry, consentPath, worktree strin
 		Debounce:    defaultDebounce,
 		IdleAfter:   defaultIdleAfter,
 		timers:      map[timerKey]*time.Timer{},
-		dirty:       map[taskKey]string{},
+		dirty:       map[taskKey]map[string]bool{},
 		inflight:    map[taskKey]int{},
 		lastTook:    map[string]time.Duration{},
 		work:        make(chan workItem, workQueueCap),
@@ -136,6 +138,24 @@ func (s *Scheduler) worktreeOf(session [16]byte) string {
 	return s.def
 }
 
+// worktreesOf is the session's worktree and, when that is a repository, every known one directly below it (a monorepo's backend/ and frontend/ each derived on their own): the wire carries no file paths, so every one runs and the touched-file rule at run time keeps a project the agent did not touch quiet. A folder that is not a repository runs its own catalog alone — never every repository it holds.
+func (s *Scheduler) worktreesOf(session [16]byte) []string {
+	top := s.worktreeOf(session)
+	out := []string{top}
+	if top == "" || !isRepo(top) {
+		return out
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for wt := range s.catalogs {
+		if wt != top && filepath.Dir(wt) == top {
+			out = append(out, wt)
+		}
+	}
+	sort.Strings(out[1:])
+	return out
+}
+
 // Start launches the workers and the idle watcher. ctx is the kill switch:
 // cancel stops scheduling AND (through the sandbox) SIGKILLs running anchors —
 // `mark1 off` cancels this before its other steps (04 §2.2).
@@ -152,27 +172,32 @@ func (s *Scheduler) Start(ctx context.Context) {
 // (task, anchor): only the latest event matters, a burst yields one run.
 func (s *Scheduler) NoteToolUse(session, task [16]byte) {
 	tk := taskKey{session, task}
-	wt := s.worktreeOf(session)
+	wts := s.worktreesOf(session)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastActivity = time.Now()
-	s.dirty[tk] = wt
-	for _, e := range s.catalogs[wt] {
-		if e.Class != ClassFast {
-			continue
+	if s.dirty[tk] == nil {
+		s.dirty[tk] = map[string]bool{}
+	}
+	for _, wt := range wts {
+		s.dirty[tk][wt] = true
+		for _, e := range s.catalogs[wt] {
+			if e.Class != ClassFast {
+				continue
+			}
+			k := timerKey{tk, e.ID, wt}
+			if t, ok := s.timers[k]; ok {
+				t.Reset(s.Debounce) // coalesce: the pending run absorbs this event
+				continue
+			}
+			e, wt := e, wt
+			s.timers[k] = time.AfterFunc(s.Debounce, func() {
+				s.mu.Lock()
+				delete(s.timers, k)
+				s.mu.Unlock()
+				s.enqueue(workItem{entry: e, tk: tk, worktree: wt})
+			})
 		}
-		k := timerKey{tk, e.ID}
-		if t, ok := s.timers[k]; ok {
-			t.Reset(s.Debounce) // coalesce: the pending run absorbs this event
-			continue
-		}
-		e := e
-		s.timers[k] = time.AfterFunc(s.Debounce, func() {
-			s.mu.Lock()
-			delete(s.timers, k)
-			s.mu.Unlock()
-			s.enqueue(workItem{entry: e, tk: tk, worktree: wt})
-		})
 	}
 }
 
@@ -181,12 +206,21 @@ func (s *Scheduler) NoteToolUse(session, task [16]byte) {
 func (s *Scheduler) Stop(session, task [16]byte) {
 	tk := taskKey{session, task}
 	s.mu.Lock()
-	wt, owed := s.dirty[tk]
+	owed := s.dirty[tk]
 	delete(s.dirty, tk)
 	s.mu.Unlock()
-	if owed {
+	for _, wt := range sortedKeys(owed) {
 		s.enqueueSlow(tk, wt)
 	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Settle is Stop with a wait: the task's owed slow anchors are enqueued and the caller blocks until nothing for the task is debouncing, queued or running — or ctx ends. The gate reads its cache after this, so a compile error the agent just wrote is in the verdict it reads (the founder's cargo-check voted 30 s after the agent had said "done").
@@ -234,14 +268,16 @@ func (s *Scheduler) idleLoop(ctx context.Context) {
 			s.mu.Unlock()
 			continue
 		}
-		drain := map[taskKey]string{}
-		for tk, wt := range s.dirty {
-			drain[tk] = wt
+		drain := map[taskKey]map[string]bool{}
+		for tk, wts := range s.dirty {
+			drain[tk] = wts
 			delete(s.dirty, tk)
 		}
 		s.mu.Unlock()
-		for tk, wt := range drain {
-			s.enqueueSlow(tk, wt)
+		for tk, wts := range drain {
+			for _, wt := range sortedKeys(wts) {
+				s.enqueueSlow(tk, wt)
+			}
 		}
 	}
 }

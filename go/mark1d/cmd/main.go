@@ -826,11 +826,14 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// the repositories sessions have been seen in below an enabled root, each its own worktree for derivation
 	seenWorktrees := func(roots []string) []string {
 		set := map[string]bool{}
+		tops := map[string]bool{}
 		sessionCwd.Range(func(_, v any) bool {
 			cwd := realPath(v.(string))
 			for _, root := range roots {
 				if anchors.Within(root, cwd) {
-					if wt := anchors.GitTop(cwd); wt != root && !set[wt] {
+					wt := anchors.GitTop(cwd)
+					tops[wt] = true
+					if wt != root {
 						set[wt] = true
 					}
 					break
@@ -838,6 +841,12 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 			}
 			return true
 		})
+		// a monorepo's project subdirectories (backend/, frontend/) are worktrees of their own: nothing derives at a top that holds no config itself
+		for _, top := range slices.Sorted(maps.Keys(tops)) {
+			for _, sub := range anchors.ProjectSubdirs(top) {
+				set[sub] = true
+			}
+		}
 		return slices.Sorted(maps.Keys(set))
 	}
 	anchorStep := reconcileAnchors(log, cfg, sb, sched, votes, seenWorktrees)

@@ -246,6 +246,41 @@ func GitTop(dir string) string {
 	}
 }
 
+var projectMarkers = []string{"go.mod", "go.work", "Cargo.toml", "package.json", "pyproject.toml", "tsconfig.json"}
+
+// ProjectSubdirs lists the immediate subdirectories of a repository that carry a project marker (a monorepo's backend/ and frontend/) when the repository's top holds none itself, skipping dependency and VCS trees; each is derived as its own worktree. A folder that is not a repository (a workspace of many repos) yields nothing: its repositories derive when a session is seen in them. Bounded at thirty-two.
+func ProjectSubdirs(top string) []string {
+	if !isRepo(top) {
+		return nil
+	}
+	for _, marker := range projectMarkers {
+		if fileExists(filepath.Join(top, marker)) {
+			return nil
+		}
+	}
+	entries, err := os.ReadDir(top)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || e.Name() == "node_modules" || e.Name() == "target" || e.Name() == "vendor" || e.Name() == "venv" {
+			continue
+		}
+		dir := filepath.Join(top, e.Name())
+		for _, marker := range projectMarkers {
+			if fileExists(filepath.Join(dir, marker)) {
+				out = append(out, dir)
+				break
+			}
+		}
+		if len(out) == 32 {
+			break
+		}
+	}
+	return out
+}
+
 // Within reports whether path is root or below it.
 func Within(root, path string) bool {
 	rel, err := filepath.Rel(root, path)
@@ -281,6 +316,12 @@ func init() {
 			panic(fmt.Sprintf("anchors: kind %q has a handler but no detector — dead handler or missing derivation rule", k))
 		}
 	}
+}
+
+// isRepo: a .git entry, directory or file (a linked worktree).
+func isRepo(p string) bool {
+	_, err := os.Stat(filepath.Join(p, ".git"))
+	return err == nil
 }
 
 func fileExists(p string) bool {

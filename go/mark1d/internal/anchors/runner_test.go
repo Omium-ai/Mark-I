@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -677,6 +678,78 @@ func TestSchedulerRunsEachSessionsOwnWorktree(t *testing.T) {
 	defer mu.Unlock()
 	if len(ran) != 3 || ran[0] != wtA || ran[1] != wtB || ran[2] != wtA {
 		t.Fatalf("worktrees run %v, want [%s %s %s]", ran, wtA, wtB, wtA)
+	}
+}
+
+// A monorepo (a repository whose top holds no config) runs the anchors of each project directly below it; a plain folder of repositories runs its own catalog alone.
+func TestSchedulerFansOutToAMonorepoSubprojects(t *testing.T) {
+	e, _ := enabledRuff(t)
+	mono := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mono, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backend, frontend := filepath.Join(mono, "backend"), filepath.Join(mono, "frontend")
+	for _, d := range []string{backend, frontend} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "pyproject.toml"), []byte("[tool.ruff]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(mono, "README.md"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ProjectSubdirs(mono); len(got) != 2 || got[0] != backend || got[1] != frontend {
+		t.Fatalf("ProjectSubdirs %v", got)
+	}
+	if err := os.WriteFile(filepath.Join(mono, "package.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ProjectSubdirs(mono); got != nil {
+		t.Fatalf("a top with its own config derives itself, not its children: %v", got)
+	}
+	if err := os.Remove(filepath.Join(mono, "package.json")); err != nil {
+		t.Fatal(err)
+	}
+	folder := t.TempDir() // no .git: a workspace of repositories, never fanned out
+	if got := ProjectSubdirs(folder); got != nil {
+		t.Fatalf("a folder that is no repository derives nothing below it: %v", got)
+	}
+
+	var mu sync.Mutex
+	var ran []string
+	sb := &fakeSandbox{run: func(spec RunSpec) (RunResult, error) {
+		mu.Lock()
+		ran = append(ran, spec.WorktreeRO)
+		mu.Unlock()
+		return RunResult{ExitCode: 0}, nil
+	}}
+	s := NewScheduler(NewRunner(sb, &fakeEmitter{}, nil, false), nil, consentFor(t, e), "", nil)
+	s.SetCatalogs(mono, map[string][]CatalogEntry{mono: {}, backend: {e}, frontend: {e}, folder: {}, filepath.Join(folder, "svc"): {e}})
+	s.Debounce = 10 * time.Millisecond
+	s.IdleAfter = time.Hour
+	inMono, inFolder := [16]byte{1}, [16]byte{2}
+	s.WorktreeFor = func(sid [16]byte) string {
+		if sid == inMono {
+			return mono
+		}
+		return folder
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+	for _, sid := range [][16]byte{inMono, inFolder} {
+		s.NoteToolUse(sid, testTask)
+		sctx, scancel := context.WithTimeout(ctx, 5*time.Second)
+		s.Settle(sctx, sid, testTask)
+		scancel()
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	sort.Strings(ran)
+	if len(ran) != 2 || ran[0] != backend || ran[1] != frontend {
+		t.Fatalf("worktrees run %v, want the monorepo's two projects and nothing under the folder", ran)
 	}
 }
 
