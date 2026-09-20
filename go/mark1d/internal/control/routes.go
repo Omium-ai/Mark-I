@@ -796,7 +796,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 }
 
 // anchorRow renders one candidate; worktree is the repository below the project it was derived in, "" for the project itself.
-func anchorRow(c anchors.Candidate, worktree string, lastRun map[string]string) map[string]any {
+func anchorRow(c anchors.Candidate, worktree string, lastRun, lastCode map[string]string) map[string]any {
 	row := map[string]any{
 		"id": c.ID, "tool": c.Tool, "version": c.ToolVersion, "side_effect": c.SideEffect,
 		"consented": c.Consented, "exec_hash": c.ExecHash, "latency_class": c.Class, "last_run": nil, "worktree": worktree,
@@ -806,6 +806,9 @@ func anchorRow(c anchors.Candidate, worktree string, lastRun map[string]string) 
 	}
 	if at, ok := lastRun[c.ID]; ok {
 		row["last_run"] = at
+	}
+	if code := lastCode[c.ID]; code != "" {
+		row["last_code"] = code // the newest vote's diagnostic_code (sandbox_denied, tool_error, TS2304, …): why a run did not simply pass
 	}
 	return row
 }
@@ -828,7 +831,7 @@ func (s *Server) anchorRows(project string) ([]map[string]any, error) {
 		return nil, err
 	}
 	rows := []map[string]any{}
-	lastRun := s.hub.lastRuns()
+	lastRun, lastCode := s.hub.lastRuns(), s.hub.lastCodes()
 	for _, ws := range c.Workspaces {
 		if project != "" && !anchors.Within(project, ws.Path) {
 			continue
@@ -838,7 +841,7 @@ func (s *Server) anchorRows(project string) ([]map[string]any, error) {
 			worktree, _ = filepath.Rel(project, ws.Path)
 		}
 		for _, a := range ws.Anchors {
-			rows = append(rows, anchorRow(a, worktree, lastRun))
+			rows = append(rows, anchorRow(a, worktree, lastRun, lastCode))
 		}
 	}
 	return rows, nil

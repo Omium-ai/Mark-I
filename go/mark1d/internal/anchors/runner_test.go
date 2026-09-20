@@ -462,6 +462,11 @@ func TestParsers(t *testing.T) {
 		{KindGoVet, RunResult{ExitCode: 1, Stderr: []byte("# x\n./main.go:3:2: unreachable code")}, m1pv1.Verdict_VERDICT_VIOLATED, "", 1, 0},
 		{KindEslint, RunResult{ExitCode: 1, Stdout: []byte(`[{"filePath":"/w/a.js","errorCount":2,"warningCount":1,"messages":[{"ruleId":"no-unused-vars","severity":2}]}]`)}, m1pv1.Verdict_VERDICT_VIOLATED, "no-unused-vars", 2, 1},
 		{KindEslint, RunResult{ExitCode: 2, Stdout: []byte("Oops! Something went wrong!")}, m1pv1.Verdict_VERDICT_ERROR, "tool_error", 0, 0},
+		// libtest's classic and terse (1.90+) failure lines both count; the `failures:` summary does not.
+		{KindCargoTest, RunResult{ExitCode: 101, Stdout: []byte("test a::b ... FAILED\nc::d --- FAILED\n\nfailures:\n    a::b\n    c::d\n\ntest result: FAILED. 0 passed; 2 failed")}, m1pv1.Verdict_VERDICT_VIOLATED, "test_failed", 2, 0},
+		// A suite the sandbox cannot host (a socket bind refused) is infra, never the change's fault.
+		{KindCargoTest, RunResult{ExitCode: 101, Stdout: []byte("x --- FAILED\nthread 'x' panicked: called `Result::unwrap()` on an `Err` value: Os { code: 13, kind: PermissionDenied, message: \"Permission denied\" }")}, m1pv1.Verdict_VERDICT_ERROR, "sandbox_denied", 1, 0},
+		{KindGoTest, RunResult{ExitCode: 1, Stderr: []byte("listen unix /tmp/x.sock: bind: permission denied\nFAIL\tpkg\t0.1s")}, m1pv1.Verdict_VERDICT_ERROR, "sandbox_denied", 0, 0},
 		// Scoped plugin rule ids are legitimate vocabulary and pass through.
 		{KindEslint, RunResult{ExitCode: 1, Stdout: []byte(`[{"filePath":"/w/a.ts","errorCount":1,"warningCount":0,"messages":[{"ruleId":"@typescript-eslint/no-explicit-any","severity":2}]}]`)}, m1pv1.Verdict_VERDICT_VIOLATED, "@typescript-eslint/no-explicit-any", 1, 0},
 		// A repo-controlled plugin names its own rules: free text (paths,
@@ -1080,5 +1085,53 @@ func TestTouchedSetDistinguishesCleanFromUnknown(t *testing.T) {
 	}
 	if s := (diffFacts{known: true, paths: []string{"a/b.py", "dir/"}}).touchedSet(); !s["a/b.py"] || !s["dir"] {
 		t.Fatalf("paths lost: %v", s)
+	}
+}
+
+// A test suite the sandbox cannot host (its last run said sandbox_denied) is not owed again for an hour: it fails the same way every Stop and costs minutes each time. A suite that merely failed is owed as before.
+func TestSchedulerSuspendsASandboxDeniedSuite(t *testing.T) {
+	e, wt := enabledRuff(t)
+	slow := e
+	slow.ID, slow.Kind, slow.Tool, slow.Class = "cargo-test@cat-1", KindCargoTest, "cargo-test", ClassSlow
+	slow.SideEffect = SideEffectTest
+	slow.Argv = []string{e.Argv[0], "test"}
+	out := "x --- FAILED\nthread 'x' panicked: Os { code: 13, kind: PermissionDenied, message: \"Permission denied\" }"
+	sb := &fakeSandbox{run: func(spec RunSpec) (RunResult, error) {
+		if spec.Argv[1] == "test" {
+			return RunResult{ExitCode: 101, Stdout: []byte(out)}, nil
+		}
+		return RunResult{ExitCode: 0}, nil
+	}}
+	s := NewScheduler(NewRunner(sb, &fakeEmitter{}, nil, true), []CatalogEntry{slow}, consentFor(t, slow), wt, nil)
+	s.IdleAfter = time.Hour
+	if got := s.slowOrder(wt); len(got) != 1 {
+		t.Fatalf("a never-run suite is owed: %v", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+	s.NoteToolUse(testSession, testTask)
+	sctx, scancel := context.WithTimeout(ctx, 5*time.Second)
+	s.Settle(sctx, testSession, testTask)
+	scancel()
+	if s.runner.LastCode(wt, slow.ID) != "sandbox_denied" {
+		t.Fatalf("last code: %q", s.runner.LastCode(wt, slow.ID))
+	}
+	if got := s.slowOrder(wt); len(got) != 0 {
+		t.Fatalf("a sandbox-denied suite must be suspended, still owed: %v", got)
+	}
+	s.mu.Lock()
+	s.lastAt[wt+"\x00"+slow.ID] = time.Now().Add(-2 * suspendFor)
+	s.mu.Unlock()
+	if got := s.slowOrder(wt); len(got) != 1 {
+		t.Fatalf("after the suspension the suite is owed again: %v", got)
+	}
+	out = "y --- FAILED\nassertion failed: left == right"
+	s.NoteToolUse(testSession, testTask)
+	sctx, scancel = context.WithTimeout(ctx, 5*time.Second)
+	s.Settle(sctx, testSession, testTask)
+	scancel()
+	if got := s.slowOrder(wt); len(got) != 1 {
+		t.Fatalf("a genuinely failing suite is owed as before: %v", got)
 	}
 }

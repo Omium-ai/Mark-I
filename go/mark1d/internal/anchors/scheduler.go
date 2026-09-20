@@ -64,8 +64,12 @@ type Scheduler struct {
 	dirty        map[taskKey]map[string]bool // slow work owed since last idle drain, by the task's worktrees
 	inflight     map[taskKey]int             // runs queued or executing, what Settle waits on
 	lastTook     map[string]time.Duration    // per anchor, its newest run's wall time: the slow queue's order
+	lastAt       map[string]time.Time        // per worktree+anchor, when its newest run finished: the suspension clock
 	work         chan workItem
 }
+
+// suspendFor: a slow anchor whose newest run the sandbox denied (sandbox_denied) is not owed again for this long — a suite that binds sockets fails the same way every Stop and costs minutes of CPU each time.
+const suspendFor = time.Hour
 
 type workItem struct {
 	entry    CatalogEntry
@@ -294,9 +298,14 @@ func (s *Scheduler) slowOrder(wt string) []CatalogEntry {
 	defer s.mu.Unlock()
 	var slow []CatalogEntry
 	for _, e := range s.catalogs[wt] {
-		if e.Class == ClassSlow {
-			slow = append(slow, e)
+		if e.Class != ClassSlow {
+			continue
 		}
+		if s.runner.LastCode(wt, e.ID) == "sandbox_denied" && time.Since(s.lastAt[wt+"\x00"+e.ID]) < suspendFor {
+			s.log.Info("anchors: suspended, the sandbox denied what its last run needed", "anchor", e.ID, "worktree", wt, "retry_in", suspendFor.String())
+			continue
+		}
+		slow = append(slow, e)
 	}
 	// never run ⇒ static checks before test suites: the one prior a fresh daemon has
 	sort.SliceStable(slow, func(i, j int) bool {
@@ -348,6 +357,10 @@ func (s *Scheduler) runItem(ctx context.Context, w workItem) {
 	}
 	s.mu.Lock()
 	s.lastTook[w.entry.ID] = time.Since(start)
+	if s.lastAt == nil {
+		s.lastAt = map[string]time.Time{}
+	}
+	s.lastAt[w.worktree+"\x00"+w.entry.ID] = time.Now()
 	s.mu.Unlock()
 }
 

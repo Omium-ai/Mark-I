@@ -84,7 +84,7 @@ var (
 	eslintRuleRe = regexp.MustCompile(`^(@[a-z0-9-]+/)?([a-z0-9-]+/)?[a-z0-9-]+$`)
 	// Test runners: one failed test per matching line; no file, no per-test code.
 	goTestFailRe    = regexp.MustCompile(`^--- FAIL: `)
-	cargoTestFailRe = regexp.MustCompile(`^test \S+ \.\.\. FAILED$`)
+	cargoTestFailRe = regexp.MustCompile(`^(test \S+ \.\.\. FAILED|\S+ --- FAILED)$`) // libtest's classic and terse (1.90+) failure lines
 	pytestFailRe    = regexp.MustCompile(`^FAILED \S`)
 	npmTestFailRe   = regexp.MustCompile(`^(not ok \d+|[✕✗×] )`)
 )
@@ -182,6 +182,10 @@ func lineHandler(tool string, cat m1pv1.EvidenceCategory, parse func(string) (di
 		switch {
 		case res.ExitCode == 0:
 			return m1pv1.Verdict_VERDICT_SATISFIED, ev
+		case sandboxDenied(res):
+			// The run needed something the sandbox denies (a socket bind, a network call): infra, never the change's fault (F-31), even when the tool also reports failures — those are the denial's.
+			ev.DiagnosticCode = "sandbox_denied"
+			return m1pv1.Verdict_VERDICT_ERROR, ev
 		case errs > 0:
 			return m1pv1.Verdict_VERDICT_VIOLATED, ev
 		case baseline > 0:
@@ -192,6 +196,12 @@ func lineHandler(tool string, cat m1pv1.EvidenceCategory, parse func(string) (di
 			return m1pv1.Verdict_VERDICT_ERROR, ev
 		}
 	}
+}
+
+var sandboxDeniedRe = regexp.MustCompile(`(?i)permission denied|operation not permitted|PermissionDenied|EACCES|EPERM|network is unreachable|address family not supported`)
+
+func sandboxDenied(res RunResult) bool {
+	return sandboxDeniedRe.Match(res.Stdout) || sandboxDeniedRe.Match(res.Stderr)
 }
 
 // eslintHandler parses `eslint --format json` (a JSON array on stdout) rather
@@ -287,8 +297,9 @@ type Runner struct {
 	// OnDropped receives the Dropped{reason} accounting for an excerpt refused at the door (wired to capture.AccountDropped); nil is legal.
 	OnDropped func(reason string)
 
-	mu      sync.Mutex
-	l0roots map[string][]byte // per worktree ("" = the single-root form): latest cortexd L0 root; absent ⇒ integrity incomplete
+	mu       sync.Mutex
+	l0roots  map[string][]byte // per worktree ("" = the single-root form): latest cortexd L0 root; absent ⇒ integrity incomplete
+	lastCode map[string]string // per worktree+anchor, the newest vote's diagnostic_code: the scheduler's suspension signal
 	// signer mints AnchorVote.signature (verify.proto field 5, founder ruling
 	// 2026-09-16); nil ⇒ votes stay unsigned, the same fail-soft posture
 	// receipt sealing already has with no enrolled device key.
@@ -450,6 +461,12 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 		}
 	}
 	integrity.DiffClassification, integrity.SuppressionDirectiveDelta = d.class, d.delta
+	r.mu.Lock()
+	if r.lastCode == nil {
+		r.lastCode = map[string]string{}
+	}
+	r.lastCode[worktree+"\x00"+e.ID] = evidence.GetDiagnosticCode()
+	r.mu.Unlock()
 	// Raw evidence stays on this device; a failed local write never fails the vote.
 	_, _ = r.Evidence.Put(task, e.ID, stdout, stderr, d.raw)
 
@@ -470,6 +487,13 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 		Body:       &m1pv1.Event_AnchorVote{AnchorVote: av},
 	}
 	return r.emit.Admit(ctx, ev)
+}
+
+// LastCode is the diagnostic_code of the newest vote this Runner cast for (worktree, anchor); "" when none.
+func (r *Runner) LastCode(worktree, id string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastCode[worktree+"\x00"+id]
 }
 
 func (r *Runner) currentL0Root(worktree string) []byte {

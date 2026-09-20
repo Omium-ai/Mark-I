@@ -63,6 +63,7 @@ type Hub struct {
 	verify      []map[string]any  // GET /v1/verify/events rows, arrival order
 	checkpoints []map[string]any  // GET /v1/receipts rows, arrival order
 	lastRun     map[string]string // anchor id -> occurred_at of its newest vote since boot
+	lastCode    map[string]string // anchor id -> diagnostic_code of its newest vote since boot ("" when clean)
 	// spend sizes the verify plane's savings estimates: the newest request's tokens per session (what a follow-up request re-reads) and each task's running total (an attempt's mean cost).
 	lastRequest map[[16]byte]uint64
 	taskTokens  map[[16]byte]uint64
@@ -122,7 +123,7 @@ func (h *Hub) SetSessionResolver(f func(id uuid.UUID) (agent, root string, ok bo
 }
 
 func NewHub() *Hub {
-	return &Hub{subs: map[chan frame]struct{}{}, sessions: map[[16]byte]*LiveSession{}, cwds: map[[16]byte]string{}, lastRun: map[string]string{}, lastRequest: map[[16]byte]uint64{}, taskTokens: map[[16]byte]uint64{}}
+	return &Hub{subs: map[chan frame]struct{}{}, sessions: map[[16]byte]*LiveSession{}, cwds: map[[16]byte]string{}, lastRun: map[string]string{}, lastCode: map[string]string{}, lastRequest: map[[16]byte]uint64{}, taskTokens: map[[16]byte]uint64{}}
 }
 
 // EstimateBlock is what a Stop the gate refused saved: the follow-up request the human would have sent re-reads the context, so one request at this session's newest size. 0 when no usage has been seen.
@@ -304,6 +305,7 @@ func (h *Hub) track(ev *m1pv1.Event) {
 	switch b := ev.GetBody().(type) {
 	case *m1pv1.Event_AnchorVote:
 		h.lastRun[b.AnchorVote.GetAnchorId()] = eventTime(ev)
+		h.lastCode[b.AnchorVote.GetAnchorId()] = b.AnchorVote.GetEvidence().GetDiagnosticCode()
 	case *m1pv1.Event_ReceiptCheckpoint:
 		cp := b.ReceiptCheckpoint
 		h.checkpoints = ring(append(h.checkpoints, map[string]any{
@@ -460,6 +462,12 @@ func (h *Hub) lastRuns() map[string]string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return maps.Clone(h.lastRun)
+}
+
+func (h *Hub) lastCodes() map[string]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return maps.Clone(h.lastCode)
 }
 
 func (h *Hub) verifyEvents() []map[string]any {
