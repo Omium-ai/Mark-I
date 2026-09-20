@@ -233,6 +233,9 @@ func (m *Module) run(w http.ResponseWriter, r *http.Request, q Query) (*Rows, bo
 		writeErr(w, http.StatusInternalServerError, "M1E-9500", "query execution failed")
 		return nil, false
 	}
+	if rows == nil {
+		rows = &Rows{}
+	}
 	return rows, true
 }
 

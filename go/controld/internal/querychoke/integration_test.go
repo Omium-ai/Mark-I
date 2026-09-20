@@ -303,7 +303,7 @@ func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID
 	if err := conn.InsertRows(ctx, "m1p_events", guardCols, [][]any{
 		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(3), uint32(1),
 			device, "GuardDecision", "route", "claudecode", uint64(0), uint64(0), "quota",
-			task, `{"decision":"block","tokens_saved_estimate":1200}`, uint64(483)},
+			task, `{"outcome":"GUARD_OUTCOME_ARRESTED","reason_code":"knee_arrest","tokens_saved_estimate":1200,"attempt":3}`, uint64(483)},
 	}); err != nil {
 		t.Fatalf("seed guard decision: %v", err)
 	}

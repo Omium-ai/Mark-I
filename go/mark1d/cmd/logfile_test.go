@@ -17,9 +17,11 @@ func TestLogFileRotatesOncePastEightMiB(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(state, "logs", "mark1d.log"), make([]byte, 9<<20), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := openLogFile(state); err != nil {
+	f2, err := openLogFile(state)
+	if err != nil {
 		t.Fatal(err)
 	}
+	_ = f2.Close() // Windows cannot remove an open file at cleanup
 	if _, err := os.Stat(filepath.Join(state, "logs", "mark1d.log.1")); err != nil {
 		t.Fatal("the full log was not rotated aside:", err)
 	}
