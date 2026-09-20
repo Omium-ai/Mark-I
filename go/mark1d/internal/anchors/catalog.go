@@ -12,9 +12,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 
 	"lukechampine.com/blake3"
 )
@@ -321,7 +324,7 @@ func Explain(sb Sandbox, worktree string) (Derivation, error) {
 			miss(d, "tests are off for this project")
 			continue
 		}
-		bin, err := exec.LookPath(d.binary)
+		bin, err := lookBinary(d.binary, abs)
 		if err != nil {
 			miss(d, d.binary+" is not on PATH") // config present, tool absent: not derivable
 			continue
@@ -387,6 +390,34 @@ func Explain(sb Sandbox, worktree string) (Derivation, error) {
 // gets a smaller privilege, not a waiver" rule as 04 §11.5. The sandbox's
 // refusal is returned so Derive can tell it from a tool that merely failed.
 func trimExe(name string) string { return strings.TrimSuffix(strings.ToLower(name), ".exe") }
+
+// lookBinary is exec.LookPath plus where tools live when the daemon's PATH is a desktop launcher's (adapters.LookPath: nvm, ~/.local/bin, Homebrew …), the compilers' own homes, and the worktree's own environment — uv's .venv/bin (ruff, pytest) and node_modules/.bin (eslint, tsc), which is where most repos keep them. A repo-local binary is fine here because the sniff and every run happen inside the sandbox and consent shows the path.
+var lookBinary = lookBinaryEverywhere
+
+// lookBinaryEverywhere is lookBinary's production body; the tests' TestMain pins lookBinary to the fake PATH alone.
+func lookBinaryEverywhere(name, worktree string) (string, error) {
+	home, _ := os.UserHomeDir()
+	if p, err := adapters.LookPath(name, home); err == nil {
+		return p, nil
+	}
+	dirs := []string{
+		filepath.Join(worktree, ".venv", "bin"),
+		filepath.Join(worktree, ".venv", "Scripts"),
+		filepath.Join(worktree, "node_modules", ".bin"),
+		filepath.Join(home, ".cargo", "bin"),
+		filepath.Join(home, "go", "bin"),
+		"/usr/local/go/bin",
+	}
+	if runtime.GOOS == "windows" {
+		dirs = append(dirs, filepath.Join(os.Getenv("ProgramFiles"), "Go", "bin"))
+	}
+	for _, d := range dirs {
+		if p, err := exec.LookPath(filepath.Join(d, name)); err == nil {
+			return p, nil
+		}
+	}
+	return "", exec.ErrNotFound
+}
 
 // goRoot: a module, or a workspace of modules — `go vet ./...` at a go.work root covers every module it uses (the monorepo shape, where go.mod sits under go/<service>/).
 func goRoot(wt string) bool {

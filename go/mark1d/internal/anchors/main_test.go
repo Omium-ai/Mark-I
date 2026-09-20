@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -66,6 +67,7 @@ func printVersionSidecar() {
 var extraProbes = map[string]func() int{}
 
 func TestMain(m *testing.M) {
+	lookBinary = func(name, _ string) (string, error) { return exec.LookPath(name) } // the fake PATH is the whole world here
 	// Helper stage first: the sandbox parent re-execs this binary with the
 	// helper spec env var; MaybeRunHelper never returns in that mode.
 	MaybeRunHelper()
