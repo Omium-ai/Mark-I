@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // The compiler anchors run offline with their module caches where the user keeps them and their build cache in the daemon's dir; a linter gets nothing extra.
@@ -92,5 +93,30 @@ func TestSolutionTsconfigUsesBuildMode(t *testing.T) {
 	}
 	if got := detectors[KindTsc].argvFor("/r/node_modules/.bin/tsc", wt); len(got) != 4 || got[1] != "--noEmit" {
 		t.Fatalf("plain tsconfig argv %v", got)
+	}
+}
+
+// A scratch dir a stopped daemon left behind is swept at boot; a fresh one (a run in flight now) is not.
+func TestSweepScratchRemovesOnlyStaleRunDirs(t *testing.T) {
+	root := t.TempDir()
+	stale := filepath.Join(root, "anchor-scratch-1")
+	fresh := filepath.Join(root, "anchor-scratch-2")
+	keep := filepath.Join(root, "cache")
+	for _, d := range []string{stale, fresh, keep} {
+		if err := os.MkdirAll(filepath.Join(d, "x"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if n := SweepScratch(root); n != 1 {
+		t.Fatalf("swept %d, want 1", n)
+	}
+	for d, want := range map[string]bool{stale: false, fresh: true, keep: true} {
+		if _, err := os.Stat(d); (err == nil) != want {
+			t.Fatalf("%s present=%v, want %v", d, err == nil, want)
+		}
 	}
 }

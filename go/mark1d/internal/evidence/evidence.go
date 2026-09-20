@@ -27,7 +27,49 @@ func Open(stateDir string) (*Store, error) {
 	return &Store{dir: dir, state: stateDir}, nil
 }
 
-// Put files one run as <dir>/<task hex>/<anchor id>-<ns>/{stdout,stderr,diff} (0600, empty parts skipped); ponytail: no retention, age out by mtime when disk notices.
+// Retention is the founder's 30 d ruling (2026-09-16): a run older than that is swept at boot, and a task dir left empty with it.
+const Retention = 30 * 24 * time.Hour
+
+// Sweep removes runs older than Retention and the task dirs they empty; the count of runs removed is returned for the log.
+func (s *Store) Sweep(now time.Time) int {
+	if s == nil {
+		return 0
+	}
+	tasks, err := os.ReadDir(s.dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, t := range tasks {
+		if !t.IsDir() {
+			continue
+		}
+		dir := filepath.Join(s.dir, t.Name())
+		runs, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		left := 0
+		for _, r := range runs {
+			info, err := r.Info()
+			if err != nil {
+				left++
+				continue
+			}
+			if now.Sub(info.ModTime()) > Retention && os.RemoveAll(filepath.Join(dir, r.Name())) == nil {
+				n++
+				continue
+			}
+			left++
+		}
+		if left == 0 {
+			_ = os.Remove(dir)
+		}
+	}
+	return n
+}
+
+// Put files one run as <dir>/<task hex>/<anchor id>-<ns>/{stdout,stderr,diff} (0600, empty parts skipped).
 func (s *Store) Put(task [16]byte, anchorID string, stdout, stderr, diff []byte) (string, error) {
 	if s == nil {
 		return "", nil

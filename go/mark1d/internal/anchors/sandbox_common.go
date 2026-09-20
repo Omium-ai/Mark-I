@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // helperSpecEnv carries the run spec into the re-exec'd helper. It is the
@@ -31,6 +32,27 @@ func prepare(scratchRoot string, spec RunSpec) (scratch string, env []string, li
 	sort.Strings(env)
 	// TMPDIR too: go's work dir and rustc's temps land in the one place the sandbox lets them write
 	return scratch, withDefault(withDefault(env, "HOME", scratch), "TMPDIR", scratch), defaultedLimits(spec.Limits), nil
+}
+
+// SweepScratch removes per-run scratch dirs a previous daemon left behind (a run in flight when it was stopped never reached its RemoveAll): every anchor-scratch-* under root older than an hour. Boot-time; the count is returned for the log.
+func SweepScratch(root string) int {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "anchor-scratch-") {
+			continue
+		}
+		if info, err := e.Info(); err != nil || time.Since(info.ModTime()) < time.Hour {
+			continue
+		}
+		if os.RemoveAll(filepath.Join(root, e.Name())) == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // writableRoots is the write set every sandbox grants: the worktree, the per-run scratch and, when the anchor has one, its daemon-owned build cache.

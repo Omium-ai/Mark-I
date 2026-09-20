@@ -628,6 +628,9 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		_ = sp.Close()
 		return err
 	}
+	if n := anchors.SweepScratch(scratch); n > 0 {
+		log.Info("mark1d: stale anchor scratch swept", "dirs", n)
+	}
 	sb := anchors.NewSandbox(scratch)
 	// The anchor→fusion tee. It wraps the ONE Admitter, so a vote reaches
 	// fusion through the same door it reaches the spool through — no second
@@ -794,6 +797,9 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	if runner.Evidence, err = evidence.Open(cfg.stateDir); err != nil {
 		_ = sp.Close()
 		return err
+	}
+	if n := runner.Evidence.Sweep(time.Now()); n > 0 {
+		log.Info("mark1d: evidence past retention swept", "runs", n, "retention", evidence.Retention)
 	}
 	for _, root := range cxRoots {
 		root := root
