@@ -540,9 +540,10 @@ func TestIntegrationTvoTaskWindowCarriesThePreWindowOpener(t *testing.T) {
 	ctx := context.Background()
 	tenant := uuid.New()
 	session, device := uuid.Must(uuid.NewV7()), uuid.New()
-	straddling, stale := uuid.New(), uuid.New()
+	straddling, stale, replayed := uuid.New(), uuid.New(), uuid.New()
 	day0 := time.Date(2026, 8, 27, 23, 50, 0, 0, time.UTC)
 	day1 := time.Date(2026, 8, 28, 0, 10, 0, 0, time.UTC)
+	day2 := time.Date(2026, 8, 29, 2, 23, 0, 0, time.UTC)
 	cols := []string{
 		"tenant_id", "occurred_at", "session_id", "event_id", "seq", "session_epoch",
 		"device_id", "event_type", "event_class", "agent", "input_tokens", "output_tokens", "cost_basis", "task_id", "payload",
@@ -552,6 +553,9 @@ func TestIntegrationTvoTaskWindowCarriesThePreWindowOpener(t *testing.T) {
 		{tenant, day1, session, uuid.Must(uuid.NewV7()), uint64(2), uint32(1), device, "Usage", "billing", "claudecode", uint64(70), uint64(5), "quota", straddling, `{}`},
 		{tenant, day0, session, uuid.Must(uuid.NewV7()), uint64(3), uint32(1), device, "TaskOpen", "diagnostic", "claudecode", uint64(0), uint64(0), "quota", stale, `{"task_seg_version":"task_seg.v1"}`},
 		{tenant, day0, session, uuid.Must(uuid.NewV7()), uint64(4), uint32(1), device, "Usage", "billing", "claudecode", uint64(9), uint64(1), "quota", stale, `{}`},
+		// history a first tail replayed on day 1 under a task opened on day 2 (before taskseg left such usage unaddressed): the opener the day after still names the version
+		{tenant, day1, session, uuid.Must(uuid.NewV7()), uint64(5), uint32(1), device, "Usage", "billing", "claudecode", uint64(20), uint64(0), "quota", replayed, `{}`},
+		{tenant, day2, session, uuid.Must(uuid.NewV7()), uint64(6), uint32(1), device, "TaskOpen", "diagnostic", "claudecode", uint64(0), uint64(0), "quota", replayed, `{"task_seg_version":"task_seg.v1"}`},
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -568,12 +572,15 @@ func TestIntegrationTvoTaskWindowCarriesThePreWindowOpener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows.Rows) != 1 {
-		t.Fatalf("day 1 attempt window: %d rows, want the straddling task alone: %v", len(rows.Rows), rows.Rows)
+	if len(rows.Rows) != 2 {
+		t.Fatalf("day 1 attempt window: %d rows, want the straddling and the replayed task: %v", len(rows.Rows), rows.Rows)
 	}
-	r := rows.Rows[0]
-	if fmt.Sprint(r["task_id"]) != straddling.String() || fmt.Sprint(r["task_seg_version"]) != "task_seg.v1" || asU64(r["gen_tokens"]) != 75 {
-		t.Fatalf("straddling task row %v: want its opener's task_seg_version and day-1 tokens only", r)
+	want := map[string]uint64{straddling.String(): 75, replayed.String(): 20}
+	for _, r := range rows.Rows {
+		tokens, ok := want[fmt.Sprint(r["task_id"])]
+		if !ok || fmt.Sprint(r["task_seg_version"]) != "task_seg.v1" || asU64(r["gen_tokens"]) != tokens {
+			t.Fatalf("row %v: want its opener's task_seg_version and day-1 tokens only (%v)", r, want)
+		}
 	}
 }
 

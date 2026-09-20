@@ -235,9 +235,9 @@ ORDER BY day, session_id`,
 	},
 	{
 		// reader.py attempt_window over [from, to): 07's attempt = span between stage-final verdicts in (session_epoch, seq) order, tail folded into the last verdicted attempt; verifier_tokens 0 (no witness row exists); task_seg_version lifted from the TaskOpen payload.
-		// A task opened before the window whose attempts continue into it (the ADR-0001 midnight split at task grain) carries its TaskOpen — and so its task_seg_version — from up to seven days back, for tasks the window holds rows for; reader.py refused the whole day by name otherwise (the founder's every hourly rollup since 03:00).
+		// A task opened before the window whose attempts continue into it (the ADR-0001 midnight split at task grain) carries its TaskOpen — and so its task_seg_version — from up to seven days back, and one opened the day after (usage a first tail replayed from history under the task open at import time, before taskseg left such usage unaddressed) from one day ahead, for tasks the window holds rows for; reader.py refused the whole day by name otherwise (the founder's every hourly rollup since 03:00).
 		name:    "tvo_task_window",
-		version: "tvo_task_window.v2",
+		version: "tvo_task_window.v3",
 		body: `SELECT e.task_id AS task_id,
        e.attempt_n AS attempt_n,
        sum(e.input_tokens + e.output_tokens + e.cache_creation_input_tokens + e.cache_read_input_tokens) AS gen_tokens,
@@ -256,14 +256,13 @@ FROM (SELECT task_id, session_epoch, seq, verdict, verdict_stage, cost_usd, even
              max(JSONExtractString(payload, 'task_seg_version')) OVER (PARTITION BY task_id) AS task_seg_version,
              countIf(in_window AND event_type != 'TaskOpen') OVER (PARTITION BY task_id) AS live_rows
       FROM (SELECT event_id, task_id, session_epoch, seq, verdict, verdict_stage, cost_usd, payload, event_type,
-                   toDate(occurred_at) >= {from:Date} AS in_window,
+                   toDate(occurred_at) >= {from:Date} AND toDate(occurred_at) < {to:Date} AS in_window,
                    input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
             FROM m1p_events
             WHERE {{tenant_pred}}
               AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
-              AND toDate(occurred_at) < {to:Date}
-              AND ((event_type IN ('Usage', 'VerdictEvent', 'TaskOpen') AND toDate(occurred_at) >= {from:Date})
-                OR (event_type = 'TaskOpen' AND toDate(occurred_at) >= {from:Date} - INTERVAL 7 DAY))
+              AND ((event_type IN ('Usage', 'VerdictEvent', 'TaskOpen') AND toDate(occurred_at) >= {from:Date} AND toDate(occurred_at) < {to:Date})
+                OR (event_type = 'TaskOpen' AND toDate(occurred_at) >= {from:Date} - INTERVAL 7 DAY AND toDate(occurred_at) < {to:Date} + INTERVAL 1 DAY))
             LIMIT 1 BY event_id) AS d) AS e
 WHERE e.in_window OR (e.event_type = 'TaskOpen' AND e.live_rows > 0)
 GROUP BY e.task_id, e.attempt_n
