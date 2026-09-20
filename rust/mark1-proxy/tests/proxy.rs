@@ -1836,17 +1836,26 @@ async fn tls_request(
     );
     tls.write_all(head.as_bytes()).await?;
     // A refusal is written and the connection closed on the head alone; on Windows the body write
-    // that follows can meet the RST (WSAECONNABORTED) before the response is read. The response is
-    // still there: read it, and let read_until_close judge an abort with no head in hand.
-    if let Err(e) = tls.write_all(body).await {
-        if !matches!(
-            e.kind(),
-            std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
-        ) {
-            return Err(e);
+    // that follows meets the RST (WSAECONNABORTED) and the kernel discards the unread response
+    // with it. So give a head-only answer a moment to land first; only when nothing came does the
+    // body go out (an accepted request waits for it), tolerating a late abort as before.
+    let mut raw = Vec::new();
+    let mut probe = [0u8; 4096];
+    match tokio::time::timeout(Duration::from_millis(250), tls.read(&mut probe)).await {
+        Ok(Ok(n)) if n > 0 => raw.extend_from_slice(&probe[..n]),
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            if let Err(e) = tls.write_all(body).await {
+                if !matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
+                ) {
+                    return Err(e);
+                }
+            }
         }
     }
-    let mut raw = Vec::new();
     read_until_close(&mut tls, &mut raw).await?;
     let split = raw
         .windows(4)
