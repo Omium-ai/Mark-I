@@ -372,14 +372,43 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A rollup is missing for a CLOSED day that had billing rows and no rollup row. Today never has one yet, a day before the tenant existed or a quiet weekend has nothing to roll up — counting those refused every report of every tenant by construction ("rollup missing for 1 day" on the day itself).
+	// Open days (live.go) fold in beside the closed rows; a quiet open day is no day.
+	now := time.Now().UTC()
+	var liveDays []string
+	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
+		day := d.Format(time.DateOnly)
+		if daysSeen[day] || rollupClosed(d, now) {
+			continue
+		}
+		lt, ok := m.liveDay(w, r, tid, d)
+		if !ok {
+			return
+		}
+		if lt.empty() {
+			continue
+		}
+		daysSeen[day] = true
+		liveDays = append(liveDays, day)
+		tokensTotal += lt.tokens
+		verified += lt.verified
+		retryLoop += lt.retryLoop
+		observed += lt.observed
+		bypass += lt.bypass
+		disabled += lt.disabled
+		perDayTokens[day] = lt.tokens
+		perDayVerified[day] = lt.verified
+		if lt.segVersion > segVersion {
+			segVersion = lt.segVersion
+		}
+	}
+
+	// A rollup is missing for a CLOSED day that had billing rows and no rollup row. A day before the tenant existed or a quiet weekend has nothing to roll up — counting those refused every report of every tenant by construction ("rollup missing for 1 day" on the day itself).
 	var missingDays []string
 	trend := []map[string]any{}
-	today := time.Now().UTC().Format(time.DateOnly)
 	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
 		day := d.Format(time.DateOnly)
 		if !daysSeen[day] {
-			if day < today && billingByDay[day] > 0 {
+			if rollupClosed(d, now) && billingByDay[day] > 0 {
 				missingDays = append(missingDays, day)
 			}
 			continue
@@ -439,6 +468,9 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	if len(missingDays) > 0 {
 		refusals = append(refusals, fmt.Sprintf("M1E-5004 rollup missing for %d day(s) in window", len(missingDays)))
 	}
+	if len(liveDays) > 0 {
+		refusals = append(refusals, fmt.Sprintf("M1E-5004 %d open day(s) reported live from the ledger, not a closed rollup", len(liveDays)))
+	}
 	refusals = append(refusals, guaranteeRefusals(covLower, verified, certified, costBasis, pricePinned, shadowConfirmed)...)
 
 	resp := map[string]any{
@@ -467,6 +499,9 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(missingDays) > 0 {
 		resp["missing_days"] = missingDays
+	}
+	if len(liveDays) > 0 {
+		resp["live_days"] = liveDays
 	}
 	if len(refusals) > 0 {
 		// report.py to_body(): one refusal field, reasons joined "; ".

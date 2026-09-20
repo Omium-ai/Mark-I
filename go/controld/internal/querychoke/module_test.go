@@ -39,8 +39,11 @@ func (f *fakeRunner) Run(_ context.Context, q Query) (*Rows, error) {
 	if r, ok := f.byTemplate[q.Template().Name()]; ok {
 		return r, nil
 	}
-	if q.Template().Name() == "certified_outcomes" {
+	switch q.Template().Name() {
+	case "certified_outcomes":
 		return &Rows{Rows: []map[string]any{{"certified": uint64(1)}}}, nil // a certified tenant unless a test says otherwise
+	case "tvo_task_window", "coverage_band":
+		return &Rows{}, nil // live open-day reads: quiet unless a test cans them
 	}
 	return f.rows, nil
 }
@@ -546,5 +549,62 @@ func TestServiceQuerySurface(t *testing.T) {
 	}
 	if run.last.Template().Name() != "tvo_task_window" || run.last.Bind()["tid"] != tenant.String() {
 		t.Fatalf("executed %s for tenant %v", run.last.Template().Name(), run.last.Bind()["tid"])
+	}
+}
+
+func TestTVOReportOpenDayRendersLive(t *testing.T) {
+	now := time.Now().UTC()
+	today := now.Format(time.DateOnly)
+	// Bootstrap rows: the Chow band says refused, the posterior mode says satisfied (v4 p_* columns); attempt 2 follows a violated attempt 1 → its tokens are retry-loop waste.
+	att := func(task string, n uint64, tokens uint64, word string, pS, pV float64) map[string]any {
+		return map[string]any{
+			"task_id": task, "attempt_n": n, "gen_tokens": tokens, "verifier_tokens": uint64(0),
+			"fused_verdict": word, "verdict_stage": "revised", "task_seg_version": "task_seg.v1",
+			"p_satisfied": pS, "p_violated": pV, "p_refused": 0.04, "p_error": 0.02,
+		}
+	}
+	run := &fakeRunner{
+		rows: &Rows{}, // no rollup row: today is open
+		byTemplate: map[string]*Rows{
+			"dropped_by_tenant_day": {Rows: []map[string]any{{"day": today, "dropped_billing": uint64(0), "events_billing_ingested": uint64(100)}}},
+			"tvo_task_window": {Rows: []map[string]any{
+				att("a", 1, 100, "violated", 0.29, 0.55),
+				att("a", 2, 50, "refused", 0.71, 0.23),
+				att("b", 1, 150, "refused", 0.68, 0.25),
+				att("c", 1, 100, "violated", 0.29, 0.55),
+			}},
+			"coverage_band": {Rows: []map[string]any{{"day": now, "observed_ms": uint64(980), "bypass_ms": uint64(20), "disabled_ms": uint64(0)}}},
+		},
+	}
+	_, mux, _, bearer := newTestModule(t, run, false)
+	w := do(mux, "GET", "/api/v1/reports/tvo?window=1d", bearer, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("tvo: got %d %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	// 400 tokens over 2 outcomes whose terminal mode is satisfied (a, b); c stays violated.
+	if resp["tvo"].(float64) != 200 {
+		t.Fatalf("an open day must render live by posterior mode: tvo=%v body=%s", resp["tvo"], w.Body.String())
+	}
+	if resp["waste"].(map[string]any)["retry_loop_tokens"].(float64) != 50 {
+		t.Fatalf("retry-loop waste must charge the attempt after a violated one: %s", w.Body.String())
+	}
+	if resp["coverage_band"].(map[string]any)["observed_fraction"].(float64) != 0.98 {
+		t.Fatalf("coverage must come from the day's transitions: %s", w.Body.String())
+	}
+	if live, _ := resp["live_days"].([]any); len(live) != 1 || live[0] != today {
+		t.Fatalf("live_days must name the open day: %s", w.Body.String())
+	}
+	if resp["guarantee_grade"] != false || !strings.Contains(resp["refusal"].(string), "1 open day(s) reported live") {
+		t.Fatalf("a live day must refuse guarantee grade by name: %s", w.Body.String())
+	}
+	if strings.Contains(resp["refusal"].(string), "rollup missing") {
+		t.Fatalf("an open day is never a missing rollup: %s", w.Body.String())
+	}
+	if resp["task_seg_version"] != "task_seg.v1" {
+		t.Fatalf("task_seg_version: %v", resp["task_seg_version"])
 	}
 }
