@@ -1,4 +1,6 @@
-"""`python -m app.jobs validate | run (--job NAME | --all --nightly) --tenant ID`; exit 1 = fail."""
+"""`python -m app.jobs validate | run (--job NAME | --all --nightly) --tenant ID|all`.
+
+Exit 1 = fail."""
 
 from app.logging import configure_logging
 
@@ -32,7 +34,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.add_argument("--nightly", action="store_true")
     run.add_argument("--hourly", action="store_true")
-    run.add_argument("--tenant", action="append", required=True, help="repeatable")
+    run.add_argument(
+        "--tenant",
+        action="append",
+        required=True,
+        help="repeatable; `all` = every active tenant in m1_tenant_directory (m1_084)",
+    )
     run.add_argument(
         "--day",
         type=date.fromisoformat,
@@ -61,9 +68,20 @@ def main(argv: list[str] | None = None) -> int:
         pool = await create_pool(settings)
         try:
             now = datetime.now(UTC)
+            tenants = list(args.tenant)
+            if "all" in tenants:
+                # the directory is global (no RLS) so this enumeration can exist:
+                # FORCE RLS on m1_tenants admits one id per GUC
+                rows = await pool.fetch(
+                    "SELECT tenant_id FROM m1_tenant_directory"
+                    " WHERE status = 'active' ORDER BY tenant_id"
+                )
+                tenants = [t for t in tenants if t != "all"] + [str(r["tenant_id"]) for r in rows]
+                tenants = list(dict.fromkeys(tenants))
+                log.info("tenant directory: %d active tenant(s)", len(rows))
             return {
                 t: await run_many(pool, settings, jobs, targets, tenant_id=t, now=now, day=args.day)
-                for t in args.tenant
+                for t in tenants
             }
         finally:
             await pool.close()

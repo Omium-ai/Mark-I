@@ -219,3 +219,29 @@ async def test_job_key_receipt_records_success_with_null_receipt_id(pool):
         await run_one(pool, None, job, rollup, tenant_id=tenant, window_start=WINDOW)
         == "already_done"
     )
+
+
+# m1_084: the directory the schedulers enumerate fills through the trigger the moment a
+# tenant is inserted (the request path's insert, under its own GUC), and `--tenant all`
+# reads it — FORCE RLS on m1_tenants admits one id per GUC, so nothing else could list them.
+async def test_tenant_directory_enumerates_every_active_tenant(pool):
+    a, b = await _mk_tenant(pool), await _mk_tenant(pool)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT tenant_id::text AS t, status, kind FROM m1_tenant_directory"
+            " WHERE tenant_id = ANY($1::uuid[])",
+            [UUID(a), UUID(b)],
+        )
+    assert {r["t"] for r in rows} == {a, b}
+    assert {(r["status"], r["kind"]) for r in rows} == {("active", "org")}
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, b)
+        await conn.execute("UPDATE m1_tenants SET status = 'suspended' WHERE id = $1", UUID(b))
+    async with pool.acquire() as conn:
+        active = {
+            str(r["tenant_id"])
+            for r in await conn.fetch(
+                "SELECT tenant_id FROM m1_tenant_directory WHERE status = 'active'"
+            )
+        }
+    assert a in active and b not in active
