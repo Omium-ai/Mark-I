@@ -599,19 +599,43 @@ ORDER BY e.task_id`,
 		// Coverage-band inputs per day (07: observed/bypass/disabled are
 		// columns of the tenant-day row — a missing day is 0/0, which the
 		// report layer refuses rather than stretches, ADR-0010 §2.7).
+		// v2 reads the surface durations from the CoverageTransition rows themselves. v1 read them back from tvo_tenant_day — the table the rollup writes from this very read, so every tenant's observed_ms was 0 forever and no report ever reached the floor. Per device and day: enabled from its first user_enable on; disabled through each mark1_off until the next user_enable (now when none); bypass is the closed windows' own duration (history_import excluded: a labelling marker over transcript history, not a capture gap). observed = enabled − disabled − bypass, floored at 0. Devices sum. dropped_billing rides for the consumer's column set; the shed terms come from dropped_by_tenant_day.
 		name:    "coverage_band",
-		version: "coverage_band.v1",
+		version: "coverage_band.v2",
 		body: `SELECT day,
-       sumMerge(observed_ms)     AS observed_ms,
-       sumMerge(bypass_ms)       AS bypass_ms,
-       sumMerge(disabled_ms)     AS disabled_ms,
-       sumMerge(dropped_billing) AS dropped_billing
-FROM tvo_tenant_day
-WHERE {{tenant_pred}} AND day BETWEEN {from:Date} AND {to:Date}
+       toUInt64(sum(greatest(0, dev_enabled - dev_disabled - dev_bypass))) AS observed_ms,
+       toUInt64(sum(dev_bypass))   AS bypass_ms,
+       toUInt64(sum(dev_disabled)) AS disabled_ms,
+       toUInt64(0)                 AS dropped_billing
+FROM (SELECT device_id, day,
+             max(row_enabled)  AS dev_enabled,
+             sum(row_disabled) AS dev_disabled,
+             sum(row_bypass)   AS dev_bypass
+      FROM (SELECT device_id, occurred_at, reason, coverage_kind, coverage_duration_ms, since, next_enable,
+                   arrayJoin(arrayMap(i -> {from:Date} + i, range(toUInt32(dateDiff('day', {from:Date}, {to:Date})) + 1))) AS day,
+                   if(since IS NULL, 0,
+                      greatest(0, dateDiff('millisecond', greatest(since, toDateTime64(day, 3)), toDateTime64(day + INTERVAL 1 DAY, 3)))) AS row_enabled,
+                   if(reason = 'mark1_off',
+                      greatest(0, dateDiff('millisecond',
+                                           greatest(occurred_at, toDateTime64(day, 3)),
+                                           least(coalesce(next_enable, now64(3)), toDateTime64(day + INTERVAL 1 DAY, 3)))), 0) AS row_disabled,
+                   if(coverage_kind = 'bypass' AND reason != 'history_import' AND toDate(occurred_at) = day, coverage_duration_ms, 0) AS row_bypass
+            FROM (SELECT device_id, occurred_at, reason, coverage_kind, coverage_duration_ms,
+                         minIf(occurred_at, reason = 'user_enable') OVER (PARTITION BY device_id) AS since,
+                         minIf(occurred_at, reason = 'user_enable')
+                             OVER (PARTITION BY device_id ORDER BY occurred_at ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS next_enable
+                  FROM (SELECT event_id, device_id, occurred_at, coverage_kind, coverage_duration_ms,
+                               JSONExtractString(payload, 'reason_code') AS reason
+                        FROM m1p_events
+                        WHERE {{tenant_pred}}
+                          AND event_type = 'CoverageTransition'
+                          AND toDate(occurred_at) >= {from:Date} - INTERVAL 90 DAY AND toDate(occurred_at) <= {to:Date}
+                        LIMIT 1 BY event_id)))
+      GROUP BY device_id, day)
 GROUP BY day
 ORDER BY day`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
-		readSet:  []string{"tvo_tenant_day"},
+		readSet:  []string{"m1p_events"},
 		rowLimit: 1_000,
 		timeout:  timeoutInteractive,
 	},

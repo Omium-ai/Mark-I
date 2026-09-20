@@ -253,7 +253,7 @@ func mustTenant(t *testing.T, id uuid.UUID) TenantID {
 // results for the seeded tenant before trusting the leak grep. seedEventRows
 // counts the m1p_events rows this writes (the offboard test's ledger math).
 // Returns the task every task-grain template keys on.
-const seedEventRows = 14
+const seedEventRows = 15
 
 // seedExcerptTaskID is shared by every tenant so evidence_excerpts' tenancy negative is a real key match.
 var seedExcerptTaskID = uuid.MustParse("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
@@ -389,7 +389,16 @@ func seed(t *testing.T, rig *itRig, conn *chconn.Conn, tenant, session uuid.UUID
 	}); err != nil {
 		t.Fatalf("seed control verdict: %v", err)
 	}
-	// The tenant-day rollup row `tvo_report` and `coverage_band` read —
+	// The surface `coverage_band` reads (v2): this device enabled at the seeded instant.
+	covCols := append(usageCols, "coverage_kind", "coverage_duration_ms", "payload")
+	if err := conn.InsertRows(ctx, "m1p_events", covCols, [][]any{
+		{tenant, at, session, uuid.Must(uuid.NewV7()), uint64(9), uint32(1),
+			device, "CoverageTransition", "diagnostic", "", uint64(0), uint64(0), "quota",
+			"enable", uint64(0), `{"kind":"COVERAGE_KIND_ENABLE","reason_code":"user_enable"}`},
+	}); err != nil {
+		t.Fatalf("seed coverage transition: %v", err)
+	}
+	// The tenant-day rollup row `tvo_report` reads —
 	// written through the real write carve-out, tenant-bound by BuildWrite.
 	reg, err := LoadTemplates()
 	if err != nil {
@@ -580,6 +589,62 @@ func TestIntegrationTvoTaskWindowCarriesThePreWindowOpener(t *testing.T) {
 		tokens, ok := want[fmt.Sprint(r["task_id"])]
 		if !ok || fmt.Sprint(r["task_seg_version"]) != "task_seg.v1" || asU64(r["gen_tokens"]) != tokens {
 			t.Fatalf("row %v: want its opener's task_seg_version and day-1 tokens only (%v)", r, want)
+		}
+	}
+}
+
+// coverage_band.v2 reads the surface from the transition rows: a device enabled at 12:00 on day 0 is observed 12 h that day and 24 h the next, less a 2 h mark1_off window and a 10 min bypass on day 1; a history_import marker (days of "duration") is a label, not a gap.
+func TestIntegrationCoverageBandFromTransitions(t *testing.T) {
+	rig := setupQC(t)
+	ctx := context.Background()
+	tenant, device, session := uuid.New(), uuid.New(), uuid.Must(uuid.NewV7())
+	at := func(d, h, m int) time.Time { return time.Date(2026, 8, 27+d, h, m, 0, 0, time.UTC) }
+	cols := []string{
+		"tenant_id", "occurred_at", "session_id", "event_id", "seq", "session_epoch",
+		"device_id", "event_type", "event_class", "agent", "input_tokens", "output_tokens", "cost_basis",
+		"coverage_kind", "coverage_duration_ms", "payload",
+	}
+	row := func(when time.Time, seq uint64, kind string, dur uint64, reason string) []any {
+		return []any{tenant, when, session, uuid.Must(uuid.NewV7()), seq, uint32(1), device, "CoverageTransition", "diagnostic", "", uint64(0), uint64(0), "quota",
+			kind, dur, `{"kind":"COVERAGE_KIND_` + strings.ToUpper(kind) + `","reason_code":"` + reason + `"}`}
+	}
+	if err := rig.ingest.InsertRows(ctx, "m1p_events", cols, [][]any{
+		row(at(0, 12, 0), 1, "enable", 0, "user_enable"),
+		row(at(0, 12, 0), 2, "bypass", uint64(3*24*3600*1000), "history_import"),
+		row(at(1, 9, 0), 3, "disable", 0, "mark1_off"),
+		row(at(1, 11, 0), 4, "enable", 0, "user_enable"),
+		row(at(1, 15, 0), 5, "bypass", uint64(10*60*1000), "disk_hard_stop"),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	reg, err := LoadTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl, _ := reg.Lookup("coverage_band")
+	q, err := Build(mustTenant(t, tenant), tpl, Params{"from": "2026-08-27", "to": "2026-08-28"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := rig.runner.Run(ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][3]uint64{ // observed, bypass, disabled (ms)
+		"2026-08-27": {12 * 3600 * 1000, 0, 0},
+		"2026-08-28": {24*3600*1000 - 2*3600*1000 - 10*60*1000, 10 * 60 * 1000, 2 * 3600 * 1000},
+	}
+	if len(rows.Rows) != 2 {
+		t.Fatalf("coverage_band rows %v, want two days", rows.Rows)
+	}
+	for _, r := range rows.Rows {
+		day := fmt.Sprint(r["day"])
+		if t, ok := r["day"].(time.Time); ok {
+			day = t.Format(time.DateOnly)
+		}
+		w, ok := want[day]
+		if !ok || asU64(r["observed_ms"]) != w[0] || asU64(r["bypass_ms"]) != w[1] || asU64(r["disabled_ms"]) != w[2] {
+			t.Fatalf("day %s: observed=%v bypass=%v disabled=%v, want %v", day, r["observed_ms"], r["bypass_ms"], r["disabled_ms"], w)
 		}
 	}
 }
