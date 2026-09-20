@@ -420,8 +420,9 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	} else {
 		for _, row := range savRows.Rows {
 			switch asStr(row["reason"]) {
-			case "knee_arrest":
-				savedArrests, nArrests = asU64(row["tokens_saved"]), asU64(row["decisions"])
+			case "knee_arrest", "block_cap": // the savings template groups by reason: both rows sum into arrests
+				savedArrests += asU64(row["tokens_saved"])
+				nArrests += asU64(row["decisions"])
 			case "stop_gate_block":
 				savedBlocks, nBlocks = asU64(row["tokens_saved"]), asU64(row["decisions"])
 			}

@@ -160,11 +160,12 @@ ORDER BY day, task_seg_version`,
 		// m1_ch_002's mv_tvo_task does it: `... AS verdict` over
 		// `e.verdict != ''` resolves the unqualified alias recursively and
 		// ClickHouse rejects the aggregate-in-WHERE cycle.
+		// v4 counts a consecutive-block cap that ended a loop (reason block_cap, told to the human like a knee stop) as an arrest: in bootstrap the knee never fires, so the cap is the arrest a tester actually gets.
 		name:    "interventions",
-		version: "interventions.v3",
+		version: "interventions.v4",
 		body: `SELECT e.task_id AS task_id,
-       sumIf(JSONExtractUInt(e.payload, 'tokens_saved_estimate'), e.event_type = 'GuardDecision' AND JSONExtractString(e.payload, 'reason_code') = 'knee_arrest') AS tokens_saved_estimate,
-       countIf(e.event_type = 'GuardDecision' AND JSONExtractString(e.payload, 'reason_code') = 'knee_arrest') AS arrests,
+       sumIf(JSONExtractUInt(e.payload, 'tokens_saved_estimate'), e.event_type = 'GuardDecision' AND JSONExtractString(e.payload, 'reason_code') IN ('knee_arrest', 'block_cap')) AS tokens_saved_estimate,
+       countIf(e.event_type = 'GuardDecision' AND JSONExtractString(e.payload, 'reason_code') IN ('knee_arrest', 'block_cap')) AS arrests,
        argMaxIf(e.verdict, e.occurred_at, e.verdict != '')  AS verdict,
        anyLastIf(e.bundle_seq, e.event_type = 'GuardDecision') AS bundle_seq
 FROM (SELECT event_id, task_id, occurred_at, event_type, payload, verdict, bundle_seq

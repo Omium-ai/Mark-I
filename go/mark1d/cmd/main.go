@@ -976,6 +976,10 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		ctl.Hub().Arrest(session, task, k, evidenceRef)
 		decided(session, task, m1pv1.GuardOutcome_GUARD_OUTCOME_ARRESTED, "knee_arrest", uint32(k.N), ctl.Hub().EstimateArrest(task, uint32(k.N)), "") //nolint:gosec // G115: attempts are small
 	}
+	gate.OnCap = func(session, task [16]byte, blocks uint32, evidenceRef string) {
+		ctl.Hub().Arrest(session, task, verdict.KneeState{N: int(blocks)}, evidenceRef)
+		decided(session, task, m1pv1.GuardOutcome_GUARD_OUTCOME_ARRESTED, "block_cap", blocks, ctl.Hub().EstimateArrest(task, blocks), evidenceRef)
+	}
 	if cfg.matrices == nil {
 		gate.ApplyGates(bc.Gates())
 	}

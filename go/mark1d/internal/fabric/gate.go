@@ -95,6 +95,8 @@ type Gate struct {
 	Health *obs.Health
 	// OnArrest observes every knee stop the gate actually told the human about (the control API's arrest row); nil is legal.
 	OnArrest func(session, task [16]byte, k verdict.KneeState, evidenceRef string)
+	// OnCap observes every consecutive-block cap that ended a loop with the verdict still violated (told to the human like a knee stop); nil is legal.
+	OnCap func(session, task [16]byte, blocks uint32, evidenceRef string)
 	// OnBlock observes every BLOCK the gate answered (the ledger's GuardDecision row); nil is legal.
 	OnBlock func(session, task [16]byte, k verdict.KneeState, evidenceRef string)
 }
@@ -283,7 +285,19 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		capN = maxConsecutiveBlocks
 	}
 	if ctr.Consecutive >= capN {
-		return allow(CodeGateCap + " consecutive block cap")
+		// The cap is a retry loop Mark 1 ends: the human is told (08 §5.1's Stop row, like the knee) and the ledger records it (block_cap), else the loop's last state — the failure still there — is invisible to everyone; in bootstrap the knee never fires, so this is the arrest a tester actually gets.
+		v := allow(CodeGateCap + " consecutive block cap")
+		if e, ok := g.reader.Get(task); ok && e.Verdict.GetVerdict() == m1pv1.Verdict_VERDICT_VIOLATED {
+			ev := g.evidence(task)
+			v.SystemMessage = fmt.Sprintf("mark1 stop-gate: retry loop stopped after %d blocks — the verdict is still violated; a person should look", ctr.Consecutive)
+			if ev != "" {
+				v.SystemMessage += "; evidence: " + ev
+			}
+			if g.OnCap != nil {
+				g.OnCap(session, task, ctr.Consecutive, ev)
+			}
+		}
+		return v
 	}
 	// 4. hourly block ceiling.
 	ceiling := atomic.LoadUint32(&g.HourlyCeiling)

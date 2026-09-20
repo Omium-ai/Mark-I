@@ -170,9 +170,18 @@ func TestGateConsecutiveCap(t *testing.T) {
 			t.Fatalf("block %d: got %v %q", i+1, v.GetDecision(), v.GetReason())
 		}
 	}
+	var capped struct {
+		blocks uint32
+		n      int
+	}
+	g.OnCap = func(_, _ [16]byte, blocks uint32, _ string) { capped.blocks, capped.n = blocks, capped.n+1 }
 	v := g.Answer(query(1, 5000), testSession)
 	if v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || !strings.Contains(v.GetReason(), "consecutive") {
 		t.Fatalf("4th answer %v %q, want M1E-5002 consecutive-cap allow", v.GetDecision(), v.GetReason())
+	}
+	// the loop's end is told to the human (the verdict is still violated) and recorded once, as the arrest a bootstrap tester gets
+	if !strings.Contains(v.GetSystemMessage(), "retry loop stopped after 3 blocks") || capped.n != 1 || capped.blocks != 3 {
+		t.Fatalf("cap must be told and recorded: message %q, OnCap %+v", v.GetSystemMessage(), capped)
 	}
 }
 
