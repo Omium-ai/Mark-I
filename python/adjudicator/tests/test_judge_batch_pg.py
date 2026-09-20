@@ -27,6 +27,7 @@ from tests.test_jobs import FakeChoke
 from tests.test_judge_batch import (
     AMBIGUOUS,
     JID,
+    MIDBAND,
     NO_TEST,
     SPEC,
     FakeBatch,
@@ -133,9 +134,10 @@ async def test_cascade_dispatches_to_the_cloud_under_consent_and_books_the_spend
     assert results["readjudicate.run"] == "succeeded"
     assert results["judge_batch.run"] == "succeeded"
     assert len(batch.calls) == 1 and cloud.dispatched == []
-    assert {r["custom_id"] for r in batch.calls[0]} == {rid(AMBIGUOUS), rid(NO_TEST)}
+    # MIDBAND is bootstrap-refused: a candidate since the select rule widened
+    assert {r["custom_id"] for r in batch.calls[0]} == {rid(AMBIGUOUS), rid(NO_TEST), rid(MIDBAND)}
     recs = await _dispatches(pool, tenant)
-    assert set(recs) == {AMBIGUOUS, NO_TEST}
+    assert set(recs) == {AMBIGUOUS, NO_TEST, MIDBAND}
     rec = recs[AMBIGUOUS]
     assert (rec["locus"], rec["vote"], rec["model"], rec["batch_id"]) == (
         "cloud",
@@ -150,6 +152,7 @@ async def test_cascade_dispatches_to_the_cloud_under_consent_and_books_the_spend
     assert {t: v.vote for t, v in votes.items()} == {
         AMBIGUOUS: Verdict.VIOLATED,
         NO_TEST: Verdict.VIOLATED,
+        MIDBAND: Verdict.VIOLATED,
     }
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
@@ -176,7 +179,7 @@ async def test_cascade_dispatches_to_the_cloud_under_consent_and_books_the_spend
     await run(_ctx(pool, tenant), http=http, batch=batch)
     assert len(batch.calls) == 1 and len(cloud.ingested) == posted_before + 1
     ids = [bytes(e.event_id) for e in cloud.events()]
-    assert len(ids) == 4 and len(set(ids)) == 2, "the re-post carries the same two event_ids"
+    assert len(ids) == 6 and len(set(ids)) == 3, "the re-post carries the same three event_ids"
     assert await _dispatches(pool, tenant) == recs
 
 
@@ -185,17 +188,22 @@ async def test_no_consent_row_means_client_side_rows_with_no_vote(pool):
     cloud, batch = FakeCloud(all_rows()), FakeBatch()
     await run(_ctx(pool, tenant), http=cloud.client(), batch=batch)
     assert batch.calls == [] and cloud.ingested == []
-    assert {d["request"]["requestId"] for d in cloud.dispatched} == {rid(AMBIGUOUS), rid(NO_TEST)}
+    assert {d["request"]["requestId"] for d in cloud.dispatched} == {
+        rid(AMBIGUOUS),
+        rid(NO_TEST),
+        rid(MIDBAND),
+    }
     recs = await _dispatches(pool, tenant)
     assert {t: (r["locus"], r["vote"], r["input_tokens"]) for t, r in recs.items()} == {
         AMBIGUOUS: ("client_side", None, None),
         NO_TEST: ("client_side", None, None),
+        MIDBAND: ("client_side", None, None),
     }
     # The next night reposts under the same request_id (the edge's dedupe key).
     await run(_ctx(pool, tenant), http=cloud.client(), batch=batch)
     assert (
-        len(cloud.dispatched) == 4
-        and len({d["request"]["requestId"] for d in cloud.dispatched}) == 2
+        len(cloud.dispatched) == 6
+        and len({d["request"]["requestId"] for d in cloud.dispatched}) == 3
     )
 
 
@@ -242,7 +250,7 @@ async def test_rls_hides_another_tenants_dispatches(pool):
     a, b = await _mk_tenant(pool), await _mk_tenant(pool)
     cloud = FakeCloud(all_rows())
     await run(_ctx(pool, a), http=cloud.client(), batch=FakeBatch())
-    assert set(await _dispatches(pool, a)) == {AMBIGUOUS, NO_TEST}
+    assert set(await _dispatches(pool, a)) == {AMBIGUOUS, NO_TEST, MIDBAND}
     assert await _dispatches(pool, b) == {}
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, b)
