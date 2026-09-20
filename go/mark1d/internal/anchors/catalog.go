@@ -126,12 +126,20 @@ var detectors = map[Kind]detector{
 	},
 	KindTsc: {
 		rule: 1, tool: "tsc", binary: "tsc", wants: "tsconfig.json",
-		class: ClassFast, sideEffect: SideEffectStatic,
+		// a compiler like cargo check: seconds per run and a V8 heap that passes 1 GiB on a mid-size app (the founder's Electron app died at 400 MB of heap under the fast cap), so it runs at idle and at Stop — where Settle still gates the Stop when it finishes within budget
+		class: ClassSlow, sideEffect: SideEffectStatic,
 		versionArgs: []string{"--version"},
 		probe:       func(wt string) bool { return fileExists(filepath.Join(wt, "tsconfig.json")) },
 		argv: func(bin string) []string {
 			// --noEmit keeps the type check side-effect-free even if the
 			// tsconfig says otherwise; --pretty false keeps output parseable.
+			return []string{bin, "--noEmit", "--pretty", "false"}
+		},
+		// a solution-style tsconfig (references, no files of its own — every Vite/Electron template) checks nothing under plain tsc; build mode walks the referenced projects, and --noEmit keeps it a check (tsc still reports every diagnostic when it cannot write its build info)
+		argvAt: func(bin, wt string) []string {
+			if tsconfigIsSolution(filepath.Join(wt, "tsconfig.json")) {
+				return []string{bin, "-b", "--noEmit", "--pretty", "false"}
+			}
 			return []string{bin, "--noEmit", "--pretty", "false"}
 		},
 	},
@@ -449,6 +457,28 @@ func (d detector) argvFor(bin, worktree string) []string {
 }
 
 // goPatterns is what `go vet`/`go test` walk at this root: `./...` in a module; at a go.work root that pattern matches nothing ("directory prefix . does not contain modules listed in go.work"), so each `use` directory becomes `./<dir>/...`, in file order. The patterns sit in the consented argv, so a changed go.work is a re-consent.
+// tsconfigIsSolution: `references` present and no `include`/`files` of its own beyond an empty list.
+func tsconfigIsSolution(path string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var c struct {
+		References []json.RawMessage `json:"references"`
+		Files      []string          `json:"files"`
+		Include    []string          `json:"include"`
+	}
+	// tsconfig allows comments and trailing commas; strip line comments, and treat anything unparseable as not a solution
+	if err := json.Unmarshal(stripLineComments(b), &c); err != nil {
+		return false
+	}
+	return len(c.References) > 0 && len(c.Files) == 0 && len(c.Include) == 0
+}
+
+var lineComment = regexp.MustCompile(`(?m)^\s*//.*$`)
+
+func stripLineComments(b []byte) []byte { return lineComment.ReplaceAll(b, nil) }
+
 func goPatterns(worktree string) []string {
 	if fileExists(filepath.Join(worktree, "go.mod")) {
 		return []string{"./..."}

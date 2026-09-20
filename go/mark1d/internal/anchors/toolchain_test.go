@@ -77,3 +77,20 @@ func TestGoWorkRootDerivesTheGoAnchors(t *testing.T) {
 		t.Fatalf("a module root walks ./..., got %v", got)
 	}
 }
+
+// A solution-style tsconfig (references, files: []) type-checks nothing under plain `tsc --noEmit`; build mode is the check.
+func TestSolutionTsconfigUsesBuildMode(t *testing.T) {
+	wt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wt, "tsconfig.json"), []byte("{\n  // solution\n  \"files\": [],\n  \"references\": [{ \"path\": \"./tsconfig.web.json\" }]\n}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectors[KindTsc].argvFor("/r/node_modules/.bin/tsc", wt); len(got) != 5 || got[1] != "-b" || got[2] != "--noEmit" {
+		t.Fatalf("solution tsconfig argv %v", got)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "tsconfig.json"), []byte(`{"compilerOptions":{"strict":true},"include":["src"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectors[KindTsc].argvFor("/r/node_modules/.bin/tsc", wt); len(got) != 4 || got[1] != "--noEmit" {
+		t.Fatalf("plain tsconfig argv %v", got)
+	}
+}
