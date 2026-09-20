@@ -1,12 +1,15 @@
 """pydantic-settings config (06 §1.1): DSN as @property with sslmode=require,
 adjudicator_app role only."""
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ADJ_", frozen=True)
+
+    # 06 §6.5's only vendor credential; raw name (not ADJ_-prefixed). Absent ⇒ judge_batch skips.
+    anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
 
     # No default on purpose: a missing DSN is a boot refusal that crashloops (06 §1.1),
     # never a service limping along against localhost. The DSN carries the

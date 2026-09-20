@@ -66,6 +66,8 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/verify/certificates", chain(http.HandlerFunc(m.handleCertificates)))
 	mux.Handle("GET /api/v1/verify/labels", chain(http.HandlerFunc(m.handleLabels)))
 	mux.Handle("POST /api/v1/verify/labels", chain(http.HandlerFunc(m.handleLabel)))
+	mux.Handle("GET /api/v1/verify/cloud-judge", chain(http.HandlerFunc(m.handleCloudJudge)))
+	mux.Handle("PUT /api/v1/verify/cloud-judge", chain(http.HandlerFunc(m.handleCloudJudgeUpdate)))
 	mux.Handle("GET /api/v1/route/decisions", chain(http.HandlerFunc(m.handleRouteDecisions)))
 	mux.Handle("GET /api/v1/route/bundle", chain(http.HandlerFunc(m.handleRouteBundle)))
 	mux.Handle("GET /api/v1/me", chain(http.HandlerFunc(m.handleMe)))

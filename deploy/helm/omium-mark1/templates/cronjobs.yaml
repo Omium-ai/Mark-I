@@ -1,7 +1,7 @@
 {{- $jobs := list
   (dict "name" "mark1-intel-hourly" "svc" "intel" "app" "mark1-intel-jobs" "image" "mark1-intel" "sa" "intel" "schedule" .Values.cronJobs.intelHourly "cadence" "--hourly" "env" "mark1.intelEnv" "tmp" .Values.intel.tmpSizeLimit)
   (dict "name" "mark1-intel-nightly" "svc" "intel" "app" "mark1-intel-jobs" "image" "mark1-intel" "sa" "intel" "schedule" .Values.cronJobs.intelNightly "cadence" "--nightly" "env" "mark1.intelEnv" "tmp" .Values.intel.tmpSizeLimit "anthropic" true)
-  (dict "name" "adjudicator-nightly" "svc" "adjudicator" "app" "adjudicator-jobs" "image" "mark1-adjudicator" "sa" "adjudicator" "schedule" .Values.cronJobs.adjudicatorNightly "cadence" "--nightly" "env" "mark1.adjEnv" "tmp" "256Mi")
+  (dict "name" "adjudicator-nightly" "svc" "adjudicator" "app" "adjudicator-jobs" "image" "mark1-adjudicator" "sa" "adjudicator" "schedule" .Values.cronJobs.adjudicatorNightly "cadence" "--nightly" "env" "mark1.adjEnv" "tmp" "256Mi" "anthropic" true)
 }}
 {{- range $j := $jobs }}
 {{- $svc := index $.Values $j.svc }}

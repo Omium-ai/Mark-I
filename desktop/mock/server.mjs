@@ -53,6 +53,8 @@ export const CLOUD_ROUTES = [
   ['GET', '/api/v1/verify/certificates', 'cloud-verify-certificates'],
   ['GET', '/api/v1/verify/labels', 'cloud-verify-labels'],
   ['POST', '/api/v1/verify/labels', 'cloud-verify-labels'],
+  ['GET', '/api/v1/verify/cloud-judge', 'cloud-verify-cloud-judge'],
+  ['PUT', '/api/v1/verify/cloud-judge', 'cloud-verify-cloud-judge'],
   ['GET', '/api/v1/route/decisions', 'cloud-route-decisions'],
   ['GET', '/api/v1/route/bundle', 'cloud-route-bundle'],
   ['GET', '/api/v1/receipts/export', 'cloud-receipts-export'],

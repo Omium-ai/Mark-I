@@ -17,6 +17,7 @@ import httpx
 import pytest
 import zstandard
 from app import ledger
+from app.adjudicate.algorithm import adjudicate
 from app.choke import QuerychokeError
 from app.jobs import judge_batch
 from app.jobs.judge_batch import (
@@ -25,7 +26,7 @@ from app.jobs.judge_batch import (
     judge_batch_skipped_total,
     lacks_vote_from,
 )
-from app.jobs.readjudicate import NO_ATTEMPT, votes_by_task
+from app.jobs.readjudicate import NO_ATTEMPT, is_candidate, votes_by_task
 from app.judges.cloud_path import AnthropicBatchRunner, message_params
 from app.judges.specs import JUDGE_REQUESTS_PATH, JUDGE_SPECS, request_id_for
 from m1p.v1 import Batch, EvidenceTier, JudgeLocus, Verdict
@@ -172,7 +173,10 @@ def _ctx(pool) -> SimpleNamespace:
     return SimpleNamespace(
         pool=pool,
         settings=SimpleNamespace(
-            querychoke_base_url="http://choke", querychoke_token=SecretStr("svc"), http_timeout_s=1
+            querychoke_base_url="http://choke",
+            querychoke_token=SecretStr("svc"),
+            http_timeout_s=1,
+            anthropic_api_key=None,
         ),
         tenant_id=TENANT,
         window_start=WINDOW,
@@ -216,11 +220,28 @@ def test_selection_is_ambiguous_tasks_lacking_this_judges_vote():
     tasks = votes_by_task(all_rows(), {})
     assert lacks_vote_from(tasks[AMBIGUOUS], JID)  # judge:g@1 voted, this judge did not
     assert not lacks_vote_from(tasks[JUDGED], JID)
-    chosen = judge_batch.select(
-        tasks, set(), judge_batch.bundle_for([], None), judge_batch.Costs(), "", JID
-    )
-    assert set(chosen) == {AMBIGUOUS, NO_TEST}
-    assert CONFIDENT not in chosen and MIDBAND not in chosen and JUDGED not in chosen
+    costs = judge_batch.Costs()
+    bundle = judge_batch.bundle_for([], None)
+    chosen = judge_batch.select(tasks, set(), bundle, costs, "", JID)
+    # MIDBAND (eta=0.68) is deep in the band, past is_candidate's D18 margin either edge.
+    fused_midband = votes_by_task(rows(), {})[MIDBAND]
+    assert adjudicate(fused_midband, bundle, costs, "").verdict == "refused"
+    assert not is_candidate(adjudicate(fused_midband, bundle, costs, "").posterior[0], costs)
+    assert set(chosen) == {AMBIGUOUS, NO_TEST, MIDBAND}
+    assert CONFIDENT not in chosen and JUDGED not in chosen
+
+
+def test_a_bootstrap_refused_task_is_a_candidate_even_off_is_candidates_margin():
+    """A clean task's lone anchor-accept fuses to [0.71, 0.23, 0.04, 0.02] — 'refused', but
+    0.18 from the nearer edge, past is_candidate's 0.10 D18 margin."""
+    task = uuid4()
+    bundle, costs = judge_batch.bundle_for([], None), judge_batch.Costs()
+    tasks = votes_by_task([row(task, ANCHOR, "AnchorVote", "satisfied")], {})
+    event = adjudicate(tasks[task], bundle, costs, "")
+    assert event.verdict == "refused"
+    assert [round(p, 2) for p in event.posterior] == [0.71, 0.23, 0.04, 0.02]
+    assert not is_candidate(event.posterior[0], costs)
+    assert judge_batch.select(tasks, set(), bundle, costs, "", JID) == [task]
 
 
 def test_e0_evidence_is_typed_anchor_facts_only():
@@ -239,13 +260,17 @@ async def test_client_side_default_posts_one_request_per_candidate_and_no_cloud_
     pool, cloud, batch = FakePool(), FakeCloud(all_rows()), FakeBatch()
     recs = await _run(pool, cloud, batch)
     assert batch.calls == [] and cloud.ingested == []
-    assert {d["request"]["requestId"] for d in cloud.dispatched} == {rid(AMBIGUOUS), rid(NO_TEST)}
+    assert {d["request"]["requestId"] for d in cloud.dispatched} == {
+        rid(AMBIGUOUS),
+        rid(NO_TEST),
+        rid(MIDBAND),
+    }
     for d in cloud.dispatched:
         assert d["tenant_id"] == TENANT
         r = d["request"]
         assert (r["judgeId"], r["model"], r["tier"]) == (JID, SPEC.model, EvidenceTier.E0.value)
         assert r["locus"] == JudgeLocus.CLIENT_SIDE.value and "evidence" not in r
-    assert set(recs) == {AMBIGUOUS, NO_TEST}
+    assert set(recs) == {AMBIGUOUS, NO_TEST, MIDBAND}
     rec = recs[AMBIGUOUS]
     assert (rec["locus"], rec["vote"], rec["model"], rec["window_start"]) == (
         "client_side",
@@ -269,7 +294,7 @@ async def test_cloud_path_runs_one_region_pinned_batch_under_an_admitting_consen
     recs = await _run(pool, cloud, batch)
     assert cloud.dispatched == []
     (requests,) = batch.calls
-    assert {r["custom_id"] for r in requests} == {rid(AMBIGUOUS), rid(NO_TEST)}
+    assert {r["custom_id"] for r in requests} == {rid(AMBIGUOUS), rid(NO_TEST), rid(MIDBAND)}
     by_id = {r["custom_id"]: r["params"] for r in requests}
     p = by_id[rid(AMBIGUOUS)]
     assert p["model"] == SPEC.model and p["inference_geo"] == "us"
@@ -285,7 +310,7 @@ async def test_cloud_path_runs_one_region_pinned_batch_under_an_admitting_consen
     ]
     assert p == message_params(SPEC, p["messages"][0]["content"])
     events = cloud.events()
-    assert {UUID(bytes=e.task_id) for e in events} == {AMBIGUOUS, NO_TEST}
+    assert {UUID(bytes=e.task_id) for e in events} == {AMBIGUOUS, NO_TEST, MIDBAND}
     for e in events:
         assert e.session_epoch == ledger.SERVICE_EPOCH
         assert e.occurred_at == ledger.window_close(WINDOW)
@@ -313,7 +338,7 @@ async def test_consent_that_does_not_admit_the_judge_falls_back_to_client_side(c
     pool, cloud, batch = FakePool(consent=consent), FakeCloud(all_rows()), FakeBatch()
     recs = await _run(pool, cloud, batch)
     assert batch.calls == [] and cloud.ingested == []
-    assert len(cloud.dispatched) == 2 and all(r["locus"] == "client_side" for r in recs.values())
+    assert len(cloud.dispatched) == 3 and all(r["locus"] == "client_side" for r in recs.values())
     assert judge_batch_skipped_total[reason] == 1
 
 
@@ -324,7 +349,7 @@ async def test_cloud_tier_above_consent_never_reaches_the_batch(monkeypatch):
     await _run(pool, cloud, batch)
     assert judge_batch_skipped_total["cloud_refused_tier_above_consent"] == 1
     assert {d["request"]["judgeId"] for d in cloud.dispatched} == {e1.judge_id}
-    assert {r["custom_id"] for r in batch.calls[0]} == {rid(AMBIGUOUS), rid(NO_TEST)}
+    assert {r["custom_id"] for r in batch.calls[0]} == {rid(AMBIGUOUS), rid(NO_TEST), rid(MIDBAND)}
     assert {a[2] for a in pool.upserts} == {JID, e1.judge_id}
 
 
@@ -333,9 +358,41 @@ async def test_e2_has_no_branch_at_either_locus(monkeypatch):
     monkeypatch.setitem(JUDGE_SPECS, e2.judge_id, e2)
     pool, cloud, batch = FakePool(consent=CONSENT), FakeCloud(all_rows()), FakeBatch()
     recs = await _run(pool, cloud, batch)
-    assert cloud.dispatched == [] and set(recs) == {AMBIGUOUS, NO_TEST}
+    assert cloud.dispatched == [] and set(recs) == {AMBIGUOUS, NO_TEST, MIDBAND}
     assert {a[2] for a in pool.upserts} == {JID}
-    assert {r["custom_id"] for r in batch.calls[0]} == {rid(AMBIGUOUS), rid(NO_TEST)}
+    assert {r["custom_id"] for r in batch.calls[0]} == {rid(AMBIGUOUS), rid(NO_TEST), rid(MIDBAND)}
+
+
+async def test_cloud_no_vendor_key_is_a_counted_skip_never_a_crash_or_client_side_fallback():
+    pool, cloud = FakePool(consent=CONSENT), FakeCloud(all_rows())
+    recs = await _run(pool, cloud)  # no batch injected, ctx.settings.anthropic_api_key is None
+    assert recs == {} and cloud.ingested == [] and cloud.dispatched == []
+    assert judge_batch_skipped_total["cloud_no_vendor_key"] == 1
+
+
+async def test_vendor_key_builds_the_client_from_settings_never_a_customer_credential(monkeypatch):
+    captured: dict = {}
+
+    class SpyAnthropic:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    class SpyRunner:
+        def __init__(self, client):
+            captured["client"] = client
+
+        async def run(self, requests):
+            return "batch_spy", {}
+
+    monkeypatch.setattr(judge_batch, "AsyncAnthropic", SpyAnthropic)
+    monkeypatch.setattr(judge_batch, "AnthropicBatchRunner", SpyRunner)
+    pool, cloud = FakePool(consent=CONSENT), FakeCloud(all_rows())
+    ctx = _ctx(pool)
+    ctx.settings.anthropic_api_key = SecretStr("sk-ant-do-not-log-or-echo")
+    await judge_batch.run(ctx, http=cloud.client())
+    assert captured["api_key"] == "sk-ant-do-not-log-or-echo"
+    assert isinstance(captured["client"], SpyAnthropic)
+    assert judge_batch_skipped_total["cloud_no_vendor_key"] == 0
 
 
 async def test_spent_row_is_reposted_under_its_own_window_and_never_recalled():
@@ -359,10 +416,10 @@ async def test_spent_row_is_reposted_under_its_own_window_and_never_recalled():
     )
     recs = await _run(pool, cloud, batch)
     (requests,) = batch.calls
-    assert [r["custom_id"] for r in requests] == [rid(NO_TEST)]
-    assert set(recs) == {NO_TEST}
+    assert {r["custom_id"] for r in requests} == {rid(NO_TEST), rid(MIDBAND)}
+    assert set(recs) == {NO_TEST, MIDBAND}
     by_task = {UUID(bytes=e.task_id): e for e in cloud.events()}
-    assert set(by_task) == {AMBIGUOUS, NO_TEST}
+    assert set(by_task) == {AMBIGUOUS, NO_TEST, MIDBAND}
     assert by_task[AMBIGUOUS].judge_vote.vote == Verdict.SATISFIED
     assert by_task[NO_TEST].judge_vote.vote == Verdict.VIOLATED
     original = ledger.judge_vote_wire(
@@ -378,13 +435,13 @@ async def test_spent_row_is_reposted_under_its_own_window_and_never_recalled():
 async def test_a_bad_batch_result_is_a_counted_skip_with_no_row_and_no_event():
     answers = {
         rid(AMBIGUOUS): message(geo="global"),
-        # NO_TEST: no result at all (errored/expired/canceled)
+        # NO_TEST, MIDBAND: no result at all (errored/expired/canceled)
     }
     pool, cloud, batch = FakePool(consent=CONSENT), FakeCloud(all_rows()), FakeBatch(answers)
     recs = await _run(pool, cloud, batch)
     assert recs == {} and cloud.ingested == []
     assert judge_batch_skipped_total["refused_region_mismatch"] == 1
-    assert judge_batch_skipped_total["cloud_result_missing"] == 1
+    assert judge_batch_skipped_total["cloud_result_missing"] == 2
 
 
 async def test_a_model_refusal_is_the_judges_refusal_and_lands_as_refused():
@@ -406,14 +463,14 @@ async def test_task_without_session_id_is_counted_at_both_loci():
     pool, cloud = FakePool(consent=CONSENT), FakeCloud([*all_rows(), *extra])
     recs = await _run(pool, cloud, batch)
     assert orphan not in recs and judge_batch_skipped_total["no_session_id"] == 1
-    assert {r["custom_id"] for r in batch.calls[0]} == {rid(AMBIGUOUS), rid(NO_TEST)}
+    assert {r["custom_id"] for r in batch.calls[0]} == {rid(AMBIGUOUS), rid(NO_TEST), rid(MIDBAND)}
 
 
 async def test_ledger_post_failure_fails_the_run_after_the_spent_rows_are_durable():
     pool, cloud, batch = FakePool(consent=CONSENT), FakeCloud(all_rows(), ingest=503), FakeBatch()
     with pytest.raises(QuerychokeError):
         await _run(pool, cloud, batch)
-    assert len(pool.upserts) == 2 and len(batch.calls) == 1
+    assert len(pool.upserts) == 3 and len(batch.calls) == 1
 
 
 async def test_e1_cloud_judge_needs_the_evidence_reader_seam(monkeypatch):
@@ -423,8 +480,8 @@ async def test_e1_cloud_judge_needs_the_evidence_reader_seam(monkeypatch):
     consent = {**CONSENT, "max_tier": "E1"}
     pool, cloud, batch = FakePool(consent=consent), FakeCloud(all_rows()), FakeBatch()
     await _run(pool, cloud, batch)
-    # JUDGED lacks a vote from THIS judge, so it is a candidate again: three, not two.
-    assert batch.calls == [] and judge_batch_skipped_total["cloud_no_evidence_reader"] == 3
+    # JUDGED lacks a vote from THIS judge (candidate again) and MIDBAND is deep in
+    assert batch.calls == [] and judge_batch_skipped_total["cloud_no_evidence_reader"] == 4
 
     async def hunks(task_id, attempt_id, tier):
         return f"{tier} hunks for {task_id}"
@@ -432,7 +489,7 @@ async def test_e1_cloud_judge_needs_the_evidence_reader_seam(monkeypatch):
     pool, cloud = FakePool(consent=consent), FakeCloud(all_rows())
     await _run(pool, cloud, batch, evidence_for=hunks)
     contents = {r["params"]["messages"][0]["content"] for r in batch.calls[0]}
-    assert contents == {f"E1 hunks for {t}" for t in (AMBIGUOUS, NO_TEST, JUDGED)}
+    assert contents == {f"E1 hunks for {t}" for t in (AMBIGUOUS, NO_TEST, JUDGED, MIDBAND)}
     assert all(e.judge_vote.tier_used == EvidenceTier.E1 for e in cloud.events())
 
 

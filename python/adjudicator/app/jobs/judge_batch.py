@@ -94,13 +94,15 @@ def select(
     cert_id: str,
     judge_id: str,
 ) -> list[UUID]:
-    """06 §6.2 step 1 for one judge: ambiguous under D18 and not yet voted on by it."""
+    """06 §6.2 step 1: fused 'refused' (a clean task's clique caps near 0.71, never 0.89's
+    satisfied) or within is_candidate's D18 margin, not yet voted on by this judge."""
     out = []
     for task_id, votes in tasks.items():
         if not lacks_vote_from(votes, judge_id):
             continue
         fused, _ = split_shadow(votes, shadow)
-        if is_candidate(adjudicate(fused, bundle, costs, cert_id).posterior[0], costs):
+        event = adjudicate(fused, bundle, costs, cert_id)
+        if event.verdict == "refused" or is_candidate(event.posterior[0], costs):
             out.append(task_id)
     return out
 
@@ -343,9 +345,17 @@ async def run(
                         log.warning(
                             "judge_batch %s %s: %s; client-side", ctx.tenant_id, spec.judge_id, exc
                         )
-                if admitted:
+                if admitted and batch is None and settings.anthropic_api_key is None:
+                    # consented tenants never fall back to client-side: a counted skip
+                    judge_batch_skipped_total["cloud_no_vendor_key"] += 1
+                    log.warning(
+                        "judge_batch %s %s: ANTHROPIC_API_KEY unset", ctx.tenant_id, spec.judge_id
+                    )
+                elif admitted:
                     if batch is None:
-                        batch = AnthropicBatchRunner(AsyncAnthropic())
+                        batch = AnthropicBatchRunner(
+                            AsyncAnthropic(api_key=settings.anthropic_api_key.get_secret_value())
+                        )
                     dispatches += await cloud(
                         batch,
                         spec,
