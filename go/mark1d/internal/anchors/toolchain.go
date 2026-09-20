@@ -30,6 +30,7 @@ func toolchainEnv(binary, cacheDir string) map[string]string {
 			"GOPROXY":     "off",
 			"GOTOOLCHAIN": "local",
 			"GOFLAGS":     "-mod=readonly",
+			"CGO_ENABLED": "0", // the sandbox PATH holds the Go dir alone: no C compiler, so cgo packages vet as their pure-Go build rather than failing the run
 		}
 		if cacheDir != "" {
 			env["GOCACHE"] = filepath.Join(cacheDir, "go-build")
