@@ -48,7 +48,15 @@ func SweepScratch(root string) int {
 		if info, err := e.Info(); err != nil || time.Since(info.ModTime()) < time.Hour {
 			continue
 		}
-		if os.RemoveAll(filepath.Join(root, e.Name())) == nil {
+		dir := filepath.Join(root, e.Name())
+		// a test suite run as an anchor leaves mode-000 dirs behind when it is stopped mid-test; RemoveAll cannot enter those
+		_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+			if err == nil && d.IsDir() {
+				_ = os.Chmod(p, 0o700)
+			}
+			return nil
+		})
+		if os.RemoveAll(dir) == nil {
 			n++
 		}
 	}

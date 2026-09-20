@@ -107,6 +107,9 @@ func TestSweepScratchRemovesOnlyStaleRunDirs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.Chmod(filepath.Join(stale, "x"), 0); err != nil { // what a stopped test suite leaves
+		t.Fatal(err)
+	}
 	old := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(stale, old, old); err != nil {
 		t.Fatal(err)
