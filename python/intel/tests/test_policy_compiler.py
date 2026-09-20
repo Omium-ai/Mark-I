@@ -4,6 +4,7 @@ Goldens are hand-derived in comments from the closed forms, never from calling t
 import hashlib
 import json
 import math
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -218,6 +219,218 @@ def test_knee_sanity_gate_blocks_publication():
     provisional = tuple(a for a in attempts() if a.verdict_stage == "provisional")
     with pytest.raises(pc.NothingToCompile):
         pc.compile_sections(provisional, REGIME)
+
+
+WINDOW_START = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+def test_identifiable_spectral_run_becomes_the_verify_section():
+    """06 §4: an identifiable run's fitted [S,V] rows fill the section, refused/error stay at
+    the literature default, groups/anchors/priors are derived honestly (never from calling the
+    module -- hand-derived here, like every other golden in this file)."""
+    run = pc.SpectralRun(
+        window_start=WINDOW_START,
+        passed=True,
+        confusion={
+            "ruff@cat-1": ((0.8, 0.1, 0.1), (0.5, 0.4, 0.1)),  # lint
+            "pytest@cat-1": ((0.9, 0.03, 0.07), (0.5, 0.45, 0.05)),  # test
+            "tsc@cat-1": ((0.85, 0.05, 0.1), (0.4, 0.5, 0.1)),  # typecheck
+        },
+        prior=(0.6, 0.4),
+    )
+    vi = pc.VerifyInputs(spectral_run=run, stable_verify_cbor=None, stable_seq=None)
+    out = pc.compile_sections(attempts(), REGIME, verify_inputs=vi)
+    # Priors: R/E keep the bootstrap mass (0.10, 0.05); S/V rescale into the remaining 0.85.
+    # syntactic∪tests is one clique by construction (07 normative): every anchor kind, whatever
+    # its sub-kind, lands in the same "syntactic" group.
+    expected = pc.VerifySection(
+        anchors=(
+            pc.AnchorEnable(catalog_id="pytest", enabled=True),
+            pc.AnchorEnable(catalog_id="ruff", enabled=True),
+            pc.AnchorEnable(catalog_id="tsc", enabled=True),
+        ),
+        verifiers=(
+            pc.VerifierModel(
+                verifier_id="pytest@cat-1",
+                confusion=(
+                    (0.9, 0.03, 0.07),
+                    (0.5, 0.45, 0.05),
+                    (0.30, 0.10, 0.60),
+                    (0.25, 0.15, 0.60),
+                ),
+            ),
+            pc.VerifierModel(
+                verifier_id="ruff@cat-1",
+                confusion=(
+                    (0.8, 0.1, 0.1),
+                    (0.5, 0.4, 0.1),
+                    (0.30, 0.20, 0.50),
+                    (0.25, 0.25, 0.50),
+                ),
+            ),
+            pc.VerifierModel(
+                verifier_id="tsc@cat-1",
+                confusion=(
+                    (0.85, 0.05, 0.1),
+                    (0.4, 0.5, 0.1),
+                    (0.30, 0.20, 0.50),
+                    (0.25, 0.25, 0.50),
+                ),
+            ),
+        ),
+        priors=(0.51, 0.34, 0.10, 0.05),
+        correlation_groups=(
+            pc.CorrelationGroup(
+                group_id="syntactic", members=("pytest@cat-1", "ruff@cat-1", "tsc@cat-1")
+            ),
+        ),
+        quarantine=(),
+    )
+    assert out.sections["verify"] == pc.encode_section(expected)
+    assert "verify: spectral run 2026-09-01" in out.note and "identifiable" in out.note
+    # (e) round-trips: the map is exactly the six per-section bytes, and the section's own
+    # productions (catalog_id, verifier_id, Prob) survive a decode-then-reencode.
+    assert out.sections_cbor == pc.encode({n: pc.Raw(b) for n, b in out.sections.items()})
+    assert pc.VerifySection.model_validate(expected.model_dump()) == expected
+
+
+def test_verify_refuses_judge_and_rm_ids_the_wire_cannot_carry():
+    """The registry's judge:/rm: keys carry a ':' the bundle's verifier-id production forbids
+    (07 CDDL; go/mark1d's isVerifierID agrees) -- there is no wire-legal way to author them, so
+    the compiler refuses rather than emit a section no edge could decode."""
+    for verifier_id in ("judge:grounded-rubric@1", "rm:qwen3-4b@1"):
+        run = pc.SpectralRun(
+            window_start=WINDOW_START,
+            passed=True,
+            confusion={verifier_id: ((0.8, 0.1, 0.1), (0.2, 0.7, 0.1))},
+            prior=(0.6, 0.4),
+        )
+        with pytest.raises(pc.VerifyBasisError, match="wire verifier-id"):
+            pc.compile_sections(
+                attempts(),
+                REGIME,
+                verify_inputs=pc.VerifyInputs(
+                    spectral_run=run, stable_verify_cbor=None, stable_seq=None
+                ),
+            )
+
+
+def test_non_identifiable_run_carries_the_stable_heads_verify_bytes_unchanged():
+    stable_bytes = pc.encode_section(
+        pc.VerifySection(
+            anchors=(pc.AnchorEnable(catalog_id="pytest", enabled=True),),
+            verifiers=(pc.VerifierModel(verifier_id="pytest@cat-1", confusion=((1, 0, 0),) * 4),),
+            priors=(0.55, 0.30, 0.10, 0.05),
+            correlation_groups=(
+                pc.CorrelationGroup(group_id="syntactic", members=("pytest@cat-1",)),
+            ),
+            quarantine=(),
+        )
+    )
+    not_passed = pc.SpectralRun(window_start=WINDOW_START, passed=False, confusion={}, prior=None)
+    out = pc.compile_sections(
+        attempts(),
+        REGIME,
+        verify_inputs=pc.VerifyInputs(
+            spectral_run=not_passed, stable_verify_cbor=stable_bytes, stable_seq=7
+        ),
+    )
+    assert out.sections["verify"] == stable_bytes
+    assert "verify: carried from stable seq 7" in out.note
+
+    # No run at all takes the same carry-forward path.
+    out2 = pc.compile_sections(
+        attempts(),
+        REGIME,
+        verify_inputs=pc.VerifyInputs(
+            spectral_run=None, stable_verify_cbor=stable_bytes, stable_seq=7
+        ),
+    )
+    assert out2.sections["verify"] == stable_bytes
+
+
+def test_no_verify_basis_raises_nothing_to_compile():
+    vi = pc.VerifyInputs(spectral_run=None, stable_verify_cbor=None, stable_seq=None)
+    with pytest.raises(pc.NothingToCompile, match="no verify basis"):
+        pc.compile_sections(attempts(), REGIME, verify_inputs=vi)
+
+
+def test_verify_row_is_normalized_or_refuses_on_all_zero_or_nan():
+    off_sum = pc.SpectralRun(
+        window_start=WINDOW_START,
+        passed=True,
+        confusion={"ruff@cat-1": ((0.8, 0.2, 0.2), (0.5, 0.4, 0.1))},  # satisfied row sums to 1.2
+        prior=(0.6, 0.4),
+    )
+    out = pc.compile_sections(
+        attempts(),
+        REGIME,
+        verify_inputs=pc.VerifyInputs(
+            spectral_run=off_sum, stable_verify_cbor=None, stable_seq=None
+        ),
+    )
+    row = (0.8, 0.2, 0.2)  # sums to 1.2000000000000002 in float, not the 1.2 literal
+    normalized_row = tuple(x / sum(row) for x in row)
+    expected = pc.VerifySection(
+        anchors=(pc.AnchorEnable(catalog_id="ruff", enabled=True),),
+        verifiers=(
+            pc.VerifierModel(
+                verifier_id="ruff@cat-1",
+                confusion=(normalized_row, (0.5, 0.4, 0.1), (0.30, 0.20, 0.50), (0.25, 0.25, 0.50)),
+            ),
+        ),
+        priors=(0.51, 0.34, 0.10, 0.05),
+        correlation_groups=(pc.CorrelationGroup(group_id="syntactic", members=("ruff@cat-1",)),),
+        quarantine=(),
+    )
+    assert out.sections["verify"] == pc.encode_section(expected)
+
+    all_zero = pc.SpectralRun(
+        window_start=WINDOW_START,
+        passed=True,
+        confusion={"ruff@cat-1": ((0.0, 0.0, 0.0), (0.5, 0.4, 0.1))},
+        prior=(0.6, 0.4),
+    )
+    with pytest.raises(pc.VerifyBasisError, match="all-zero"):
+        pc.compile_sections(
+            attempts(),
+            REGIME,
+            verify_inputs=pc.VerifyInputs(
+                spectral_run=all_zero, stable_verify_cbor=None, stable_seq=None
+            ),
+        )
+
+    nan_row = pc.SpectralRun(
+        window_start=WINDOW_START,
+        passed=True,
+        confusion={"ruff@cat-1": ((math.nan, 0.5, 0.5), (0.5, 0.4, 0.1))},
+        prior=(0.6, 0.4),
+    )
+    with pytest.raises(pc.VerifyBasisError, match="NaN"):
+        pc.compile_sections(
+            attempts(),
+            REGIME,
+            verify_inputs=pc.VerifyInputs(
+                spectral_run=nan_row, stable_verify_cbor=None, stable_seq=None
+            ),
+        )
+
+
+def test_verify_refuses_a_verifier_kind_it_cannot_resolve():
+    unresolvable = pc.SpectralRun(
+        window_start=WINDOW_START,
+        passed=True,
+        confusion={"consistency": ((0.6, 0.2, 0.2), (0.3, 0.5, 0.2))},
+        prior=(0.6, 0.4),
+    )
+    with pytest.raises(pc.VerifyBasisError, match="no kind"):
+        pc.compile_sections(
+            attempts(),
+            REGIME,
+            verify_inputs=pc.VerifyInputs(
+                spectral_run=unresolvable, stable_verify_cbor=None, stable_seq=None
+            ),
+        )
 
 
 ROUTE_OK = {

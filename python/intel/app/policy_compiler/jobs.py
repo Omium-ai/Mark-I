@@ -2,15 +2,22 @@
 the choke → cpvs/ladders/knee → one `bundle_drafts` row; controld publishes (publish.py)."""
 
 import contextlib
+import json
 import logging
 import os
 from datetime import date, timedelta
 from typing import Any
 
+import asyncpg
 import httpx
 
 from app.db import set_local_tenant
-from app.policy_compiler.compile import NothingToCompile, compile_sections
+from app.policy_compiler.compile import (
+    NothingToCompile,
+    SpectralRun,
+    VerifyInputs,
+    compile_sections,
+)
 from app.policy_compiler.cpvs import CertifiedAttempt, Regime, certified
 from app.policy_compiler.publish import KneeGateViolation, previous_sections, write_draft
 from app.regime import load_regime
@@ -38,6 +45,42 @@ async def read_attempts(
         bearer=bearer,
     )
     return tuple(CertifiedAttempt.model_validate(dict(r)) for r in result.rows)
+
+
+def _as_dict(value: Any) -> Any:
+    return json.loads(value) if isinstance(value, str) else value
+
+
+async def _verify_inputs(conn: asyncpg.Connection, tenant_id: str) -> VerifyInputs:
+    """The newest spectral_runs row (identifiable or not) and the `stable` channel's published
+    head, both under the caller's tenant GUC — compile_sections' verify basis (06 §4)."""
+    row = await conn.fetchrow(
+        "SELECT window_start, passed, confusion, prior FROM spectral_runs "
+        "WHERE tenant_id = $1 ORDER BY window_start DESC LIMIT 1",
+        tenant_id,
+    )
+    run = None
+    if row is not None:
+        confusion = _as_dict(row["confusion"])
+        prior = _as_dict(row["prior"])
+        run = SpectralRun(
+            window_start=row["window_start"],
+            passed=row["passed"],
+            confusion={k: (tuple(rows[0]), tuple(rows[1])) for k, rows in confusion.items()},
+            prior=tuple(prior) if prior is not None else None,
+        )
+    stable = await previous_sections(conn, tenant_id, "stable")
+    stable_seq = None
+    if stable is not None:
+        stable_seq = await conn.fetchval(
+            "SELECT head_seq FROM bundle_channel_heads WHERE tenant_id = $1 AND channel = 'stable'",
+            tenant_id,
+        )
+    return VerifyInputs(
+        spectral_run=run,
+        stable_verify_cbor=stable["verify"] if stable is not None else None,
+        stable_seq=stable_seq,
+    )
 
 
 async def compile(  # noqa: A001 — the scheduler contract names the entry `compile`
@@ -75,8 +118,9 @@ async def compile(  # noqa: A001 — the scheduler contract names the entry `com
         if regime.cost_basis != basis:
             raise RuntimeError(f"regime basis {regime.cost_basis!r} != ledger basis {basis!r}")
         previous = await previous_sections(conn, ctx.tenant_id, CHANNEL)
+        verify_inputs = await _verify_inputs(conn, ctx.tenant_id)
         try:
-            compiled = compile_sections(attempts, regime, previous)
+            compiled = compile_sections(attempts, regime, previous, verify_inputs)
         except NothingToCompile:
             return None
         if regime.price is not None:

@@ -4,6 +4,7 @@ as `refused` and parks the job, carry-forward reads the last published draft, an
 negative. Same DSN gating as test_jobs_pg.py."""
 
 import hashlib
+import json
 import os
 import random
 from datetime import UTC, datetime
@@ -14,7 +15,15 @@ import pytest
 from app.db import _tenant_guc_reset, set_local_tenant
 from app.jobs.runner import JobContext
 from app.policy_compiler import jobs
-from app.policy_compiler.compile import SECTION_NAMES, compile_sections
+from app.policy_compiler.compile import (
+    SECTION_NAMES,
+    AnchorEnable,
+    CorrelationGroup,
+    VerifierModel,
+    VerifySection,
+    compile_sections,
+    encode_section,
+)
 from app.policy_compiler.cpvs import Regime
 from app.policy_compiler.publish import KneeGateViolation, previous_sections, write_draft
 from app.regime import RegimeUnset
@@ -70,14 +79,26 @@ async def _mk_tenant(pool: asyncpg.Pool) -> str:
         await conn.execute(
             "INSERT INTO m1_tenants (id, org_id, name) VALUES ($1, $2, $3)", tenant, org, tag
         )
+        # Every real tenant has a `stable` head before the nightly compiler ever runs
+        # (go/controld bootstrap.go); jobs.compile now needs one as verify's carry-forward basis.
+        await conn.execute(
+            "INSERT INTO bundle_channel_heads (tenant_id, channel) VALUES ($1, 'stable') "
+            "ON CONFLICT DO NOTHING",
+            tenant,
+        )
+        await write_draft(conn, str(tenant), "stable", WINDOW, compile_sections(attempts(), REGIME))
+        await _publish_as_controld(conn, str(tenant), "stable", WINDOW)
     return str(tenant)
 
 
-async def _drafts(pool: asyncpg.Pool, tenant: str) -> list[asyncpg.Record]:
+async def _drafts(pool: asyncpg.Pool, tenant: str, channel: str = "canary") -> list[asyncpg.Record]:
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         return await conn.fetch(
-            "SELECT * FROM bundle_drafts WHERE tenant_id = $1 ORDER BY window_start", UUID(tenant)
+            "SELECT * FROM bundle_drafts WHERE tenant_id = $1 AND channel = $2 "
+            "ORDER BY window_start",
+            UUID(tenant),
+            channel,
         )
 
 
@@ -214,5 +235,65 @@ async def test_carry_forward_reads_the_last_published_draft_and_rls_hides_it(poo
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, other)
         assert await previous_sections(conn, tenant, "canary") is None
-        assert await conn.fetchval("SELECT count(*) FROM bundle_drafts") == 0
+        # `other` has its own `_mk_tenant` stable-head draft; the RLS-negative is about canary.
+        assert (
+            await conn.fetchval("SELECT count(*) FROM bundle_drafts WHERE channel = 'canary'") == 0
+        )
     assert len(await _drafts(pool, tenant)) == 1
+
+
+async def test_identifiable_spectral_run_reaches_the_compiled_draft(pool, monkeypatch):
+    """m1_087: intel_app can read the adjudicator's spectral_runs row, and jobs.compile turns
+    an identifiable one into the draft's verify section (06 §4), not the zero-verifier default."""
+    monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
+    tenant = await _mk_tenant(pool)
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant)
+        await conn.execute(
+            "INSERT INTO spectral_runs (tenant_id, window_start, window_days, n_tasks, passed, "
+            "diagnostics, confusion, prior) "
+            "VALUES ($1, $2, 30, 500, true, '{}'::jsonb, $3::jsonb, $4::jsonb)",
+            UUID(tenant),
+            WINDOW,
+            json.dumps({"ruff@cat-1": [[0.8, 0.1, 0.1], [0.5, 0.4, 0.1]]}),
+            json.dumps([0.6, 0.4]),
+        )
+    choke = MockChoke()
+    choke.templates[jobs.ATTEMPTS_TEMPLATE] = _rows()
+    async with choke.client() as http:
+        assert await jobs.compile(_ctx(pool, tenant), http=http, regime=REGIME) is None
+    (draft,) = await _drafts(pool, tenant)
+    expected_verify = VerifySection(
+        anchors=(AnchorEnable(catalog_id="ruff", enabled=True),),
+        verifiers=(
+            VerifierModel(
+                verifier_id="ruff@cat-1",
+                confusion=(
+                    (0.8, 0.1, 0.1),
+                    (0.5, 0.4, 0.1),
+                    (0.30, 0.20, 0.50),
+                    (0.25, 0.25, 0.50),
+                ),
+            ),
+        ),
+        priors=(0.51, 0.34, 0.10, 0.05),
+        correlation_groups=(CorrelationGroup(group_id="syntactic", members=("ruff@cat-1",)),),
+        quarantine=(),
+    )
+    assert bytes(draft["verify_cbor"]) == encode_section(expected_verify)
+    assert "verify: spectral run" in draft["knee_note"] and "identifiable" in draft["knee_note"]
+
+
+async def test_no_spectral_run_carries_the_stable_heads_verify_bytes(pool, monkeypatch):
+    """No spectral_runs row at all: verify carries the `stable` head _mk_tenant bootstrapped,
+    never the zero-verifier default (the bug this whole change fixes)."""
+    monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
+    tenant = await _mk_tenant(pool)
+    choke = MockChoke()
+    choke.templates[jobs.ATTEMPTS_TEMPLATE] = _rows()
+    async with choke.client() as http:
+        assert await jobs.compile(_ctx(pool, tenant), http=http, regime=REGIME) is None
+    (draft,) = await _drafts(pool, tenant)
+    stable_verify = compile_sections(attempts(), REGIME).sections["verify"]
+    assert bytes(draft["verify_cbor"]) == stable_verify
+    assert "verify: carried from stable seq 1" in draft["knee_note"]

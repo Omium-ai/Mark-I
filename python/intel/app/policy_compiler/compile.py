@@ -8,16 +8,20 @@ uses: definite lengths, minimal heads, keys sorted by encoded bytes, shortest fl
 preserves the value, no NaN/Inf, no null. controld's strict Go decoder re-checks canonicality by
 re-encoding (policydist.DecodeSections), and the tests round-trip a fixture through it.
 
-The compiler authors `route`. `verify` (§4 estimates), `memory` (§9.5), `cortex`, `gates` and
-`agent_maps` are compiled THROUGH: carried byte-for-byte from the tenant's last published draft,
-or the conservative defaults below on a first publication.
+The compiler authors `route` and (given `VerifyInputs`) `verify`: an identifiable spectral run's
+fitted matrices, or else the tenant's `stable` head carried byte-for-byte — never defaulted to
+zero verifiers once a basis exists. `memory` (§9.5), `cortex`, `gates` and `agent_maps` are
+compiled THROUGH: carried byte-for-byte from the tenant's last published draft, or the
+conservative defaults below on a first publication.
 """
 
 import hashlib
 import math
 import re
 import struct
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
@@ -281,10 +285,141 @@ class NothingToCompile(ValueError):
     """No certified attempt in the window: nothing measured, so no draft is minted (06 §5.4)."""
 
 
+class VerifyBasisError(ValueError):
+    """A spectral run's fitted parameters cannot honestly become a verify section (a row is
+    NaN or all-zero, or a verifier's kind cannot be resolved) — refused, never fabricated."""
+
+
+@dataclass(frozen=True)
+class SpectralRun:
+    """One `spectral_runs` row (adj_001), as the compiler needs it. The estimator's latent
+    classes are binary (06 §4: satisfied/violated only), so `confusion` carries two rows per
+    verifier and `prior` two entries — both None/empty unless `passed`."""
+
+    window_start: datetime
+    passed: bool
+    confusion: Mapping[str, tuple[Sequence[float], Sequence[float]]]
+    prior: tuple[float, float] | None
+
+
+@dataclass(frozen=True)
+class VerifyInputs:
+    """What `jobs.py` reads under the tenant GUC to build `verify`: the newest spectral run, if
+    any, and the tenant's `stable` channel head verify bytes (+ seq, for the note) as the
+    carry-forward basis when the run is missing or not identifiable."""
+
+    spectral_run: SpectralRun | None
+    stable_verify_cbor: bytes | None
+    stable_seq: int | None = None
+
+
+# tool -> kind, a local copy of bootstrap.go bootstrapAnchors
+_TOOL_KIND: dict[str, str] = {
+    "cargo-check": "compile",
+    "cargo-test": "test",
+    "go-test": "test",
+    "npm-test": "test",
+    "pytest": "test",
+    "eslint": "lint",
+    "ruff": "lint",
+    "go-vet": "typecheck",
+    "tsc": "typecheck",
+}
+
+# likelihoods.py KIND_TO_GROUP: syntactic ∪ tests is one clique (06 §4.1)
+_KIND_GROUP: dict[str, str] = {
+    "lint": "syntactic",
+    "typecheck": "syntactic",
+    "compile": "syntactic",
+    "test": "syntactic",
+    "judge": "judges",
+    "rm": "rms",
+    "consistency": "consistency",
+}
+
+# CALIBRATED_CONFUSION [refused, error] rows per kind: the estimator is binary-latent
+_KIND_TAIL: dict[str, tuple[tuple[float, float, float], tuple[float, float, float]]] = {
+    "compile": ((0.30, 0.10, 0.60), (0.25, 0.15, 0.60)),
+    "test": ((0.30, 0.10, 0.60), (0.25, 0.15, 0.60)),
+    "lint": ((0.30, 0.20, 0.50), (0.25, 0.25, 0.50)),
+    "typecheck": ((0.30, 0.20, 0.50), (0.25, 0.25, 0.50)),
+    "judge": ((0.30, 0.30, 0.40), (0.30, 0.30, 0.40)),
+    "rm": ((0.30, 0.30, 0.40), (0.30, 0.30, 0.40)),
+    "consistency": ((0.30, 0.30, 0.40), (0.30, 0.30, 0.40)),
+}
+
+# bootstrap.go priors; unfitted R/E mass (0.15) kept, fitted S/V rescaled into 0.85
+_BOOTSTRAP_PRIORS = (0.55, 0.30, 0.10, 0.05)
+_RE_MASS = _BOOTSTRAP_PRIORS[2] + _BOOTSTRAP_PRIORS[3]
+
+
+def _kind_for(verifier_id: str) -> str:
+    # judge:/rm: keys carry a ':' the bundle verifier-id production forbids: refuse
+    if verifier_id.startswith(("judge:", "rm:")):
+        raise VerifyBasisError(
+            f"verifier {verifier_id!r}: judge/rm ids are not a wire verifier-id (07) — refused, "
+            "never fabricated onto the bundle"
+        )
+    kind = _TOOL_KIND.get(verifier_id.split("@", 1)[0])
+    if kind is None:
+        raise VerifyBasisError(f"verifier {verifier_id!r}: no kind (not a recognized anchor tool)")
+    return kind
+
+
+def _normalized(values: Sequence[float], what: str) -> tuple[float, ...]:
+    if any(math.isnan(x) for x in values):
+        raise VerifyBasisError(f"{what}: NaN — a spectral row is never fabricated (06 §4)")
+    total = sum(values)
+    if total <= 0:
+        raise VerifyBasisError(f"{what}: all-zero row — never fabricated (06 §4)")
+    if abs(total - 1.0) <= 1e-9:
+        return tuple(float(x) for x in values)
+    return tuple(x / total for x in values)
+
+
+def _verify_from_spectral(run: SpectralRun) -> tuple[VerifySection, str]:
+    if run.prior is None:
+        raise VerifyBasisError(f"spectral run {run.window_start}: passed with no prior")
+    s, v = _normalized(run.prior, "spectral prior")
+    priors = (s * (1 - _RE_MASS), v * (1 - _RE_MASS), *_BOOTSTRAP_PRIORS[2:])
+    verifiers: list[VerifierModel] = []
+    anchors: list[AnchorEnable] = []
+    groups: dict[str, list[str]] = {}
+    for verifier_id, rows in sorted(run.confusion.items()):
+        kind = _kind_for(verifier_id)
+        satisfied = _normalized(tuple(rows[0]), f"{verifier_id}: satisfied row")
+        violated = _normalized(tuple(rows[1]), f"{verifier_id}: violated row")
+        refused, error = _KIND_TAIL[kind]
+        verifiers.append(
+            VerifierModel(verifier_id=verifier_id, confusion=(satisfied, violated, refused, error))
+        )
+        groups.setdefault(_KIND_GROUP[kind], []).append(verifier_id)
+        if kind in ("compile", "test", "lint", "typecheck"):
+            anchors.append(AnchorEnable(catalog_id=verifier_id.split("@", 1)[0], enabled=True))
+    section = VerifySection(
+        anchors=tuple(anchors),
+        verifiers=tuple(verifiers),
+        priors=priors,
+        correlation_groups=tuple(
+            CorrelationGroup(group_id=g, members=tuple(m)) for g, m in sorted(groups.items())
+        ),
+        quarantine=(),  # spectral.estimate already drops tampered votes before fitting (06 §2.4)
+    )
+    return section, f"verify: spectral run {run.window_start} (identifiable)"
+
+
+def _verify_from_stable(stable_cbor: bytes | None, stable_seq: int | None) -> tuple[bytes, str]:
+    if stable_cbor is None:
+        raise NothingToCompile("no verify basis: no identifiable spectral run and no stable head")
+    seq = stable_seq if stable_seq is not None else "?"
+    return bytes(stable_cbor), f"verify: carried from stable seq {seq}"
+
+
 def compile_sections(
     attempts: Iterable[CertifiedAttempt],
     regime: Regime,
     previous: Mapping[str, bytes] | None = None,
+    verify_inputs: VerifyInputs | None = None,
 ) -> Compiled:
     attempts = tuple(attempts)
     classes = sorted({a.task_class for a in certified(attempts)})
@@ -317,6 +452,16 @@ def compile_sections(
         if name != "route"
     }
     sections["route"] = encode_section(route)
+    verify_note = None
+    if verify_inputs is not None:
+        run = verify_inputs.spectral_run
+        if run is not None and run.passed and run.confusion:
+            verify_section, verify_note = _verify_from_spectral(run)
+            sections["verify"] = encode_section(verify_section)
+        else:
+            sections["verify"], verify_note = _verify_from_stable(
+                verify_inputs.stable_verify_cbor, verify_inputs.stable_seq
+            )
     body = sections_map(sections)
     inherited = sum(1 for c in cells if c.inherited)
     note = (
@@ -325,6 +470,8 @@ def compile_sections(
         f"attempts of task_class {knee.task_class}: {knee.note}; "
         + ("non-route sections carried forward" if carried else "non-route sections defaulted")
     )
+    if verify_note is not None:
+        note += f"; {verify_note}"
     return Compiled(
         sections=sections,
         sections_cbor=body,
