@@ -114,6 +114,7 @@ func TestIntegrationReportGuaranteeGradeFromTenantRegimeRow(t *testing.T) {
 				"observed_ms": uint64(980), "bypass_ms": uint64(20), "disabled_ms": uint64(0), "dropped_billing": uint64(0),
 			}}},
 			"dropped_by_tenant_day": {Rows: []map[string]any{{"dropped_billing": uint64(0), "events_billing_ingested": uint64(100)}}},
+			"certified_outcomes":    {Rows: []map[string]any{{"certified": uint64(3)}}}, // a certified tenant: this test is about the regime row
 		}},
 		Verifier: auth.NewHMACVerifier([]byte(key), auth.StaticRevocations{}),
 		ObsCfg:   obs.Config{ServiceName: "querychoke-regime-it"},
