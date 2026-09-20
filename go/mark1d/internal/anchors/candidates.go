@@ -57,7 +57,8 @@ type WorkspaceCandidates struct {
 // store's answer. ConsentedAt is zero unless Consented.
 type Candidate struct {
 	ConsentRecord
-	Consented bool `json:"consented"`
+	Consented bool   `json:"consented"`
+	Drift     string `json:"drift,omitempty"` // why a once-consented anchor needs re-consent (driftReason); "" when new or consented
 }
 
 // Approval is one line of approvals.jsonl. The CLI writes it (its Approval
@@ -90,6 +91,8 @@ func PublishCandidates(path string, consented []ConsentRecord, derived map[strin
 			cand := Candidate{ConsentRecord: toRecord(e, time.Time{})}
 			if rec, ok := byID[e.ID]; ok && rec.ExecHash == cand.ExecHash {
 				cand.Consented, cand.ConsentedAt = true, rec.ConsentedAt
+			} else if ok {
+				cand.Drift = driftReason(rec, e)
 			}
 			ws.Anchors = append(ws.Anchors, cand)
 		}

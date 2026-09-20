@@ -551,3 +551,33 @@ func TestNpmShimTarget(t *testing.T) {
 		t.Error("a plain batch file is not an npm shim")
 	}
 }
+
+// TestPublishCandidatesNamesTheDrift: a once-consented anchor whose derivation moved is unconsented AND says why — the app shows "tool version changed", not "1 check found".
+func TestPublishCandidatesNamesTheDrift(t *testing.T) {
+	path := CandidatesPath(canonTemp(t))
+	old := CatalogEntry{ID: "ruff", Tool: "ruff", Argv: []string{"/b/ruff", "check", "."}, BinaryHash: bytes.Repeat([]byte{1}, 32), ToolVersion: "ruff 0.6.2"}
+	now := old
+	now.ToolVersion = "ruff 0.7.0"
+	fresh := CatalogEntry{ID: "tsc", Tool: "tsc", Argv: []string{"/b/tsc", "--noEmit"}, BinaryHash: bytes.Repeat([]byte{3}, 32), ToolVersion: "5.9"}
+	if err := PublishCandidates(path, []ConsentRecord{toRecord(old, time.Now())}, map[string][]CatalogEntry{"/w": {now, fresh}}, nil, SandboxStatus{Available: true}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c Candidates
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Candidate{}
+	for _, a := range c.Workspaces[0].Anchors {
+		byID[a.ID] = a
+	}
+	if byID["ruff"].Consented || byID["ruff"].Drift != `tool version changed: "ruff 0.6.2" -> "ruff 0.7.0"` {
+		t.Fatalf("drifted anchor must be unconsented with the reason named: %+v", byID["ruff"])
+	}
+	if byID["tsc"].Consented || byID["tsc"].Drift != "" {
+		t.Fatalf("a never-consented anchor carries no drift: %+v", byID["tsc"])
+	}
+}

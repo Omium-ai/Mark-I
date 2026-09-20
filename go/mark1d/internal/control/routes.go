@@ -801,6 +801,9 @@ func anchorRow(c anchors.Candidate, worktree string, lastRun map[string]string) 
 		"id": c.ID, "tool": c.Tool, "version": c.ToolVersion, "side_effect": c.SideEffect,
 		"consented": c.Consented, "exec_hash": c.ExecHash, "latency_class": c.Class, "last_run": nil, "worktree": worktree,
 	}
+	if c.Drift != "" {
+		row["drift"] = c.Drift
+	}
 	if at, ok := lastRun[c.ID]; ok {
 		row["last_run"] = at
 	}
