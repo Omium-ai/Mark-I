@@ -348,25 +348,14 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var missingDays []string
-	trend := []map[string]any{}
-	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
-		day := d.Format(time.DateOnly)
-		if !daysSeen[day] {
-			missingDays = append(missingDays, day)
-			continue
-		}
-		trend = append(trend, map[string]any{
-			"day": day,
-			"tvo": ratio(float64(perDayTokens[day]), float64(perDayVerified[day])),
-		})
-	}
 	// Shed accounting (06 §8.2, formula normative in 07): the band's lower
 	// edge needs dropped_billing + events_billing_ingested, which live on the
 	// loss ledger, not the rollup row — the same `dropped_by_tenant_day` read
 	// intel's coverage_inputs() performs (reader.py), so both surfaces narrow
-	// from the same numbers.
+	// from the same numbers. Read first: its per-day billing counts also say
+	// which days had anything to roll up.
 	var droppedBilling, billingIngested uint64
+	billingByDay := map[string]uint64{}
 	if shedTpl, err := m.reg.Lookup("dropped_by_tenant_day"); err != nil {
 		writeErr(w, http.StatusInternalServerError, "M1E-9500", "registry miswired")
 		return
@@ -379,7 +368,26 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 		for _, row := range shedRows.Rows {
 			droppedBilling += asU64(row["dropped_billing"])
 			billingIngested += asU64(row["events_billing_ingested"])
+			billingByDay[asStr(row["day"])] += asU64(row["events_billing_ingested"])
 		}
+	}
+
+	// A rollup is missing for a CLOSED day that had billing rows and no rollup row. Today never has one yet, a day before the tenant existed or a quiet weekend has nothing to roll up — counting those refused every report of every tenant by construction ("rollup missing for 1 day" on the day itself).
+	var missingDays []string
+	trend := []map[string]any{}
+	today := time.Now().UTC().Format(time.DateOnly)
+	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
+		day := d.Format(time.DateOnly)
+		if !daysSeen[day] {
+			if day < today && billingByDay[day] > 0 {
+				missingDays = append(missingDays, day)
+			}
+			continue
+		}
+		trend = append(trend, map[string]any{
+			"day": day,
+			"tvo": ratio(float64(perDayTokens[day]), float64(perDayVerified[day])),
+		})
 	}
 	covFraction, covLower := coverageBand(observed, bypass, disabled, droppedBilling, billingIngested)
 

@@ -161,11 +161,15 @@ func TestTVOReportContract(t *testing.T) {
 		"disabled_ms":          uint64(0),
 		"dropped_billing":      uint64(0),
 	}}}
-	// Shed-free loss ledger: coverage_lower = coverage = 0.98 ≥ D23's 0.95.
-	shedFree := &Rows{Rows: []map[string]any{{
-		"dropped_billing":         uint64(0),
-		"events_billing_ingested": uint64(100),
-	}}}
+	// Shed-free loss ledger: coverage_lower = coverage = 0.98 ≥ D23's 0.95. One row per day of the 7-day window (billing rows on every day: each closed day without a rollup is then genuinely missing).
+	shedFree := &Rows{}
+	for i := 6; i >= 0; i-- {
+		shedFree.Rows = append(shedFree.Rows, map[string]any{
+			"day":                     time.Now().UTC().AddDate(0, 0, -i).Format(time.DateOnly),
+			"dropped_billing":         uint64(0),
+			"events_billing_ingested": uint64(100),
+		})
+	}
 	run := &fakeRunner{
 		rows:       reportRows,
 		byTemplate: map[string]*Rows{"dropped_by_tenant_day": shedFree},
@@ -274,6 +278,20 @@ func TestTVOReportContract(t *testing.T) {
 	if len(resp["missing_days"].([]any)) != 6 {
 		t.Fatalf("missing days must be enumerated: %s", w.Body.String())
 	}
+
+	// A day with no billing rows (before the tenant existed, a quiet weekend) and today (never closed yet) are not missing rollups: a fresh tenant's first report must not refuse for the six days before it signed up.
+	run.byTemplate["dropped_by_tenant_day"] = &Rows{Rows: []map[string]any{{
+		"day":                     time.Now().UTC().Format(time.DateOnly),
+		"dropped_billing":         uint64(0),
+		"events_billing_ingested": uint64(100),
+	}}}
+	w = do(mux, "GET", "/api/v1/reports/tvo?window=7d", bearer, "")
+	resp = map[string]any{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if refusal, _ := resp["refusal"].(string); strings.Contains(refusal, "rollup missing") || resp["missing_days"] != nil {
+		t.Fatalf("quiet days before the tenant's first row are not missing rollups: %s", w.Body.String())
+	}
+	run.byTemplate["dropped_by_tenant_day"] = shedFree
 }
 
 // A restated day arrives as TWO (day, series) rows; ADR-0010 §6 makes the new
