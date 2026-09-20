@@ -67,8 +67,9 @@ LIMIT 1 BY event_id`,
 	},
 	{
 		// appapi GET /moments (desktop spec §5.1): arrests (task-bearing GuardDecision), injections and route decisions over [from, to], newest first; the handler cuts at ?since. agent is the session's SessionStart agent when that row is in the window, else the row's own stamp (chproj: SdkInfo.agent when the SessionStart was in an earlier batch).
+		// v3 keeps a single-rung advisory "stay" (every request of a subscription session) out of the feed: a decision, not a moment — 1,628 of them buried the founder's four blocks below the feed's newest hundred.
 		name:    "app_moments",
-		version: "app_moments.v2",
+		version: "app_moments.v3",
 		body: `SELECT e.event_id AS event_id, e.occurred_at AS occurred_at, e.session_id AS session_id, e.task_id AS task_id,
        if(e.start_agent != '', e.start_agent, e.agent) AS agent,
        e.event_type AS event_type, e.propensity AS propensity, e.fidelity AS fidelity, e.bundle_seq AS bundle_seq, e.payload AS payload
@@ -80,6 +81,7 @@ FROM (SELECT event_id, occurred_at, session_id, task_id, agent, event_type, prop
               AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
               AND event_type IN ('SessionStart', 'GuardDecision', 'MemoryInjection', 'RouteDecision')
               AND (event_type != 'GuardDecision' OR task_id != toUUID('00000000-0000-0000-0000-000000000000'))
+              AND (event_type != 'RouteDecision' OR fidelity != 'advisory' OR JSONLength(payload, 'candidates') > 1)
             LIMIT 1 BY event_id) AS d) AS e
 WHERE e.event_type != 'SessionStart'
 ORDER BY e.occurred_at DESC, e.event_id DESC`,
