@@ -529,7 +529,7 @@ func TestIntegrationPolicyDistribution(t *testing.T) {
 		}
 
 		// Coverage: 2 active devices for tenant A, 1 on head.
-		cov, err := h.mod.store.AckCoverage(ctx, h.tenantA, "stable")
+		cov, err := h.mod.store.AckCoverage(ctx, h.tenantA, "stable", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -563,7 +563,7 @@ func TestIntegrationPolicyDistribution(t *testing.T) {
 		if result != "rejected" || code != "M1E-3005" {
 			t.Fatalf("a device erased its own rejection: %q %q", result, code)
 		}
-		cov, err = h.mod.store.AckCoverage(ctx, h.tenantA, "stable")
+		cov, err = h.mod.store.AckCoverage(ctx, h.tenantA, "stable", nil)
 		if err != nil {
 			t.Fatal(err)
 		}

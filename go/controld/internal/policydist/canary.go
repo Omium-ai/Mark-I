@@ -12,6 +12,7 @@
 package policydist
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
@@ -131,9 +132,62 @@ func InCohort(tenantSalt []byte, deviceID uuid.UUID, percent int) bool {
 	if percent >= 100 {
 		return true
 	}
+	return percentile(tenantSalt, deviceID) < uint64(percent)
+}
+
+// percentile is InCohort's HMAC(tenant_salt, device_id) mod 100, shared so the min-one rule agrees with InCohort.
+func percentile(tenantSalt []byte, deviceID uuid.UUID) uint64 {
 	m := hmac.New(sha256.New, tenantSalt)
 	d := deviceID
 	m.Write(d[:])
 	sum := m.Sum(nil)
-	return binary.BigEndian.Uint64(sum[:8])%100 < uint64(percent)
+	return binary.BigEndian.Uint64(sum[:8]) % 100
+}
+
+// lowerPercentile: lower percentile wins, ties break on the lower device id, so every caller picks the same one device.
+func lowerPercentile(salt []byte, a, b uuid.UUID) bool {
+	pa, pb := percentile(salt, a), percentile(salt, b)
+	if pa != pb {
+		return pa < pb
+	}
+	return bytes.Compare(a[:], b[:]) < 0
+}
+
+// CohortOf is InCohort over every active device plus the min-one rule: the lowest-percentile device is always in once percent > 0, so a one-device fleet never sits at an empty cohort.
+func CohortOf(tenantSalt []byte, activeDevices []uuid.UUID, percent int) []uuid.UUID {
+	if percent <= 0 || len(activeDevices) == 0 {
+		return nil
+	}
+	in := make([]uuid.UUID, 0, len(activeDevices))
+	lowest := activeDevices[0]
+	for _, id := range activeDevices {
+		if InCohort(tenantSalt, id, percent) {
+			in = append(in, id)
+		}
+		if lowerPercentile(tenantSalt, id, lowest) {
+			lowest = id
+		}
+	}
+	for _, id := range in {
+		if id == lowest {
+			return in
+		}
+	}
+	return append(in, lowest)
+}
+
+// InCohortOf is CohortOf's membership test for one device, so the steering path (which only ever needs a yes/no for the device that just polled) need not build the whole slice.
+func InCohortOf(tenantSalt []byte, activeDevices []uuid.UUID, percent int, deviceID uuid.UUID) bool {
+	if InCohort(tenantSalt, deviceID, percent) {
+		return true
+	}
+	if percent <= 0 {
+		return false
+	}
+	for _, id := range activeDevices {
+		if id != deviceID && lowerPercentile(tenantSalt, id, deviceID) {
+			return false
+		}
+	}
+	return true
 }

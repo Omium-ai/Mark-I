@@ -63,6 +63,32 @@ func (h *itHarness) ack(ctx context.Context, device uuid.UUID, channel string, s
 	}
 }
 
+// cursorOf/headSeqOf are cursor/headSeq generalized to an explicit tenant -- the rest of this file is tenantA-bound, but the one-device-tenant test below needs tenant B.
+func (h *itHarness) cursorOf(tenant uuid.UUID, channel string) itCursor {
+	h.t.Helper()
+	var c itCursor
+	if err := h.admin.QueryRow(context.Background(),
+		`SELECT seq, cohort_percent, health_ticks, halted_at, halt_reason, rollback_seq, promoted_seq FROM rollout_cursor WHERE tenant_id = $1 AND channel = $2`,
+		tenant, channel).Scan(&c.Seq, &c.Cohort, &c.Ticks, &c.Halted, &c.Reason, &c.Rollback, &c.Promoted); err != nil && err != pgx.ErrNoRows {
+		h.t.Fatal(err)
+	}
+	return c
+}
+
+func (h *itHarness) headSeqOf(tenant uuid.UUID, channel string) int64 {
+	h.t.Helper()
+	var seq int64
+	err := h.admin.QueryRow(context.Background(),
+		`SELECT head_seq FROM bundle_channel_heads WHERE tenant_id = $1 AND channel = $2`, tenant, channel).Scan(&seq)
+	if err == pgx.ErrNoRows {
+		return -1
+	}
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return seq
+}
+
 func TestIntegrationRolloutController(t *testing.T) {
 	h := itSetup(t)
 	ctx := context.Background()
@@ -190,7 +216,7 @@ func TestIntegrationRolloutController(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cov, err := h.mod.store.AckCoverage(ctx, h.tenantA, ch)
+		cov, err := h.mod.store.AckCoverage(ctx, h.tenantA, ch, nil)
 		if err != nil || cov.CommandString == 0 {
 			t.Fatalf("the channel-lifetime tripwire should still be lit: %+v %v", cov, err)
 		}
@@ -441,5 +467,52 @@ func TestIntegrationRolloutHaltNeverPromotes(t *testing.T) {
 	}
 	if h.headSeq(BootstrapChannel) != -1 {
 		t.Fatal("a halted rollout must never publish anything to stable")
+	}
+}
+
+// TestIntegrationRolloutPromotionOneDeviceTenant is the min-one rule's payoff: a single-device tenant (deviceB) still widens 5% -> 25% -> 100% and promotes once that device ACKs the canary head.
+func TestIntegrationRolloutPromotionOneDeviceTenant(t *testing.T) {
+	h := itSetup(t)
+	ctx := context.Background()
+
+	now := time.Now()
+	salt := func(uuid.UUID) ([]byte, error) { return []byte("it-salt"), nil }
+	c := NewController(h.mod, itHealthyRunner(), querychoke.MustLoadTemplates(), salt, receipts.StaticTenants([]uuid.UUID{h.tenantBID}))
+	c.Clock(func() time.Time { return now }, nil)
+
+	first, err := h.mod.Publish(ctx, h.tenantB, h.draft(CanaryChannel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.mod.store.RecordAck(ctx, h.tenantB, h.deviceB, Ack{Channel: CanaryChannel, Seq: first.Seq, Result: "applied", EdgeVersion: "1.0.0"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Tick(ctx, h.tenantB, CanaryChannel); err != nil {
+		t.Fatal(err)
+	}
+	if cur := h.cursorOf(h.tenantBID, CanaryChannel); cur.Cohort != 5 {
+		t.Fatalf("first tick did not seed at 5%%: %+v", cur)
+	}
+	for _, want := range []int64{25, 100} {
+		now = now.Add(SoakWindow + time.Minute)
+		if err := c.Tick(ctx, h.tenantB, CanaryChannel); err != nil {
+			t.Fatal(err)
+		}
+		if cur := h.cursorOf(h.tenantBID, CanaryChannel); cur.Cohort != want {
+			t.Fatalf("the sole device did not widen the rollout to %d%% (min-one rule): %+v", want, cur)
+		}
+	}
+
+	now = now.Add(SoakWindow + time.Minute)
+	if err := c.Tick(ctx, h.tenantB, CanaryChannel); err != nil {
+		t.Fatal(err)
+	}
+	cur := h.cursorOf(h.tenantBID, CanaryChannel)
+	if cur.Promoted == nil {
+		t.Fatalf("the one-device tenant's rollout did not promote: %+v", cur)
+	}
+	if h.headSeqOf(h.tenantBID, BootstrapChannel) != *cur.Promoted {
+		t.Fatalf("promotion did not land on tenant B's stable channel: cursor %+v stable head %d", cur, h.headSeqOf(h.tenantBID, BootstrapChannel))
 	}
 }

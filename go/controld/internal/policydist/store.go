@@ -505,10 +505,11 @@ func (c Coverage) HeadRatio() float64 {
 	return float64(c.OnHead) / float64(c.ActiveDevices)
 }
 
-// AckCoverage runs m1_042's canary query. `partial` is deliberately absent
-// from the numerator: 05 §4.3(b) makes a skipped section count as
-// NON-adoption, so a partial ACK must not widen a rollout even though it is a
-// successful verify.
+// AckCoverage runs m1_042's canary query, cohort-restricted when non-empty (05 §4.3 item 1: under steering only in-cohort devices poll/ACK canary, so a whole-fleet denominator never reaches the widen floor under 100%; nil/empty is the whole fleet, unchanged for every pre-steering and stable-channel caller).
+//
+// `partial` is deliberately absent from the numerator:
+// 05 §4.3(b) makes a skipped section count as NON-adoption, so a partial ACK
+// must not widen a rollout even though it is a successful verify.
 //
 // All three adoption counters are scoped to head_seq, because every one of them
 // is an answer to the same question -- what happened to THIS bundle. Earlier,
@@ -517,13 +518,17 @@ func (c Coverage) HeadRatio() float64 {
 // longer ACKing, blocked widening permanently. Fail-closed in direction, but
 // indistinguishable from a hung rollout in production.
 //
-// CommandString is the deliberate exception and is NOT seq-scoped: 05 §4.3(a)
-// makes one M1E-3005 too many, and a command string that reached a device in a
-// superseded bundle still happened. It reads the full ACK history rather than
-// the latest-per-device CTE, which could only ever have seen the most recent
-// one anyway.
-func (s *Store) AckCoverage(ctx context.Context, tenant querychoke.TenantID, channel string) (Coverage, error) {
+// CommandString is the deliberate exception and is NOT seq-scoped, and NOT
+// cohort-scoped either: 05 §4.3(a) makes one M1E-3005 too many, and a command
+// string that reached a device in a superseded bundle still happened. It
+// reads the full ACK history rather than the latest-per-device CTE, which
+// could only ever have seen the most recent one anyway.
+func (s *Store) AckCoverage(ctx context.Context, tenant querychoke.TenantID, channel string, cohort []uuid.UUID) (Coverage, error) {
 	var c Coverage
+	var cohortParam []uuid.UUID
+	if len(cohort) > 0 {
+		cohortParam = cohort
+	}
 	err := s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
 		scanErr := tx.QueryRow(ctx, `
 			WITH latest AS (
@@ -547,9 +552,10 @@ func (s *Store) AckCoverage(ctx context.Context, tenant querychoke.TenantID, cha
 			  JOIN m1_devices d ON d.tenant_id = h.tenant_id
 			                   AND d.revoked_at IS NULL
 			                   AND d.last_seen_at > now() - interval '24 hours'
+			                   AND ($3::uuid[] IS NULL OR d.id = ANY($3::uuid[]))
 			  LEFT JOIN latest l ON l.device_id = d.id
 			 WHERE h.tenant_id = $1 AND h.channel = $2
-			 GROUP BY h.head_seq`, tenant.UUID(), channel).
+			 GROUP BY h.head_seq`, tenant.UUID(), channel, cohortParam).
 			Scan(&c.HeadSeq, &c.ActiveDevices, &c.OnHead, &c.Rejected, &c.Partial, &c.CommandString)
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			// No head row, or no device seen in 24h. Both mean "nothing to
@@ -561,6 +567,20 @@ func (s *Store) AckCoverage(ctx context.Context, tenant querychoke.TenantID, cha
 		return scanErr
 	})
 	return c, err
+}
+
+// ActiveDevices is the tenant's fleet as the canary controller and the steering path both see it (not revoked, seen in the last 24h), shared so both feed the same set into CohortOf/InCohortOf.
+func (s *Store) ActiveDevices(ctx context.Context, tenant querychoke.TenantID) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	err := s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id FROM m1_devices WHERE tenant_id = $1 AND revoked_at IS NULL AND last_seen_at > now() - interval '24 hours'`, tenant.UUID())
+		if err != nil {
+			return err
+		}
+		ids, err = pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+		return err
+	})
+	return ids, err
 }
 
 // --------------------------------------------------------------------------- Canary steering (05 §4.3 item 1)

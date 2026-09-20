@@ -147,7 +147,7 @@ func step(cov Coverage, cur cursor, regressed bool, now time.Time) (cursor, Deci
 
 // Tick is the worker entrypoint (ingest.Replay's shape): one evaluation of one (tenant, channel). Any error leaves the cursor untouched, which is a hold.
 func (c *Controller) Tick(ctx context.Context, tenant querychoke.TenantID, channel string) error {
-	cov, err := c.mod.store.AckCoverage(ctx, tenant, channel)
+	cov, err := c.mod.store.AckCoverage(ctx, tenant, channel, nil)
 	if err != nil || cov.HeadSeq == 0 {
 		return err
 	}
@@ -170,6 +170,16 @@ func (c *Controller) Tick(ctx context.Context, tenant querychoke.TenantID, chann
 			return c.rollback(ctx, tenant, channel, cur.Seq) // resumed after a crash between halt and publish
 		}
 		return nil
+	}
+	// 05 §4.3 item 1: under steering only cohort devices ever poll and ACK canary, so under 100% the whole-fleet coverage above can never reach the widen floor -- re-measure over the cohort. At 100% the cohort IS the whole fleet, so the first read already has the right numbers.
+	if channel == CanaryChannel && cur.Cohort < 100 {
+		cohortIDs, err := c.cohort(ctx, tenant, cur.Cohort)
+		if err != nil {
+			return err
+		}
+		if cov, err = c.mod.store.AckCoverage(ctx, tenant, channel, cohortIDs); err != nil {
+			return err
+		}
 	}
 	// AckCoverage's CommandString is channel-lifetime; the halt is per rollout, or one historical 3005 bricks the channel forever.
 	if cov.CommandString, err = c.tripwire(ctx, tenant, channel, cur.Seq); err != nil {
@@ -360,31 +370,17 @@ func (c *Controller) regressed(ctx context.Context, tenant querychoke.TenantID, 
 	return false, nil
 }
 
-// cohort is 06 §10.4's assignment over the active fleet: the devices AckCoverage counts, filtered by InCohort.
+// cohort is 06 §10.4's assignment over the active fleet, CohortOf's min-one rule included (Store.ActiveDevices filtered by InCohort, plus the lowest-percentile device once percent > 0).
 func (c *Controller) cohort(ctx context.Context, tenant querychoke.TenantID, percent int) ([]uuid.UUID, error) {
 	salt, err := c.salt(tenant.UUID())
 	if err != nil {
 		return nil, err
 	}
-	var ids []uuid.UUID
-	err = c.mod.store.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id FROM m1_devices WHERE tenant_id = $1 AND revoked_at IS NULL AND last_seen_at > now() - interval '24 hours'`, tenant.UUID())
-		if err != nil {
-			return err
-		}
-		ids, err = pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
-		return err
-	})
+	active, err := c.mod.store.ActiveDevices(ctx, tenant)
 	if err != nil {
 		return nil, err
 	}
-	in := ids[:0]
-	for _, id := range ids {
-		if InCohort(salt, id, percent) {
-			in = append(in, id)
-		}
-	}
-	return in, nil
+	return CohortOf(salt, active, percent), nil
 }
 
 type arm struct{ num, den float64 }

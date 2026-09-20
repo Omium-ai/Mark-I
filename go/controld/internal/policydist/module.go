@@ -147,25 +147,29 @@ func (m *Module) Publish(ctx context.Context, tenant querychoke.TenantID, d Draf
 // GET /api/v1/policy/bundle
 // ---------------------------------------------------------------------------
 
-// steerChannel (05 §4.3 item 1): on a stable poll an in-cohort device under an active, un-halted, unpromoted canary rollout is told to move to canary.
+// steerChannel (05 §4.3 item 1): on a stable poll an in-cohort device under an active, un-halted, unpromoted canary rollout is told to move to canary. The active-device read only runs when a rollout is actually live (percent > 0): most stable polls have none, and skipping it there is the cheap case, not a cache.
 func (m *Module) steerChannel(ctx context.Context, tenant querychoke.TenantID, deviceID uuid.UUID) string {
 	if m.salt == nil {
 		return BootstrapChannel
 	}
 	percent, err := m.store.ActiveCanaryCohort(ctx, tenant)
-	if err != nil {
-		return BootstrapChannel // fail-closed toward stable: an unreadable cursor steers nobody
+	if err != nil || percent <= 0 {
+		return BootstrapChannel // fail-closed toward stable: an unreadable cursor, or none active, steers nobody
 	}
 	salt, err := m.salt(tenant.UUID())
 	if err != nil {
 		return BootstrapChannel
 	}
-	return steerTarget(percent, salt, deviceID)
+	active, err := m.store.ActiveDevices(ctx, tenant)
+	if err != nil {
+		return BootstrapChannel
+	}
+	return steerTarget(percent, salt, active, deviceID)
 }
 
-// steerTarget is steerChannel's pure decision, split out so it is testable without a database.
-func steerTarget(percent int, salt []byte, deviceID uuid.UUID) string {
-	if InCohort(salt, deviceID, percent) {
+// steerTarget is steerChannel's pure decision, split out so it is testable without a database. It shares CohortOf's min-one rule (InCohortOf) with Controller.cohort, so a one-device tenant's canary poller and the controller's own coverage/health measurement over that same device agree.
+func steerTarget(percent int, salt []byte, activeDevices []uuid.UUID, deviceID uuid.UUID) string {
+	if InCohortOf(salt, activeDevices, percent, deviceID) {
 		return CanaryChannel
 	}
 	return BootstrapChannel

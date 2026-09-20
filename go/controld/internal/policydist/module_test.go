@@ -499,42 +499,109 @@ func TestInCohort(t *testing.T) {
 func TestSteerTarget(t *testing.T) {
 	salt := []byte("tenant-salt")
 	device := uuid.New()
+	fleet := []uuid.UUID{device}
 
-	for _, tc := range []struct {
-		name    string
-		percent int
-	}{
-		{"no rollout, halted, or already promoted (ActiveCanaryCohort's shared 0%)", 0},
-	} {
-		if got := steerTarget(tc.percent, salt, device); got != BootstrapChannel {
-			t.Fatalf("%s: steerTarget(%d) = %q, want %q", tc.name, tc.percent, got, BootstrapChannel)
-		}
+	if got := steerTarget(0, salt, fleet, device); got != BootstrapChannel {
+		t.Fatalf("no rollout (0%%): steerTarget = %q, want %q", got, BootstrapChannel)
 	}
-
 	// 100% is always in cohort: an active, unpromoted rollout that finished widening.
-	if got := steerTarget(100, salt, device); got != CanaryChannel {
+	if got := steerTarget(100, salt, fleet, device); got != CanaryChannel {
 		t.Fatalf("steerTarget(100) = %q, want %q", got, CanaryChannel)
 	}
 
-	// A partial step (25%) puts some devices in cohort and leaves others out
-	var in, out uuid.UUID
-	for i := 0; i < 1000 && (in == uuid.Nil || out == uuid.Nil); i++ {
+	// A partial step (25%) puts some devices in and leaves others out; find one of each, plus a third with a strictly lower percentile than the out one so it is not the min-one fallback either.
+	var in, out, lowerThanOut uuid.UUID
+	for i := 0; i < 1000 && (in == uuid.Nil || out == uuid.Nil || lowerThanOut == uuid.Nil); i++ {
 		d := uuid.New()
-		if InCohort(salt, d, 25) {
+		switch {
+		case InCohort(salt, d, 25):
 			if in == uuid.Nil {
 				in = d
 			}
-		} else if out == uuid.Nil {
+		case out == uuid.Nil:
 			out = d
+		case lowerThanOut == uuid.Nil && lowerPercentile(salt, d, out):
+			lowerThanOut = d
 		}
 	}
-	if in == uuid.Nil || out == uuid.Nil {
-		t.Fatal("could not find both an in-cohort and an out-of-cohort device at 25% in 1000 tries")
+	if in == uuid.Nil || out == uuid.Nil || lowerThanOut == uuid.Nil {
+		t.Fatal("could not find the needed devices at 25% in 1000 tries")
 	}
-	if got := steerTarget(25, salt, in); got != CanaryChannel {
+	if got := steerTarget(25, salt, []uuid.UUID{in}, in); got != CanaryChannel {
 		t.Fatalf("in-cohort device: steerTarget(25) = %q, want %q", got, CanaryChannel)
 	}
-	if got := steerTarget(25, salt, out); got != BootstrapChannel {
-		t.Fatalf("out-of-cohort device: steerTarget(25) = %q, want %q", got, BootstrapChannel)
+	// out is alone in the fleet: the min-one rule makes it the fallback despite being out of InCohort's natural cut.
+	if got := steerTarget(25, salt, []uuid.UUID{out}, out); got != CanaryChannel {
+		t.Fatalf("sole out-of-cohort device (min-one applies): steerTarget(25) = %q, want %q", got, CanaryChannel)
+	}
+	// out is no longer the fleet's lowest percentile once lowerThanOut is active too.
+	if got := steerTarget(25, salt, []uuid.UUID{out, lowerThanOut}, out); got != BootstrapChannel {
+		t.Fatalf("out-of-cohort and not the fleet minimum: steerTarget(25) = %q, want %q", got, BootstrapChannel)
+	}
+	if got := steerTarget(25, salt, []uuid.UUID{out, lowerThanOut}, lowerThanOut); got != CanaryChannel {
+		t.Fatalf("the fleet's actual minimum: steerTarget(25) = %q, want %q", got, CanaryChannel)
+	}
+}
+
+// TestCohortOfMinOne is 05 §4.3 item 1's second gap: a tiny fleet must not sit at an empty cohort forever -- the fleet's single lowest-percentile device is always in once percent > 0.
+func TestCohortOfMinOne(t *testing.T) {
+	salt := []byte("tenant-salt")
+
+	// A one-device fleet: that device is in at 5%, however its own percentile falls.
+	solo := uuid.New()
+	if got := CohortOf(salt, []uuid.UUID{solo}, 5); len(got) != 1 || got[0] != solo {
+		t.Fatalf("solo fleet at 5%%: CohortOf = %v, want [%s]", got, solo)
+	}
+	if len(CohortOf(salt, []uuid.UUID{solo}, 0)) != 0 {
+		t.Fatal("percent 0 must select nobody, min-one included")
+	}
+
+	// A 40-device fleet at 5%: never empty, equal to InCohort's selection plus the fleet's lowest percentile (a floor, not an addition, when it is already a member).
+	fleet := make([]uuid.UUID, 40)
+	for i := range fleet {
+		fleet[i] = uuid.New()
+	}
+	got := CohortOf(salt, fleet, 5)
+	if len(got) == 0 {
+		t.Fatal("40-device fleet at 5%: CohortOf returned nobody")
+	}
+	want := map[uuid.UUID]bool{}
+	lowest := fleet[0]
+	for _, id := range fleet {
+		if InCohort(salt, id, 5) {
+			want[id] = true
+		}
+		if lowerPercentile(salt, id, lowest) {
+			lowest = id
+		}
+	}
+	want[lowest] = true
+	if len(got) != len(want) {
+		t.Fatalf("CohortOf = %d devices, want exactly InCohort's %d plus the min-one floor", len(got), len(want))
+	}
+	for _, id := range got {
+		if !want[id] {
+			t.Fatalf("CohortOf included %s, which is neither InCohort-selected nor the fleet minimum", id)
+		}
+	}
+}
+
+// TestInCohortOfAgreesWithCohortOf: the steering path (InCohortOf, one device at a time) and the controller path (CohortOf, the whole slice) must select the exact same set.
+func TestInCohortOfAgreesWithCohortOf(t *testing.T) {
+	salt := []byte("tenant-salt")
+	fleet := make([]uuid.UUID, 12)
+	for i := range fleet {
+		fleet[i] = uuid.New()
+	}
+	for _, percent := range []int{0, 5, 25, 100} {
+		in := map[uuid.UUID]bool{}
+		for _, id := range CohortOf(salt, fleet, percent) {
+			in[id] = true
+		}
+		for _, id := range fleet {
+			if got, want := InCohortOf(salt, fleet, percent, id), in[id]; got != want {
+				t.Fatalf("percent %d, device %s: InCohortOf = %v, CohortOf membership = %v", percent, id, got, want)
+			}
+		}
 	}
 }
