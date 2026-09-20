@@ -494,3 +494,47 @@ func TestInCohort(t *testing.T) {
 		t.Fatalf("25%% cohort selected %d of %d devices", in, len(devices))
 	}
 }
+
+// TestSteerTarget (05 §4.3 item 1): canary for an in-cohort device under an active rollout, stable for everyone else.
+func TestSteerTarget(t *testing.T) {
+	salt := []byte("tenant-salt")
+	device := uuid.New()
+
+	for _, tc := range []struct {
+		name    string
+		percent int
+	}{
+		{"no rollout, halted, or already promoted (ActiveCanaryCohort's shared 0%)", 0},
+	} {
+		if got := steerTarget(tc.percent, salt, device); got != BootstrapChannel {
+			t.Fatalf("%s: steerTarget(%d) = %q, want %q", tc.name, tc.percent, got, BootstrapChannel)
+		}
+	}
+
+	// 100% is always in cohort: an active, unpromoted rollout that finished widening.
+	if got := steerTarget(100, salt, device); got != CanaryChannel {
+		t.Fatalf("steerTarget(100) = %q, want %q", got, CanaryChannel)
+	}
+
+	// A partial step (25%) puts some devices in cohort and leaves others out
+	var in, out uuid.UUID
+	for i := 0; i < 1000 && (in == uuid.Nil || out == uuid.Nil); i++ {
+		d := uuid.New()
+		if InCohort(salt, d, 25) {
+			if in == uuid.Nil {
+				in = d
+			}
+		} else if out == uuid.Nil {
+			out = d
+		}
+	}
+	if in == uuid.Nil || out == uuid.Nil {
+		t.Fatal("could not find both an in-cohort and an out-of-cohort device at 25% in 1000 tries")
+	}
+	if got := steerTarget(25, salt, in); got != CanaryChannel {
+		t.Fatalf("in-cohort device: steerTarget(25) = %q, want %q", got, CanaryChannel)
+	}
+	if got := steerTarget(25, salt, out); got != BootstrapChannel {
+		t.Fatalf("out-of-cohort device: steerTarget(25) = %q, want %q", got, BootstrapChannel)
+	}
+}

@@ -133,10 +133,11 @@ func writeTrust(t *testing.T, stateDir string, m *manifest) {
 type cp struct {
 	mu sync.Mutex
 
-	body []byte // what GET /bundle serves
-	etag string //   under this ETag
-	seq  string //   and this X-Mark1-Bundle-Seq echo
-	head *vecHead
+	body    []byte // what GET /bundle serves
+	etag    string //   under this ETag
+	seq     string //   and this X-Mark1-Bundle-Seq echo
+	head    *vecHead
+	steerTo string // X-Mark1-Channel echoed on GET /bundle when set (05 §4.3 item 1)
 
 	bundleStatus int    // non-zero ⇒ GET /bundle fails with it
 	keysStatus   int    // non-zero ⇒ GET /.well-known/mark1-keys fails with it
@@ -176,6 +177,9 @@ func (s *cp) handler() http.Handler {
 		if s.bundleStatus != 0 {
 			w.WriteHeader(s.bundleStatus)
 			return
+		}
+		if s.steerTo != "" {
+			w.Header().Set("X-Mark1-Channel", s.steerTo)
 		}
 		if inm := r.Header.Get("If-None-Match"); inm != "" && inm == s.etag {
 			s.notModN++
@@ -943,7 +947,7 @@ func TestClientAsksForTheHeadTheProofTargets(t *testing.T) {
 	}
 }
 
-// TestClientRefusesAnotherTenantsBundle: with TenantID set, a bundle for any other tenant is M1E-3001 and never applied; the frozen vectors carry tenant 0x0101…
+// TestClientRefusesAnotherTenantsBundle: with TenantID set, a bundle for any other tenant is M1E-3001 and never applied.
 func TestClientRefusesAnotherTenantsBundle(t *testing.T) {
 	h := newHarness(t)
 	h.serve("full", `"t7-stable-000001"`, "1")
@@ -1057,5 +1061,92 @@ func TestClientApplyGatesFollowsApply(t *testing.T) {
 	c.publish()
 	if len(got) != 2 || got[1] != (policy.GatesSection{}) {
 		t.Fatalf("past max_age ApplyGates saw %+v, want the zero section (gates open)", got)
+	}
+}
+
+// TestLKGPathsPerChannel: stable keeps the pre-steering filenames so an upgrading install does not lose its state
+func TestLKGPathsPerChannel(t *testing.T) {
+	if b, m := lkgPaths("stable"); b != lkgFile || m != metaFile {
+		t.Fatalf("stable = %s/%s, want the original %s/%s", b, m, lkgFile, metaFile)
+	}
+	if b, m := lkgPaths("canary"); b != "lkg-canary.cbor" || m != "lkg-canary.json" {
+		t.Fatalf("canary = %s/%s, want lkg-canary.cbor/lkg-canary.json", b, m)
+	}
+}
+
+// TestClientSteerIsANoOpOnEmptyMatchingOrInvalidHeader: 05 §4.3 item 2's "nothing changes" cases
+func TestClientSteerIsANoOpOnEmptyMatchingOrInvalidHeader(t *testing.T) {
+	c := &Client{channel: "stable", log: slog.New(slog.NewTextHandler(io.Discard, nil)), hint: make(chan struct{}, 1)}
+	for _, header := range []string{"", "stable", "../../etc/passwd", "has spaces", "semi;colon", "a/b"} {
+		c.steer(header)
+		if c.channel != "stable" {
+			t.Fatalf("steer(%q) changed channel to %q", header, c.channel)
+		}
+		if len(c.hint) != 0 {
+			t.Fatalf("steer(%q) nudged despite being a no-op", header)
+		}
+	}
+}
+
+// TestClientSteerSwitchesChannelKeepsFloorsSeparate: a header-only steer moves the client to canary with its own floor, and a steer back applies stable's newer seq without a rollback rejection.
+func TestClientSteerSwitchesChannelKeepsFloorsSeparate(t *testing.T) {
+	h := newHarness(t)
+	c := h.client()
+
+	h.serve("full", `"t7-stable-000001"`, "1")
+	if !c.tick(context.Background()) || c.channel != "stable" || c.lkg.b.Seq != 1 {
+		t.Fatal("seq 1 did not apply on stable")
+	}
+
+	// The next stable poll is steered to "local": no bundle bytes change (a 304), but the header alone must move the client.
+	h.cp.set(func(s *cp) { s.steerTo = "local" })
+	if !c.tick(context.Background()) {
+		t.Fatal("steered tick reported a transport failure")
+	}
+	if c.channel != "local" {
+		t.Fatalf("channel = %q, want local", c.channel)
+	}
+	if c.lkg != nil {
+		t.Fatal("a freshly steered-to channel with no persisted LKG must read as no bundle, not stable's")
+	}
+	select {
+	case <-c.hint:
+	default:
+		t.Fatal("a steer must nudge an immediate re-fetch rather than wait out the jittered poll")
+	}
+
+	// Now polling ?channel=local: apply bundle_zero there, under its own LKG files.
+	h.cp.set(func(s *cp) { s.steerTo = "" })
+	h.serve("bundle_zero", `"t7-local-000000"`, "0")
+	if !c.tick(context.Background()) || c.lkg == nil || c.lkg.b.Seq != 0 || c.lkg.b.Channel != "local" {
+		t.Fatal("bundle_zero did not apply on the steered-to channel")
+	}
+	if _, err := os.Stat(filepath.Join(h.state, "policy", "lkg-local.cbor")); err != nil {
+		t.Fatalf("local channel's LKG was not persisted under its own name: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(h.state, "policy", lkgFile)); err != nil {
+		t.Fatalf("stable's original LKG file must survive the excursion: %v", err)
+	}
+
+	// Steered back to stable: the ORIGINAL seq-1 LKG reloads from disk, untouched.
+	h.cp.set(func(s *cp) { s.steerTo = "stable" })
+	if !c.tick(context.Background()) {
+		t.Fatal("steer-back tick failed")
+	}
+	if c.channel != "stable" || c.lkg == nil || c.lkg.b.Seq != 1 {
+		t.Fatalf("steering back to stable did not restore its floor: channel=%s lkg=%+v", c.channel, c.lkg)
+	}
+
+	// The stable floor is intact: seq 2 (chained from seq 1) applies clean
+	h.cp.set(func(s *cp) { s.steerTo = "" })
+	h.serve("minimal", `"t7-stable-000002"`, "2")
+	if !c.tick(context.Background()) || c.lkg.b.Seq != 2 {
+		t.Fatal("stable seq 2 did not apply after the round trip")
+	}
+	acks, _ := h.cp.snapshot()
+	for _, a := range acks {
+		if a.Result == "rejected" {
+			t.Fatalf("stable's floor was corrupted by the local excursion: %+v", a)
+		}
 	}
 }

@@ -33,6 +33,9 @@ const (
 // WidenSteps is 05 §4.3's ladder. 100 is terminal.
 var WidenSteps = []int{5, 25, 100}
 
+// CanaryChannel is 05 §4.1's publication target for every compiled draft
+const CanaryChannel = "canary"
+
 const (
 	// WidenCoverage is the ACK-coverage floor for a widen.
 	//

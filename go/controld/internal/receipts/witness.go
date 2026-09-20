@@ -68,6 +68,39 @@ func StaticTenants(ids []uuid.UUID) TenantSource {
 	return func(context.Context) ([]uuid.UUID, error) { return ids, nil }
 }
 
+// DirectoryTenants reads every active tenant from m1_tenant_directory (m1_084, global, no RLS), the same set `--tenant all` enumerates, plus the pinned WITNESS_TENANTS list; a static list alone left every later tenant without a witness, a rollout or a draft publisher. The zero GUC reads no RLS row, so this transaction can see nothing else.
+func DirectoryTenants(db DB, pinned []uuid.UUID) TenantSource {
+	return func(ctx context.Context) ([]uuid.UUID, error) {
+		seen := map[uuid.UUID]bool{}
+		out := []uuid.UUID{}
+		for _, id := range pinned {
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+		err := db.WithTenant(ctx, querychoke.TenantID{}, func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, `SELECT tenant_id FROM m1_tenant_directory WHERE status = 'active' ORDER BY tenant_id`)
+			if err != nil {
+				return err
+			}
+			ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+			for _, id := range ids {
+				if !seen[id] {
+					seen[id] = true
+					out = append(out, id)
+				}
+			}
+			return err
+		})
+		if err != nil && len(pinned) > 0 {
+			log.Printf("receipts: tenant directory unreadable, using the pinned list alone: %v", err)
+			return out, nil
+		}
+		return out, err
+	}
+}
+
 type WitnessJob struct {
 	db       DB
 	signer   *Signer

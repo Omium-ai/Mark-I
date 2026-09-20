@@ -113,7 +113,7 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 	return nil
 }
 
-// cursor is one rollout_cursor row. RollbackSeq 0 means none.
+// cursor is one rollout_cursor row. RollbackSeq/PromotedSeq 0 means none.
 type cursor struct {
 	Seq         int64
 	Cohort      int
@@ -122,6 +122,8 @@ type cursor struct {
 	Halted      bool
 	HaltReason  string
 	RollbackSeq int64
+	// PromotedSeq is the STABLE seq a completed canary rollout's content landed at (m1_089): set once, by promote(), never by save().
+	PromotedSeq int64
 }
 
 // step is the pure transition: Decide plus the two-tick health counter and the widen ladder.
@@ -187,7 +189,42 @@ func (c *Controller) Tick(ctx context.Context, tenant querychoke.TenantID, chann
 	if d == DecisionHalt && cur.Seq > 1 {
 		return c.rollback(ctx, tenant, channel, cur.Seq)
 	}
+	// 05 §4.3 item 1's completion: canary held clean at 100% through one more soak promotes its content onto stable.
+	if channel == CanaryChannel && next.Cohort == 100 && cur.PromotedSeq == 0 && now.Sub(next.StepStarted) >= SoakWindow {
+		return c.promote(ctx, tenant, cur.Seq)
+	}
 	return nil
+}
+
+// promote is 05 §4.3 item 1's rollout completion: the canary head's sections republished onto stable at STABLE's own head+1
+func (c *Controller) promote(ctx context.Context, tenant querychoke.TenantID, seq int64) error {
+	var body []byte
+	var maxAge float64
+	err := c.mod.store.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT body_cbor, extract(epoch FROM max_age)::float8 FROM policy_bundles WHERE tenant_id = $1 AND channel = $2 AND seq = $3`,
+			tenant.UUID(), CanaryChannel, seq).Scan(&body, &maxAge)
+	})
+	if err != nil {
+		return fmt.Errorf("policydist: promotion of canary seq %d: reading it: %w", seq, err)
+	}
+	canary, err := Unmarshal(body)
+	if err != nil {
+		return err
+	}
+	sections, err := canonEnc.Marshal(canary.Sections)
+	if err != nil {
+		return err
+	}
+	p, err := c.mod.Publish(ctx, tenant, Draft{Channel: BootstrapChannel, MaxAge: time.Duration(maxAge * float64(time.Second)), SectionsCBOR: sections})
+	if err != nil {
+		return fmt.Errorf("policydist: promotion of canary seq %d: %w", seq, err)
+	}
+	log.Printf("policydist: rollout %s/%s seq %d completed at 100%%; content promoted to stable seq %d", tenant, CanaryChannel, seq, p.Seq)
+	return c.mod.store.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE rollout_cursor SET promoted_seq = $1, updated_at = now() WHERE tenant_id = $2 AND channel = $3 AND seq = $4 AND promoted_seq IS NULL`,
+			p.Seq, tenant.UUID(), CanaryChannel, seq)
+		return err
+	})
 }
 
 // rollback is 05 §4.6: the content of seq-1 published forward at head+1, then recorded on the cursor.
@@ -225,11 +262,11 @@ func (c *Controller) load(ctx context.Context, tenant querychoke.TenantID, chann
 	var cur cursor
 	var haltedAt *time.Time
 	var reason *string
-	var rb *int64
+	var rb, promoted *int64
 	found := true
 	err := c.mod.store.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `SELECT seq, cohort_percent, step_started_at, health_ticks, halted_at, halt_reason, rollback_seq FROM rollout_cursor WHERE tenant_id = $1 AND channel = $2`,
-			tenant.UUID(), channel).Scan(&cur.Seq, &cur.Cohort, &cur.StepStarted, &cur.HealthTicks, &haltedAt, &reason, &rb)
+		err := tx.QueryRow(ctx, `SELECT seq, cohort_percent, step_started_at, health_ticks, halted_at, halt_reason, rollback_seq, promoted_seq FROM rollout_cursor WHERE tenant_id = $1 AND channel = $2`,
+			tenant.UUID(), channel).Scan(&cur.Seq, &cur.Cohort, &cur.StepStarted, &cur.HealthTicks, &haltedAt, &reason, &rb, &promoted)
 		if errors.Is(err, pgx.ErrNoRows) {
 			found = false
 			return nil
@@ -242,6 +279,9 @@ func (c *Controller) load(ctx context.Context, tenant querychoke.TenantID, chann
 	if rb != nil {
 		cur.RollbackSeq = *rb
 	}
+	if promoted != nil {
+		cur.PromotedSeq = *promoted
+	}
 	return cur, found, err
 }
 
@@ -253,7 +293,7 @@ func (c *Controller) reset(ctx context.Context, tenant querychoke.TenantID, chan
 			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (tenant_id, channel) DO UPDATE
 			   SET seq = EXCLUDED.seq, cohort_percent = EXCLUDED.cohort_percent, step_started_at = EXCLUDED.step_started_at,
-			       health_ticks = 0, halted_at = NULL, halt_reason = NULL, rollback_seq = NULL, updated_at = now()`,
+			       health_ticks = 0, halted_at = NULL, halt_reason = NULL, rollback_seq = NULL, promoted_seq = NULL, updated_at = now()`,
 			tenant.UUID(), channel, cur.Seq, cur.Cohort, cur.StepStarted)
 		return err
 	})

@@ -27,14 +27,15 @@ type itCursor struct {
 	Halted             *time.Time
 	Reason             *string
 	Rollback           *int64
+	Promoted           *int64
 }
 
 func (h *itHarness) cursor(channel string) itCursor {
 	h.t.Helper()
 	var c itCursor
 	if err := h.admin.QueryRow(context.Background(),
-		`SELECT seq, cohort_percent, health_ticks, halted_at, halt_reason, rollback_seq FROM rollout_cursor WHERE tenant_id = $1 AND channel = $2`,
-		h.tenantAID, channel).Scan(&c.Seq, &c.Cohort, &c.Ticks, &c.Halted, &c.Reason, &c.Rollback); err != nil && err != pgx.ErrNoRows {
+		`SELECT seq, cohort_percent, health_ticks, halted_at, halt_reason, rollback_seq, promoted_seq FROM rollout_cursor WHERE tenant_id = $1 AND channel = $2`,
+		h.tenantAID, channel).Scan(&c.Seq, &c.Cohort, &c.Ticks, &c.Halted, &c.Reason, &c.Rollback, &c.Promoted); err != nil && err != pgx.ErrNoRows {
 		h.t.Fatal(err)
 	}
 	return c
@@ -314,4 +315,131 @@ func TestIntegrationRolloutController(t *testing.T) {
 			t.Fatalf("tenant B sees %d cursor rows (admin %d): %v", n, h.adminCount("rollout_cursor"), err)
 		}
 	})
+}
+
+// itHealthyRunner: the "nothing regressed" fake querychoke.Runner the promotion tests share.
+func itHealthyRunner() *fakeRunner {
+	return &fakeRunner{rows: func(querychoke.Query) *querychoke.Rows {
+		return &querychoke.Rows{Columns: []string{"arm", "n", "d"}, Rows: []map[string]any{
+			{"arm": "cohort", "n": uint64(10), "d": uint64(1000)},
+			{"arm": "control", "n": uint64(10), "d": uint64(1000)},
+		}}
+	}}
+}
+
+// TestIntegrationRolloutPromotion: canary at 100% held clean through one more soak forward-publishes onto stable exactly once (05 §4.3 item 1).
+func TestIntegrationRolloutPromotion(t *testing.T) {
+	h := itSetup(t)
+	ctx := context.Background()
+
+	now := time.Now()
+	salt := func(uuid.UUID) ([]byte, error) { return []byte("it-salt"), nil }
+	c := NewController(h.mod, itHealthyRunner(), querychoke.MustLoadTemplates(), salt, receipts.StaticTenants([]uuid.UUID{h.tenantAID}))
+	c.Clock(func() time.Time { return now }, nil)
+
+	first, err := h.mod.Publish(ctx, h.tenantA, h.draft(CanaryChannel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.ack(ctx, h.deviceA1, CanaryChannel, first.Seq, "applied", nil)
+	h.ack(ctx, h.deviceA2, CanaryChannel, first.Seq, "applied", nil)
+
+	// The first tick has no prior cursor, so it SEEDS the ladder at 5% rather than widening from it (same as TestIntegrationRolloutController).
+	if err := c.Tick(ctx, h.tenantA, CanaryChannel); err != nil {
+		t.Fatal(err)
+	}
+	if cur := h.cursor(CanaryChannel); cur.Cohort != 5 {
+		t.Fatalf("first tick did not seed at 5%%: %+v", cur)
+	}
+	for _, want := range []int64{25, 100} {
+		now = now.Add(SoakWindow + time.Minute)
+		if err := c.Tick(ctx, h.tenantA, CanaryChannel); err != nil {
+			t.Fatal(err)
+		}
+		if cur := h.cursor(CanaryChannel); cur.Cohort != want {
+			t.Fatalf("did not widen to %d%%: %+v", want, cur)
+		}
+	}
+	if h.headSeq(BootstrapChannel) != -1 {
+		t.Fatal("stable must not exist yet -- nothing has promoted")
+	}
+
+	// At 100% but the soak since reaching it has not elapsed: no promotion.
+	now = now.Add(time.Minute)
+	if err := c.Tick(ctx, h.tenantA, CanaryChannel); err != nil {
+		t.Fatal(err)
+	}
+	if cur := h.cursor(CanaryChannel); cur.Promoted != nil {
+		t.Fatalf("promoted before the soak at 100%% elapsed: %+v", cur)
+	}
+
+	// The soak at 100% elapses cleanly: promotion.
+	now = now.Add(SoakWindow)
+	if err := c.Tick(ctx, h.tenantA, CanaryChannel); err != nil {
+		t.Fatal(err)
+	}
+	cur := h.cursor(CanaryChannel)
+	if cur.Promoted == nil || h.headSeq(BootstrapChannel) != *cur.Promoted {
+		t.Fatalf("promotion did not land on stable: cursor %+v stable head %d", cur, h.headSeq(BootstrapChannel))
+	}
+	if !bytes.Equal(h.sectionsOf(BootstrapChannel, *cur.Promoted), h.sectionsOf(CanaryChannel, first.Seq)) {
+		t.Fatal("promoted content differs from the canary head's sections")
+	}
+
+	// Idempotent: re-ticking, even repeatedly, never promotes a second time.
+	promoted := *cur.Promoted
+	for i := 0; i < 3; i++ {
+		now = now.Add(TickInterval)
+		if err := c.Tick(ctx, h.tenantA, CanaryChannel); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := h.cursor(CanaryChannel); got.Promoted == nil || *got.Promoted != promoted {
+		t.Fatalf("promoted_seq moved on a re-tick: %+v", got)
+	}
+	if h.headSeq(BootstrapChannel) != promoted {
+		t.Fatalf("stable head advanced past the single promotion: %d, want %d", h.headSeq(BootstrapChannel), promoted)
+	}
+	if h.adminCount("policy_bundles") != 2 {
+		t.Fatalf("promotion published %d bundles total (canary head + one promotion), want exactly 2", h.adminCount("policy_bundles"))
+	}
+}
+
+// TestIntegrationRolloutHaltNeverPromotes: a halted rollout never forward-publishes to stable, however long it sits (05 §4.3 item 3).
+func TestIntegrationRolloutHaltNeverPromotes(t *testing.T) {
+	h := itSetup(t)
+	ctx := context.Background()
+
+	now := time.Now()
+	salt := func(uuid.UUID) ([]byte, error) { return []byte("it-salt"), nil }
+	c := NewController(h.mod, itHealthyRunner(), querychoke.MustLoadTemplates(), salt, receipts.StaticTenants([]uuid.UUID{h.tenantAID}))
+	c.Clock(func() time.Time { return now }, nil)
+
+	first, err := h.mod.Publish(ctx, h.tenantA, h.draft(CanaryChannel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := "M1E-3005"
+	h.ack(ctx, h.deviceA1, CanaryChannel, first.Seq, "rejected", &code)
+
+	if err := c.Tick(ctx, h.tenantA, CanaryChannel); err != nil {
+		t.Fatal(err)
+	}
+	if cur := h.cursor(CanaryChannel); cur.Halted == nil || cur.Promoted != nil {
+		t.Fatalf("expected an immediate halt with no promotion: %+v", cur)
+	}
+
+	// Time keeps passing well past any soak window
+	for i := 0; i < 3; i++ {
+		now = now.Add(SoakWindow + time.Minute)
+		if err := c.Tick(ctx, h.tenantA, CanaryChannel); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cur := h.cursor(CanaryChannel); cur.Promoted != nil {
+		t.Fatalf("a halted rollout promoted after enough ticks: %+v", cur)
+	}
+	if h.headSeq(BootstrapChannel) != -1 {
+		t.Fatal("a halted rollout must never publish anything to stable")
+	}
 }

@@ -224,6 +224,7 @@ func main() {
 		IntelServiceToken: cfg.IntelServiceToken, // guards POST /internal/v1/judge-requests (ADR-0008 edge half)
 	})
 
+	// Every per-tenant loop enumerates the tenant directory (m1_084) plus the pinned WITNESS_TENANTS list.
 	tenants := make([]uuid.UUID, 0, len(cfg.WitnessTenants))
 	for _, s := range cfg.WitnessTenants {
 		id, err := uuid.Parse(s)
@@ -232,6 +233,7 @@ func main() {
 		}
 		tenants = append(tenants, id)
 	}
+	tenantSet := receipts.DirectoryTenants(tenantDB, tenants)
 	enrollMod := enroll.New(enroll.Deps{
 		DB:            tenantDB,
 		PG:            tenantDB,
@@ -319,23 +321,16 @@ func main() {
 		if err != nil {
 			log.Fatalf("receipts: witness publisher boot refusal (05 §1.2): %v", err)
 		}
-		job := receipts.NewWitnessJob(tenantDB, chainSigner, pub, receipts.StaticTenants(tenants), time.Hour)
+		job := receipts.NewWitnessJob(tenantDB, chainSigner, pub, tenantSet, time.Hour)
 		go job.Run(witnessCtx)
 	} else {
 		log.Printf("receipts: WITNESS_BUCKET unset — hourly witness job NOT running; chain heads have no external anchor (m1_003)")
 	}
-	if len(tenants) > 0 {
-		rollout := policydist.NewController(policy, chRunner, tmpl, enrollMod.TenantRoot, receipts.StaticTenants(tenants))
-		go rollout.Run(witnessCtx)
-		go policydist.NewDraftPublisher(rollout).Run(witnessCtx)
-	} else {
-		log.Printf("policydist: WITNESS_TENANTS unset — canary rollout controller and draft publisher NOT running (05 §4.1, §4.3)")
-	}
-	if len(tenants) > 0 {
-		go ingest.NewQuarantineSweep(tenantDB, store, chainStore, receipts.StaticTenants(tenants)).Run(witnessCtx)
-	} else {
-		log.Printf("ingest: WITNESS_TENANTS unset — daily quarantine sweep NOT running; the S3 lifecycle at 32 d is the only deletion (m1_080)")
-	}
+	policy.SetSalt(enrollMod.TenantRoot) // canary steering on the stable routes assigns cohorts with the same root the controller uses
+	rollout := policydist.NewController(policy, chRunner, tmpl, enrollMod.TenantRoot, tenantSet)
+	go rollout.Run(witnessCtx)
+	go policydist.NewDraftPublisher(rollout).Run(witnessCtx)
+	go ingest.NewQuarantineSweep(tenantDB, store, chainStore, tenantSet).Run(witnessCtx)
 
 	// 9. /metrics /healthz on MetricsPort (pod-annotation scrape, 05 §1.7);
 	// /readyz mirrored there for the same scraper.

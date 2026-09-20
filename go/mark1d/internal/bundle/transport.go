@@ -40,6 +40,7 @@ type fetchResult struct {
 	etag        string
 	seq         string // X-Mark1-Bundle-Seq — an unauthenticated transport echo
 	proof       string // X-Mark1-Tlog-Proof — the same echo; only its tree_size is read, to ask for the head the proof targets
+	channel     string // X-Mark1-Channel — 05 §4.3 item 1's steer hint; empty on a server that predates it
 	notModified bool
 }
 
@@ -87,7 +88,7 @@ func (c *Client) getBundle(ctx context.Context) (*fetchResult, error) {
 	defer func() { _ = resp.Body.Close() }()
 	switch resp.StatusCode {
 	case http.StatusNotModified:
-		return &fetchResult{notModified: true}, nil
+		return &fetchResult{notModified: true, channel: resp.Header.Get("X-Mark1-Channel")}, nil
 	case http.StatusOK:
 	default:
 		return nil, fmt.Errorf("policy bundle GET: HTTP %d", resp.StatusCode)
@@ -100,10 +101,11 @@ func (c *Client) getBundle(ctx context.Context) (*fetchResult, error) {
 		return nil, err
 	}
 	return &fetchResult{
-		body:  raw,
-		etag:  resp.Header.Get("ETag"),
-		seq:   resp.Header.Get("X-Mark1-Bundle-Seq"),
-		proof: resp.Header.Get("X-Mark1-Tlog-Proof"),
+		body:    raw,
+		etag:    resp.Header.Get("ETag"),
+		seq:     resp.Header.Get("X-Mark1-Bundle-Seq"),
+		proof:   resp.Header.Get("X-Mark1-Tlog-Proof"),
+		channel: resp.Header.Get("X-Mark1-Channel"),
 	}, nil
 }
 
@@ -255,6 +257,7 @@ func (c *Client) streamOnce(ctx context.Context) bool {
 	if resp.StatusCode != http.StatusOK {
 		return false
 	}
+	// ponytail: the stream response can carry X-Mark1-Channel too (05 §4.3 item 1), unread here
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 4096), sseLineMax)
 	event, got := "", false

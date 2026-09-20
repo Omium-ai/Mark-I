@@ -324,3 +324,21 @@ func TestIntegrationWitnessJobLocksHeadInRealBucketAndTicksHourly(t *testing.T) 
 		t.Fatalf("positive control: DELETE of an unlocked version in the lock-enabled bucket failed: %v", err)
 	}
 }
+
+// TestIntegrationDirectoryTenantsUnionsThePinnedList: m1_084's trigger mirrors every tenant into the directory; the source answers those plus the pinned ids, deduplicated, with the zero GUC.
+func TestIntegrationDirectoryTenantsUnionsThePinnedList(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	pinned := uuid.New()
+	ids, err := receipts.DirectoryTenants(h.db, []uuid.UUID{pinned, h.tenantA.UUID()})(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[uuid.UUID]int{}
+	for _, id := range ids {
+		seen[id]++
+	}
+	if seen[pinned] != 1 || seen[h.tenantA.UUID()] != 1 || seen[h.tenantB.UUID()] != 1 {
+		t.Fatalf("directory ∪ pinned must hold every active tenant once: %v", ids)
+	}
+}

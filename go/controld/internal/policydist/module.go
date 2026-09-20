@@ -31,6 +31,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
@@ -49,6 +51,8 @@ type ModuleDeps struct {
 	ObsCfg   obs.Config
 	// IntelServiceToken guards the internal judge-request route (judge.go), the same credential as receipts' append route; empty verifies nothing, so the surface is absent, never open.
 	IntelServiceToken string
+	// Salt is the per-tenant HMAC root (enroll.Module.TenantRoot) the canary controller assigns cohorts with (05 §4.3 item 1).
+	Salt func(uuid.UUID) ([]byte, error)
 }
 
 type Module struct {
@@ -59,14 +63,18 @@ type Module struct {
 	hub          *Hub
 	limiter      *limiter
 	serviceToken string
+	salt         func(uuid.UUID) ([]byte, error)
 }
 
 func NewModule(d ModuleDeps) *Module {
 	return &Module{
 		store: d.Store, pgReady: d.PG, verifier: d.Verifier, obsCfg: d.ObsCfg,
-		hub: NewHub(), limiter: newLimiter(), serviceToken: d.IntelServiceToken,
+		hub: NewHub(), limiter: newLimiter(), serviceToken: d.IntelServiceToken, salt: d.Salt,
 	}
 }
+
+// SetSalt wires the cohort salt after enroll exists (enroll is built on this module, so the dependency runs the other way at boot).
+func (m *Module) SetSalt(f func(uuid.UUID) ([]byte, error)) { m.salt = f }
 
 func (m *Module) Name() string { return "policydist" }
 
@@ -139,6 +147,30 @@ func (m *Module) Publish(ctx context.Context, tenant querychoke.TenantID, d Draf
 // GET /api/v1/policy/bundle
 // ---------------------------------------------------------------------------
 
+// steerChannel (05 §4.3 item 1): on a stable poll an in-cohort device under an active, un-halted, unpromoted canary rollout is told to move to canary.
+func (m *Module) steerChannel(ctx context.Context, tenant querychoke.TenantID, deviceID uuid.UUID) string {
+	if m.salt == nil {
+		return BootstrapChannel
+	}
+	percent, err := m.store.ActiveCanaryCohort(ctx, tenant)
+	if err != nil {
+		return BootstrapChannel // fail-closed toward stable: an unreadable cursor steers nobody
+	}
+	salt, err := m.salt(tenant.UUID())
+	if err != nil {
+		return BootstrapChannel
+	}
+	return steerTarget(percent, salt, deviceID)
+}
+
+// steerTarget is steerChannel's pure decision, split out so it is testable without a database.
+func steerTarget(percent int, salt []byte, deviceID uuid.UUID) string {
+	if InCohort(salt, deviceID, percent) {
+		return CanaryChannel
+	}
+	return BootstrapChannel
+}
+
 func (m *Module) handleBundle(w http.ResponseWriter, r *http.Request) {
 	tenant, claims, ok := identity(w, r)
 	if !ok {
@@ -151,6 +183,10 @@ func (m *Module) handleBundle(w http.ResponseWriter, r *http.Request) {
 	if !m.limiter.allow("poll", claims.DeviceID, pollPerMinute) {
 		writeError(w, http.StatusTooManyRequests, "M1E-9001", "bundle poll rate exceeded")
 		return
+	}
+	if channel == BootstrapChannel {
+		// Ahead of the ETag/304 short-circuit: a steered device polls stable far more often than stable's body changes and must see the header on a 304 too.
+		w.Header().Set("X-Mark1-Channel", m.steerChannel(r.Context(), tenant, claims.DeviceID))
 	}
 
 	served, err := m.store.Latest(r.Context(), tenant, channel)
@@ -207,7 +243,7 @@ const heartbeat = 30 * time.Second
 const eventWriteTimeout = 10 * time.Second
 
 func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
-	_, claims, ok := identity(w, r)
+	tenant, claims, ok := identity(w, r)
 	if !ok {
 		return
 	}
@@ -237,6 +273,9 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no") // proxies must not buffer a hint stream
+	if channel == BootstrapChannel {
+		w.Header().Set("X-Mark1-Channel", m.steerChannel(r.Context(), tenant, claims.DeviceID))
+	}
 	w.WriteHeader(http.StatusOK)
 	if err := rc.Flush(); err != nil {
 		return

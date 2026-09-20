@@ -563,6 +563,27 @@ func (s *Store) AckCoverage(ctx context.Context, tenant querychoke.TenantID, cha
 	return c, err
 }
 
+// --------------------------------------------------------------------------- Canary steering (05 §4.3 item 1)
+
+// ActiveCanaryCohort is the canary channel's cohort_percent iff its cursor names canary's current head, is not halted and not yet promoted; 0 otherwise.
+func (s *Store) ActiveCanaryCohort(ctx context.Context, tenant querychoke.TenantID) (int, error) {
+	var percent int
+	err := s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		scanErr := tx.QueryRow(ctx, `
+			SELECT c.cohort_percent
+			  FROM rollout_cursor c
+			  JOIN bundle_channel_heads h ON h.tenant_id = c.tenant_id AND h.channel = c.channel
+			 WHERE c.tenant_id = $1 AND c.channel = $2
+			   AND c.seq = h.head_seq AND c.halted_at IS NULL AND c.promoted_seq IS NULL`,
+			tenant.UUID(), CanaryChannel).Scan(&percent)
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return nil
+		}
+		return scanErr
+	})
+	return percent, err
+}
+
 // inclusionJSON / signaturesJSON render the two jsonb columns. Hex, not
 // base64: the receipt payloads and every other hash column in this estate are
 // hex, and one encoding for one kind of value keeps operator queries joinable.

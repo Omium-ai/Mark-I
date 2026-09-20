@@ -77,6 +77,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -269,11 +270,7 @@ func New(cfg Config) (*Client, error) {
 		// and policy is an enhancement it can run without.
 		c.log.Warn("mark1d: no pinned bundle signing keys; policy stays on built-in defaults (FR-POLICY-005)", "path", filepath.Join(c.dir, keysFile))
 	} else {
-		c.lkg = c.loadLKG()
-	}
-	if c.lkg != nil && c.tenant != nil && !bytes.Equal(c.lkg.b.TenantID[:], c.tenant) {
-		c.log.Error("mark1d: last-known-good bundle belongs to another tenant; ignoring it", "bundle_tenant", uuid.UUID(c.lkg.b.TenantID).String())
-		c.lkg = nil
+		c.lkg = c.loadLKGFor(c.channel)
 	}
 	c.boot, c.published.seq, c.published.stale = c.posture()
 	c.report()
@@ -379,6 +376,8 @@ func (c *Client) tick(ctx context.Context) bool {
 		c.log.Warn("mark1d: policy fetch failed; last-known-good stays in force (FR-POLICY-005)", "err", err)
 		return false
 	}
+	// steer runs after the response is fully handled against c.channel: switching first would make callerChecks compare this bundle against the channel we are leaving.
+	defer func() { c.steer(res.channel) }()
 	if res.notModified {
 		return true
 	}
@@ -540,6 +539,21 @@ func (c *Client) report() {
 	c.health.Bundle(c.published.seq, issued, c.published.stale)
 }
 
+// steerIdent is 07 rule 1(d)'s identifier production, restated locally: the policy package's own isFreeIdent is unexported.
+var steerIdent = regexp.MustCompile(`\A[A-Za-z0-9_.:@-]{1,128}\z`)
+
+// steer is 05 §4.3 item 1's client half: a channel hint naming somewhere other than where we polled moves this device to that channel's own LKG and floor.
+func (c *Client) steer(header string) {
+	if header == c.channel || !steerIdent.MatchString(header) {
+		return
+	}
+	c.log.Info("mark1d: policy channel steered", "from", c.channel, "to", header)
+	c.channel = header
+	c.lkg = c.loadLKGFor(header)
+	c.publish()
+	c.nudge()
+}
+
 func (c *Client) epoch() uint64 {
 	s := c.now().Unix()
 	if s < 0 {
@@ -579,6 +593,14 @@ const (
 	lkgFile  = "lkg.cbor"
 	metaFile = "lkg.json"
 )
+
+// lkgPaths names the per-channel last-known-good files: the anti-rollback floor is per (tenant, channel), so a switch must never advance one channel's floor against another's.
+func lkgPaths(channel string) (bundlePath, metaPath string) {
+	if channel == "stable" {
+		return lkgFile, metaFile
+	}
+	return "lkg-" + channel + ".cbor", "lkg-" + channel + ".json"
+}
 
 // trustFile is the local pinned signing material, shaped after 08 §3.5's
 // `bundle_section_keys` so enrollment can eventually write the manifest's
@@ -767,17 +789,14 @@ type lkgMeta struct {
 	HeadRootHex   string `json:"tlog_head_root_hex"`
 }
 
-// loadLKG re-runs the FULL verification over the persisted bytes. The custody
-// dir is 0700 in the user's own home, which is a boundary and not a proof:
-// anything that could rewrite lkg.cbor could otherwise install policy no key
-// ever signed. lastAppliedSeq is nil because this bundle IS the last applied —
-// passing its own seq would make it its own replay.
-func (c *Client) loadLKG() *applied {
-	raw, err := os.ReadFile(filepath.Join(c.dir, lkgFile))
+// loadLKGFor re-runs the FULL verification over channel's persisted bytes and refuses a bundle of another tenant or channel.
+func (c *Client) loadLKGFor(channel string) *applied {
+	bundlePath, metaPath := lkgPaths(channel)
+	raw, err := os.ReadFile(filepath.Join(c.dir, bundlePath))
 	if err != nil {
 		return nil
 	}
-	metaRaw, err := os.ReadFile(filepath.Join(c.dir, metaFile))
+	metaRaw, err := os.ReadFile(filepath.Join(c.dir, metaPath))
 	if err != nil {
 		c.log.Error("mark1d: last-known-good bundle has no metadata; ignoring it", "err", err)
 		return nil
@@ -805,6 +824,10 @@ func (c *Client) loadLKG() *applied {
 			"meta_seq", meta.Seq, "bundle_seq", b.Seq)
 		return nil
 	}
+	if c.tenant != nil && !bytes.Equal(b.TenantID[:], c.tenant) {
+		c.log.Error("mark1d: last-known-good bundle belongs to another tenant; ignoring it", "bundle_tenant", uuid.UUID(b.TenantID).String())
+		return nil
+	}
 	c.log.Info("mark1d: last-known-good policy bundle loaded", "seq", b.Seq, "channel", b.Channel)
 	return &applied{raw: raw, b: b, etag: meta.ETag, head: head}
 }
@@ -830,11 +853,12 @@ func (c *Client) persist(a *applied) {
 	}
 	// Bytes first: a meta without its bundle is ignored on load, a bundle
 	// without its meta is too — neither half alone can be mistaken for state.
-	if err := writeAtomic(filepath.Join(c.dir, lkgFile), a.raw); err != nil {
+	bundlePath, metaPath := lkgPaths(c.channel)
+	if err := writeAtomic(filepath.Join(c.dir, bundlePath), a.raw); err != nil {
 		c.log.Error("mark1d: persisting last-known-good bundle", "err", err)
 		return
 	}
-	if err := writeAtomic(filepath.Join(c.dir, metaFile), metaRaw); err != nil {
+	if err := writeAtomic(filepath.Join(c.dir, metaPath), metaRaw); err != nil {
 		c.log.Error("mark1d: persisting last-known-good metadata", "err", err)
 	}
 }
