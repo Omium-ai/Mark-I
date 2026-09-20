@@ -44,6 +44,8 @@ func TestCodexRolloutsAreTailedForAnEnabledRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	rollout := strings.ReplaceAll(string(raw), "/home/devuser/workspace/acme-app", canonRoot)
+	// the fixture's day is the past; a Usage spent before the task it would ride was minted is history and stays unaddressed (taskseg), so the rollout is a LIVE one: stamped today
+	rollout = strings.ReplaceAll(rollout, `"timestamp":"2026-09-16T08`, `"timestamp":"`+time.Now().UTC().Add(time.Hour).Format("2006-01-02T15"))
 	if err := os.WriteFile(filepath.Join(codexHome, "sessions", "2026", "09", "16", filepath.Base(codexFixtureRollout)), []byte(rollout), 0o600); err != nil {
 		t.Fatal(err)
 	}

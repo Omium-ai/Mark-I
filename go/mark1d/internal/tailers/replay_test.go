@@ -19,6 +19,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/taskseg"
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const fixtureRoot = "../../../../conformance/hooks/claudecode/v2.1.251"
@@ -330,8 +331,10 @@ func TestReplayUsageCarriesTaskID(t *testing.T) {
 		t.Run(map[bool]string{false: "flush-mid-session", true: "flush-after-session-end"}[late], func(t *testing.T) {
 			seg := taskseg.New([]byte("tenant-path-salt"))
 			var transitions []*m1pv1.Event
+			// every synthetic hook event is stamped in the fixture's own day: a task opens at its minting event's time, and a Usage from before that is history (taskseg) — as a live hook and a live transcript agree on today, the synthetic hook and the recorded transcript agree on 2026-08-29
 			hook := func(ev *m1pv1.Event) {
 				ev.SessionId = session[:]
+				ev.OccurredAt = timestamppb.New(time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC))
 				transitions = append(transitions, seg.Observe(ev, nil)...)
 			}
 			turn := func(i m1pv1.Initiator) *m1pv1.Event {

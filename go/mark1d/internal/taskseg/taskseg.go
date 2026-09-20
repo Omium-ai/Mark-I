@@ -9,7 +9,6 @@ import (
 	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/binary"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -48,6 +47,8 @@ type task struct {
 	// verdicted marks the R3 state: closed by a certified/revised verdict,
 	// still addressable, still reopenable by an overlapping follow-up.
 	verdicted bool
+	// openedAt is the time of the event that minted the task (its own stamp, else the wall clock): a Usage from before it is history, not the task's.
+	openedAt time.Time
 }
 
 type session struct {
@@ -78,6 +79,8 @@ type Segmenter struct {
 	Verdict func(TaskID) (*m1pv1.VerdictEvent, bool)
 
 	mu sync.Mutex
+	// at is the time of the event being observed (its own stamp, else the wall clock), the open time of any task it mints; a replayed fixture and a live session are each consistent with themselves.
+	at time.Time
 	// ponytail: sessions are evicted on SessionEnd only; a session that never
 	// ends leaks one small struct until the daemon restarts. An idle sweep when
 	// long-lived daemons show it mattering.
@@ -121,6 +124,7 @@ func (s *Segmenter) Observe(ev *m1pv1.Event, files []string) []*m1pv1.Event {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.at = eventTime(ev) // what a task minted by this event opens at
 	ss := s.sessions[sid]
 	if ss == nil {
 		switch ev.Body.(type) {
@@ -153,7 +157,7 @@ func (s *Segmenter) Observe(ev *m1pv1.Event, files []string) []*m1pv1.Event {
 		return s.tool(sid, ss, files)
 	case *m1pv1.Event_Usage:
 		// The numerator meets the denominator here: an unaddressed Usage takes the currently open task (D-AA's zero-sentinel resolution), so tvo_task has rows — unless it was spent before the task existed: a first tail replays a session's history (30 d) under whatever task is open at import time, and that put 537 M tokens of the founder's past week on one task opened that minute (and a day's attempt window held rows of a task whose opener lay after it, which refused the day's rollup by name). Such a Usage stays unaddressed history.
-		if len(ev.TaskId) == 0 && ss.cur != nil && !spentBefore(ev, ss.cur.id) {
+		if len(ev.TaskId) == 0 && ss.cur != nil && !spentBefore(ev, ss.cur) {
 			id := ss.cur.id
 			ev.TaskId = id[:]
 		}
@@ -324,14 +328,21 @@ func (s *Segmenter) end(sid [16]byte, ss *session) []*m1pv1.Event {
 	return out
 }
 
-// spentBefore: the Usage's own time lies more than a turn's slack before the task's mint (its UUIDv7 timestamp).
-func spentBefore(ev *m1pv1.Event, id TaskID) bool {
+// spentBefore: the Usage's own time lies more than a turn's slack before the task was opened.
+func spentBefore(ev *m1pv1.Event, t *task) bool {
 	at := ev.GetOccurredAt()
-	if at == nil {
+	if at == nil || t.openedAt.IsZero() {
 		return false
 	}
-	minted := int64(binary.BigEndian.Uint64(id[:8]) >> 16) //nolint:gosec // G115: 48 bits of milliseconds
-	return at.AsTime().UnixMilli() < minted-usageSlack.Milliseconds()
+	return at.AsTime().Before(t.openedAt.Add(-usageSlack))
+}
+
+// eventTime is the event's own stamp, else the wall clock.
+func eventTime(ev *m1pv1.Event) time.Time {
+	if at := ev.GetOccurredAt(); at != nil {
+		return at.AsTime()
+	}
+	return time.Now()
 }
 
 // usageSlack covers a Usage the agent spent on the prompt that minted the task (the transcript line precedes the mint by the request itself).
@@ -344,7 +355,7 @@ func (s *Segmenter) mint(sid [16]byte, ss *session, parent *task, seed []string)
 		// an ALLOW. Fabricating an id would poison the denominator forever.
 		return nil
 	}
-	t := &task{id: id, files: map[[32]byte]bool{}, lastTurn: ss.turn, turns: 1}
+	t := &task{id: id, files: map[[32]byte]bool{}, lastTurn: ss.turn, turns: 1, openedAt: s.at}
 	if parent != nil {
 		maps.Copy(t.files, parent.files) // the merged chain keeps its file set
 	}

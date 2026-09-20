@@ -52,7 +52,7 @@ func SweepScratch(root string) int {
 		// a test suite run as an anchor leaves mode-000 dirs behind when it is stopped mid-test; RemoveAll cannot enter those
 		_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 			if err == nil && d.IsDir() {
-				_ = os.Chmod(p, 0o700)
+				_ = os.Chmod(p, 0o700) //nolint:gosec // G302: a directory a stopped test suite left at mode 000, made traversable so it can be removed
 			}
 			return nil
 		})
