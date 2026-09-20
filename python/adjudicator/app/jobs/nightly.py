@@ -161,6 +161,7 @@ async def _ledger_pairs(
             GOLD_TEMPLATE,
             window,
             bearer=settings.querychoke_token.get_secret_value(),
+            tenant_id=ctx.tenant_id,
         )
     verdict = {
         hmac.new(
@@ -250,6 +251,7 @@ async def spectral_estimate(ctx: Any, *, http: httpx.AsyncClient | None = None) 
             VOTES_TEMPLATE,
             window,
             bearer=settings.querychoke_token.get_secret_value(),
+            tenant_id=ctx.tenant_id,
         )
     est, run = run_spectral(rows)
     async with ctx.pool.acquire() as conn, conn.transaction():

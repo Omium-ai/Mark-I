@@ -108,6 +108,12 @@ class FakeChoke:
             self.requests.append(
                 (body["template"], body["params"], req.headers.get("authorization"))
             )
+            # A service job rides /internal/v1/query naming its tenant in the body; the device
+            # route answered every nightly M1E-1002 (prod 2026-09-20).
+            assert req.url.path == "/internal/v1/query" and UUID(body["tenant_id"]), (
+                req.url.path,
+                body,
+            )
             served = {nightly.VOTES_TEMPLATE: self.rows, nightly.GOLD_TEMPLATE: self.gold}
             if body["template"] not in served:
                 return httpx.Response(400, json={"error": {"code": "M1E-2008", "message": "?"}})

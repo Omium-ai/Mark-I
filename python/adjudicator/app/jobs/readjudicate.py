@@ -347,6 +347,7 @@ async def run(
             VOTES_TEMPLATE,
             window,
             bearer=settings.querychoke_token.get_secret_value(),
+            tenant_id=ctx.tenant_id,
         )
         registry = registry_by_wire_id(await list_verifiers(ctx.pool))
         cert = await current_cert(ctx.pool, ctx.tenant_id)

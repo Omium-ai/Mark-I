@@ -101,6 +101,7 @@ async def read_excerpts(
     tier: str,
     fetch: AttachmentFetch,
     receipt_for: ReceiptReader,
+    tenant_id: str | None = None,
 ) -> list[tuple[Excerpt, bytes]]:
     if tier != "E1":
         raise refuse(f"refused_tier_no_archive:{tier}", "only E1 is receipted and served")
@@ -110,6 +111,7 @@ async def read_excerpts(
         EXCERPTS_TEMPLATE,
         {"from": window[0].isoformat(), "to": window[1].isoformat(), "task_id": str(task_id)},
         bearer=bearer,
+        tenant_id=tenant_id,
     )
     out = []
     for x in parse_rows(rows):
@@ -131,12 +133,13 @@ def choke_archive_reader(
     window: tuple[date, date],
     fetch: AttachmentFetch,
     receipt_for: ReceiptReader,
+    tenant_id: str | None = None,
 ) -> ArchiveReader:
     """CertifiedRunner's archive_for: one tar member per admitted part, `<evidence event>.patch`."""
 
     async def read(task_id: UUID, attempt_id: UUID, tier: str) -> bytes:
         parts = await read_excerpts(
-            http, base_url, bearer, window, task_id, tier, fetch, receipt_for
+            http, base_url, bearer, window, task_id, tier, fetch, receipt_for, tenant_id
         )
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:

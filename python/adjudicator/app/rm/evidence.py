@@ -17,10 +17,11 @@ def choke_evidence_reader(
     window: tuple[date, date],
     fetch: AttachmentFetch,
     receipt_for: ReceiptReader,
+    tenant_id: str | None = None,
 ) -> EvidenceReader:
     async def read(task_id: UUID, attempt_id: UUID, tier: str) -> str:
         parts = await read_excerpts(
-            http, base_url, bearer, window, task_id, tier, fetch, receipt_for
+            http, base_url, bearer, window, task_id, tier, fetch, receipt_for, tenant_id
         )
         return "\n".join(
             f"--- excerpt {x.evidence_event_id}\n{data.decode('utf-8', errors='replace')}"

@@ -302,7 +302,12 @@ async def run(
     )
     async with own as client:
         rows = await run_template(
-            client, settings.querychoke_base_url, VOTES_TEMPLATE, window, bearer=bearer
+            client,
+            settings.querychoke_base_url,
+            VOTES_TEMPLATE,
+            window,
+            bearer=bearer,
+            tenant_id=ctx.tenant_id,
         )
         registry = registry_by_wire_id(await list_verifiers(ctx.pool))
         cert = await current_cert(ctx.pool, ctx.tenant_id)
