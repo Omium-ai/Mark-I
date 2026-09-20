@@ -25,10 +25,10 @@ func toolchainEnv(binary, cacheDir string) map[string]string {
 	case "go":
 		gopath := pick("GOPATH", filepath.Join(home, "go"))
 		env := map[string]string{
-			"GOPATH":      gopath,
-			"GOMODCACHE":  pick("GOMODCACHE", filepath.Join(gopath, "pkg", "mod")),
-			"GOPROXY":     "off",
-			"GOTOOLCHAIN": "local",
+			"GOPATH":     gopath,
+			"GOMODCACHE": pick("GOMODCACHE", filepath.Join(gopath, "pkg", "mod")),
+			"GOPROXY":    "off",
+			// GOTOOLCHAIN stays auto: the founder's /usr/local/go is 1.22 and his repos want 1.25, served from the module cache's toolchain — `local` would refuse every run; a toolchain not cached fails on the denied network, honestly
 			"GOFLAGS":     "-mod=readonly",
 			"CGO_ENABLED": "0", // the sandbox PATH holds the Go dir alone: no C compiler, so cgo packages vet as their pure-Go build rather than failing the run
 		}

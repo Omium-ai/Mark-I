@@ -98,6 +98,8 @@ type detector struct {
 	versionArgs   []string // argv tail for the version sniff
 	probe         func(worktree string) bool
 	argv          func(binaryPath string) []string
+	// argvAt, when set, derives the argv from the worktree too (go.work roots name their modules); argv is the worktree-blind form.
+	argvAt func(binaryPath, worktree string) []string
 }
 
 // detectors is the PROBE_HANDLERS-shaped const table (06 §2.1 adopts the
@@ -152,9 +154,8 @@ var detectors = map[Kind]detector{
 		execsRepoCode: true,
 		versionArgs:   []string{"version"}, // `go version`, no dashes
 		probe:         goRoot,
-		argv: func(bin string) []string {
-			return []string{bin, "vet", "./..."}
-		},
+		argv:          func(bin string) []string { return []string{bin, "vet", "./..."} },
+		argvAt:        func(bin, wt string) []string { return append([]string{bin, "vet"}, goPatterns(wt)...) },
 	},
 	KindEslint: {
 		rule: 1, tool: "eslint", binary: "eslint", wants: "eslint.config.* or .eslintrc* file",
@@ -186,6 +187,7 @@ var detectors = map[Kind]detector{
 		versionArgs: []string{"version"},
 		probe:       goRoot,
 		argv:        func(bin string) []string { return []string{bin, "test", "./..."} },
+		argvAt:      func(bin, wt string) []string { return append([]string{bin, "test"}, goPatterns(wt)...) },
 	},
 	KindCargoTest: {
 		rule: 1, tool: "cargo-test", binary: "cargo", wants: "Cargo.toml",
@@ -369,7 +371,7 @@ func Explain(sb Sandbox, worktree string) (Derivation, error) {
 			ID:            fmt.Sprintf("%s@cat-%d", d.tool, d.rule),
 			Kind:          kind,
 			Tool:          d.tool,
-			Argv:          append(prefix, d.argv(bin)[1:]...),
+			Argv:          append(prefix, d.argvFor(bin, abs)[1:]...),
 			Class:         d.class,
 			SideEffect:    d.sideEffect,
 			ExecsRepoCode: d.execsRepoCode,
@@ -417,6 +419,49 @@ func lookBinaryEverywhere(name, worktree string) (string, error) {
 		}
 	}
 	return "", exec.ErrNotFound
+}
+
+func (d detector) argvFor(bin, worktree string) []string {
+	if d.argvAt != nil {
+		return d.argvAt(bin, worktree)
+	}
+	return d.argv(bin)
+}
+
+// goPatterns is what `go vet`/`go test` walk at this root: `./...` in a module; at a go.work root that pattern matches nothing ("directory prefix . does not contain modules listed in go.work"), so each `use` directory becomes `./<dir>/...`, in file order. The patterns sit in the consented argv, so a changed go.work is a re-consent.
+func goPatterns(worktree string) []string {
+	if fileExists(filepath.Join(worktree, "go.mod")) {
+		return []string{"./..."}
+	}
+	raw, err := os.ReadFile(filepath.Join(worktree, "go.work"))
+	if err != nil {
+		return []string{"./..."}
+	}
+	var out []string
+	inUse := false
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "use (":
+			inUse = true
+		case inUse && line == ")":
+			inUse = false
+		case inUse, strings.HasPrefix(line, "use "):
+			dir := strings.TrimSpace(strings.TrimPrefix(line, "use "))
+			dir = strings.Trim(dir, `"`)
+			if dir == "" || filepath.IsAbs(dir) || strings.HasPrefix(dir, "..") {
+				continue
+			}
+			out = append(out, "./"+strings.TrimPrefix(filepath.ToSlash(filepath.Clean(dir)), "./")+"/...")
+		}
+	}
+	if len(out) == 0 {
+		return []string{"./..."}
+	}
+	return out
 }
 
 // goRoot: a module, or a workspace of modules — `go vet ./...` at a go.work root covers every module it uses (the monorepo shape, where go.mod sits under go/<service>/).

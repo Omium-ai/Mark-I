@@ -16,7 +16,7 @@ func TestToolchainEnvIsOfflineAndCacheScoped(t *testing.T) {
 		t.Fatalf("cargo env %v", cargo)
 	}
 	gov := toolchainEnv("go", "/cache/go-vet")
-	if gov["GOMODCACHE"] != "/m" || gov["GOPROXY"] != "off" || gov["GOTOOLCHAIN"] != "local" || gov["GOCACHE"] != filepath.Join("/cache/go-vet", "go-build") {
+	if gov["GOMODCACHE"] != "/m" || gov["GOPROXY"] != "off" || gov["GOTOOLCHAIN"] != "" || gov["GOCACHE"] != filepath.Join("/cache/go-vet", "go-build") {
 		t.Fatalf("go env %v", gov)
 	}
 	if _, ok := toolchainEnv("go", "")["GOCACHE"]; ok {
@@ -38,5 +38,20 @@ func TestGoWorkRootDerivesTheGoAnchors(t *testing.T) {
 	}
 	if !goRoot(wt) {
 		t.Fatal("go.work did not make a Go root")
+	}
+	if got := goPatterns(wt); len(got) != 1 || got[0] != "./svc/..." {
+		t.Fatalf("go.work patterns %v, want [./svc/...]", got)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "go.work"), []byte("go 1.25\n\nuse (\n\t./go/a // the daemon\n\t\"./go/b\"\n\t/abs/never\n)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := goPatterns(wt); len(got) != 2 || got[0] != "./go/a/..." || got[1] != "./go/b/..." {
+		t.Fatalf("go.work block patterns %v", got)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "go.mod"), []byte("module x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := goPatterns(wt); len(got) != 1 || got[0] != "./..." {
+		t.Fatalf("a module root walks ./..., got %v", got)
 	}
 }
