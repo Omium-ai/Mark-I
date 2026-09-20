@@ -243,9 +243,7 @@ func enabledRootFor(stateDir, extra, cwd string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
-		abs = resolved
-	}
+	abs = realPath(abs)
 	best := ""
 	for _, r := range roots {
 		if rel, rerr := filepath.Rel(r, abs); rerr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && len(r) > len(best) {
@@ -253,6 +251,18 @@ func enabledRootFor(stateDir, extra, cwd string) (string, bool) {
 		}
 	}
 	return best, best != ""
+}
+
+// realPath is EvalSymlinks that survives a path whose tail does not exist yet: the nearest existing ancestor is resolved and the rest re-joined (macOS /var → /private/var, Windows short names).
+func realPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	parent := filepath.Dir(p)
+	if parent == p {
+		return p
+	}
+	return filepath.Join(realPath(parent), filepath.Base(p))
 }
 
 // openLogFile appends to <state>/logs/mark1d.log; past 8 MiB the file rotates once to mark1d.log.1.
