@@ -1,6 +1,7 @@
 package anchors
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -23,5 +24,19 @@ func TestToolchainEnvIsOfflineAndCacheScoped(t *testing.T) {
 	}
 	if toolchainEnv("ruff", "/cache/ruff") != nil {
 		t.Fatal("a linter inherits nothing")
+	}
+}
+
+// A go.work root is a Go root: `go vet ./...` there covers every module the workspace uses (go.mod under go/<service>/ in a monorepo).
+func TestGoWorkRootDerivesTheGoAnchors(t *testing.T) {
+	wt := t.TempDir()
+	if goRoot(wt) {
+		t.Fatal("an empty dir is no Go root")
+	}
+	if err := os.WriteFile(filepath.Join(wt, "go.work"), []byte("go 1.25\nuse ./svc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !goRoot(wt) {
+		t.Fatal("go.work did not make a Go root")
 	}
 }

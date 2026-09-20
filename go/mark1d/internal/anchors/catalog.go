@@ -142,13 +142,13 @@ var detectors = map[Kind]detector{
 		},
 	},
 	KindGoVet: {
-		rule: 1, tool: "go-vet", binary: "go", wants: "go.mod",
+		rule: 1, tool: "go-vet", binary: "go", wants: "go.mod or go.work",
 		class: ClassSlow, sideEffect: SideEffectStatic, // vet compiles the package graph
 		// vet's compile step honors repo-supplied cgo directives (#cgo
 		// CFLAGS/LDFLAGS reach the host compiler/linker) — repo-steered exec.
 		execsRepoCode: true,
 		versionArgs:   []string{"version"}, // `go version`, no dashes
-		probe:         func(wt string) bool { return fileExists(filepath.Join(wt, "go.mod")) },
+		probe:         goRoot,
 		argv: func(bin string) []string {
 			return []string{bin, "vet", "./..."}
 		},
@@ -178,10 +178,10 @@ var detectors = map[Kind]detector{
 	},
 	// Test runners (06 §2.5): SideEffectTest, always Slow, derived only under the per-repo opt-in.
 	KindGoTest: {
-		rule: 1, tool: "go-test", binary: "go", wants: "go.mod",
+		rule: 1, tool: "go-test", binary: "go", wants: "go.mod or go.work",
 		class: ClassSlow, sideEffect: SideEffectTest, execsRepoCode: true,
 		versionArgs: []string{"version"},
-		probe:       func(wt string) bool { return fileExists(filepath.Join(wt, "go.mod")) },
+		probe:       goRoot,
 		argv:        func(bin string) []string { return []string{bin, "test", "./..."} },
 	},
 	KindCargoTest: {
@@ -387,6 +387,11 @@ func Explain(sb Sandbox, worktree string) (Derivation, error) {
 // gets a smaller privilege, not a waiver" rule as 04 §11.5. The sandbox's
 // refusal is returned so Derive can tell it from a tool that merely failed.
 func trimExe(name string) string { return strings.TrimSuffix(strings.ToLower(name), ".exe") }
+
+// goRoot: a module, or a workspace of modules — `go vet ./...` at a go.work root covers every module it uses (the monorepo shape, where go.mod sits under go/<service>/).
+func goRoot(wt string) bool {
+	return fileExists(filepath.Join(wt, "go.mod")) || fileExists(filepath.Join(wt, "go.work"))
+}
 
 func sniffVersion(sb Sandbox, worktree string, prefix, args []string, extra map[string]string) (string, error) {
 	if sb == nil {
