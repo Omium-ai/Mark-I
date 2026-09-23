@@ -26,7 +26,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-from app.policy_compiler.cpvs import CertifiedAttempt, Regime, certified, cpvs_table
+from app.policy_compiler.cpvs import ANY_CLASS, CertifiedAttempt, Regime, certified, cpvs_table
 from app.policy_compiler.knee import KneeInputs, knee_table
 from app.policy_compiler.ladders import build_ladders
 
@@ -426,10 +426,10 @@ def compile_sections(
     if not classes:
         raise NothingToCompile("no certified attempts in the window")
     cells = cpvs_table(attempts, regime)
-    # ponytail: 07 route.knee is one table: a mixed-class window pools under "*" (per-class = wire)
+    # ponytail: 07 route.knee is one table: a mixed-class window pools under "any"
     knee = knee_table(
         KneeInputs(
-            task_class=classes[0] if len(classes) == 1 else "*",
+            task_class=classes[0] if len(classes) == 1 else ANY_CLASS,
             attempts=attempts,
             v_task=regime.v_default,
             price=regime.price,

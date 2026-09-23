@@ -721,7 +721,7 @@ def test_knee_label_is_the_ledgers_task_class_and_pools_a_mixed_window():
     is a single table, and the note says which."""
     fn_only = tuple(a for a in attempts() if a.task_class == "fn")
     assert "attempts of task_class fn:" in pc.compile_sections(fn_only, REGIME).note
-    assert "attempts of task_class *:" in pc.compile_sections(attempts(), REGIME).note
+    assert "attempts of task_class any:" in pc.compile_sections(attempts(), REGIME).note
 
 
 async def test_compile_refuses_a_mixed_basis_window_before_touching_postgres(monkeypatch):
@@ -781,3 +781,13 @@ async def test_controld_fixture_rows_are_certified_attempts():
     # prices under a guessed basis (CON-014).
     with pytest.raises(ValidationError, match="cost_basis"):
         CertifiedAttempt.model_validate({**rows[0], "cost_basis": ""})
+
+
+def test_edge_unclassified_class_and_modelless_attempts_compile_onto_the_wire():
+    # prod 2026-09-23: the edge's "*" class and a Usage-less attempt failed the route section
+    rows = [_a(f"t{i}", 1, "claude-sonnet-5", "satisfied", cls="*", **SONNET) for i in range(30)]
+    rows.append(_a("t-none", 1, "", "violated", cls="*"))
+    cells = cpvs_table(rows, REGIME)
+    assert [(c.task_class, c.model_id) for c in cells] == [("any", "claude-sonnet-5")]
+    for c in cells:
+        pc.CPVSRow.model_validate(c.wire())

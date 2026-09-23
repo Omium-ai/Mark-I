@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable
 from statistics import fmean
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.policy_compiler.knee import AttemptCost, Basis, coster, wilson_lcb
 from app.tvo.engine import _CERTIFIED_STAGES
@@ -30,6 +30,12 @@ class CertifiedAttempt(AttemptCost):
     task_class: str
     model_id: str
     cost_basis: Basis
+
+    @field_validator("task_class")
+    @classmethod
+    def _wire_class(cls, v: str) -> str:
+        # the edge stamps "*" until a classifier exists; the wire identifier forbids it
+        return ANY_CLASS if v in ("", "*") else v
 
 
 class Regime(BaseModel):
@@ -98,6 +104,9 @@ def _estimate(task_class: str, model_id: str, rows: list[CertifiedAttempt], cost
     )
 
 
+ANY_CLASS = "any"
+
+
 def cpvs_table(attempts: Iterable[CertifiedAttempt], regime: Regime) -> list[CPVSCell]:
     """One cell per observed (task_class, model) with a measured or inherited estimate,
     sorted for a deterministic wire order."""
@@ -105,10 +114,12 @@ def cpvs_table(attempts: Iterable[CertifiedAttempt], regime: Regime) -> list[CPV
     by_cell: dict[tuple[str, str], list[CertifiedAttempt]] = defaultdict(list)
     by_model: dict[str, list[CertifiedAttempt]] = defaultdict(list)
     for a in certified(attempts):
+        if not a.model_id:
+            continue  # no Usage witnessed the attempt: no model to score it against
         by_cell[a.task_class, a.model_id].append(a)
         by_model[a.model_id].append(a)
     pooled = {
-        m: _estimate("*", m, rows, cost)
+        m: _estimate(ANY_CLASS, m, rows, cost)
         for m, rows in by_model.items()
         if sum(1 for a in rows if a.fused_verdict in _OUTCOMES) >= MIN_CELL
     }
