@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import anthropic
 import asyncpg
 import httpx
 from anthropic import AsyncAnthropic
@@ -356,16 +357,26 @@ async def run(
                         batch = AnthropicBatchRunner(
                             AsyncAnthropic(api_key=settings.anthropic_api_key.get_secret_value())
                         )
-                    dispatches += await cloud(
-                        batch,
-                        spec,
-                        candidates,
-                        sessions,
-                        task_rows,
-                        evidence_for,
-                        spent,
-                        ctx.window_start,
-                    )
+                    try:
+                        dispatches += await cloud(
+                            batch,
+                            spec,
+                            candidates,
+                            sessions,
+                            task_rows,
+                            evidence_for,
+                            spent,
+                            ctx.window_start,
+                        )
+                    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
+                        # a refused vendor key is config, not a failed night: counted
+                        judge_batch_skipped_total["cloud_vendor_key_rejected"] += 1
+                        log.warning(
+                            "judge_batch %s %s: vendor refused the key (%s)",
+                            ctx.tenant_id,
+                            spec.judge_id,
+                            exc.status_code,
+                        )
                 else:
                     dispatches += await client_side(
                         edge, tenant, spec, candidates, sessions, ctx.window_start

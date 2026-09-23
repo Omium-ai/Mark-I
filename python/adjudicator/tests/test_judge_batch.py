@@ -395,6 +395,22 @@ async def test_vendor_key_builds_the_client_from_settings_never_a_customer_crede
     assert judge_batch_skipped_total["cloud_no_vendor_key"] == 0
 
 
+async def test_a_key_the_vendor_refuses_is_a_counted_skip_not_a_failed_night():
+    # prod 2026-09-21..23: a placeholder key 401ed the whole nightly three nights
+    import anthropic
+    import httpx
+
+    class RefusingBatch:
+        async def run(self, requests):
+            resp = httpx.Response(401, request=httpx.Request("POST", "https://api.anthropic.com"))
+            raise anthropic.AuthenticationError("invalid x-api-key", response=resp, body=None)
+
+    pool, cloud = FakePool(consent=CONSENT), FakeCloud(all_rows())
+    await judge_batch.run(_ctx(pool), http=cloud.client(), batch=RefusingBatch())
+    assert judge_batch_skipped_total["cloud_vendor_key_rejected"] == 1
+    assert cloud.ingested == [] and cloud.dispatched == []
+
+
 async def test_spent_row_is_reposted_under_its_own_window_and_never_recalled():
     spent = {
         "task_id": AMBIGUOUS,
