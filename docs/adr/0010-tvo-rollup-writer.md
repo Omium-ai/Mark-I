@@ -1,6 +1,6 @@
 # ADR-0010 — Who writes `tvo_tenant_day`: a daily job-keyed batch writer, never a materialized view
 
-- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/RECONCILIATION.md (D-EI). Signed before any production `tvo_tenant_day` write; none exists yet.
+- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/history/RECONCILIATION.md (D-EI). Signed before any production `tvo_tenant_day` write; none exists yet.
 - **Date:** 2026-08-28
 - **Deciders:** Anurag Upadhyay (founder), Omium
 - **Reversibility:** cheap for the mechanics, irreversible for the rows. Schedule, grace lag, dedupe-window size and the job's SQL are config and a migration — hours. What cannot be reversed is a written `(tenant_id, day, task_seg_version)` row: it is append-only by decision, so a number assembled from it and quoted to a customer stays quotable forever and stays *wrong* forever if it was wrong. Correction is a new, differently-keyed series, never an edit. A wholesale rebuild stays possible — `tvo_task` is retained 760 d, so the writer's input outlives its output — which keeps this expensive rather than fatal, exactly as the S3 replay log does for ADR-0001.
@@ -113,7 +113,7 @@ All four follow from one fact: a ClickHouse MV is a trigger on an insert *block*
 ## References
 
 - `migrations/m1_ch_002_rollups.sql` — the `tvo_tenant_day` DDL (156–177), the four MV-impossibility reasons preserved above (185–196), the writer prose this record replaces (198–207).
-- `docs/07-data-model.md` — the two contradicting sections (§"Materialized views and rollups" vs §"The arithmetic each derived number computes"); §`task_seg.v1` "Version bumps without restating history"; §Coverage (`coverage_transitions`, `tvo_reports.coverage_band`, the guarantee CHECK).
-- `docs/06-lld-intelligence.md` — §7.2 scheduler and lease model (D19); §7.3 idempotency and re-run semantics (`job_key` UNIQUE, watermarked reads, grace lag D20, retry budget D21); §8.5 the refusal rule (D23) this record extends by one clause.
-- `docs/05-lld-cloud.md` — §6 the `querychoke` construction proof and its write-shaped carve-outs; §6.3 the template registry this record adds `tvo_rollup_tenant_day` to.
-- `docs/RECONCILIATION.md` — **D-F** and finding **F37**. ADR-0001 — the shared `(tenant_id, day, …)` prefix. ADR-0002 — version stamping, the append-only rule, and the irreversibility class a quoted number belongs to.
+- `docs/design/07-data-model.md` — the two contradicting sections (§"Materialized views and rollups" vs §"The arithmetic each derived number computes"); §`task_seg.v1` "Version bumps without restating history"; §Coverage (`coverage_transitions`, `tvo_reports.coverage_band`, the guarantee CHECK).
+- `docs/design/06-lld-intelligence.md` — §7.2 scheduler and lease model (D19); §7.3 idempotency and re-run semantics (`job_key` UNIQUE, watermarked reads, grace lag D20, retry budget D21); §8.5 the refusal rule (D23) this record extends by one clause.
+- `docs/design/05-lld-cloud.md` — §6 the `querychoke` construction proof and its write-shaped carve-outs; §6.3 the template registry this record adds `tvo_rollup_tenant_day` to.
+- `docs/history/RECONCILIATION.md` — **D-F** and finding **F37**. ADR-0001 — the shared `(tenant_id, day, …)` prefix. ADR-0002 — version stamping, the append-only rule, and the irreversibility class a quoted number belongs to.

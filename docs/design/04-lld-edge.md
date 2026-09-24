@@ -1057,12 +1057,12 @@ pub fn merkle_root(leaves: &[[u8; 16]]) -> [u8; 32];
 pub fn inclusion_path(leaves: &[[u8; 16]], index: usize) -> Vec<[u8; 32]>;
 
 /// KeyRing: key_id → pubkey with not_before/not_after and cross-signatures;
-/// rotation verification is here so mark1d, the proxy, and tools/verifier
+/// rotation verification is here so mark1d, the proxy, and rust/verifier
 /// share one implementation of "is this signature from a then-valid key".
 pub struct KeyRing { /* ... */ }
 ```
 
-One signing discipline product-wide: `mark1d.identity` uses this crate's semantics (via the Go mirror, conformance-vector-validated) for origin signatures; `tools/verifier` consumes the same primitives so "verify offline" and "sign at origin" cannot drift.
+One signing discipline product-wide: `mark1d.identity` uses this crate's semantics (via the Go mirror, conformance-vector-validated) for origin signatures; `rust/verifier` consumes the same primitives so "verify offline" and "sign at origin" cannot drift.
 
 ### 7.3 `mark1-policy` — bundle verify + decode to typed eval structs
 

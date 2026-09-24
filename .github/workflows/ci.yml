@@ -309,7 +309,7 @@ jobs:
       M1_TEST_CH_DSN: http://127.0.0.1:8123/?database=default
       M1_TEST_S3_ENDPOINT: http://127.0.0.1:9002
       # `just migrate` sends m1_ch_*.sql to a ClickHouse client and refuses to run at all without
-      # CLICKHOUSE_HOST (scripts/migrate-db.sh §"ClickHouse lane"). What `stores-up` provisions is
+      # CLICKHOUSE_HOST (tools/migrate-db.sh §"ClickHouse lane"). What `stores-up` provisions is
       # the multi-call binary, not a `clickhouse-client` on PATH, so the command is several words
       # — migrate-db.sh reads it into an argv array, which is what makes that legal.
       #
@@ -396,7 +396,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Benchmarks. 12 §7.1's absolute budgets are only meaningful on the pinned runner class
-  # (bench/RUNNER.md); GitHub-hosted numbers have variance that is not ours to control.
+  # (docs/runbooks/bench-runner.md); GitHub-hosted numbers have variance that is not ours to control.
   #
   # The runner is a real machine somebody has to own. Until it exists — or on any day it is
   # down — this stage DEFERS to the mandatory pre-release bench in release.yml and says so
@@ -446,7 +446,7 @@ jobs:
             echo
             echo "${MSG}"
             echo
-            echo "Owner action: provision the pinned runner class (see \`bench/RUNNER.md\`),"
+            echo "Owner action: provision the pinned runner class (see \`docs/runbooks/bench-runner.md\`),"
             echo "register it self-hosted, and set repo variable \`MARK1_BENCH_RUNNER\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -468,7 +468,7 @@ jobs:
           esac
           if [ "${{ needs.bench-wake.result }}" = "failure" ]; then
             # EC2 capacity, not code: the mandatory measurement is release.yml's, where a wake failure IS red.
-            echo "::warning title=Bench runner did not start::bench-runner.yml could not start a pinned instance (bench/RUNNER.md); budgets not measured on this push — release.yml measures them mandatorily before anything ships."
+            echo "::warning title=Bench runner did not start::bench-runner.yml could not start a pinned instance (docs/runbooks/bench-runner.md); budgets not measured on this push — release.yml measures them mandatorily before anything ships."
             exit 0
           fi
           if [ "${{ needs.bench-deferred.result }}" != "success" ]; then

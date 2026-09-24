@@ -98,7 +98,7 @@ func TestAgentEnumPinned(t *testing.T) {
 	}
 }
 
-// One export line is tools/verifier's ExportRow; the schema reds on a line the verifier could not load.
+// One export line is rust/verifier's ExportRow; the schema reds on a line the verifier could not load.
 func TestReceiptsExportLineSchema(t *testing.T) {
 	s := loadSchemas(t)
 	line := `{"seq":1042,"payload":"{\"type\":\"checkpoint\",\"v\":1}","receipt_hash_hex":"` + strings.Repeat("ab", 32) + `","device_key_id":"ed25519:a1cf5c00b2784f6e","device_signature_hex":"` + strings.Repeat("01", 64) + `","server_key_id":"ed25519:1325b850c2871916","server_signature_hex":"` + strings.Repeat("02", 64) + `"}`

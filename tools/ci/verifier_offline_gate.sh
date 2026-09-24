@@ -3,7 +3,7 @@
 # "validate the chain, checkpoints, inclusion paths, and witness heads offline, WITH EVERY
 # OMIUM SERVER UNREACHABLE" (02 §92). 12 §12 names this obligation `conf_verifier_offline`
 # and there was no such test — the guarantee lived in a comment at the bottom of
-# tools/verifier/Cargo.toml ("nothing else, ever"), which is a note to a future reader, not
+# rust/verifier/Cargo.toml ("nothing else, ever"), which is a note to a future reader, not
 # a check. Nothing refused a network crate and nothing observed a run.
 #
 # This matters more than a normal gate because it is the SALES CLAIM. "Verify Omium, don't
@@ -156,11 +156,11 @@ N=$(wc -l < "$TMP/actual.txt" | tr -d ' ')
   echo "      read, so this mechanism proved nothing. Check the package name and the flags above."
   exit 1
 }
-# The four crates a human typed into tools/verifier/Cargo.toml. If the graph resolved to
+# The four crates a human typed into rust/verifier/Cargo.toml. If the graph resolved to
 # something real but not to THIS crate's graph, the count check above still passes.
 for d in mark1-verifier mark1-receipt clap serde_json; do
   grep -qx "$d" "$TMP/actual.txt" || {
-    echo "FAIL: '$d' is a direct dependency in tools/verifier/Cargo.toml but is absent from the"
+    echo "FAIL: '$d' is a direct dependency in rust/verifier/Cargo.toml but is absent from the"
     echo "      resolved closure. This gate is reading the wrong graph."
     exit 1
   }

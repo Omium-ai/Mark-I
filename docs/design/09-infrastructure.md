@@ -290,7 +290,7 @@ Why EC2 and not the two alternatives:
 # ClickHouse for the Mark 1 token-event ledger. SINGLE NODE BY DESIGN (plan:
 # "single node day one"): the S3-first ingest landing is the durability layer,
 # so this instance is a rebuildable view, not a system of record. Schemas and
-# the ordering-key ADR live in omium-mark1/docs/07-data-model.md — this module
+# the ordering-key ADR live in omium-mark1/docs/design/07-data-model.md — this module
 # creates the box, the disk, the backup path and the credential plumbing, and
 # deliberately nothing schema-shaped.
 # =============================================================================

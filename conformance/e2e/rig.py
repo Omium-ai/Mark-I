@@ -3,7 +3,7 @@
 What `drive()` does, in order (03 §7.a's sequence, replayed from the frozen corpus):
 
   1. build   mark1d / mark1 / controld (`go build`), mark1-hookshim + mark1-verifier (cargo)
-  2. stores  scratch Postgres database migrated by scripts/migrate-db.sh (the same runner
+  2. stores  scratch Postgres database migrated by tools/migrate-db.sh (the same runner
              `just migrate` is); TLS switched on at the local cluster because controld's
              AppDSN pins sslmode=require; m1p_query provisioned in ClickHouse; a per-run
              MinIO bucket carrying the R6 per-tenant-KMS Deny policy
@@ -457,7 +457,7 @@ class Rig:
             if not local_ch.is_file():
                 fail(
                     "CLICKHOUSE_CLIENT unset and .stores/bin/clickhouse absent: "
-                    "scripts/migrate-db.sh cannot apply m1_ch_*.sql — export CLICKHOUSE_CLIENT "
+                    "tools/migrate-db.sh cannot apply m1_ch_*.sql — export CLICKHOUSE_CLIENT "
                     "as ci.yml's integration job does"
                 )
             env["CLICKHOUSE_CLIENT"] = (
@@ -467,7 +467,7 @@ class Rig:
             pg_bin = ROOT / ".stores" / "pg_bin"
             if pg_bin.is_file():
                 env["PATH"] = pg_bin.read_text().strip() + os.pathsep + env["PATH"]
-        self._sh(["scripts/migrate-db.sh", "migrations", "m1"], cwd=ROOT, env=env, timeout=600)
+        self._sh(["tools/migrate-db.sh", "migrations", "m1"], cwd=ROOT, env=env, timeout=600)
 
         # 07: exactly two runtime ClickHouse users. stores-up's users.xml defines m1p_ingest;
         # the SELECT principal is provisioned by SQL here, the way the querychoke suite does.

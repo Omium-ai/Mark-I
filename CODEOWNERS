@@ -6,8 +6,8 @@
 # --- Contract surfaces: a change here is a change to what Mark 1 *is* ---
 /proto/                             @Omium-ai/mark1-core @Omium-ai/mark1-security
 /migrations/                        @Omium-ai/mark1-core @Omium-ai/mark1-security
-/docs/07-data-model.md              @Omium-ai/mark1-core @Omium-ai/mark1-security
-/docs/08-api-contracts.md           @Omium-ai/mark1-core @Omium-ai/mark1-security
+/docs/design/07-data-model.md              @Omium-ai/mark1-core @Omium-ai/mark1-security
+/docs/design/08-api-contracts.md           @Omium-ai/mark1-core @Omium-ai/mark1-security
 /docs/adr/                          @Omium-ai/mark1-core @Omium-ai/mark1-security
 
 # --- Security-relevant code paths: legality, secrets, tenancy, signing ---
@@ -21,7 +21,7 @@
 /go/controld/internal/querychoke/   @Omium-ai/mark1-security
 /go/controld/internal/dprelease/    @Omium-ai/mark1-security
 /python/shared/mark1_receipts/      @Omium-ai/mark1-security
-/tools/verifier/                    @Omium-ai/mark1-security
+/rust/verifier/                    @Omium-ai/mark1-security
 
 # --- The gates that enforce the design must not be quietly weakened ---
 /tools/ci/                          @Omium-ai/mark1-security

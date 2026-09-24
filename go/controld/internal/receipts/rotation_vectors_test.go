@@ -2,7 +2,7 @@
 // crosses a server-key rotation and stays valid; a bare successor or an
 // unannounced hand-over is the one named defect. Driven here because this
 // package's VerifyChain is what the operator-side tooling runs; the customer
-// binary is driven by tools/verifier's own conf_vectors_ test.
+// binary is driven by rust/verifier's own conf_vectors_ test.
 
 package receipts
 

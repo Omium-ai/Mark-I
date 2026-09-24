@@ -1,6 +1,6 @@
 # ADR-0001 — ClickHouse ordering key and `ReplacingMergeTree` layout
 
-- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/RECONCILIATION.md (D-EI).
+- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/history/RECONCILIATION.md (D-EI).
 - **Date:** 2026-08-28
 - **Deciders:** Anurag Upadhyay (founder), Omium
 - **Reversibility:** expensive — a MergeTree `ORDER BY` cannot be altered in place; reversing means a new table plus a full re-ingest from the S3 replay log. At pilot scale (~10⁷–10⁸ events, tens of GB of zstd batches) that is hours of one backfill worker and negligible S3 GET cost. At 100× (~10¹⁰ events, tens of TB) it is days of parallel backfill, four-to-five-figure S3 GET + transfer spend, and a dual-write window in `controld.ingest` while the backfill catches up. Painful, bounded, and *possible* — which is exactly why the S3-first landing exists. Without the replay log this decision would be unrecoverable, not merely expensive.
@@ -101,4 +101,4 @@ with `event_id` a UUIDv7 (time-prefixed) that is simultaneously the server dedup
 
 - `/home/anurag/workspace/Omium/omium-mark1/docs/spec/execution-plan-v2.md` — Data stores table ("the one irreversible decision; ADR signed before the first production write"); "Decisions to make before code" item 1.
 - `/home/anurag/workspace/Omium/omium-mark1/docs/.parts/07-part3-analytics.md` — full DDL for `mark1.m1p_events`, codec rationale, the "ADR-0001 on the record" section this record formalizes, MV definitions, S3 `ingest/` replay-log layout.
-- `/home/anurag/workspace/Omium/omium-mark1/docs/RECONCILIATION.md` — R-14 (two ClickHouse credentials, INSERT-only and SELECT-only, both held solely by `controld`; all reads through the choke).
+- `/home/anurag/workspace/Omium/omium-mark1/docs/history/RECONCILIATION.md` — R-14 (two ClickHouse credentials, INSERT-only and SELECT-only, both held solely by `controld`; all reads through the choke).

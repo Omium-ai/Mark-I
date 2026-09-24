@@ -25,7 +25,7 @@ spec:
       annotations:
         summary: "controld ingest ack p99 > 0.8s for 10m (A-02)"
         description: "p99 ack latency is {{ `{{ $value }}` }}s; freshness is degrading, spools absorb, fleet spool exhaustion eventually blocks billing-grade writers."
-        runbook: "docs/11-observability-and-slo.md#rb-1--ingest-backlog"
+        runbook: "docs/design/11-observability-and-slo.md#rb-1--ingest-backlog"
     - alert: Mark1StructuralAssumptionBroken
       expr: increase(controld_ingest_identity_disagreements_total[5m]) > 0 or increase(controld_querychoke_render_refusals_total[5m]) > 0
       labels:
@@ -35,7 +35,7 @@ spec:
       annotations:
         summary: "controld cannot-happen counter moved (A-05)"
         description: "Envelope/token identity disagreement or a querychoke render refusal: an attack, an edge bug, or a boot-validated template invariant failing at runtime."
-        runbook: "docs/11-observability-and-slo.md#rb-3"
+        runbook: "docs/design/11-observability-and-slo.md#rb-3"
     - alert: Mark1RolloutHalted
       expr: increase(controld_policydist_rollout_decisions_total{decision="halt"}[10m]) > 0
       labels:
@@ -45,7 +45,7 @@ spec:
       annotations:
         summary: "policy bundle canary controller halted a rollout (A-09)"
         description: "The canary controller detected harm and stopped widening; a human must disposition it (05 §4.3)."
-        runbook: "docs/11-observability-and-slo.md#rb-4"
+        runbook: "docs/design/11-observability-and-slo.md#rb-4"
     - alert: Mark1WitnessPublicationFailure
       expr: sum(increase(controld_receipts_witness_published_total{outcome="error"}[2h])) > 0 unless sum(increase(controld_receipts_witness_published_total{outcome="published"}[2h])) > 0
       labels:
@@ -55,7 +55,7 @@ spec:
       annotations:
         summary: "no witness head published in 2h while publications error (A-10)"
         description: "The external-verifiability claim is degrading silently (SLO-9)."
-        runbook: "docs/11-observability-and-slo.md#rb-9"
+        runbook: "docs/design/11-observability-and-slo.md#rb-9"
     - alert: Mark1SecretNearMiss
       expr: increase(controld_ingest_scanner_hits_total[1h]) > 0 or increase(controld_ingest_quarantines_total[1h]) > 0
       labels:
@@ -65,7 +65,7 @@ spec:
       annotations:
         summary: "secret scanner hit or batch quarantined (A-13)"
         description: "Fail-closed already contained it (quarantine prefix, never replayed); follow up with tenant hygiene and edge-ruleset gap analysis."
-        runbook: "docs/11-observability-and-slo.md#rb-3"
+        runbook: "docs/design/11-observability-and-slo.md#rb-3"
     - alert: Mark1ProjectionLag
       expr: controld_ingest_ch_project_lag_seconds > 300
       for: 5m
@@ -76,5 +76,5 @@ spec:
       annotations:
         summary: "ClickHouse projection lag > 5m (SLO-4)"
         description: "Newest landed batch vs newest projected is {{ `{{ $value }}` }}s; reports go stale, capture and receipts do not."
-        runbook: "docs/11-observability-and-slo.md#rb-2--clickhouse-full-or-unavailable"
+        runbook: "docs/design/11-observability-and-slo.md#rb-2--clickhouse-full-or-unavailable"
 {{- end }}

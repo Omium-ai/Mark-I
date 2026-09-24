@@ -26,7 +26,7 @@ plugins:
   # Running betterproto's OWN plugin binary is therefore the STRONGER pin: plugin and library come
   # from one resolution in the committed uv.lock, so gen_fresh.sh stays deterministic. `uv run`
   # rather than a literal .venv path so UV_PROJECT_ENVIRONMENT cannot desync CI from a laptop.
-  # Requires `uv sync` first (scripts/bootstrap.sh does it) and the [compiler] extra in the dev
+  # Requires `uv sync` first (tools/bootstrap.sh does it) and the [compiler] extra in the dev
   # group — the plugin hard-fails without black/jinja2/grpclib.
   - local: ["uv", "run", "--frozen", "protoc-gen-python_betterproto"]
     out: gen/python

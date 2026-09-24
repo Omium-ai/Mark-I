@@ -23,10 +23,8 @@ report() { # report <message> <matches>
   fi
 }
 
-# Every .rs in the tree, not just rust/: tools/verifier is a workspace member outside that
-# directory, so `find rust` let `cred.0` there pass green — the same defect as rule 3's old
-# receiver pattern, one level up. The file set is read off the tree so no crate can be added
-# to the build and left out of this gate.
+# Every .rs in the tree, not just rust/: a crate once lived under tools/ and `find rust` let `cred.0` there
+# pass green. The file set is read off the tree so no crate can be added to the build and left out of this gate.
 RS_FILES=$(find . -name '*.rs' -type f -not -path '*/target/*' 2>/dev/null | sed 's|^\./||' | sort)
 DECLARED=''
 

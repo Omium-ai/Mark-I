@@ -15,7 +15,7 @@ import (
 	"fmt"
 )
 
-// Defect names are cross-language API (the verifier, tools/verifier, reports
+// Defect names are cross-language API (the verifier, rust/verifier, reports
 // the same strings): renaming one orphans every auditor script that matches
 // on it.
 type Defect string

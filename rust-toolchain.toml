@@ -1,5 +1,5 @@
 # Pinned to match the rust:1.91-slim-bookworm builder image (13 §1, §8).
-# Edge release triples (13 §2.3) are installed by scripts/bootstrap.sh, not listed
+# Edge release triples (13 §2.3) are installed by tools/bootstrap.sh, not listed
 # here: a `targets` list makes every contributor download five std sets to run
 # `cargo test`.
 [toolchain]

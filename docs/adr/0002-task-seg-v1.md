@@ -1,6 +1,6 @@
 # ADR-0002 — `task_seg.v1` merge rules: the TVO denominator
 
-- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/RECONCILIATION.md (D-EI). Rule changes become `task_seg.v2` on new events only; v1 rows are never re-segmented.
+- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/history/RECONCILIATION.md (D-EI). Rule changes become `task_seg.v2` on new events only; v1 rows are never re-segmented.
 - **Date:** 2026-08-28
 - **Deciders:** Anurag Upadhyay (founder), Omium
 - **Reversibility:** cheap to *evolve*, expensive to *restate* — and the design makes restatement structurally impossible by accident. Changing the rules is a version bump (`task_seg.v2`) that applies only to new `TaskOpen` events; old events are never re-stamped, so shipping v2 costs one bundle push plus a new rollup series. Restating *history* under new rules is an explicit, per-tenant, receipted re-segmentation job into a new rollup keyed `v2-restated` — the old numbers and their receipts remain valid forever. What can never be reversed: a number already quoted to a customer under v1. That is the point.

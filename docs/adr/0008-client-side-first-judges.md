@@ -70,5 +70,5 @@ The strongest case: free-form judges are cheap to build, cover failure modes rub
 ## References
 - `docs/spec/execution-plan-v2.md` — contract C4 (evidence tiers, client-side default), C5 (noise certificates), Phase 4 gate; "raw sessions and code stay client-side made physical"
 - `/home/anurag/workspace/Omium/mark1-research/README.md` — Paper I Thm 4.2 (`v*` break-even) and **Cor 4.3** (grounded rubric AUC 0.886 clears break-even 2×; LLM-judge AUROC ≤ 0.65 fails economically) — the load-bearing citation; Paper II (four-verdict optimality, self-certifying labels)
-- `docs/10-security-threat-model.md` — §10.4 (what each tier actually discloses; subprocessor register; region pinning), §2.4 B-V row on cloud-judge consent, §11.3 (learned-member reward hacking, the adjacent arms race)
-- `docs/06-lld-intelligence.md` — adjudicator judge orchestration, gold-set lifecycle, D-S calibration
+- `docs/design/10-security-threat-model.md` — §10.4 (what each tier actually discloses; subprocessor register; region pinning), §2.4 B-V row on cloud-judge consent, §11.3 (learned-member reward hacking, the adjacent arms race)
+- `docs/design/06-lld-intelligence.md` — adjudicator judge orchestration, gold-set lifecycle, D-S calibration

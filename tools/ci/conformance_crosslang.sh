@@ -44,7 +44,7 @@ if [ "$TOTAL" -eq 0 ]; then
 fi
 
 need() {
-  command -v "$1" >/dev/null 2>&1 || { echo "FAIL: '$1' not found; run scripts/bootstrap.sh"; exit 1; }
+  command -v "$1" >/dev/null 2>&1 || { echo "FAIL: '$1' not found; run tools/bootstrap.sh"; exit 1; }
 }
 
 # ---- D-AP: where each leg writes the raw IEEE-754 bits of every fusion posterior it

@@ -5,7 +5,7 @@
 ## Contract check (mechanically enforced by contracts_sync_check — this is the human half)
 
 - [ ] No proto/message, table, bundle-section, error-code, or hook-payload change — OR —
-- [ ] `docs/07-data-model.md` / `docs/08-api-contracts.md` updated **in this PR**
+- [ ] `docs/design/07-data-model.md` / `docs/design/08-api-contracts.md` updated **in this PR**
 
 ## Discipline
 

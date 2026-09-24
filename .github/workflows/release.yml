@@ -106,7 +106,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - run: |
-          echo "::error title=No pinned bench runner::12 §7.1's budgets gate this release and can only be measured on the pinned runner class (bench/RUNNER.md). Provision it and set MARK1_BENCH_RUNNER."
+          echo "::error title=No pinned bench runner::12 §7.1's budgets gate this release and can only be measured on the pinned runner class (docs/runbooks/bench-runner.md). Provision it and set MARK1_BENCH_RUNNER."
           exit 1
 
   # The pinned box is stopped between runs; bench-runner.yml starts it (release role, OIDC).

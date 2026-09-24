@@ -6,7 +6,7 @@ resolver = "2"
 members = [
     "rust/m1p-wire",
     "rust/mark1-receipt",
-    "tools/verifier",
+    "rust/verifier",
     # D-L: a member whose manifest has no target (no src/lib.rs, src/main.rs, lib or bin section)
     # makes cargo refuse the WHOLE workspace — no metadata, no lockfile, no build. Members join
     # as their src lands (13 §11 build order); otel_gate.sh still scans every Cargo.toml in the
@@ -31,7 +31,7 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "UNLICENSED"     # tools/verifier overrides: license = "Apache-2.0"
+license = "UNLICENSED"     # rust/verifier overrides: license = "Apache-2.0"
 authors = ["Omium"]
 rust-version = "1.91"
 
@@ -108,7 +108,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-clap = { version = "4.5", features = ["derive"] }   # cortexd, tools/verifier; the shim parses NO args
+clap = { version = "4.5", features = ["derive"] }   # cortexd, rust/verifier; the shim parses NO args
 
 # --- platform ---
 libc = "0.2"                                     # prctl/PR_SET_DUMPABLE, RLIMIT_CORE, ioprio

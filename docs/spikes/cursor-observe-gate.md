@@ -1,6 +1,6 @@
 # Spike: Cursor hooks, usage visibility, and BYOK routing
 
-**Scope:** Gates the Phase 5 `cursor` observe/gate slot per `docs/08-api-contracts.md` §5.6 and the Cursor row of `docs/03-hld.md` §6's capability matrix. Read against FR-AGENT-015 (`docs/02-requirements.md`). All facts read 2026-09-15.
+**Scope:** Gates the Phase 5 `cursor` observe/gate slot per `docs/design/08-api-contracts.md` §5.6 and the Cursor row of `docs/design/03-hld.md` §6's capability matrix. Read against FR-AGENT-015 (`docs/design/02-requirements.md`). All facts read 2026-09-15.
 
 ## Verdict: GO-WITH-CONDITIONS — stays Phase 5 observe/gate; proxy is NO-GO in every regime, not just subscription
 

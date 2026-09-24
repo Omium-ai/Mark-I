@@ -1,6 +1,6 @@
 // Two rungs of proof: a fake verifier script pins the orchestration contract
 // (args, exit-code passthrough, fetch translation), and an end-to-end run of
-// the REAL tools/verifier binary over the conformance receipt vectors proves
+// the REAL rust/verifier binary over the conformance receipt vectors proves
 // the whole §7.7 loop with real crypto, tamper case included. The second rung
 // builds the binary if it is missing rather than skipping (see realVerifier),
 // so a lane that ships no Rust toolchain fails loudly instead of reporting

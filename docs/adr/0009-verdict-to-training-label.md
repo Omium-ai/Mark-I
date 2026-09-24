@@ -1,6 +1,6 @@
 # ADR-0009 — Mapping the four-verdict vocabulary onto the trainer's binary KTO label
 
-- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/RECONCILIATION.md (D-EI).
+- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/history/RECONCILIATION.md (D-EI).
 - **Date:** 2026-08-28
 - **Deciders:** Anurag Upadhyay (founder), Omium
 - **Reversibility:** cheap for future exports, impossible for past training runs — corpus exports are immutable and receipted (a corrected export is a new `export_id`, never a rewrite), so changing the mapping is a new exporter release producing new exports under the new rule; nothing historical is restated and every old export's receipt stays valid. What cannot be reversed: gradient updates already taken from a corpus built under the old mapping. A model trained on a mis-mapped corpus is retrained from checkpoints, at GPU cost, not patched.
@@ -87,7 +87,7 @@ Two accounting requirements make the exclusion honest rather than silent:
 
 ## References
 
-- `/home/anurag/workspace/Omium/omium-mark1/docs/RECONCILIATION.md` — **R-02** (the finding this ADR resolves: the mapping existed nowhere; `07` decided it in-document; the second-order bias note originates here). Related: R-03 (the `completion` field cross-repo question), R-19 (`filter_by_sigs` drops unsigned rows — correct for Mark 1).
+- `/home/anurag/workspace/Omium/omium-mark1/docs/history/RECONCILIATION.md` — **R-02** (the finding this ADR resolves: the mapping existed nowhere; `07` decided it in-document; the second-order bias note originates here). Related: R-03 (the `completion` field cross-repo question), R-19 (`filter_by_sigs` drops unsigned rows — correct for Mark 1).
 - `/home/anurag/workspace/Omium/omium-mark1/docs/.parts/07-part3-analytics.md` — §Corpus schemas: the `KtoRow` wire mirror (label/reward constraints, drop taxonomy `malformed / empty / non_train_split / reward_label_mismatch`), the in-document resolution ("`refused` and `error` rows are not exported to KTO at all (Paper II: infrastructure failure is not a preference signal)"), the Parquet mirror retaining all four verdicts with posteriors and `label_confidence`, and the immutable-export / one-receipt-covers-the-pair rule.
 - `/home/anurag/workspace/Omium/mark1-research/README.md` — Paper II Thm 5.1 (abstaining rule strictly dominates every binary verifier; the Chow band) and Thm 5.2 (conflating infrastructure failure with `violated` incurs unavoidable excess risk; the four-verdict vocabulary proved Bayes-optimal).
 - `/home/anurag/workspace/Omium/omium-mark1/docs/spec/execution-plan-v2.md` — the four-verdict vocabulary adopted verbatim from platform migration `008`; Appendix A delta 1 (the trainer reads `manifest.json` + `rows.jsonl`, not Parquet; Arrow shards carry no label column).

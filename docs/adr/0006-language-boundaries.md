@@ -91,6 +91,6 @@ Worth a line because it is the obvious compromise: Rust absorbs `mark1d`/`contro
 
 ## References
 - `docs/spec/execution-plan-v2.md` — component registry "Why this choice" column (linkerd2-proxy existence proof; cgo distribution tax; Tailscale/lefthook-shaped work; ~500 LoC numpy with crowd-kit as test oracle); repo layout; grounding facts (existing Go services `checkpoint-manager`/`policy-engine`; Rust build conventions; committed codegen with pinned buf plugins)
-- `docs/04-lld-edge.md` — hot-path budgets, `Secret<T>` custody, shim deadlines
-- `docs/12-testing-and-quality.md`, `docs/13-repo-scaffold.md` — the three CI matrices and the new audit gates (`cargo-deny`, `cargo-vet`, `govulncheck`)
+- `docs/design/04-lld-edge.md` — hot-path budgets, `Secret<T>` custody, shim deadlines
+- `docs/design/12-testing-and-quality.md`, `docs/design/13-repo-scaffold.md` — the three CI matrices and the new audit gates (`cargo-deny`, `cargo-vet`, `govulncheck`)
 - ADR-0005 — the M1P conformance-vector obligation this ADR's Go/Rust dual decoders inherit

@@ -1,7 +1,7 @@
 # Receipt conformance vectors — the three-language lock
 
 `manifest.json` freezes the receipt byte contract that `python/shared/mark1_receipts`,
-`rust/mark1-receipt` (+ `tools/verifier`) and `go/mark1d/internal/identity` must
+`rust/mark1-receipt` (+ `rust/verifier`) and `go/mark1d/internal/identity` must
 reproduce **bit-identically**. This README is normative where the docs delegate a
 construction detail (12 §3.4: the vector commit fixes what the prose left open);
 everything else restates 07's receipts section, `migrations/m1_002_receipt_chain.sql`,
@@ -111,7 +111,7 @@ and the chain disagreeing, so the chain-walk legs that carry no manifest never e
 Test successor seed: `0x33 × 32`. `rotation.accept` is rows 1–4 as frozen plus the
 rotation record (5) and one successor-signed row (6); `rotation.negatives` are
 `rotation_without_cross_sign` (successor published bare) and `rotation_unannounced`
-(row 5 re-signed without `successor_key_id`). Drivers: `tools/verifier`
+(row 5 re-signed without `successor_key_id`). Drivers: `rust/verifier`
 `conf_vectors_verifier_follows_rotation` + the negatives loop, Go
 `TestConfVectorsReceiptControldRotation`.
 

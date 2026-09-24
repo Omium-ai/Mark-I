@@ -1,6 +1,8 @@
 # Mark 1 — Design Documentation
 
-**Status:** design phase. No production code exists yet, by intent.
+**Status:** in production since 2026-09 (cloud, daemon and desktop app). These documents are the design record the code was built from; `history/RECONCILIATION.md` is the build log of every contradiction found and ruled on since.
+
+**Layout:** `design/` the numbered design set (01–14) · `adr/` decisions · `spec/` the frozen plan and architecture spec · `spikes/` go/no-go artifacts · `runbooks/` operating notes · `history/` the reconciliation log.
 **Owner:** Anurag Upadhyay (founder / principal architect), Omium.
 **Started:** 2026-08-28.
 
@@ -46,22 +48,22 @@ Read `01` first regardless of who you are. After that, follow the row that descr
 
 | Doc | Title | Read this if you are… |
 |---|---|---|
-| `01-introduction.md` | Introduction, thesis, scope, glossary | anyone, first |
-| `02-requirements.md` | Numbered requirements + acceptance criteria + phase gates | writing code, testing it, or deciding whether a phase is done |
-| `03-hld.md` | High-level design: C4 context/container, the five planes, core flow diagrams | building any component, or evaluating the system as a whole |
-| `04-lld-edge.md` | Low-level design: `mark1d`, `mark1-proxy`, `mark1-hookshim`, `cortexd`, the Rust crates | writing edge code |
-| `05-lld-cloud.md` | Low-level design: `controld` — ingest, enroll, policy-dist, dp-release, query-choke | writing cloud code |
-| `06-lld-intelligence.md` | Low-level design: `adjudicator-svc`, `mark1-intel`, the training-plane seam | implementing adjudication, TVO, memory, routing, or the corpus |
-| `07-data-model.md` | Protobuf, Postgres DDL, ClickHouse DDL, PolicyBundle CBOR, spool layout, corpus schemas | touching any persisted or transmitted byte |
-| `08-api-contracts.md` | M1P/1, control-plane REST, MCP tools, hook contracts, CLI, UDS framing, error taxonomy | implementing or calling any interface |
-| `09-infrastructure.md` | AWS topology, EKS, RDS, ClickHouse, S3/KMS, IRSA, Helm + GitOps, capacity and cost, DR, edge distribution | deploying, sizing, or paying for it |
-| `10-security-threat-model.md` | Trust boundaries, STRIDE, the OAuth guard, credential custody, tenancy, key ceremony, control matrix | reviewing us, or writing anything that touches a credential or a tenant boundary |
-| `11-observability-and-slo.md` | Self-monitoring without OpenTelemetry, metrics catalog, SLIs/SLOs, alerts, runbooks | operating it |
-| `12-testing-and-quality.md` | Test pyramid, conformance suites, fuzz and chaos targets, isolation negative tests, CI thresholds | writing a test, or checking a gate |
-| `13-repo-scaffold.md` | File-by-file scaffold, build tooling, lint/format, versioning, release, CODEOWNERS | starting the first commit |
-| `14-delivery-plan.md` | Workstreams, dependency graph, milestones, gate checklists, risk register | sequencing the build |
+| [`01-introduction.md`](design/01-introduction.md) | Introduction, thesis, scope, glossary | anyone, first |
+| [`02-requirements.md`](design/02-requirements.md) | Numbered requirements + acceptance criteria + phase gates | writing code, testing it, or deciding whether a phase is done |
+| [`03-hld.md`](design/03-hld.md) | High-level design: C4 context/container, the five planes, core flow diagrams | building any component, or evaluating the system as a whole |
+| [`04-lld-edge.md`](design/04-lld-edge.md) | Low-level design: `mark1d`, `mark1-proxy`, `mark1-hookshim`, `cortexd`, the Rust crates | writing edge code |
+| [`05-lld-cloud.md`](design/05-lld-cloud.md) | Low-level design: `controld` — ingest, enroll, policy-dist, dp-release, query-choke | writing cloud code |
+| [`06-lld-intelligence.md`](design/06-lld-intelligence.md) | Low-level design: `adjudicator-svc`, `mark1-intel`, the training-plane seam | implementing adjudication, TVO, memory, routing, or the corpus |
+| [`07-data-model.md`](design/07-data-model.md) | Protobuf, Postgres DDL, ClickHouse DDL, PolicyBundle CBOR, spool layout, corpus schemas | touching any persisted or transmitted byte |
+| [`08-api-contracts.md`](design/08-api-contracts.md) | M1P/1, control-plane REST, MCP tools, hook contracts, CLI, UDS framing, error taxonomy | implementing or calling any interface |
+| [`09-infrastructure.md`](design/09-infrastructure.md) | AWS topology, EKS, RDS, ClickHouse, S3/KMS, IRSA, Helm + GitOps, capacity and cost, DR, edge distribution | deploying, sizing, or paying for it |
+| [`10-security-threat-model.md`](design/10-security-threat-model.md) | Trust boundaries, STRIDE, the OAuth guard, credential custody, tenancy, key ceremony, control matrix | reviewing us, or writing anything that touches a credential or a tenant boundary |
+| [`11-observability-and-slo.md`](design/11-observability-and-slo.md) | Self-monitoring without OpenTelemetry, metrics catalog, SLIs/SLOs, alerts, runbooks | operating it |
+| [`12-testing-and-quality.md`](design/12-testing-and-quality.md) | Test pyramid, conformance suites, fuzz and chaos targets, isolation negative tests, CI thresholds | writing a test, or checking a gate |
+| [`13-repo-scaffold.md`](design/13-repo-scaffold.md) | File-by-file scaffold, build tooling, lint/format, versioning, release, CODEOWNERS | starting the first commit |
+| [`14-delivery-plan.md`](design/14-delivery-plan.md) | Workstreams, dependency graph, milestones, gate checklists, risk register | sequencing the build |
 | `adr/` | Architecture decision records | before changing anything a record decided |
-| `RECONCILIATION.md` | Every contradiction found across the set, with severity and owner | signing off the design phase, or wondering why two documents disagree |
+| [`RECONCILIATION.md`](history/RECONCILIATION.md) | Every contradiction found across the set, with severity and owner | signing off the design phase, or wondering why two documents disagree |
 
 ---
 
@@ -123,20 +125,20 @@ authorship.
 | Doc | Status |
 |---|---|
 | `00-README.md` | written |
-| `01-introduction.md` | written |
-| `02-requirements.md` | written — 181 requirements (15 CON, 120 FR, 46 NFR) |
-| `03-hld.md` | written — 15 diagrams, all 9 core flows |
-| `04-lld-edge.md` | written — 46-row failure catalog, each row naming its test |
-| `05-lld-cloud.md` | written — 11-stage ingest, querychoke construction proof |
-| `06-lld-intelligence.md` | written — ADJUDICATE pseudocode + worked example |
-| `07-data-model.md` | written — 29 sections: protobuf, Postgres, ClickHouse, CBOR, corpus |
-| `08-api-contracts.md` | written — full `M1E-*` error taxonomy |
-| `09-infrastructure.md` | written — capacity model with the arithmetic shown |
-| `10-security-threat-model.md` | written — 67-row control matrix (C-01…C-67) |
-| `11-observability-and-slo.md` | written — 10 SLOs, 15 alerts, 10 runbooks, zero OTel |
-| `12-testing-and-quality.md` | written — per-phase gate checklists |
-| `13-repo-scaffold.md` | written — file-by-file scaffold, commits C0–C9 |
-| `14-delivery-plan.md` | written — ≈116 engineer-weeks, staffing scenarios |
+| [`01-introduction.md`](design/01-introduction.md) | written |
+| [`02-requirements.md`](design/02-requirements.md) | written — 181 requirements (15 CON, 120 FR, 46 NFR) |
+| [`03-hld.md`](design/03-hld.md) | written — 15 diagrams, all 9 core flows |
+| [`04-lld-edge.md`](design/04-lld-edge.md) | written — 46-row failure catalog, each row naming its test |
+| [`05-lld-cloud.md`](design/05-lld-cloud.md) | written — 11-stage ingest, querychoke construction proof |
+| [`06-lld-intelligence.md`](design/06-lld-intelligence.md) | written — ADJUDICATE pseudocode + worked example |
+| [`07-data-model.md`](design/07-data-model.md) | written — 29 sections: protobuf, Postgres, ClickHouse, CBOR, corpus |
+| [`08-api-contracts.md`](design/08-api-contracts.md) | written — full `M1E-*` error taxonomy |
+| [`09-infrastructure.md`](design/09-infrastructure.md) | written — capacity model with the arithmetic shown |
+| [`10-security-threat-model.md`](design/10-security-threat-model.md) | written — 67-row control matrix (C-01…C-67) |
+| [`11-observability-and-slo.md`](design/11-observability-and-slo.md) | written — 10 SLOs, 15 alerts, 10 runbooks, zero OTel |
+| [`12-testing-and-quality.md`](design/12-testing-and-quality.md) | written — per-phase gate checklists |
+| [`13-repo-scaffold.md`](design/13-repo-scaffold.md) | written — file-by-file scaffold, commits C0–C9 |
+| [`14-delivery-plan.md`](design/14-delivery-plan.md) | written — ≈116 engineer-weeks, staffing scenarios |
 | `RECONCILIATION.md` | **open** — 104 findings (26 cross-document + 15 security review + 13 staff-engineer review + 13 build verification + 37 line-level sweep); the input to sign-off. The last 50 are the **closed** ones: they were found by *executing* the foundation and then reading every line of it, rather than reading the documents that describe it. The sixth pass also records eleven binding cross-document decisions (D-A…D-K) that no single document could have resolved alone. |
 
 | ADR | Decision | Status |

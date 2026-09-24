@@ -72,6 +72,6 @@ The strongest case: zero-build observability, excellent dashboards, paged-integr
 
 ## References
 - `docs/spec/execution-plan-v2.md` — "Why this is v2" (the rejection), M1P section (schema, identity, transport, `Dropped{}`), grounding fact: "OpenTelemetry in the estate today … Mark 1 taking no OTel dependency costs nothing and breaks nothing"
-- `docs/11-observability-and-slo.md` — self-monitoring without OpenTelemetry; `session_id`/`event_id`/`seq` correlation; `Dropped{}`/coverage as product telemetry
+- `docs/design/11-observability-and-slo.md` — self-monitoring without OpenTelemetry; `session_id`/`event_id`/`seq` correlation; `Dropped{}`/coverage as product telemetry
 - `docs/spec/execution-plan-v2.md` appendix delta 4 — the CI gates (`cargo-deny` etc.) are new in `omium-mark1`, not inherited
 - ADR-0007 — spool durability classes (the billing-grade delivery guarantee this fabric exists to carry)

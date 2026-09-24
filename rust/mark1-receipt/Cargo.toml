@@ -3,7 +3,7 @@ name = "mark1-receipt"
 version.workspace = true
 edition.workspace = true
 # NOT license.workspace (= UNLICENSED). This crate is Apache-2.0 for a structural reason, not a
-# generous one: tools/verifier is Apache-2.0 and published, and it depends on THIS crate. A
+# generous one: rust/verifier is Apache-2.0 and published, and it depends on THIS crate. A
 # proprietary dependency makes the verifier unbuildable by the customer and unpublishable to
 # crates.io (which refuses a package whose dependencies are not themselves published) — which
 # would reduce "a standalone verifier validates the chain offline, with our server unreachable"

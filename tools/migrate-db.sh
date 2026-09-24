@@ -10,11 +10,10 @@
 # so a re-run skips what has already run and a RENAMED file is (correctly) treated as new.
 # Three prefixes, one runner (13 §R-13.3):
 #
-#     scripts/migrate-db.sh migrations                     m1
-#     scripts/migrate-db.sh python/adjudicator/migrations  adj
-#     scripts/migrate-db.sh python/intel/migrations        in
+#     tools/migrate-db.sh migrations                       m1
+#     tools/migrate-db.sh migrations/adjudicator           adj
 #
-# Usage:  DATABASE_URL=postgres://user:pass@host:port/db  scripts/migrate-db.sh <dir> <service>
+# Usage:  DATABASE_URL=postgres://user:pass@host:port/db  tools/migrate-db.sh <dir> <service>
 # Flags:  --dry-run   print what would run, touch nothing
 #
 # -----------------------------------------------------------------------------

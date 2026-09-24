@@ -66,7 +66,7 @@ The plan's seven compliance points map: pt.1 → CON-001, CON-003; pt.2 → CON-
 
 ## 3. FR-SPINE-* — capture fabric, spool, uploader, ingest, ledger, receipts, witness, verifier
 
-The spine is the TVO Ledger and everything an event crosses to reach it. Ownership: `m1p-wire` (framing/codegen), `mark1d` (spool, uploader), `controld.ingest`, Postgres/ClickHouse/S3, `mark1-receipt` + `python/shared/mark1_receipts`, `tools/verifier`.
+The spine is the TVO Ledger and everything an event crosses to reach it. Ownership: `m1p-wire` (framing/codegen), `mark1d` (spool, uploader), `controld.ingest`, Postgres/ClickHouse/S3, `mark1-receipt` + `python/shared/mark1_receipts`, `rust/verifier`.
 
 | ID | P | Requirement |
 |---|---|---|
@@ -677,7 +677,7 @@ Requirement → owning component → design-doc section → test home in `12-tes
 | FR-SPINE-001…003, FR-SPINE-023 | `m1p-wire`, proto/m1p/v1, `m1p-registry` | TBD-07, TBD-08 | TBD-12 (unit; conformance: schema windows) |
 | FR-SPINE-004…007, FR-SPINE-024, NFR-DURABILITY-001…005, NFR-FOOTPRINT-002 | `mark1d.spool`, `m1p-wire` framing | TBD-04, TBD-07 (binary layout) | TBD-12 (fuzz: decoders; chaos: kill/full/95%) |
 | FR-SPINE-008…014 | `mark1d.uplink`, `controld.ingest`, ClickHouse DDL | TBD-05, TBD-07, TBD-08 | TBD-12 (conformance: ingest; chaos: retry/S3) |
-| FR-SPINE-015…020, NFR-CORRECTNESS-006 | `mark1-receipt`, `python/shared/mark1_receipts`, `controld`, `tools/verifier` | TBD-05, TBD-07, TBD-10 (ceremony) | TBD-12 (unit: chain; conformance: offline verify; negative: append-only) |
+| FR-SPINE-015…020, NFR-CORRECTNESS-006 | `mark1-receipt`, `python/shared/mark1_receipts`, `controld`, `rust/verifier` | TBD-05, TBD-07, TBD-10 (ceremony) | TBD-12 (unit: chain; conformance: offline verify; negative: append-only) |
 | FR-SPINE-021/-022, NFR-CORRECTNESS-002 | `mark1-intel.tvo`, ADR-0002 | TBD-06 | TBD-12 (unit: golden TVO) |
 | FR-VERIFY-001…005 | `mark1d.anchors`, `cortexd` (merkle) | TBD-04 | TBD-12 (negative: sandbox + anti-tamper suite) |
 | FR-VERIFY-006…011 | `mark1d.verdict` (fusion, gate, knee) | TBD-04 | TBD-12 (unit: fusion/knee golden; conformance: gate UX) |

@@ -635,7 +635,7 @@ Everything else — including every HTTP handler in all five modules — sees on
 
 ### 7.4 Migrations in prod
 
-Estate conventions verbatim: plain numbered idempotent `.sql`, service-prefixed `m1_0NN_<name>.sql` in `omium-mark1/migrations/`, applied by the `scripts/migrate-db.sh` pattern tracking `schema_migrations` keyed `"m1__${filename}"`. In prod they run as an **Argo CD Sync-hook `Job`** (the `omium-gitops/prod/db-migrate-job.yaml` pattern): `PreSync` hook, runs as `controld_migrate`, sync fails visibly if the Job fails — the deployment cannot proceed past a failed migration, which is the per-service-migration-gap lesson closed by construction. Role/RLS-policy migrations are migrations like any other (numbered, idempotent), so the negative tests below run against exactly what prod will execute.
+Estate conventions verbatim: plain numbered idempotent `.sql`, service-prefixed `m1_0NN_<name>.sql` in `omium-mark1/migrations/`, applied by the `tools/migrate-db.sh` pattern tracking `schema_migrations` keyed `"m1__${filename}"`. In prod they run as an **Argo CD Sync-hook `Job`** (the `omium-gitops/prod/db-migrate-job.yaml` pattern): `PreSync` hook, runs as `controld_migrate`, sync fails visibly if the Job fails — the deployment cannot proceed past a failed migration, which is the per-service-migration-gap lesson closed by construction. Role/RLS-policy migrations are migrations like any other (numbered, idempotent), so the negative tests below run against exactly what prod will execute.
 
 ### 7.5 The CI negative tests that make decorative RLS impossible to repeat
 
