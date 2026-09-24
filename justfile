@@ -343,6 +343,8 @@ lint-py:
 
 lint-proto:
     buf lint proto
+    @# a pull request's checkout has origin/main but no local main, and buf clones the repo's local branches only
+    @git rev-parse --verify -q refs/heads/main >/dev/null || git branch -q main origin/main
     buf breaking proto --against '.git#branch=main,subdir=proto'
 
 # The design-enforcing custom gates (§7.5). Small scripts, zero tolerance.
