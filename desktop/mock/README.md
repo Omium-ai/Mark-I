@@ -70,7 +70,7 @@ daemon's catalog vocabulary on both sides (`claudecode`, never `claude-code`).
 Receipt seqs join too: `local-receipts` numbers checkpoints 1..3 with head
 `{seq: 1042, checkpoint_seq: 3}`, and `cloud-receipts-export` is controld's
 real export shape — `application/x-ndjson`, one signed receipt per line
-(`tools/verifier` `ExportRow`: `seq, payload, receipt_hash_hex,
+(`rust/verifier` `ExportRow`: `seq, payload, receipt_hash_hex,
 device_key_id, device_signature_hex, server_key_id, server_signature_hex`),
 the fixture holding the lines as an array. Chain seq 1042 is checkpoint 3 and
 its `receipt_hash_hex` is the local `head.hash`; `merkle_root`, `key_id`
@@ -138,7 +138,7 @@ the daemon's, not a sketch of §7.1:
   events_covered, merkle_root, key_id}]}` newest first, `?before=<seq>`
   pages back. Countersignatures and witnesses are the cloud export's.
 - `POST /v1/receipts/verify` relays the offline verifier's own `Report`
-  (`tools/verifier`). An empty body verifies the enrolled server's export
+  (`rust/verifier`). An empty body verifies the enrolled server's export
   with its key manifest; `{chain, keys, witness?}` names local snapshots.
 - `/v1/verify/events` rows are `{type: arrest|verdict|tamper, id, time,
   task_id, session_id, …}`: arrests add `attempt, p_lcb, v, c_n,

@@ -1,6 +1,6 @@
 # Spike: GitHub Copilot CLI `events.jsonl` usage surface
 
-**Scope:** Copilot CLI / coding-agent surfaces (`github/copilot-cli`), not IDE inline completions. Gates the Phase 5 `copilot` adapter slot per `docs/03-hld.md` §6 and `docs/08-api-contracts.md` §5.5. All facts read 2026-09-15; every claim is sourced or marked "not found as of 2026-09-15."
+**Scope:** Copilot CLI / coding-agent surfaces (`github/copilot-cli`), not IDE inline completions. Gates the Phase 5 `copilot` adapter slot per `docs/design/03-hld.md` §6 and `docs/design/08-api-contracts.md` §5.5. All facts read 2026-09-15; every claim is sourced or marked "not found as of 2026-09-15."
 
 ## Verdict: GO-WITH-CONDITIONS — stays Phase 5, on a different primary usage path than the plan assumed
 

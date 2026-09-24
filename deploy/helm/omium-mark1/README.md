@@ -27,8 +27,8 @@ wave 0 ServiceAccounts, NetworkPolicies, ClickHouse (ConfigMap, headless Service
 (Argo `Sync` hook, `BeforeHookCreation`; a PreSync hook would run before ClickHouse exists on the first sync) →
 wave 2 Deployments, Services, HPA, PDBs, CronJobs, PrometheusRule.
 
-The migrate Job runs as the RDS master: `CREATE DATABASE mark1` if absent, then `scripts/migrate-db.sh` over
-`migrations/` (`m1`), `python/adjudicator/migrations/` (`adj`), `python/intel/migrations/` (`in`) — `m1_ch_*.sql`
+The migrate Job runs as the RDS master: `CREATE DATABASE mark1` if absent, then `tools/migrate-db.sh` over
+`migrations/*.sql` (`m1`), `migrations/adjudicator/` (`adj`), and an empty `in` lane — `m1_ch_*.sql`
 go to ClickHouse as `m1p_ddl`, everything else to Postgres, one `schema_migrations` ledger — then `ALTER ROLE … PASSWORD`
 for the four runtime roles from `mark1-db-service-credentials`. Idempotent; re-runs report `0 applied`.
 The image is `migrate/Dockerfile` (`postgres:15` + the ClickHouse binary + the runner + the SQL), built from the repo root

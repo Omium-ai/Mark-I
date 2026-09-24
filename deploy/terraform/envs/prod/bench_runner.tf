@@ -1,4 +1,4 @@
-# The pinned bench runner (bench/RUNNER.md): a c7i.2xlarge that is STOPPED between runs.
+# The pinned bench runner (docs/runbooks/bench-runner.md): a c7i.2xlarge that is STOPPED between runs.
 # bench-runner.yml starts it through the release role; the box shuts itself down after 20 idle
 # minutes (instance_initiated_shutdown_behavior = stop), so a failed workflow never leaves it running.
 data "aws_ssm_parameter" "ubuntu_2404" {
@@ -82,7 +82,7 @@ resource "aws_instance" "bench_runner" {
   tags = {
     Name    = "omium-mark1-bench-runner-${each.key}"
     Service = "ci"
-    Purpose = "pinned bench runner (bench/RUNNER.md) - started only by bench-runner.yml; self-stops when idle"
+    Purpose = "pinned bench runner (docs/runbooks/bench-runner.md) - started only by bench-runner.yml; self-stops when idle"
   }
 }
 

@@ -15,7 +15,7 @@ set -eu
 cd "$(dirname "$0")/../.."
 ROOT=.
 ALLOWLIST=tools/ci/posture_allowlist.txt
-DOCS="docs/04-lld-edge.md docs/05-lld-cloud.md"
+DOCS="docs/design/04-lld-edge.md docs/design/05-lld-cloud.md"
 TAB=$(printf '\t')
 
 TMP=$(mktemp -d)

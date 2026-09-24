@@ -27,7 +27,7 @@ Claude Code hook and settings facts in §5.1 were verified against the vendor do
 | I-2 | M1P/1 ingest transport (`POST /m1p/v1/ingest`) | `mark1d` uploader → `controld.ingest` | wire-stable | §2 |
 | I-3 | Control-plane REST (enroll, policy, receipts, reports, DP) | `mark1` CLI + `mark1d` → `controld` | wire-stable | §3 |
 | I-4 | Public-key + transparency-log read surface | anyone (incl. the standalone verifier, offline) | wire-stable, **public** | §3.5 |
-| I-5 | Receipt/checkpoint format + chain rules | `controld`/`mark1d` → `tools/verifier` | wire-stable, **public** | 07 §receipts; §3.4 |
+| I-5 | Receipt/checkpoint format + chain rules | `controld`/`mark1d` → `rust/verifier` | wire-stable, **public** | 07 §receipts; §3.4 |
 | I-6 | PolicyBundle v1 (canonical CBOR, six sections) | `mark1-intel.policy-compiler` → edges | config-stable | 07 §bundle; §10.3 |
 | I-7 | M1PL local fabric (UDS / named pipe framing) | hookshim, proxy, cortexd, tailers → `mark1d` | internal | §4 |
 | I-8 | Loopback fallback listener | agents that cannot exec the shim → `mark1d` | internal | §4.5 |
@@ -42,7 +42,7 @@ Claude Code hook and settings facts in §5.1 were verified against the vendor do
 
 ### 1.3 Deprecation policy per class
 
-- **wire-stable.** A deprecated major keeps being served for **≥ 180 days** after its successor GAs, and for as long as any enrolled, non-revoked device is still pinned to it — the `m1p-registry` records per-tenant accepted windows, and a major is retired per tenant only when that tenant's window closes. Out-of-window requests receive the structured upgrade hint of §10.2, never a silent drop. Public interfaces (I-4, I-5) are **never** retired: the verifier must validate historical chains forever, so old receipt formats remain decodable in `tools/verifier` permanently.
+- **wire-stable.** A deprecated major keeps being served for **≥ 180 days** after its successor GAs, and for as long as any enrolled, non-revoked device is still pinned to it — the `m1p-registry` records per-tenant accepted windows, and a major is retired per tenant only when that tenant's window closes. Out-of-window requests receive the structured upgrade hint of §10.2, never a silent drop. Public interfaces (I-4, I-5) are **never** retired: the verifier must validate historical chains forever, so old receipt formats remain decodable in `rust/verifier` permanently.
 - **config-stable.** No deprecation window is needed: the bundle carries the shape and the data together. Removing a section is a bundle push that old edges treat as "section absent ⇒ built-in default" (fail-static ladder, §10.3).
 - **internal.** No external deprecation obligations. The version byte/field MUST still change on any layout change so that mixed-version state on disk (e.g. spool segments across an upgrade) is detected and drained, not misparsed.
 - **externally-owned.** We deprecate nothing; vendors do. When a vendor breaks a surface, the response is: bump `agent_maps` (bundle push) if the break is absorbable; otherwise the adapter emits `Dropped{reason: unsupported_agent_version}` and the conformance fixture for the pinned version is updated. The adapter slot's go/no-go spike artifact (plan, Phase 1) is re-run on major vendor releases.
@@ -973,7 +973,7 @@ There is no server round-trip on the critical path: off works with the network d
 
 ```
 mark1 verify-receipts [--from <export.jsonl|dir>] [--against-witness] [--offline] [--json]
-Wraps the standalone open-source verifier (tools/verifier) — same code, same verdicts.
+Wraps the standalone open-source verifier (rust/verifier) — same code, same verdicts.
 Default network path: GET /api/v1/receipts/export + /api/v1/receipts/keys — the export
 is DEFINED as byte-loadable by the verifier with no translation layer, so the CLI's
 job is fetch + orchestrate + honest exit codes, never a fourth crypto implementation.
@@ -1230,7 +1230,7 @@ Monotonic seq interacts with skipping: an edge that skipped section `cortex@v3` 
 - **Spool segments:** header carries the layout version; an upgraded `mark1d` drains old-layout segments read-only before writing new ones; it never mixes layouts within a segment.
 - **MCP tools (§6):** additive schema evolution only; a renamed or re-typed field is a new tool name. Agents cache tool schemas per session, so in-place mutation is a lying contract.
 - **CLI `--json`:** additive keys only; removed keys require a major CLI version and a release note. Exit codes are frozen forever — MDM scripts key on them.
-- **Receipts:** never versioned away (§1.3); new receipt kinds are new `kind` values, and `tools/verifier` treats an unknown `kind` as opaque-but-chain-checked — the chain verifies even where the payload semantics are newer than the verifier.
+- **Receipts:** never versioned away (§1.3); new receipt kinds are new `kind` values, and `rust/verifier` treats an unknown `kind` as opaque-but-chain-checked — the chain verifies even where the payload semantics are newer than the verifier.
 - **Hook payloads:** vendor-versioned, absorbed by `agent_maps` (§5 rule 1); an unabsorbable break is `Dropped{unsupported_agent_version}` plus a conformance-fixture update, never a guess.
 
 ---

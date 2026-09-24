@@ -1,6 +1,6 @@
 # ADR-0004 — Key ceremony: every key in the system, and the Ed25519/KMS split
 
-- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/RECONCILIATION.md (D-EI). The design is signed; the ceremony itself (real KMS keys, P-256 arms, witness selection) executes at deployment (Block E) and is recorded as an addendum here when it happens.
+- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead; the ruling is recorded in docs/history/RECONCILIATION.md (D-EI). The design is signed; the ceremony itself (real KMS keys, P-256 arms, witness selection) executes at deployment (Block E) and is recorded as an addendum here when it happens.
 - **Date:** 2026-08-28
 - **Deciders:** Anurag Upadhyay (founder), Omium
 - **Reversibility:** expensive — every signature ever produced must verify forever, so an algorithm or custody change is additive-only: the offline verifier and `KeyRing` carry every historical algorithm permanently, and reversing means a rotation ceremony plus a verifier release, never a deletion
@@ -19,7 +19,7 @@ The threat model already wrote most of this down: **§9 of `10-security-threat-m
 
 AWS KMS supports RSA and ECDSA (P-256/P-384/P-521). It does **not** support Ed25519. One of the two requirements must bend.
 
-The deciding lens: the offline verifier (`tools/verifier/`) is a **customer-facing open-source artifact**, and "verify Omium" is the sales claim. Verifier complexity is therefore a product cost, not merely an engineering one.
+The deciding lens: the offline verifier (`rust/verifier/`) is a **customer-facing open-source artifact**, and "verify Omium" is the sales claim. Verifier complexity is therefore a product cost, not merely an engineering one.
 
 ## Decision
 
@@ -50,7 +50,7 @@ Threat model §9.2 verbatim, with the algorithm corrected to P-256 for the eight
 
 - **Participants (all required, no delegation):** founder (key owner), security lead/lead engineer (operator), one witness who is neither (counsel or external advisor). Remote attendance permitted with recorded video; the attestation names who attended how.
 - **Preconditions:** AWS account per `09` with CloudTrail on; time-boxed ceremony IAM roles; transparency log deployed and writable; the attestation draft open and filled in live.
-- **Steps:** (1) inventory read-back and confirmation of the eight keys to create; (2) `aws kms create-key` one at a time, `ECC_NIST_P256` sign/verify, key policy granting `kms:Sign` only to the named consuming role, `kms:Verify` public, no export, no `kms:PutKeyPolicy` for runtime principals, aliased `alias/mark1-sign-<name>-v1`; (3) **distinctness check** — operator demonstrates the update/log key id differs from every bundle section key id (the same predicate R5 enforces forever), witness initials it; (4) **manifest publication** — public keys exported via `kms:GetPublicKey`, `key_id`s derived, manifest with validity windows published to `/.well-known/mark1-keys` and appended to the transparency log; operator fetches the inclusion proof and verifies it with `tools/verifier` in the session; (5) **witness selection** — the external witness target(s) for hourly chain heads are decided here and recorded; the first head is published and verified from outside Omium infrastructure; (6) **negative proof** — one forbidden operation attempted per key class (export, sign from an unauthorized role), denials recorded: the ceremony attests what the keys *cannot* do; (7) **attestation** — the document is signed by all three, hashed, and the hash appended to the transparency log.
+- **Steps:** (1) inventory read-back and confirmation of the eight keys to create; (2) `aws kms create-key` one at a time, `ECC_NIST_P256` sign/verify, key policy granting `kms:Sign` only to the named consuming role, `kms:Verify` public, no export, no `kms:PutKeyPolicy` for runtime principals, aliased `alias/mark1-sign-<name>-v1`; (3) **distinctness check** — operator demonstrates the update/log key id differs from every bundle section key id (the same predicate R5 enforces forever), witness initials it; (4) **manifest publication** — public keys exported via `kms:GetPublicKey`, `key_id`s derived, manifest with validity windows published to `/.well-known/mark1-keys` and appended to the transparency log; operator fetches the inclusion proof and verifies it with `rust/verifier` in the session; (5) **witness selection** — the external witness target(s) for hourly chain heads are decided here and recorded; the first head is published and verified from outside Omium infrastructure; (6) **negative proof** — one forbidden operation attempted per key class (export, sign from an unauthorized role), denials recorded: the ceremony attests what the keys *cannot* do; (7) **attestation** — the document is signed by all three, hashed, and the hash appended to the transparency log.
 - **Rotation ceremony:** successor created → predecessor cross-signs the successor's manifest entry → overlapping validity windows → tlog leaf → consumers migrate at the boundary → predecessor stays verify-valid for its historical window forever. **Compromise rotation** sets `not_after` to the compromise time, publishes a revocation leaf, and re-signs or invalidates everything signed after that instant; the witness record bounds what "after" can hide.
 - **Cadence:** yearly for server-side keys; device keys never rotate in place; salts on tenant request or incident. Any deviation from the runbook is itself a receipted event.
 
@@ -100,7 +100,7 @@ The strongest case: unblocks receipt code immediately; KMS custody arrives befor
 
 ## References
 - `docs/spec/execution-plan-v2.md` — "Decisions to make before code" item 4; C13 receipts; data stores (external witness); reuse section (`keys.py` key_id scheme)
-- `docs/RECONCILIATION.md` — R-01 (the finding this ADR resolves), resolution rule
-- `docs/10-security-threat-model.md` — §9.1 key table (normative, incorporated by reference), §9.2 ceremony runbook, §8.3 update key ≠ bundle key / boot refusal R5, §4.3 custody rule
+- `docs/history/RECONCILIATION.md` — R-01 (the finding this ADR resolves), resolution rule
+- `docs/design/10-security-threat-model.md` — §9.1 key table (normative, incorporated by reference), §9.2 ceremony runbook, §8.3 update key ≠ bundle key / boot refusal R5, §4.3 custody rule
 - `Omium-platform/core-services/recovery-orchestrator/app/receipts/keys.py` — vendored Ed25519 Signer protocol, `key_id = "ed25519:" + sha256(pub)[:16]`
 - AWS KMS asymmetric key specs (RSA, ECC_NIST_P256/P384/P521; no Ed25519) — the constraint that forced the decision

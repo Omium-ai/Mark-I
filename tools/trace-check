@@ -66,7 +66,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-REQ_DOC = ROOT / "docs/02-requirements.md"
+REQ_DOC = ROOT / "docs/design/02-requirements.md"
 YAML_PATH = ROOT / "conformance/traceability.yaml"
 DEBT_PATH = ROOT / "conformance/traceability-debt.txt"
 
@@ -278,8 +278,8 @@ def resolve(prefix: str, body: str) -> str | None:
     raise AssertionError(f"no resolver for evidence kind {prefix!r}")
 
 
-CONTROL_DOC = ROOT / "docs/10-security-threat-model.md"
-TEST_DOC = ROOT / "docs/12-testing-and-quality.md"
+CONTROL_DOC = ROOT / "docs/design/10-security-threat-model.md"
+TEST_DOC = ROOT / "docs/design/12-testing-and-quality.md"
 CONTROL_ROW = re.compile(r"^\|\s*(C-\d+)\s*\|")
 # 12 §9 numbers its ten rows by the architecture spec's enforcement points; 10's controls cite
 # the frozen plan's seven. The correspondence is stated in 12 §9's own header paragraph.

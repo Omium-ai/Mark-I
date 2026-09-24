@@ -6,7 +6,7 @@
 // Routes:
 //   GET /api/v1/receipts                  08 §3.4's list + chain_head
 //   GET /api/v1/receipts/export           JSONL, one ExportRow per line — the
-//                                         exact shape tools/verifier loads
+//                                         exact shape rust/verifier loads
 //                                         (lib.rs ExportRow; 08 §7.7 "--from
 //                                         <export.jsonl>")
 //   GET /api/v1/receipts/keys             the key-manifest snapshot the
@@ -246,7 +246,7 @@ func (m *Module) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// handleExport is the verifier-food form: JSONL, one tools/verifier ExportRow
+// handleExport is the verifier-food form: JSONL, one rust/verifier ExportRow
 // per line, byte-loadable by `mark1-verifier verify --chain <file>` with no
 // translation layer in between — the round-trip the offline-verification
 // product depends on.
@@ -283,7 +283,7 @@ func (m *Module) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleKeys serves the tools/verifier KeysFile shape: the role split IS
+// handleKeys serves the rust/verifier KeysFile shape: the role split IS
 // which list a key sits in (lib.rs load_keys — flattening the lists is the S1
 // the vectors lock). Retired/superseded/revoked keys stay published: past
 // receipts must remain verifiable forever (m1_002 §1, m1_001 §5).
@@ -355,7 +355,7 @@ func (m *Module) handleKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// handleWitness serves the tools/verifier WitnessFile shape from m1_003's
+// handleWitness serves the rust/verifier WitnessFile shape from m1_003's
 // rows. This is Omium's OWN record of what it published — the trust anchor is
 // the external copy (m1_003 header); this route exists so the verifier can
 // FIND those copies and so `--witness` has a local snapshot to run against.

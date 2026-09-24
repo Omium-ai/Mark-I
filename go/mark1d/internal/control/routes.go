@@ -1270,7 +1270,7 @@ type verifyBody struct {
 	Witness string `json:"witness"`
 }
 
-// verifyReceipts runs tools/verifier exactly as `mark1 verify-receipts` does (08 §7.7): local snapshots when the body names them, else the enrolled server's export + key manifest fetched with the device token; its --json stdout is the result, exit 5 the defect verdict.
+// verifyReceipts runs rust/verifier exactly as `mark1 verify-receipts` does (08 §7.7): local snapshots when the body names them, else the enrolled server's export + key manifest fetched with the device token; its --json stdout is the result, exit 5 the defect verdict.
 func (s *Server) verifyReceipts(w http.ResponseWriter, r *http.Request) {
 	var body verifyBody
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))

@@ -4,7 +4,7 @@ VENDORED from Omium-platform/core-services/recovery-orchestrator/app/receipts/ca
 (copied 2026-08-29, per docs/13 §4.2's vendoring rule). The estate module is NORMATIVE
 there and this one is normative here: every receipt this repo ever issues is verifiable
 by an outside auditor only if these bytes are reproducible outside this process — in Go
-(mark1d.identity), in Rust (mark1-receipt / tools/verifier), and in an auditor's own
+(mark1d.identity), in Rust (mark1-receipt / rust/verifier), and in an auditor's own
 script. conformance/vectors/receipt/manifest.json is the frozen referee.
 
 The estate's rules, kept verbatim (docs/07 "The receipt chain"):

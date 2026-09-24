@@ -38,3 +38,6 @@ mark1-test-*/
 
 # Per-boot port + bearer the desktop mock writes at start (the GUI chmods it); never committable.
 /desktop/mock/control.json
+
+# the per-repo anchor opt-in mark1d writes into any enabled workspace (anchors.RepoOptInPath)
+/.mark1/

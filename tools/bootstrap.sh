@@ -6,10 +6,10 @@
 # repository: no codegen, no build, no git. What you run after it is `just gen-check && just
 # build && just test`.
 #
-#   ./scripts/bootstrap.sh            install anything missing, then verify
-#   ./scripts/bootstrap.sh --check    verify only; exit nonzero on the first gap
+#   ./tools/bootstrap.sh            install anything missing, then verify
+#   ./tools/bootstrap.sh --check    verify only; exit nonzero on the first gap
 #
-# Windows uses scripts/bootstrap.ps1. Everything here is pinned: a floating tool version is a
+# Windows uses tools/bootstrap.ps1. Everything here is pinned: a floating tool version is a
 # statement about *time*, and nothing in a build should depend on when it ran (13 §9.5).
 # =============================================================================
 
@@ -41,7 +41,7 @@ esac
 case "$OS" in
     Linux)  GOOS=linux;  LOWEROS=linux ;;
     Darwin) GOOS=darwin; LOWEROS=darwin ;;
-    *) echo "bootstrap: use scripts/bootstrap.ps1 on Windows" >&2; exit 1 ;;
+    *) echo "bootstrap: use tools/bootstrap.ps1 on Windows" >&2; exit 1 ;;
 esac
 
 ok()   { echo "  ok    $*"; }

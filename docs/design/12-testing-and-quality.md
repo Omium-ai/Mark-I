@@ -387,7 +387,7 @@ Remaining 04 §10 rows not tabulated above (`chaos_daemon_crashloop`, `chaos_cor
 
 ### 7.2 Hardware and variance handling
 
-- **The pinned runner.** Absolute budgets gate only on one self-hosted runner class (fixed instance type, recorded in each result's metadata; the class is c7i.2xlarge-equivalent, chosen and frozen in `bench/RUNNER.md` — changing it requires re-baselining every budget in the same PR). GitHub-hosted runners run the same benchmarks **report-only** across the 3-OS matrix — cross-OS numbers inform, never block, because their variance is not ours to control.
+- **The pinned runner.** Absolute budgets gate only on one self-hosted runner class (fixed instance type, recorded in each result's metadata; the class is c7i.2xlarge-equivalent, chosen and frozen in `docs/runbooks/bench-runner.md` — changing it requires re-baselining every budget in the same PR). GitHub-hosted runners run the same benchmarks **report-only** across the 3-OS matrix — cross-OS numbers inform, never block, because their variance is not ours to control.
 - **Anti-flake protocol,** in order:
   1. Paired A/B within one run wherever a delta is the budget (proxy) — the strongest variance killer.
   2. Median-of-5 process-level repetitions; the gated statistic is the median, never the mean.
@@ -436,7 +436,7 @@ One row per in-code compliance enforcement point: the frozen plan's seven, plus 
 | 6 | **Tenancy** (plan 5 / spec 6; CON-010) | the entire §4 isolation suite: seven adopted RLS tests + BYPASSRLS extensions + chokepoint fuzz/negatives + memory API + S3/KMS + `negative_envelope_tenant_spoof_rejected` | `conformance/tenancy/` | **every PR, required check** |
 | 7 | **Federation** (plan 6 / spec 7; CON-011) | `neg_km_direct_sql_bypass`, `neg_span_below_m_never_publishes`, `neg_invariant_never_federates` (schema-level), `negative_epsilon_exhaustion_refuses`, `neg_release_requires_ledger_debit` (transactional coupling), `neg_unreviewed_never_publishes`, `neg_optout_spans_absent` | `conformance/tenancy/federation/` | every PR from Phase 5; Phase 5 gate |
 | 8 | **Training** (spec 8; FR-LEARN-001…004, CON-011's ε ledger) | `test_corpus_refuses_uncertified_labels` (06 §13), `neg_cross_tenant_training_requires_receipted_optin`, `neg_dpsgd_debits_epsilon`, `test_canary_memorization_blocks_leaky_checkpoint`, `test_promotion_pipeline_state_machine` (§8), `test_mark1_row_roundtrip_preserves_completion` (§3.4) | `python/intel/tests/` + `conformance/vectors/` | PR (intel suites); Phase 6 gate for DP-SGD arms |
-| 9 | **Auditability against Omium itself** (spec 9; FR-SPINE-015…020) | `prop_receipt_chain_tamper_evident` + `prop_merkle_inclusion_sound` + `unit_receipt_dual_sig` (§2.3), `conf_verifier_offline` (full chain + witness heads validated with every Omium endpoint blackholed; detects each of the five defect kinds on corrupted fixtures — FR-SPINE-020), `conf_witness_hourly_head` (FR-SPINE-019: tampered head fails witness comparison), `test_append_only_receipts` (§4.1) | `tools/verifier/tests/` + `conformance/e2e/` | every PR (offline verify is fixture-fast); witness arm nightly |
+| 9 | **Auditability against Omium itself** (spec 9; FR-SPINE-015…020) | `prop_receipt_chain_tamper_evident` + `prop_merkle_inclusion_sound` + `unit_receipt_dual_sig` (§2.3), `conf_verifier_offline` (full chain + witness heads validated with every Omium endpoint blackholed; detects each of the five defect kinds on corrupted fixtures — FR-SPINE-020), `conf_witness_hourly_head` (FR-SPINE-019: tampered head fails witness comparison), `test_append_only_receipts` (§4.1) | `rust/verifier/tests/` + `conformance/e2e/` | every PR (offline verify is fixture-fast); witness arm nightly |
 | 10 | **Scope of reading** (plan 7 / spec 10; CON-012, CON-014) | `neg_tailer_reads_inside_roots_only` (filesystem audit: zero reads outside enrolled roots), `neg_mark1ignore_honored` (ignored file appears in zero events, unindexed by cortexd), `unit_coverage_transitions_receipted` (FR-SPINE-026), `neg_report_refuses_below_floor` (FR-CLI-005: refusal, not a caveat), `unit_report_no_mixed_basis` (CON-014), `tailer_retention_gap` (F-16: gaps attributable, never silent) | `mark1d` + CLI negatives (colocated) | every PR |
 
 Reading the matrix: rows 1–3, 5, 6, 10 are green-required at their phase gates per 02 §10 and stay required forever after; rows 7–8 activate with their phases but their *schemas'* negative tests (e.g. `neg_invariant_never_federates`) land with the migrations, not with the features — the constraint is tested the day the table exists.
@@ -673,7 +673,7 @@ Line + branch coverage per component: `cargo llvm-cov` (Rust), `go test -coverpr
 
 | Scope | Floor | Enforcement |
 |---|---|---|
-| Load-bearing set: `m1p-wire`, `mark1-receipt`, `mark1-redact`, `mark1-policy`, `mark1d/internal/{spool,verdict,capture}`, `controld/{ingest,querychoke}`, `tools/verifier` | **90% branch** | blocks merge |
+| Load-bearing set: `m1p-wire`, `mark1-receipt`, `mark1-redact`, `mark1-policy`, `mark1d/internal/{spool,verdict,capture}`, `controld/{ingest,querychoke}`, `rust/verifier` | **90% branch** | blocks merge |
 | Everything else | **75% line** per component | report-only until Phase 2, then blocks (the ratchet is dated, not aspirational) |
 | Ratchet rule | coverage of a load-bearing component may never drop >1pp in a PR | blocks merge |
 

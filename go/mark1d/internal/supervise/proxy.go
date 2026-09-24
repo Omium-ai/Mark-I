@@ -219,7 +219,7 @@ func removePort(path string) error {
 // The assumption this names, because the repo has no existing rule for finding
 // a sibling binary: a packaged install puts mark1d and mark1-proxy in ONE
 // directory. That is the same shape 08 §8.1 already uses for the shim
-// (`~/.omium/mark1/bin/mark1-hookshim`, docs/08-api-contracts.md:969), and it is
+// (`~/.omium/mark1/bin/mark1-hookshim`, docs/design/08-api-contracts.md:969), and it is
 // the only rung that holds for an installed user with no PATH entry. It does
 // NOT hold in this repo's own build: `just build-edge` writes dist/mark1d and
 // target/release/mark1-proxy, which is why MARK1_PROXY and PATH follow it.

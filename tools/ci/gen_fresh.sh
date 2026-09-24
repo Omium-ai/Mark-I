@@ -12,7 +12,7 @@ command -v just >/dev/null 2>&1 || {
   echo "FAIL: gen_fresh: 'just' not found; the justfile is the CI contract (13 §6.1)"; exit 1
 }
 command -v buf >/dev/null 2>&1 || {
-  echo "FAIL: gen_fresh: 'buf' not found; run scripts/bootstrap.sh"; exit 1
+  echo "FAIL: gen_fresh: 'buf' not found; run tools/bootstrap.sh"; exit 1
 }
 # Both checks below are `git`, and outside a work tree git exits 128 with "not a
 # git repository" -- which this script would report as "committed codegen differs

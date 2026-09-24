@@ -3,7 +3,7 @@
 //! The harness — fake upstream, proxy, keep-alive clients, the paired-median loop — lives in
 //! `tests/common/mod.rs` and is shared with `tests/latency_floor.rs`, which asserts a relaxed
 //! CI floor on the same measurement under `cargo test` on every PR. This bench asserts the
-//! real budget, and is gated only on the pinned runner (`bench/RUNNER.md`).
+//! real budget, and is gated only on the pinned runner (`docs/runbooks/bench-runner.md`).
 //!
 //! Three things here are assertions rather than reports, because a budget nobody can fail is
 //! a budget nobody keeps. Criterion is the better estimator and prints the distributions, but

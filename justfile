@@ -57,7 +57,7 @@ default: lint test
 
 # Regenerate committed proto bindings and stage the Rust gen into m1p-wire.
 gen:
-    @v=$(buf --version 2>/dev/null | head -1); [ "$v" = "$M1_BUF_VERSION" ] || { echo "gen: buf '${v:-<not found>}' on PATH, but the pin is $M1_BUF_VERSION. Versions disagree about comment attachment in generated code, so this output is not what gen-check compares against. Fix: install buf $M1_BUF_VERSION (scripts/bootstrap.sh)" >&2; exit 1; }
+    @v=$(buf --version 2>/dev/null | head -1); [ "$v" = "$M1_BUF_VERSION" ] || { echo "gen: buf '${v:-<not found>}' on PATH, but the pin is $M1_BUF_VERSION. Versions disagree about comment attachment in generated code, so this output is not what gen-check compares against. Fix: install buf $M1_BUF_VERSION (tools/bootstrap.sh)" >&2; exit 1; }
     cd proto && buf generate
     cp proto/gen/rust/m1p.v1.rs rust/m1p-wire/gen/m1p.v1.rs
 
@@ -343,6 +343,8 @@ lint-py:
 
 lint-proto:
     buf lint proto
+    @# a pull request's checkout has origin/main but no local main, and buf clones the repo's local branches only
+    @git rev-parse --verify -q refs/heads/main >/dev/null || git branch -q main origin/main
     buf breaking proto --against '.git#branch=main,subdir=proto'
 
 # The design-enforcing custom gates (§7.5). Small scripts, zero tolerance.
@@ -408,7 +410,7 @@ fuzz duration="60":
     cd go/mark1d && go test -fuzz=FuzzSpoolRecordDecode -fuzztime={{duration}}s ./internal/spool
     cd go/mark1d && go test -fuzz=FuzzM1plFrameRead     -fuzztime={{duration}}s ./internal/fabric
 
-# Absolute budgets are only meaningful on the pinned runner class (12 §7.2, bench/RUNNER.md).
+# Absolute budgets are only meaningful on the pinned runner class (12 §7.2, docs/runbooks/bench-runner.md).
 #
 # Benches with CI thresholds (12 owns the numbers): proxy ≤1 ms median, redact ~100 MB/s, shim cold start ≤10 ms.
 bench:
@@ -424,15 +426,14 @@ bench:
 # Apply core + service migrations to a target DSN (idempotent; safe to re-run).
 #
 # `migrations/` is BOTH engines' schema: the runner sends m1_ch_*.sql to a ClickHouse client and
-# everything else to psql (see scripts/migrate-db.sh). CLICKHOUSE_HOST is a hard precondition
+# everything else to psql (see tools/migrate-db.sh). CLICKHOUSE_HOST is a hard precondition
 # there — it refuses rather than skipping, because a "migrated" deployment missing its ledger
 # tables is the failure this repo will not ship — but the connection actually made is whatever
 # CLICKHOUSE_CLIENT names, since the pinned client reads only CLICKHOUSE_USER and
 # CLICKHOUSE_PASSWORD from the environment. `just stores-up` prints both values on exit.
 migrate dsn:
-    DATABASE_URL={{dsn}} scripts/migrate-db.sh migrations m1
-    DATABASE_URL={{dsn}} scripts/migrate-db.sh python/adjudicator/migrations adj
-    DATABASE_URL={{dsn}} scripts/migrate-db.sh python/intel/migrations in
+    DATABASE_URL={{dsn}} tools/migrate-db.sh migrations m1
+    DATABASE_URL={{dsn}} tools/migrate-db.sh migrations/adjudicator adj
 
 # No Docker, no testcontainers: the daemon dependency adds no fidelity and breaks on Docker-less
 # runners. Idempotent. Nothing to export — the DSNs are the fixed values at the top of this file.

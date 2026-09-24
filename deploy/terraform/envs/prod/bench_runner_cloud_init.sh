@@ -1,5 +1,5 @@
 #!/bin/bash
-# First boot of the pinned bench runner (bench/RUNNER.md). Installs the GitHub runner as a
+# First boot of the pinned bench runner (docs/runbooks/bench-runner.md). Installs the GitHub runner as a
 # systemd service under /opt/runner and an idle timer that stops the instance after 20 quiet minutes.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive

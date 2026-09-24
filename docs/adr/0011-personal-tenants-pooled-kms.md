@@ -1,6 +1,6 @@
 # ADR-0011 — Personal tenants: one pooled KMS key for `kind='personal'`, per-tenant keys stay for organizations
 
-- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead ("organization keys per tenant, personal tenants share one pooled key"); recorded in docs/RECONCILIATION.md (D-EI)
+- **Status:** Accepted — signed by Anurag Upadhyay (founder) 2026-09-16, as recommended by the lead ("organization keys per tenant, personal tenants share one pooled key"); recorded in docs/history/RECONCILIATION.md (D-EI)
 - **Date:** 2026-09-16
 - **Deciders:** Anurag Upadhyay (founder), Omium
 - **Reversibility:** cheap before the first personal upload, expensive after — objects written under the pooled key cannot be re-keyed without a copy pass, and the bucket-policy deny statement is the control that makes the choice physical

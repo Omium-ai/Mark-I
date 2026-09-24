@@ -1,7 +1,7 @@
 //! Lowercase hex, the encoding every hash travels in INSIDE signed payloads
 //! (`prev_receipt_hash`, `merkle_root` — vectors manifest throughout).
 //! In-crate rather than a dependency: the verifier's trust surface is
-//! deliberately small (tools/verifier Cargo.toml "nothing else, ever"), and
+//! deliberately small (rust/verifier Cargo.toml "nothing else, ever"), and
 //! these are the few lines that keep it that way.
 
 /// Lowercase hex — the only encoding this crate ever EMITS (Python

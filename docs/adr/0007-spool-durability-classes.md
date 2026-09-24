@@ -76,6 +76,6 @@ The strongest steelman of the set: it is philosophically consistent with the res
 
 ## References
 - `docs/spec/execution-plan-v2.md` — M1P spool section (segments, framing, cap, fsync, per-class policy, `Dropped{}`), posture matrix ("fail-open for availability…"), Phase 1 verification (kill -9 drill), critical file 3
-- `docs/04-lld-edge.md` — spool internals, backpressure, failure catalog; shim 50 ms deadline and spill ring; tee `try_send`
-- `docs/10-security-threat-model.md` — §11.5 coverage-window attributability (the disk-stop reason code's role)
+- `docs/design/04-lld-edge.md` — spool internals, backpressure, failure catalog; shim 50 ms deadline and spill ring; tee `try_send`
+- `docs/design/10-security-threat-model.md` — §11.5 coverage-window attributability (the disk-stop reason code's role)
 - ADR-0005 — why the fabric must carry billing-grade delivery at all

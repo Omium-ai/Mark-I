@@ -3,9 +3,9 @@
 //! hold honestly.
 //!
 //! `benches/latency.rs` asserts the real budgets (1 ms, 35 MB) but only runs on the pinned
-//! runner (`bench/RUNNER.md`), and `bench-gate` passes *as deferred* while that runner is
+//! runner (`docs/runbooks/bench-runner.md`), and `bench-gate` passes *as deferred* while that runner is
 //! unregistered — so until it exists, no PR can go red on a hot-path regression. This test
-//! closes that hole with a relaxed number: `bench/RUNNER.md` records that a hosted runner's
+//! closes that hole with a relaxed number: `docs/runbooks/bench-runner.md` records that a hosted runner's
 //! spread is wider than the 1 ms budget, so 1 ms here would fail builds that did not regress.
 //! 5 ms is an order of magnitude above the delta this harness measures (~0.3 ms) and still
 //! below anything a `spawn_blocking` per request or a regex compiled per record costs. The

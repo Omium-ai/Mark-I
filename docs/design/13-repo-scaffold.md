@@ -14,7 +14,7 @@ The language rule, applied mechanically — a new component goes where its colum
 
 | Language | Wins when | Mark 1 components |
 |---|---|---|
-| **Rust** | hostile-input parsing, sub-ms/small-RSS budgets, memory-safety as a security property, static single binaries shipped to machines we don't own | `mark1-proxy`, `mark1-hookshim`, `cortexd`, the four client crates, `mark1-frames`, `tools/verifier` |
+| **Rust** | hostile-input parsing, sub-ms/small-RSS budgets, memory-safety as a security property, static single binaries shipped to machines we don't own | `mark1-proxy`, `mark1-hookshim`, `cortexd`, the four client crates, `mark1-frames`, `rust/verifier` |
 | **Go** | long-lived daemons, process supervision, network plumbing, one-binary-many-modules services, fast cross-compile for a CLI | `mark1d`, `controld`, `mark1` CLI |
 | **Python** | numerics (numpy-only spectral D-S), judge orchestration, batch jobs over DuckDB/Parquet, FastAPI service skeleton inherited from the estate | `adjudicator-svc`, `mark1-intel`, `shared/mark1_receipts` |
 
@@ -47,7 +47,7 @@ For the lead's contradiction pass; this document takes the stated side.
 |---|---|---|---|
 | R-13.1 | `buf breaking` category | plan §M1P: `WIRE_JSON`; estate `shared/proto/buf.yaml`: `FILE` | **the plan** — `WIRE_JSON` is the weakest category that still guarantees wire + JSON compatibility, which is what a versioned-by-package protocol needs; the estate's `FILE` is stricter about source-level moves Mark 1 does not need to freeze. Divergence recorded in §5.1 |
 | R-13.2 | Go runtime image | estate `checkpoint-manager/Dockerfile`: `alpine:latest` runtime stage; doc 09 §capacity: "All Go/Rust images are distroless" | **doc 09 / distroless** — `alpine:latest` is a floating tag, the exact class retired 2026-08-13; the estate's own Dockerfile contradicts its stated posture. Mark 1 uses `gcr.io/distroless/static-debian12:nonroot` for Go (§8.1) |
-| R-13.3 | Migrations location | plan tree: one root `migrations/`; 06 trees: per-service `python/adjudicator/migrations/` (`adj_0NN_`) and `python/intel/migrations/` (`in_0NN_`) | **both** — root `migrations/` holds the controld-owned core schema (`m1_0NN_`, per 05 §7); the Python services keep their estate-convention service-local dirs. One runner (`scripts/migrate-db.sh` pattern), three prefixes. Treated as an expansion of the plan tree, not a contradiction of it |
+| R-13.3 | Migrations location | plan tree: one root `migrations/`; 06 trees: per-service `python/adjudicator/migrations/` (`adj_0NN_`) and `python/intel/migrations/` (`in_0NN_`) | **both** — root `migrations/` holds the controld-owned core schema (`m1_0NN_`, per 05 §7); the Python services keep their estate-convention service-local dirs. One runner (`tools/migrate-db.sh` pattern), three prefixes. Treated as an expansion of the plan tree, not a contradiction of it |
 | R-13.4 | Python version | estate skeleton is `python:3.11-slim`; Mark 1 is a new repo | **3.12** — a greenfield repo pins the current stable line; the estate's 3.11 is the skeleton *source*, not a ceiling. `requires-python = ">=3.12"` (§4.2) |
 
 ---
@@ -77,7 +77,7 @@ omium-mark1/
 ├── uv.lock                          # committed; CI syncs --frozen
 ├── justfile                         # §6 — the one entry point for every build/test/lint/gen verb
 ├── CODEOWNERS                       # §10.1 — root file; GitHub resolves it, no .github/ copy exists
-├── LICENSE                          # UNLICENSED (proprietary) — except tools/verifier/LICENSE (Apache-2.0)
+├── LICENSE                          # UNLICENSED (proprietary) — except rust/verifier/LICENSE (Apache-2.0)
 │
 ├── .github/
 │   ├── PULL_REQUEST_TEMPLATE.md     # §10.2
@@ -240,7 +240,7 @@ members = [
     "rust/mark1-hookshim",
     "rust/mark1-proxy",
     "rust/cortexd",
-    "tools/verifier",
+    "rust/verifier",
 ]
 # cargo-fuzz crates need nightly and their own profiles; they build via `just fuzz`, not the workspace.
 exclude = [
@@ -252,7 +252,7 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "UNLICENSED"     # tools/verifier overrides: license = "Apache-2.0"
+license = "UNLICENSED"     # rust/verifier overrides: license = "Apache-2.0"
 authors = ["Omium"]
 rust-version = "1.91"
 
@@ -330,7 +330,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-clap = { version = "4.5", features = ["derive"] }   # cortexd, tools/verifier; the shim parses NO args
+clap = { version = "4.5", features = ["derive"] }   # cortexd, rust/verifier; the shim parses NO args
 
 # --- platform ---
 libc = "0.2"                                     # prctl/PR_SET_DUMPABLE, RLIMIT_CORE, ioprio
@@ -665,7 +665,7 @@ dependencies = [
 - `app/config.py`: pydantic-settings, DSNs as `@property` with `sslmode=require` baked in (asyncpg's default `prefer` silently falls back to plaintext — the estate's scar, not repeated).
 - `app/db.py`: `tenant_guc_setup` as the pool `setup=` callback; FastAPI `dependencies=[Depends(tenant_context_dependency)]`; workers use `set_local_tenant` inside the transaction. Services connect as `adjudicator_app` / `intel_app` — NOBYPASSRLS roles from day one (the rds_superuser lesson, enforced by the CI negative tests in `conformance/tenancy/`).
 - `app/errors.py`: `install_exception_handlers`; `asyncio.TimeoutError`/`asyncpg.InterfaceError` → 503 + `Retry-After`.
-- Migrations: numbered, idempotent, service-prefixed (`adj_0NN_`, `in_0NN_`), run by the `scripts/migrate-db.sh` runner tracking `schema_migrations` keyed `"${service}__${filename}"`; in prod, an Argo CD PreSync Job (05 §7).
+- Migrations: numbered, idempotent, service-prefixed (`adj_0NN_`, `in_0NN_`), run by the `tools/migrate-db.sh` runner tracking `schema_migrations` keyed `"${service}__${filename}"`; in prod, an Argo CD PreSync Job (05 §7).
 - Tests: flat `tests/`, `python -m pytest tests -o asyncio_mode=auto`; real-Postgres suites gated on an env DSN via `pytest.mark.skipif` — **no testcontainers; CI has no Docker** (estate grounding).
 
 ---
@@ -892,9 +892,9 @@ bench:
 
 # Apply core + service migrations to a target DSN (idempotent; safe to re-run).
 migrate dsn:
-    DATABASE_URL={{dsn}} scripts/migrate-db.sh migrations m1
-    DATABASE_URL={{dsn}} scripts/migrate-db.sh python/adjudicator/migrations adj
-    DATABASE_URL={{dsn}} scripts/migrate-db.sh python/intel/migrations in
+    DATABASE_URL={{dsn}} tools/migrate-db.sh migrations m1
+    DATABASE_URL={{dsn}} tools/migrate-db.sh python/adjudicator/migrations adj
+    DATABASE_URL={{dsn}} tools/migrate-db.sh python/intel/migrations in
 
 # Local dev stack (postgres, clickhouse, minio, the three cloud services). DEV ONLY.
 dev-up:
@@ -934,13 +934,13 @@ Three-OS coverage for Rust and Go is non-negotiable from day one (plan §Deploym
 
 ### 6.4 Clean-machine bootstrap
 
-`scripts/bootstrap.sh` (macOS/Linux) and `scripts/bootstrap.ps1` (Windows) install exactly the tool list below, verify versions, and stop — they do not touch the repo. What a new engineer runs:
+`tools/bootstrap.sh` (macOS/Linux) and `tools/bootstrap.ps1` (Windows) install exactly the tool list below, verify versions, and stop — they do not touch the repo. What a new engineer runs:
 
 **macOS**
 ```sh
 brew install just uv go buf golangci-lint syft pre-commit && brew install rustup && rustup-init -y
 git clone git@github.com:Omium-ai/omium-mark1 && cd omium-mark1
-./scripts/bootstrap.sh --check     # verifies: rust 1.91 (from rust-toolchain.toml), go 1.25, uv, buf, just, golangci-lint
+./tools/bootstrap.sh --check     # verifies: rust 1.91 (from rust-toolchain.toml), go 1.25, uv, buf, just, golangci-lint
 just gen-check && just build && just test
 ```
 
@@ -950,7 +950,7 @@ curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y          # picks u
 curl -LsSf https://astral.sh/uv/install.sh | sh
 # go 1.25 from go.dev tarball; just/buf/golangci-lint/syft from their release binaries (bootstrap.sh does this)
 git clone git@github.com:Omium-ai/omium-mark1 && cd omium-mark1
-./scripts/bootstrap.sh             # installs the non-apt tools into ~/.local/bin, then --check
+./tools/bootstrap.sh             # installs the non-apt tools into ~/.local/bin, then --check
 just gen-check && just build && just test
 ```
 
@@ -958,7 +958,7 @@ just gen-check && just build && just test
 ```powershell
 winget install Rustlang.Rustup Golang.Go astral-sh.uv Casey.Just bufbuild.buf GolangCI.golangci-lint
 git clone git@github.com:Omium-ai/omium-mark1; cd omium-mark1
-./scripts/bootstrap.ps1 -Check
+./tools/bootstrap.ps1 -Check
 just gen-check; just build; just test
 ```
 
@@ -1317,7 +1317,7 @@ Four artifact classes, four schemes — because they have four different compati
 | **Cloud services** (`controld`, `adjudicator`, `intel`) | **no semver — `<sha7>` only** | continuously deployable; "version" is the deployed SHA in GitOps, promoted per the estate's promote-by-SHA workflow. Compatibility is carried by the wire contract, not by service version numbers |
 | **PolicyBundles / update manifests** | monotonic `seq` per `(tenant, channel)` / `manifest_seq` | not versions at all — sequenced signed documents; rollback is *new content under a higher seq* (04 §9.4, 09 §11.2). No semver semantics ever attach to them |
 
-Crate versions (`0.1.0` workspace-wide) and Python package versions are internal bookkeeping — nothing is published to crates.io or PyPI except `tools/verifier`, which carries its own semver from its first public release (it is the one artifact whose downstream we do not control).
+Crate versions (`0.1.0` workspace-wide) and Python package versions are internal bookkeeping — nothing is published to crates.io or PyPI except `rust/verifier`, which carries its own semver from its first public release (it is the one artifact whose downstream we do not control).
 
 Dialect parsers version independently *inside* the edge version: each `mark1-frames` module carries its `DIALECT_REV` (04 §4), bumped with a new golden fixture — a vendor format churn is a fixture+rev diff, not an edge release semantics change. Same pattern for `task_seg_version`, `grammar_rev`/`query_rev`/`indexer_rev` (cortexd CAS): **data-plane revisions ride inside artifacts; only binaries get semver.**
 
@@ -1358,8 +1358,8 @@ Two GitHub teams under `Omium-ai`: `@Omium-ai/mark1-core` (default owners) and `
 # --- Contract surfaces: a change here is a change to what Mark 1 *is* ---
 /proto/                             @Omium-ai/mark1-core @Omium-ai/mark1-security
 /migrations/                        @Omium-ai/mark1-core @Omium-ai/mark1-security
-/docs/07-data-model.md              @Omium-ai/mark1-core @Omium-ai/mark1-security
-/docs/08-api-contracts.md           @Omium-ai/mark1-core @Omium-ai/mark1-security
+/docs/design/07-data-model.md              @Omium-ai/mark1-core @Omium-ai/mark1-security
+/docs/design/08-api-contracts.md           @Omium-ai/mark1-core @Omium-ai/mark1-security
 /docs/adr/                          @Omium-ai/mark1-core @Omium-ai/mark1-security
 
 # --- Security-relevant code paths: legality, secrets, tenancy, signing ---
@@ -1373,7 +1373,7 @@ Two GitHub teams under `Omium-ai`: `@Omium-ai/mark1-core` (default owners) and `
 /go/controld/internal/querychoke/   @Omium-ai/mark1-security
 /go/controld/internal/dprelease/    @Omium-ai/mark1-security
 /python/shared/mark1_receipts/      @Omium-ai/mark1-security
-/tools/verifier/                    @Omium-ai/mark1-security
+/rust/verifier/                    @Omium-ai/mark1-security
 
 # --- The gates that enforce the design must not be quietly weakened ---
 /tools/ci/                          @Omium-ai/mark1-security
@@ -1399,7 +1399,7 @@ The last stanza matters: relaxing a lint config, editing a CI gate script, or "u
 ## Contract check (mechanically enforced by contracts_sync_check — this is the human half)
 
 - [ ] No proto/message, table, bundle-section, error-code, or hook-payload change — OR —
-- [ ] `docs/07-data-model.md` / `docs/08-api-contracts.md` updated **in this PR**
+- [ ] `docs/design/07-data-model.md` / `docs/design/08-api-contracts.md` updated **in this PR**
 
 ## Discipline
 
@@ -1426,20 +1426,20 @@ set -eu
 CHANGED=$(git diff --name-only "${BASE_REF}"...HEAD)
 touches() { echo "$CHANGED" | grep -qE "$1"; }
 
-if touches '^proto/m1p/' && ! touches '^docs/07-data-model\.md'; then
-  echo "FAIL: proto change without docs/07-data-model.md in the same PR (00-README sync rule)"; exit 1
+if touches '^proto/m1p/' && ! touches '^docs/design/07-data-model\.md'; then
+  echo "FAIL: proto change without docs/design/07-data-model.md in the same PR (00-README sync rule)"; exit 1
 fi
 if touches '^(migrations|python/adjudicator/migrations|python/intel/migrations)/' \
-   && ! touches '^docs/07-data-model\.md'; then
-  echo "FAIL: migration change without docs/07-data-model.md in the same PR"; exit 1
+   && ! touches '^docs/design/07-data-model\.md'; then
+  echo "FAIL: migration change without docs/design/07-data-model.md in the same PR"; exit 1
 fi
-if touches 'sections\.rs|policydist/catalog\.go|policy_compiler/' && ! touches '^docs/07-data-model\.md'; then
+if touches 'sections\.rs|policydist/catalog\.go|policy_compiler/' && ! touches '^docs/design/07-data-model\.md'; then
   echo "FAIL: bundle-section change without docs/07 in the same PR"; exit 1
 fi
-if touches 'errors?\.(rs|go|py)$|M1E-' && ! touches '^docs/08-api-contracts\.md'; then
-  echo "FAIL: error-taxonomy change without docs/08-api-contracts.md in the same PR"; exit 1
+if touches 'errors?\.(rs|go|py)$|M1E-' && ! touches '^docs/design/08-api-contracts\.md'; then
+  echo "FAIL: error-taxonomy change without docs/design/08-api-contracts.md in the same PR"; exit 1
 fi
-if touches '^go/mark1d/adapters/|^rust/mark1-hookshim/src/maps\.rs' && ! touches '^docs/08-api-contracts\.md'; then
+if touches '^go/mark1d/adapters/|^rust/mark1-hookshim/src/maps\.rs' && ! touches '^docs/design/08-api-contracts\.md'; then
   echo "FAIL: hook/adapter contract change without docs/08 in the same PR"; exit 1
 fi
 echo "contracts_sync_check: OK"
@@ -1464,9 +1464,9 @@ The plan's nine "Critical files, in build order" as an actual commit sequence. E
 | **C2** | `rust/m1p-wire`: staged gen include, M1PL framing with bounded `len`, incremental `FrameDecoder`, `fuzz/frame_decode` + seed corpus in `conformance/vectors/m1pl/` | Rust 3-OS matrix becomes required; **fuzz-smoke (60 s)**; the workspace `--locked` build gate | `cargo test -p m1p-wire` round-trips every event family; the fuzzer survives its smoke run; hostile length prefixes provably cannot allocate past the bound |
 | **C3** | `go/mark1d` skeleton (`cmd/main.go`, `internal/{obs,fabric,capture}` stubs) + **`internal/spool` in full** (07 §6: 64 MiB segments, crc32c, mmap ledger, per-class policy, `Dropped{}` accounting, recovery scan) + Go frame reader + `FuzzSpoolRecordDecode`/`FuzzM1plFrameRead` | Go 3-OS matrix required; **govulncheck**; Go fuzz smoke; **`conformance_crosslang.sh`** (first two-language vectors: Rust↔Go frames) | `kill -9` mid-append test shows billing-grade loss = 0 beyond the fsync window, all loss accounted as `Dropped{CRC_LOSS}`; Rust-encoded frames decode identically in Go |
 | **C4** | `go/controld` skeleton (`internal/{config,server,auth,obs,pg}`) + **`internal/ingest` in full** (S3-first landing, token-stamped tenancy, idempotent upsert, pre-egress scanner, CH async-insert via `chproj`) | depguard querychoke/no-grpc rules now bite real code; ingest integration tests (DSN-gated, `just dev-up` stack) | `mark1d` spool → uplink → controld → MinIO+ClickHouse end to end in compose; replaying a batch is idempotent by `event_id`; a tenant-mismatch batch is rejected + security event |
-| **C5** | `migrations/m1_001…` (tenants/devices, receipt chain per `ro_012` template + `key_id`/checkpoint columns, verifier registry, certs, artifacts, contributions, ε ledger, bundles, gold sets — 07's DDL) + `scripts/migrate-db.sh` + **`docs/adr/0001-clickhouse-ordering-key.md` signed** | migration idempotency check (apply twice); **`conformance/tenancy/` RLS negative tests** (the `*_app` NOBYPASSRLS discipline, mechanically un-repeatable) | `just migrate` twice = no-op; RLS negative suite proves cross-tenant reads impossible as the app roles; **the one irreversible ADR is signed before any production write** |
+| **C5** | `migrations/m1_001…` (tenants/devices, receipt chain per `ro_012` template + `key_id`/checkpoint columns, verifier registry, certs, artifacts, contributions, ε ledger, bundles, gold sets — 07's DDL) + `tools/migrate-db.sh` + **`docs/adr/0001-clickhouse-ordering-key.md` signed** | migration idempotency check (apply twice); **`conformance/tenancy/` RLS negative tests** (the `*_app` NOBYPASSRLS discipline, mechanically un-repeatable) | `just migrate` twice = no-op; RLS negative suite proves cross-tenant reads impossible as the app roles; **the one irreversible ADR is signed before any production write** |
 | **C6** | `python/shared/mark1_receipts` (vendored `canonical.py`/`keys.py` + `checkpoint.py`) + `conformance/vectors/receipt/` + the Go origin-sign mirror in `mark1d/internal/identity` | Python CI (ruff, pytest, pip-audit); receipt vectors join `conformance_crosslang.sh` — **three languages now locked together** | one vector set produces identical canonical bytes, hashes, and verifiable dual signatures in Python, Rust, and Go |
-| **C7** | `tools/verifier` (Rust, Apache-2.0): chain walk, checkpoint Merkle + inclusion paths, dual-sig + KeyRing rotation verification, witness-head cross-check, offline by construction | verifier e2e in CI: build a chain via C3–C6 components **with no server running**, verify it | the sales claim is demonstrable: `mark1-verifier verify --chain … --witness …` passes offline; any single tampered byte fails with a named defect |
+| **C7** | `rust/verifier` (Rust, Apache-2.0): chain walk, checkpoint Merkle + inclusion paths, dual-sig + KeyRing rotation verification, witness-head cross-check, offline by construction | verifier e2e in CI: build a chain via C3–C6 components **with no server running**, verify it | the sales claim is demonstrable: `mark1-verifier verify --chain … --witness …` passes offline; any single tampered byte fails with a named defect |
 | **C8** | `rust/mark1-hookshim` (off-check-first, maps-as-data, spill ring) + `go/mark1d/adapters/claudecode` + `internal/tailers` (sidechain dedupe as protocol invariant) + `conformance/hooks/claudecode/<pinned>/` fixtures | hook-fixture replay suite; shim cold-start bench (≤10 ms) + 50 ms deadline test; `secret_type_gate` now covers the shim's redact link | recorded Claude Code sessions replay through shim+tailer → spool → ingest with zero duplicate `Usage` (the ~2.5× overcount defense proven by fixture); daemon-down replay via spill ring works |
 | **C9** | `python/intel` skeleton + **`app/tvo/` in full** (closed forms, engine, deterministic waste taxonomy, coverage metric, report) + `in_0NN` migrations | TVO golden test: output must match the hand-computed Paper I worked example; coverage-floor refusal test (`M1E-5004`) | **the Phase 1 gate**: end-to-end certified usage events from a real session, TVO computed, verifiable offline by the customer — dogfood week starts |
 | **R1** | first `edge/v0.1.0` tag (no new code) | `release.yml`: 5-triple build, signing/notarization, **SBOM + SLSA attestation** (the last two new-vs-estate gates turn on) | `mark1 verify-release` validates signature + provenance on a dogfood laptop; ring 0 manifest committed |

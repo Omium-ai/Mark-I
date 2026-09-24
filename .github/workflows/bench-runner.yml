@@ -1,4 +1,4 @@
-# Starts the pinned bench runner (bench/RUNNER.md) — a stopped EC2 instance that registers itself
+# Starts the pinned bench runner (docs/runbooks/bench-runner.md) — a stopped EC2 instance that registers itself
 # as a self-hosted runner on boot and shuts itself down after 20 idle minutes.
 #
 # Called by ci.yml (main pushes) and release.yml before their `bench` jobs; the weekly schedule is a

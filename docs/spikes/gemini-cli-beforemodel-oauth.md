@@ -1,6 +1,6 @@
 # Spike: Gemini CLI `BeforeModel` in OAuth mode
 
-**Read against:** `docs/08-api-contracts.md` §5.3 (gemini adapter, `UNVERIFIED — spike gates this adapter slot`), `docs/03-hld.md` §6 (per-agent capability matrix, Gemini CLI row — all six cells `unverified`). All sources below read 2026-09-15.
+**Read against:** `docs/design/08-api-contracts.md` §5.3 (gemini adapter, `UNVERIFIED — spike gates this adapter slot`), `docs/design/03-hld.md` §6 (per-agent capability matrix, Gemini CLI row — all six cells `unverified`). All sources below read 2026-09-15.
 
 ## Verdict: GO, with a two-source capture design — not hooks alone
 

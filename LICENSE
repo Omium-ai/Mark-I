@@ -14,8 +14,8 @@ a separate written agreement signed by an authorized representative of Omium.
 Unauthorized copying, distribution, or disclosure of the Software by any means
 is strictly prohibited.
 
-EXCEPTION: the standalone offline verifier at tools/verifier/ is licensed
-separately under the Apache License, Version 2.0. See tools/verifier/LICENSE.
+EXCEPTION: the standalone offline verifier at rust/verifier/ is licensed
+separately under the Apache License, Version 2.0. See rust/verifier/LICENSE.
 That exception is deliberate: "verify Omium" is only a meaningful claim if the
 verifier is inspectable by the party doing the verifying.
 

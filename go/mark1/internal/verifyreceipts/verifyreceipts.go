@@ -1,5 +1,5 @@
 // Package verifyreceipts is 08 §7.7: fetch + orchestrate + honest exit
-// codes. It wraps the standalone open-source verifier (tools/verifier —
+// codes. It wraps the standalone open-source verifier (rust/verifier —
 // same code, same verdicts) rather than growing a fourth crypto
 // implementation: the default network path is GET /api/v1/receipts/export +
 // /api/v1/receipts/keys (§7.7 as amended — the export is DEFINED as
@@ -41,7 +41,7 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 		verifier, err = exec.LookPath("mark1-verifier")
 		if err != nil {
 			return cli.Failf(cli.ExitRuntime, "",
-				"mark1-verifier not on PATH — install it (tools/verifier) or set MARK1_VERIFIER")
+				"mark1-verifier not on PATH — install it (rust/verifier) or set MARK1_VERIFIER")
 		}
 	}
 
@@ -175,7 +175,7 @@ const exportPage = 5000
 
 // fetchChain pages GET /api/v1/receipts/export (08 §7.7 as amended — the
 // D-O ruling: the export IS the default network path) with the device token
-// and lands the body verbatim. Each line already is one tools/verifier
+// and lands the body verbatim. Each line already is one rust/verifier
 // ExportRow — byte-loadable, the round-trip the receipts integration e2e
 // proves — so this function copies bytes and never re-marshals a row: a
 // re-encode could perturb the exact payload text the signatures cover.
@@ -268,7 +268,7 @@ func seqOfLine(line []byte) (uint64, bool) {
 	return 0, false
 }
 
-// fetchKeys snapshots GET /api/v1/receipts/keys — the tools/verifier
+// fetchKeys snapshots GET /api/v1/receipts/keys — the rust/verifier
 // KeysFile the server emits natively (pubkey_hex, role split by list), so
 // the body lands verbatim. Authenticated like the export: device keys are
 // tenant-scoped (m1_001) and 08 §7.7 (amended) severs the old

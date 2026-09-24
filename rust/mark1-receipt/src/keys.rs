@@ -179,7 +179,7 @@ pub enum KeyCheck {
 
 /// key_id → published key. One implementation of "is this signature from a
 /// then-valid key", shared by mark1d (via the Go mirror), the proxy, and
-/// tools/verifier so "verify offline" and "sign at origin" cannot drift
+/// rust/verifier so "verify offline" and "sign at origin" cannot drift
 /// (04 §7.2).
 #[derive(Debug, Clone, Default)]
 pub struct KeyRing {

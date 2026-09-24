@@ -29,7 +29,7 @@ import (
 
 const KeyManifestSchema = "mark1-keys.v1"
 
-// ManifestKey is one published key; the JSON shape is tools/verifier's
+// ManifestKey is one published key; the JSON shape is rust/verifier's
 // KeyRecord plus `section` for bundle keys.
 type ManifestKey struct {
 	Section   string            `json:"section,omitempty"`
