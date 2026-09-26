@@ -1,0 +1,7 @@
+{
+  "about": "first run with an invite whose POST /team/invites/accept refuses already_in_team: the caller is an active member of another team",
+  "extends": "first-run",
+  "status": {
+    "cloud-team-invites-accept": 409
+  }
+}

@@ -52,6 +52,8 @@ type Deps struct {
 	IntelServiceToken string
 	// Regimes resolves the tenant's m1_075 row (06 §8.4); nil ⇒ every basis stays unresolved and reports issue indicative.
 	Regimes RegimeSource
+	// Viewers narrows a team member's reads to their devices (15-teams); nil reads tenant-wide.
+	Viewers Viewers
 }
 
 type Module struct {
@@ -61,7 +63,11 @@ type Module struct {
 }
 
 func New(d Deps) *Module {
-	return &Module{reg: d.Registry, runner: d.Runner, deps: d}
+	runner := d.Runner
+	if d.Viewers != nil {
+		runner = Scoped(runner, d.Viewers)
+	}
+	return &Module{reg: d.Registry, runner: runner, deps: d}
 }
 
 func (m *Module) Name() string { return "querychoke" }
@@ -229,6 +235,10 @@ func (m *Module) run(w http.ResponseWriter, r *http.Request, q Query) (*Rows, bo
 			writeErr(w, http.StatusServiceUnavailable, "M1E-9500", "query concurrency limit; retry")
 			return nil, false
 		}
+		if errors.Is(err, ErrTeamScope) {
+			writeErr(w, http.StatusForbidden, "M1E-1001", "this read is tenant-wide; a team member reads only their own work")
+			return nil, false
+		}
 		slog.Error("querychoke: query failed", "template", q.tpl.name, "err", err)
 		writeErr(w, http.StatusInternalServerError, "M1E-9500", "query execution failed")
 		return nil, false
@@ -281,20 +291,29 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	}
 	pricePinned := reg != nil && reg.CostBasis == costBasisUSD && modelPrices.pinned[reg.PriceModelID]
 	shadowConfirmed := reg != nil && reg.CostBasis == costBasisQuota
+	viewer, err := ViewerFrom(r.Context(), m.deps.Viewers)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "M1E-9500", "viewer lookup failed")
+		return
+	}
 
-	tpl, err := m.reg.Lookup("tvo_report")
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "M1E-9500", "registry miswired")
-		return
-	}
-	q, err := Build(tid, tpl, Params{"from": from, "to": to})
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "M1E-2001", err.Error())
-		return
-	}
-	rows, ok := m.run(w, r, q)
-	if !ok {
-		return
+	// A team member's report is their own (15-teams): the tenant-day rollup has no device, so the window is read live from the ledger instead.
+	rows := &Rows{}
+	if !viewer.Team {
+		tpl, err := m.reg.Lookup("tvo_report")
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "M1E-9500", "registry miswired")
+			return
+		}
+		q, err := Build(tid, tpl, Params{"from": from, "to": to})
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "M1E-2001", err.Error())
+			return
+		}
+		var ok bool
+		if rows, ok = m.run(w, r, q); !ok {
+			return
+		}
 	}
 
 	// Fold the (day, series) rows into the report. The template returns one
@@ -375,12 +394,21 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	// Open days (live.go) fold in beside the closed rows; a quiet open day is no day.
 	now := time.Now().UTC()
 	var liveDays []string
-	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
+	// ponytail: a member's report folds the window once, so its trend is empty; a day-grained per-device read fills it when members need the chart.
+	if viewer.Team {
+		lt, ok := m.liveSpan(w, r, tid, from, to)
+		if !ok {
+			return
+		}
+		tokensTotal, verified, retryLoop = lt.tokens, lt.verified, lt.retryLoop
+		observed, bypass, disabled, segVersion = lt.observed, lt.bypass, lt.disabled, lt.segVersion
+	}
+	for d := from; !d.After(to) && !viewer.Team; d = d.AddDate(0, 0, 1) {
 		day := d.Format(time.DateOnly)
 		if daysSeen[day] || rollupClosed(d, now) {
 			continue
 		}
-		lt, ok := m.liveDay(w, r, tid, d)
+		lt, ok := m.liveSpan(w, r, tid, d, d)
 		if !ok {
 			return
 		}
@@ -408,7 +436,7 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
 		day := d.Format(time.DateOnly)
 		if !daysSeen[day] {
-			if rollupClosed(d, now) && billingByDay[day] > 0 {
+			if !viewer.Team && rollupClosed(d, now) && billingByDay[day] > 0 {
 				missingDays = append(missingDays, day)
 			}
 			continue
@@ -470,6 +498,9 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(liveDays) > 0 {
 		refusals = append(refusals, fmt.Sprintf("M1E-5004 %d open day(s) reported live from the ledger, not a closed rollup", len(liveDays)))
+	}
+	if viewer.Team {
+		refusals = append(refusals, "M1E-5004 per-person report read live from the ledger, not the tenant rollup")
 	}
 	refusals = append(refusals, guaranteeRefusals(covLower, verified, certified, costBasis, pricePinned, shadowConfirmed)...)
 

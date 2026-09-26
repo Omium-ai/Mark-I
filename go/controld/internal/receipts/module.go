@@ -55,6 +55,8 @@ type ModuleDeps struct {
 	// Store and IntelServiceToken serve the internal append route (append.go); an empty token verifies nothing, so the surface is absent, never open.
 	Store             *Store
 	IntelServiceToken string
+	// Viewers narrows the listed rows to a team member's devices (15-teams); head, export, keys and witness stay tenant-wide. nil lists tenant-wide.
+	Viewers querychoke.Viewers
 }
 
 type Module struct {
@@ -64,10 +66,11 @@ type Module struct {
 	obsCfg       obs.Config
 	store        *Store
 	serviceToken string
+	viewers      querychoke.Viewers
 }
 
 func NewModule(d ModuleDeps) *Module {
-	return &Module{db: d.DB, pgReady: d.PG, verifier: d.Verifier, obsCfg: d.ObsCfg, store: d.Store, serviceToken: d.IntelServiceToken}
+	return &Module{db: d.DB, pgReady: d.PG, verifier: d.Verifier, obsCfg: d.ObsCfg, store: d.Store, serviceToken: d.IntelServiceToken, viewers: d.Viewers}
 }
 
 func (m *Module) Name() string { return "receipts" }
@@ -109,14 +112,24 @@ type chainHead struct {
 	CheckpointSeq int64
 }
 
-func (m *Module) readChain(ctx context.Context, tenant querychoke.TenantID, sinceSeq int64, limit int) ([]row, chainHead, error) {
+// readChain reads a page of the chain and its head; with viewer.Team only rows a viewer's device signed are paged (server acts carry no device and are left out), the head is always the tenant's.
+func (m *Module) readChain(ctx context.Context, tenant querychoke.TenantID, sinceSeq int64, limit int, viewer querychoke.Viewer) ([]row, chainHead, error) {
 	var rows []row
 	head := chainHead{Hash: GenesisHash}
 	err := m.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
-		res, err := tx.Query(ctx, `
+		q, args := `
 			SELECT seq, payload, prev_receipt_hash, receipt_hash, record_type,
 			       device_key_id, device_signature, server_key_id, server_signature
-			  FROM m1_receipts WHERE seq > $1 ORDER BY seq LIMIT $2`, sinceSeq, limit)
+			  FROM m1_receipts WHERE seq > $1 ORDER BY seq LIMIT $2`, []any{sinceSeq, limit}
+		if viewer.Team {
+			q, args = `
+			SELECT seq, payload, prev_receipt_hash, receipt_hash, record_type,
+			       device_key_id, device_signature, server_key_id, server_signature
+			  FROM m1_receipts WHERE seq > $1
+			   AND device_key_id IN (SELECT key_id FROM m1_device_keys WHERE device_id = ANY($3::uuid[]))
+			 ORDER BY seq LIMIT $2`, append(args, viewer.Devices)
+		}
+		res, err := tx.Query(ctx, q, args...)
 		if err != nil {
 			return err
 		}
@@ -199,7 +212,12 @@ func (m *Module) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sinceSeq, limit := pageParams(r)
-	rows, head, err := m.readChain(r.Context(), tenant, sinceSeq, limit)
+	viewer, err := querychoke.ViewerFrom(r.Context(), m.viewers)
+	if err != nil {
+		http.Error(w, `{"error":{"code":"M1E-9500","message":"viewer lookup failed"}}`, http.StatusServiceUnavailable)
+		return
+	}
+	rows, head, err := m.readChain(r.Context(), tenant, sinceSeq, limit, viewer)
 	if err != nil {
 		http.Error(w, `{"error":{"code":"M1E-9500","message":"chain read failed"}}`, http.StatusServiceUnavailable)
 		return
@@ -256,7 +274,7 @@ func (m *Module) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sinceSeq, limit := pageParams(r)
-	rows, _, err := m.readChain(r.Context(), tenant, sinceSeq, limit)
+	rows, _, err := m.readChain(r.Context(), tenant, sinceSeq, limit, querychoke.Viewer{}) // verifier food: the whole chain, or its prev-hash links cannot verify
 	if err != nil {
 		http.Error(w, `{"error":{"code":"M1E-9500","message":"chain read failed"}}`, http.StatusServiceUnavailable)
 		return

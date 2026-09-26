@@ -1,7 +1,7 @@
 {
-  "invite_link": "https://app.omium.ai/invite/tenant_1/abc123",
+  "sent": false,
+  "invite_link": "https://mark.omium.ai/join#m1inv_Wm9sYVRlYW1JbnZpdGU",
   "invited_email": "teammate@example.com",
-  "status": "sent",
-  "sent": true,
+  "status": "invited",
   "expires_at": "2026-09-23T09:00:00.000Z"
 }

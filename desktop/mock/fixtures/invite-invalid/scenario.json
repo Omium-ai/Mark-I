@@ -1,0 +1,7 @@
+{
+  "about": "first run with an invite whose POST /team/invites/accept refuses invite_invalid: unknown, expired or already accepted",
+  "extends": "first-run",
+  "status": {
+    "cloud-team-invites-accept": 404
+  }
+}

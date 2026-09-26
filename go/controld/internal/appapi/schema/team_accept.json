@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/team_accept.json",
+  "title": "POST /api/v1/team/invites/accept",
+  "description": "The caller is now an active member of the invite's tenant; the app re-enrolls the device into it. Refusals (error.json reason): 404 invite_invalid, 403 invite_email_mismatch, 409 already_in_team | own_team | team_full.",
+  "type": "object",
+  "required": ["tenant_id", "role"],
+  "additionalProperties": false,
+  "properties": {
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "role": { "type": "string", "enum": ["member"] }
+  }
+}

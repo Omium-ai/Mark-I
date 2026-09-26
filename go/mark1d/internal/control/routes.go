@@ -1037,6 +1037,7 @@ type consentsPatch struct {
 	E1         *bool `json:"e1"`
 	CloudJudge *bool `json:"cloud_judge"`
 	Training   *bool `json:"training"`
+	Team       *bool `json:"team"`
 }
 
 type optInBody struct {
@@ -1057,7 +1058,7 @@ func (s *Server) setConsents(patch *consentsPatch) error {
 	for _, f := range []struct {
 		dst *bool
 		src *bool
-	}{{&c.E1, patch.E1}, {&c.CloudJudge, patch.CloudJudge}, {&c.Training, patch.Training}} {
+	}{{&c.E1, patch.E1}, {&c.CloudJudge, patch.CloudJudge}, {&c.Training, patch.Training}, {&c.Team, patch.Team}} {
 		if f.src != nil {
 			*f.dst = *f.src
 		}

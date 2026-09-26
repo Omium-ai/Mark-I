@@ -61,6 +61,10 @@ export const CLOUD_ROUTES = [
   ['GET', '/api/v1/receipts/witness', 'cloud-receipts-witness'],
   ['GET', '/api/v1/team', 'cloud-team'],
   ['POST', '/api/v1/team/invites', 'cloud-team-invites'],
+  ['POST', '/api/v1/team/invites/accept', 'cloud-team-invites-accept'],
+  ['POST', '/api/v1/team/leave', 'cloud-team-leave'],
+  // {id} carries a literal member (usr_2, a member in the team-* scenarios), as the memory actions do.
+  ['DELETE', '/api/v1/team/members/usr_2', 'cloud-team-members-remove'],
   ['PUT', '/api/v1/team', 'cloud-team-update'],
   ['GET', '/api/v1/me', 'cloud-me'],
 ];
@@ -69,13 +73,45 @@ const SSE_EVENT_NAME = 'local-events';
 // controld streams the export as application/x-ndjson (one ExportRow per line); the fixture holds the rows as an array.
 const NDJSON_FIXTURES = new Set(['cloud-receipts-export']);
 
-function loadFixtures(scenario) {
-  const dir = path.join(HERE, 'fixtures', scenario);
-  const cache = new Map();
-  for (const f of fs.readdirSync(dir)) {
-    cache.set(f.replace(/\.json$/, ''), JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+// Fixtures are written as of FIXTURE_NOW. Every string that is a whole date or date-time moves by (now - FIXTURE_NOW) at load,
+// so "this week" and "last 7 days" hold on any day the mock runs; dates inside other strings (receipt payloads) stay put.
+export const FIXTURE_NOW = Date.parse('2026-09-16T15:00:00Z');
+const DATE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{3})?Z)?$/;
+
+export function shiftDates(v, ms) {
+  if (typeof v === 'string' && DATE_RE.test(v)) {
+    if (v.length === 10) return new Date(Date.parse(`${v}T15:00:00Z`) + ms).toISOString().slice(0, 10);
+    const s = new Date(Date.parse(v) + ms).toISOString();
+    return v.includes('.') ? s : s.replace(/\.\d{3}Z$/, 'Z');
   }
-  return cache;
+  if (Array.isArray(v)) return v.map((x) => shiftDates(x, ms));
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, shiftDates(x, ms)]));
+  return v;
+}
+
+// A scenario dir with scenario.json holds only what differs from the one it `extends`; its `status` maps a fixture to a non-200 reply.
+export function scenarioMeta(scenario) {
+  const p = path.join(HERE, 'fixtures', scenario, 'scenario.json');
+  return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {};
+}
+
+function readScenario(scenario) {
+  const meta = scenarioMeta(scenario);
+  const base = meta.extends ? readScenario(meta.extends) : { fixtures: new Map(), status: new Map() };
+  const dir = path.join(HERE, 'fixtures', scenario);
+  for (const f of fs.readdirSync(dir)) {
+    if (f === 'scenario.json') continue;
+    base.fixtures.set(f.replace(/\.json$/, ''), JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+  }
+  for (const [fixture, code] of Object.entries(meta.status ?? {})) base.status.set(fixture, code);
+  return base;
+}
+
+export function loadScenario(scenario, now = Date.now()) {
+  const { fixtures, status } = readScenario(scenario);
+  const ms = Math.floor((now - FIXTURE_NOW) / 60_000) * 60_000;
+  for (const [k, v] of fixtures) fixtures.set(k, shiftDates(v, ms));
+  return { fixtures, status };
 }
 
 function drain(req) {
@@ -105,7 +141,7 @@ function matchRoute(routes, method, pathname) {
 }
 
 export function startLocal(scenario, port, token) {
-  const fixtures = loadFixtures(scenario);
+  const { fixtures, status } = loadScenario(scenario);
   const server = http.createServer(async (req, res) => {
     await drain(req);
     const url = new URL(req.url, 'http://localhost');
@@ -131,7 +167,7 @@ export function startLocal(scenario, port, token) {
     }
     const fixture = matchRoute(LOCAL_ROUTES, req.method, url.pathname);
     if (!fixture) return json(res, 404, { error: 'not found' });
-    return json(res, 200, fixtures.get(fixture));
+    return json(res, status.get(fixture) ?? 200, fixtures.get(fixture));
   });
   return listen(server, port);
 }
@@ -144,7 +180,7 @@ function listen(server, port) {
 }
 
 export function startCloud(scenario, port) {
-  const fixtures = loadFixtures(scenario);
+  const { fixtures, status } = loadScenario(scenario);
   const server = http.createServer(async (req, res) => {
     await drain(req);
     if (!req.headers.authorization) return json(res, 401, { error: 'missing session bearer' });
@@ -152,7 +188,7 @@ export function startCloud(scenario, port) {
     const fixture = matchRoute(CLOUD_ROUTES, req.method, url.pathname);
     if (!fixture) return json(res, 404, { error: 'not found' });
     if (NDJSON_FIXTURES.has(fixture)) return ndjson(res, fixtures.get(fixture));
-    return json(res, 200, fixtures.get(fixture));
+    return json(res, status.get(fixture) ?? 200, fixtures.get(fixture));
   });
   return listen(server, port);
 }
@@ -170,7 +206,7 @@ function parseArgs(argv) {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
 if (isMain) {
   const { scenario, localPort, cloudPort } = parseArgs(process.argv.slice(2));
-  const scenarios = fs.readdirSync(path.join(HERE, 'fixtures'));
+  const scenarios = fs.readdirSync(path.join(HERE, 'fixtures')).filter((d) => d !== 'controld');
   if (!scenarios.includes(scenario)) {
     process.stderr.write(`unknown scenario "${scenario}", want one of ${scenarios.join('|')}\n`);
     process.exit(1);

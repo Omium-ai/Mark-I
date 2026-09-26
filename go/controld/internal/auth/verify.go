@@ -25,6 +25,9 @@ type Claims struct {
 	ExpiresAt time.Time
 	// Subject is set only by userauth's TenantVerifier: the Mark 1 user token's sub, a tenant-scoped principal with no device (desktop spec §7.2).
 	Subject string
+	// Email and TokenTenantID are the user token's own (15-teams): TenantID is the effective tenant, which a team membership moves off the token's.
+	Email         string
+	TokenTenantID uuid.UUID
 }
 
 // Sentinel errors map 1:1 onto 08 §9 rows; the HTTP layer owns the mapping.

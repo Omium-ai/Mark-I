@@ -22,6 +22,14 @@ func Pending(stateDir string) bool {
 	return !bytes.Equal(cur, done)
 }
 
+// MarkUnrelayed makes the live record Pending again, for a new device identity controld holds no consent row for.
+func MarkUnrelayed(stateDir string) error {
+	if err := os.Remove(relayedPath(stateDir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // Bearer is uplink.TokenSource's shape: the device token is read at send time from its custody, never held here.
 type Bearer interface {
 	Token(context.Context) (string, error)

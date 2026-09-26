@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/team_member_remove.json",
+  "title": "DELETE /api/v1/team/members/{id}",
+  "description": "Owner only: the member row is closed and the member's devices in this tenant are revoked (revoked_devices newly revoked by this call; a retry answers 0). Refusals: 403 not_owner, 400 owner_cannot_leave, 404 member_not_found.",
+  "type": "object",
+  "required": ["id", "status", "revoked_devices"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string" },
+    "status": { "type": "string", "enum": ["removed"] },
+    "revoked_devices": { "type": "integer", "minimum": 0 }
+  }
+}

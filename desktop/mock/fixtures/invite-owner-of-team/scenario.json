@@ -1,0 +1,7 @@
+{
+  "about": "first run with an invite whose POST /team/invites/accept refuses owner_of_team: the caller owns a team that has members",
+  "extends": "first-run",
+  "status": {
+    "cloud-team-invites-accept": 409
+  }
+}

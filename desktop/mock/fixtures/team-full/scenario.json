@@ -1,0 +1,7 @@
+{
+  "about": "a full team: owner, seven members and two live invites fill the 10 seats; POST /team/invites refuses team_full",
+  "extends": "active",
+  "status": {
+    "cloud-team-invites": 409
+  }
+}

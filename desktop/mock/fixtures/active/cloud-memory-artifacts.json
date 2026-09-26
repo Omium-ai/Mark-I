@@ -9,7 +9,8 @@
       "state": "admitted",
       "scope": "mine",
       "n": 11,
-      "pinned": false
+      "pinned": false,
+      "mine": true
     },
     {
       "artifact_id": "art_fix_3",
@@ -20,7 +21,8 @@
       "state": "admitted",
       "scope": "team",
       "n": 6,
-      "pinned": false
+      "pinned": false,
+      "mine": true
     },
     {
       "artifact_id": "art_inv_2",
@@ -31,7 +33,8 @@
       "state": "extracted",
       "scope": "mine",
       "n": 2,
-      "pinned": false
+      "pinned": false,
+      "mine": true
     }
   ]
 }

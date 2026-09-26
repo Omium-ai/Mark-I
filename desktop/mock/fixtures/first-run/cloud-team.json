@@ -6,10 +6,15 @@
       "email": "anurag@omium.ai",
       "role": "owner",
       "joined_at": "2026-09-01T09:00:00.000Z",
-      "status": "active"
+      "status": "active",
+      "last_active": null
     }
   ],
-  "invite_link": "https://app.omium.ai/invite/tenant_1/abc123",
+  "you": {
+    "role": "owner"
+  },
+  "max_members": 10,
+  "invite_link": null,
   "shared_memory": false,
   "tvo": {
     "tvo": 13000,

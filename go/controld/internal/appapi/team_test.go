@@ -93,16 +93,21 @@ func TestArtifactIDDecodesTheProtojsonBytes(t *testing.T) {
 
 func TestTeamSchemasCoverTheContract(t *testing.T) {
 	s := loadSchemas(t)
-	s.Validate("team.json", []byte(`{"members":[{"id":"usr_1","name":null,"email":null,"role":"owner","joined_at":"2026-09-16T00:00:00Z","status":"active"},{"id":"invite:0191c7a0-5b1e-7c2d-9e4f-0123456789a0","name":null,"email":"a@b.example","role":"member","joined_at":"2026-09-16T00:00:00Z","status":"invited"}],"invite_link":null,"shared_memory":false,"tvo":{"tvo":100,"coverage_band":{"observed_fraction":0.97,"coverage_lower":0.96,"floor":0.95},"cost_basis":"usd","guarantee_grade":true},"fleet_status":null}`))
-	s.Validate("team.json", []byte(`{"members":[],"invite_link":null,"shared_memory":true,"tvo":null,"fleet_status":null}`))
-	s.Validate("team_invite.json", []byte(`{"sent":true,"invite_link":"https://app.omium.ai/invite/0191c7a0-5b1e-7c2d-9e4f-0123456789a0/`+base64.RawURLEncoding.EncodeToString(make([]byte, 32))+`","invited_email":null,"status":"sent","expires_at":"2026-09-23T00:00:00Z"}`))
+	s.Validate("team.json", []byte(`{"members":[{"id":"usr_1","name":null,"email":"o@b.example","role":"owner","joined_at":"2026-09-16T00:00:00Z","last_active":"2026-09-17T00:00:00Z","status":"active"},{"id":"invite:0191c7a0-5b1e-7c2d-9e4f-0123456789a0","name":null,"email":"a@b.example","role":"member","joined_at":"2026-09-16T00:00:00Z","last_active":null,"status":"invited"}],"you":{"role":"owner"},"max_members":10,"invite_link":null,"shared_memory":false,"tvo":{"tvo":100,"coverage_band":{"observed_fraction":0.97,"coverage_lower":0.96,"floor":0.95},"cost_basis":"usd","guarantee_grade":true},"fleet_status":null}`))
+	s.Validate("team.json", []byte(`{"members":[],"you":{"role":"member"},"max_members":10,"invite_link":null,"shared_memory":true,"tvo":null,"fleet_status":null}`))
+	s.Validate("team_invite.json", []byte(`{"sent":false,"invite_link":"https://mark.omium.ai/join#`+base64.RawURLEncoding.EncodeToString(make([]byte, 32))+`","invited_email":null,"status":"invited","expires_at":"2026-09-23T00:00:00Z"}`))
+	s.Validate("team_accept.json", []byte(`{"tenant_id":"0191c7a0-5b1e-7c2d-9e4f-0123456789a0","role":"member"}`))
+	s.Validate("team_leave.json", []byte(`{"tenant_id":"0191c7a0-5b1e-7c2d-9e4f-0123456789a0"}`))
+	s.Validate("team_member_remove.json", []byte(`{"id":"usr_2","status":"removed","revoked_devices":2}`))
+	s.Validate("error.json", []byte(`{"error":{"code":"M1E-2011","message":"the team is full","reason":"team_full"}}`))
 	s.Validate("team_update.json", []byte(`{"shared_memory":true}`))
 	s.Validate("memory_action.json", []byte(`{"artifact_id":"0191c7a0-5b1e-7c2d-9e4f-0123456789a0","state":"retired","receipt_id":"0191c7a0-5b1e-7c2d-9e4f-0123456789a1"}`))
 	s.Validate("memory_action.json", []byte(`{"artifact_id":"0191c7a0-5b1e-7c2d-9e4f-0123456789a0","pinned":true}`))
 	s.Validate("memory_outcomes.json", []byte(`{"outcomes":[{"artifact_id":"0191c7a0-5b1e-7c2d-9e4f-0123456789a0","verified_outcomes":11,"uplift_lcb":0.34,"n":11}]}`))
 	for file, bad := range map[string]string{
-		"team.json":              `{"members":[{"id":"x","name":"n","email":null,"role":"owner","joined_at":"2026-09-16T00:00:00Z","status":"active"}],"invite_link":null,"shared_memory":false,"tvo":null,"fleet_status":null}`,
-		"team_invite.json":       `{"sent":false,"invite_link":"https://evil.example/x","invited_email":null,"status":"sent","expires_at":"2026-09-23T00:00:00Z"}`,
+		"team.json":              `{"members":[{"id":"x","name":"n","email":null,"role":"owner","joined_at":"2026-09-16T00:00:00Z","last_active":null,"status":"active"}],"you":{"role":"owner"},"max_members":10,"invite_link":null,"shared_memory":false,"tvo":null,"fleet_status":null}`,
+		"team_invite.json":       `{"sent":true,"invite_link":"https://app.omium.ai/invite/x","invited_email":null,"status":"sent","expires_at":"2026-09-23T00:00:00Z"}`,
+		"team_accept.json":       `{"tenant_id":"0191c7a0-5b1e-7c2d-9e4f-0123456789a0","role":"owner"}`,
 		"memory_action.json":     `{"artifact_id":"0191c7a0-5b1e-7c2d-9e4f-0123456789a0","state":"admitted"}`,
 		"memory_outcomes.json":   `{"outcomes":[{"artifact_id":"0191c7a0-5b1e-7c2d-9e4f-0123456789a0","verified_outcomes":-1,"uplift_lcb":0.34,"n":11}]}`,
 		"memory_injections.json": `{"window":{"from":"2026-09-01","to":"2026-09-16"},"injections":[{"id":"x","artifact_id":"a","at":"2026-09-16T00:00:00Z","session_id":"0191c7a0-5b1e-7c2d-9e4f-0123456789a0","task_id":null,"channel":"hook_context","tokens_used":1,"outcome":"maybe"}],"honesty":{"coverage_band":{"observed_fraction":1,"coverage_lower":1,"floor":0.95},"cost_basis":"usd","guarantee_grade":true,"task_seg_version":"task_seg.v1"}}`,
@@ -117,6 +122,20 @@ func TestTeamSchemasCoverTheContract(t *testing.T) {
 		s.Walk(file, s.Docs()[file], inst, "$", &errs)
 		if len(errs) == 0 {
 			t.Errorf("%s: validator passed %s", file, bad)
+		}
+	}
+}
+
+func TestInviteTokenTakesTheLinkOrTheToken(t *testing.T) {
+	for in, want := range map[string]string{
+		"abc_-9":                            "abc_-9",
+		"  https://mark.omium.ai/join#abc ": "abc",
+		"https://app.omium.ai/invite/0191c7a0-5b1e-7c2d-9e4f-0123456789a0/abc": "abc",
+		"https://mark.omium.ai/join#":                                          "",
+		"":                                                                     "",
+	} {
+		if got := inviteToken(in); got != want {
+			t.Errorf("inviteToken(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

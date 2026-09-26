@@ -18,9 +18,12 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/teams"
 )
 
 const issuer = "https://api.omium.ai"
@@ -249,4 +252,50 @@ func TestTenantVerifierAdmitsUserTokenBesideDeviceVerifier(t *testing.T) {
 			t.Fatalf("%s under Multi: want auth.ErrBadToken, got %v", name, err)
 		}
 	}
+}
+
+type teamRow struct{ team *uuid.UUID }
+
+func (r teamRow) Scan(dest ...any) error {
+	*(dest[0].(**uuid.UUID)) = r.team
+	return nil
+}
+
+type teamTx struct {
+	pgx.Tx
+	team *uuid.UUID
+}
+
+func (f teamTx) QueryRow(context.Context, string, ...any) pgx.Row { return teamRow{f.team} }
+
+type teamDB struct {
+	team *uuid.UUID
+	err  error
+}
+
+func (d teamDB) WithTenant(_ context.Context, _ querychoke.TenantID, fn func(pgx.Tx) error) error {
+	if d.err != nil {
+		return d.err
+	}
+	return fn(teamTx{team: d.team})
+}
+
+// 15-teams: the read surface resolves a member's user token to the team tenant, keeps the token's own tenant and email beside it, and an unresolvable membership is a 401, never the token tenant by default.
+func TestTeamVerifierResolvesTheEffectiveTenant(t *testing.T) {
+	f := newFixture(t)
+	team := uuid.New()
+	teams.Forget("omium:user-1")
+	c, err := f.v.TeamVerifier(teamDB{team: &team}).Verify(context.Background(), f.token(nil))
+	if err != nil || c.TenantID != team || c.TokenTenantID != f.tenant || c.Email != "dev@example.com" || c.Subject != "user-1" {
+		t.Fatalf("member: %+v %v", c, err)
+	}
+	teams.Forget("omium:user-1")
+	if c, err = f.v.TeamVerifier(teamDB{}).Verify(context.Background(), f.token(nil)); err != nil || c.TenantID != f.tenant {
+		t.Fatalf("no membership: %+v %v", c, err)
+	}
+	teams.Forget("omium:user-1")
+	if _, err := f.v.TeamVerifier(teamDB{err: errors.New("pg down")}).Verify(context.Background(), f.token(nil)); !errors.Is(err, auth.ErrBadToken) {
+		t.Fatalf("unresolved: want auth.ErrBadToken, got %v", err)
+	}
+	teams.Forget("omium:user-1")
 }

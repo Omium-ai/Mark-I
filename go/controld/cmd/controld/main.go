@@ -259,9 +259,11 @@ func main() {
 	// the read surface admits a device token or a Mark 1 user token (desktop spec §7.2); ingest/enroll/policy stay device-only
 	reads := verifier
 	if users != nil {
-		reads = auth.Multi(verifier, users.TenantVerifier())
+		reads = auth.Multi(verifier, users.TeamVerifier(tenantDB)) // a team member's user token reads the team tenant (15-teams)
 	}
 	chRunner := querychoke.NewRunner(chQuery, ch, chOffboard)
+	// 15-teams per-person visibility: one viewer memo shared by every read surface
+	viewers := querychoke.NewPGViewers(tenantDB)
 	qc := querychoke.New(querychoke.Deps{ // 08 §3.3 report/query chokepoint
 		Registry:           tmpl,
 		Runner:             chRunner,
@@ -270,6 +272,7 @@ func main() {
 		RollupWriteEnabled: cfg.RollupWriteEnabled,
 		IntelServiceToken:  cfg.IntelServiceToken,
 		Regimes:            querychoke.PGRegimes{DB: tenantDB},
+		Viewers:            viewers,
 	})
 
 	srv := server.New(cfg.Port, cfg.DrainTimeout)
@@ -291,20 +294,24 @@ func main() {
 		ObsCfg:            obsCfg,
 		Store:             chainStore,
 		IntelServiceToken: cfg.IntelServiceToken,
+		Viewers:           viewers,
 	}), policy, qc, memory.New(memory.Deps{ // 08 §3.7 memory delivery: device-token verified, tenant from claims, proxied to intel
 		Verifier:          reads,
 		ObsCfg:            obsCfg,
 		IntelBaseURL:      cfg.IntelBaseURL,
 		IntelServiceToken: cfg.IntelServiceToken,
+		Viewers:           viewers,
 	}), appapi.New(appapi.Deps{ // desktop app read surface (mark1-desktop-app-spec §5, §7.2)
-		Verifier:   reads,
-		ObsCfg:     obsCfg,
-		Registry:   tmpl,
-		Runner:     chRunner,
-		Reports:    qc,
-		PG:         tenantDB,
-		Regimes:    querychoke.PGRegimes{DB: tenantDB},
-		TenantRoot: enrollMod.TenantRoot,
+		Verifier:       reads,
+		ObsCfg:         obsCfg,
+		Registry:       tmpl,
+		Runner:         querychoke.Scoped(chRunner, viewers),
+		Reports:        qc,
+		PG:             tenantDB,
+		Regimes:        querychoke.PGRegimes{DB: tenantDB},
+		TenantRoot:     enrollMod.TenantRoot,
+		TeamMaxMembers: cfg.TeamMaxMembers,
+		RevokeSubject:  enrollMod.RevokeSubjectDevices,
 	}))
 
 	// The hourly witness-head job (m1_003; 05 §4.4). Runs only when a

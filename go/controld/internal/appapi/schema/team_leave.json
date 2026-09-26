@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/team_leave.json",
+  "title": "POST /api/v1/team/leave",
+  "description": "The member row is closed; tenant_id is the user token's own (personal) tenant, which the app re-enrolls into. Refusals: 400 owner_cannot_leave, 403 not_member.",
+  "type": "object",
+  "required": ["tenant_id"],
+  "additionalProperties": false,
+  "properties": {
+    "tenant_id": { "type": "string", "format": "uuid" }
+  }
+}

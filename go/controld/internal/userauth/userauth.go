@@ -20,6 +20,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/server"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/teams"
 )
 
 // Audience is the aud every Mark 1 user token must carry.
@@ -70,16 +71,28 @@ func New(issuer, jwksPinned string) (*Verifier, error) {
 }
 
 // TenantVerifier admits the user token on the read surface (desktop spec §7.2: the cloud API takes the user session bearer) as an auth.Verifier whose Claims carry the tenant and Subject but no device; auth.Multi composes it beside the device verifier.
-func (v *Verifier) TenantVerifier() auth.Verifier { return tenantVerifier{v} }
+func (v *Verifier) TenantVerifier() auth.Verifier { return tenantVerifier{v: v} }
 
-type tenantVerifier struct{ v *Verifier }
+// TeamVerifier is TenantVerifier with the tenant resolved through teams.EffectiveTenant (15-teams): a team member reads the team tenant.
+func (v *Verifier) TeamVerifier(db teams.DB) auth.Verifier { return tenantVerifier{v: v, db: db} }
+
+type tenantVerifier struct {
+	v  *Verifier
+	db teams.DB
+}
 
 func (t tenantVerifier) Verify(ctx context.Context, bearer string) (auth.Claims, error) {
 	c, err := t.v.Verify(ctx, bearer)
 	if err != nil {
 		return auth.Claims{}, fmt.Errorf("%w: %v", auth.ErrBadToken, err)
 	}
-	return auth.Claims{TenantID: c.TenantID, Subject: c.Sub}, nil
+	tenant := c.TenantID
+	if t.db != nil {
+		if tenant, err = teams.EffectiveTenant(ctx, t.db, teams.Subject(c.Sub), c.TenantID); err != nil {
+			return auth.Claims{}, fmt.Errorf("%w: effective tenant unresolved: %v", auth.ErrBadToken, err)
+		}
+	}
+	return auth.Claims{TenantID: tenant, Subject: c.Sub, Email: c.Email, TokenTenantID: c.TenantID}, nil
 }
 
 type wireClaims struct {

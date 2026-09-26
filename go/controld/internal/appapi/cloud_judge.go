@@ -93,6 +93,10 @@ func (m *Module) handleCloudJudgeUpdate(w http.ResponseWriter, r *http.Request) 
 	}
 	var state cloudJudgeState
 	err := m.deps.PG.WithTenant(r.Context(), tid, func(tx pgx.Tx) error {
+		// in a team one person's click would send every teammate's evidence to the subprocessor: the owner decides (15-teams ruling 4)
+		if err := ownerOfTeam(r.Context(), tx, tid.UUID(), claims); err != nil {
+			return err
+		}
 		var werr error
 		if *wire.Enabled {
 			// Idempotent: m1_065's partial unique index refuses a second live row, so a re-enable is a no-op.
@@ -115,7 +119,7 @@ func (m *Module) handleCloudJudgeUpdate(w http.ResponseWriter, r *http.Request) 
 		return err
 	})
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "M1E-9500", "cloud judge consent update failed")
+		writeTeamErr(w, err, "cloud judge consent update failed")
 		return
 	}
 	writeJSON(w, state)

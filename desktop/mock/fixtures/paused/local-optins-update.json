@@ -8,7 +8,8 @@
   "consents": {
     "e1": true,
     "cloud_judge": true,
-    "training": true
+    "training": true,
+    "team": false
   },
   "statusline": true
 }

@@ -1,0 +1,14 @@
+{
+  "user": {
+    "id": "usr_2",
+    "name": "Sara",
+    "email": "sara@omium.ai"
+  },
+  "tenant": {
+    "id": "tenant_1",
+    "name": "Omium"
+  },
+  "plan": "free",
+  "regime": "apikey",
+  "region": "us"
+}

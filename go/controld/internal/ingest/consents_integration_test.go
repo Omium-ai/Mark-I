@@ -37,7 +37,7 @@ func TestIntegrationDeviceConsentsLandAppendOnlyUnderRLS(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		return rec
 	}
-	for _, body := range []string{`{"e1":true,"cloud_judge":true,"training":true}`, `{"e1":true,"cloud_judge":false,"training":false}`} {
+	for _, body := range []string{`{"e1":true,"cloud_judge":true,"training":true,"team":true}`, `{"e1":true,"cloud_judge":false,"training":false}`} {
 		if rec := put(body); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "recorded_at") {
 			t.Fatalf("%s: %d %s", body, rec.Code, rec.Body.String())
 		}
@@ -46,6 +46,19 @@ func TestIntegrationDeviceConsentsLandAppendOnlyUnderRLS(t *testing.T) {
 	var n int
 	if err := q.admin.QueryRow(ctx, `SELECT count(*) FROM m1_device_consents WHERE device_id = $1`, q.deviceA).Scan(&n); err != nil || n != 2 {
 		t.Fatalf("rows = %d %v, want 2 (history kept)", n, err)
+	}
+	var teams []bool
+	rows, err := q.admin.Query(ctx, `SELECT team FROM m1_device_consents WHERE device_id = $1 ORDER BY recorded_at`, q.deviceA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var b bool
+		_ = rows.Scan(&b)
+		teams = append(teams, b)
+	}
+	if len(teams) != 2 || !teams[0] || teams[1] {
+		t.Fatalf("team column: %v, want [true false] (absent reads false)", teams)
 	}
 	// intel's read (python/intel/app/corpus/export.py training_consented), run as the app role under tenant A's GUC.
 	const latest = `SELECT bool_and(training) FROM (SELECT DISTINCT ON (device_id) training FROM m1_device_consents ORDER BY device_id, recorded_at DESC) d`

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/receipt"
@@ -90,6 +92,7 @@ func (s *Server) purgePolicy() error {
 
 func (s *Server) enrollmentPath() string { return filepath.Join(s.cfg.StateDir, "enrollment.json") }
 func (s *Server) keyPath() string        { return filepath.Join(s.cfg.StateDir, "device.key") }
+func (s *Server) nextKeyPath() string    { return s.keyPath() + ".next" }
 
 func (s *Server) readEnrollment() (*enrollmentDoc, error) {
 	path := s.enrollmentPath()
@@ -122,14 +125,17 @@ func (d *enrollmentDoc) liveState() string {
 	return d.State
 }
 
-// otherTenantLive refuses a silent tenant switch: a live enrollment is released by DELETE /v1/enroll, never overwritten.
-func (s *Server) otherTenantLive(w http.ResponseWriter, tenant string) bool {
-	cur, err := s.readEnrollment()
-	if err != nil || cur.liveState() != "active" || tenant == "" || cur.TenantID == tenant {
-		return false
+// prevEnrollmentPath is where a tenant switch or sign-out parks the outgoing document; mark1d drains the spool it owned under its token only, then removes it.
+func (s *Server) prevEnrollmentPath() string {
+	return filepath.Join(s.cfg.StateDir, "enrollment.prev.json")
+}
+
+// retire moves the live document aside for mark1d's tenant-switch step; an earlier one still waiting there owns the spool and is kept.
+func (s *Server) retire() error {
+	if _, err := os.Stat(s.prevEnrollmentPath()); err == nil {
+		return os.Remove(s.enrollmentPath())
 	}
-	refuse(w, http.StatusConflict, "M1E-2001", "device is enrolled with tenant "+cur.TenantID+"; DELETE /v1/enroll first")
-	return true
+	return os.Rename(s.enrollmentPath(), s.prevEnrollmentPath())
 }
 
 func (s *Server) notifyEnrolled() {
@@ -142,7 +148,8 @@ func (s *Server) notifyEnrolled() {
 }
 
 type keygenBody struct {
-	TenantID string `json:"tenant_id"`
+	TenantID string `json:"tenant_id"` // the app's request shape; a tenant switch is postEnroll's to settle
+	Rotate   bool   `json:"rotate"`    // the cloud refused the live key as revoked in the target tenant (08 §3.1: re-enrollment takes a new key)
 }
 
 // keygen mints (or re-reads) <state>/device.key through identity's generator — O_EXCL, 0600, the 32-byte seed `mark1 enroll` and receipt.OpenKey read — and returns only the public half.
@@ -156,10 +163,11 @@ func (s *Server) keygen(w http.ResponseWriter, r *http.Request) {
 	}
 	s.files.Lock()
 	defer s.files.Unlock()
-	if s.otherTenantLive(w, body.TenantID) {
-		return
+	path := s.keyPath()
+	if body.Rotate {
+		path = s.nextKeyPath() // minted beside the live key; postEnroll swaps it in only once an identity under it lands
 	}
-	k, err := identity.NewDeviceKey(identity.FileCustody{Path: s.keyPath()})
+	k, err := identity.NewDeviceKey(identity.FileCustody{Path: path})
 	if err != nil {
 		internal(w, err)
 		return
@@ -230,14 +238,34 @@ func (s *Server) postEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tid, did, kid, ok := tokenClaims(body.DeviceToken)
+	rotated := false
+	if ok && kid != key.KeyID() {
+		if next, err := receipt.OpenKey(s.nextKeyPath()); err == nil && next.KeyID() == kid {
+			key, rotated = next, true
+		}
+	}
 	if !ok || kid != key.KeyID() || tid != body.TenantID || did != body.DeviceID {
 		refuse(w, http.StatusConflict, "M1E-2001", "enrollment names another device: the token's key_id/device_id/tenant_id must match this daemon's key and the body")
 		return
 	}
 	s.files.Lock()
 	defer s.files.Unlock()
-	if s.otherTenantLive(w, body.TenantID) {
-		return
+	if rotated {
+		if err := os.Rename(s.keyPath(), fmt.Sprintf("%s.retired-%d", s.keyPath(), time.Now().UnixNano())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			internal(w, err)
+			return
+		}
+		if err := os.Rename(s.nextKeyPath(), s.keyPath()); err != nil {
+			internal(w, err)
+			return
+		}
+	}
+	cur, curErr := s.readEnrollment()
+	if curErr == nil && cur.TenantID != body.TenantID {
+		if err := s.retire(); err != nil {
+			internal(w, err)
+			return
+		}
 	}
 	ts := time.Now().UTC()
 	doc := enrollmentDoc{
@@ -253,11 +281,18 @@ func (s *Server) postEnroll(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = s.pinKeys(body.BundleSectionKeys)
 	}
+	newDevice := curErr == nil && cur.DeviceID != doc.DeviceID
+	if err == nil && newDevice {
+		err = consents.MarkUnrelayed(s.cfg.StateDir) // consents are per device: the new one starts with none on the cloud side
+	}
 	if err != nil {
 		internal(w, err)
 		return
 	}
 	s.notifyEnrolled()
+	if newDevice {
+		go s.relayNow()
+	}
 	writeJSON(w, map[string]any{"tenant_id": doc.TenantID, "device_id": doc.DeviceID, "enrolled_at": ts.Format(time.RFC3339)})
 }
 
@@ -284,7 +319,10 @@ func (s *Server) getEnroll(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) deleteEnroll(w http.ResponseWriter, r *http.Request) {
 	s.files.Lock()
 	defer s.files.Unlock()
-	err := os.Remove(s.enrollmentPath())
+	_, err := os.Stat(s.enrollmentPath())
+	if err == nil {
+		err = s.retire()
+	}
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:

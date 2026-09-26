@@ -86,15 +86,15 @@ func foldAttempts(rows []map[string]any) dayTotals {
 	return out
 }
 
-// liveDay reads one open day the way the rollup would; a failed read has already been written to w.
-func (m *Module) liveDay(w http.ResponseWriter, r *http.Request, tid TenantID, day time.Time) (dayTotals, bool) {
-	next := day.AddDate(0, 0, 1)
+// liveSpan reads the days [from, to] the way the rollup would (one open day, or a team member's whole window); a failed read has already been written to w.
+func (m *Module) liveSpan(w http.ResponseWriter, r *http.Request, tid TenantID, from, to time.Time) (dayTotals, bool) {
+	next := to.AddDate(0, 0, 1)
 	winTpl, err := m.reg.Lookup("tvo_task_window")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "M1E-9500", "registry miswired")
 		return dayTotals{}, false
 	}
-	winQ, err := Build(tid, winTpl, Params{"from": day, "to": next})
+	winQ, err := Build(tid, winTpl, Params{"from": from, "to": next})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "M1E-2001", err.Error())
 		return dayTotals{}, false
@@ -109,7 +109,7 @@ func (m *Module) liveDay(w http.ResponseWriter, r *http.Request, tid TenantID, d
 		writeErr(w, http.StatusInternalServerError, "M1E-9500", "registry miswired")
 		return dayTotals{}, false
 	}
-	covQ, err := Build(tid, covTpl, Params{"from": day, "to": next})
+	covQ, err := Build(tid, covTpl, Params{"from": from, "to": next})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "M1E-2001", err.Error())
 		return dayTotals{}, false
@@ -119,7 +119,7 @@ func (m *Module) liveDay(w http.ResponseWriter, r *http.Request, tid TenantID, d
 		return dayTotals{}, false
 	}
 	for _, row := range covRows.Rows {
-		if asDay(row["day"]) != day.Format(time.DateOnly) {
+		if d := asDay(row["day"]); d < from.Format(time.DateOnly) || d > to.Format(time.DateOnly) {
 			continue
 		}
 		out.observed += asU64(row["observed_ms"])

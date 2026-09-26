@@ -28,6 +28,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/teams"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/userauth"
 )
 
@@ -300,10 +301,21 @@ func (m *Module) handleApprove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "M1E-2001", "platform is required")
 		return
 	}
-	tenant, subject := claims.TenantID, "omium:"+claims.Sub
-	status, err := m.ensurePersonalTenant(r.Context(), tenant, subject)
+	subject := teams.Subject(claims.Sub)
+	teams.Forget(subject) // the app re-enrolls right after accept/leave: read the member row, not this pod's cache
+	tenant, err := teams.EffectiveTenant(r.Context(), m.db, subject, claims.TenantID)
 	if err != nil {
-		m.serverErr(w, "approve: ensure personal tenant", err)
+		m.serverErr(w, "approve: effective tenant", err)
+		return
+	}
+	var status string
+	if tenant == claims.TenantID {
+		status, err = m.ensurePersonalTenant(r.Context(), tenant, subject)
+	} else {
+		status, err = m.tenantStatus(r.Context(), tenant)
+	}
+	if err != nil {
+		m.serverErr(w, "approve: tenant status", err)
 		return
 	}
 	if status != "active" {
@@ -318,6 +330,11 @@ func (m *Module) handleApprove(w http.ResponseWriter, r *http.Request) {
 	device, token, expiresIn, err := m.approveEnrollment(r.Context(), tenant, codeHash, req.Platform, hostnameHMAC, subject)
 	if errors.Is(err, errCodeConsumed) {
 		device, token, expiresIn, err = m.reissueUserDevice(r.Context(), tenant, codeHash, subject)
+	}
+	if errors.Is(err, errKeyRevoked) {
+		// 08 §3.1: no un-revoke, re-enrollment takes a new key; the app answers this reason with keygen {rotate: true}
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "M1E-1003", "reason": "device_key_revoked", "message": "this device key was revoked in this tenant; generate a new key"}})
+		return
 	}
 	if errors.Is(err, errCodeConsumed) || isUniqueViolation(err) {
 		writeErr(w, http.StatusBadRequest, "M1E-2001", "device key already enrolled; generate a new key")
@@ -440,6 +457,14 @@ func (m *Module) handleToken(w http.ResponseWriter, r *http.Request) {
 	if key.revoked {
 		// Terminal (05 §3.4): no un-revoke; the body says re-enroll.
 		writeErr(w, http.StatusForbidden, "M1E-1003", "device revoked; re-enroll to continue")
+		return
+	}
+	// 15-teams: a person who left keeps the token they hold (≤24 h, the daemon's drain window) but never a new one
+	if gone, err := m.leftTeam(r.Context(), rec.tenant, device); err != nil {
+		m.serverErr(w, "token: team membership", err)
+		return
+	} else if gone {
+		writeErr(w, http.StatusForbidden, "M1E-1003", "not a member of this team any more; re-enroll to continue")
 		return
 	}
 	now := m.now()

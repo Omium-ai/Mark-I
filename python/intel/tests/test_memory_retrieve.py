@@ -125,6 +125,7 @@ def _db_row(kind: str, trigger: str = PLANTED, lcb: float = 0.25, distance: floa
         "scope": "mine",
         "pinned": False,
         "n_obs": 10,
+        "mine": True,
     }
     if distance is not None:
         row["distance"] = distance
@@ -142,11 +143,18 @@ def test_artifacts_route_serves_admitted_rows_under_the_tenant_guc():
     )
     assert "error_sig_digest" not in arts[1]
     assert arts[0]["utility_lcb"] == 0.25 and arts[0]["guidance"] == "retry with backoff"
-    assert (arts[0]["state"], arts[0]["scope"], arts[0]["pinned"], arts[0]["n"]) == (
+    assert (
+        arts[0]["state"],
+        arts[0]["scope"],
+        arts[0]["pinned"],
+        arts[0]["n"],
+        arts[0]["mine"],
+    ) == (
         "admitted",
         "mine",
         False,
         10,
+        True,
     )
     assert any("set_config('app.tenant_id'" in s for s in conn.sql)
     assert any("state = 'admitted'" in s for s in conn.sql)
