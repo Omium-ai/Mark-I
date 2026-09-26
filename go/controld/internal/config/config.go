@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -156,6 +157,7 @@ type Config struct {
 	// (05 §3.4), so config may tighten it but can never loosen it.
 	RevocationCacheMaxAge time.Duration
 	DrainTimeout          time.Duration // DRAIN_TIMEOUT default 25s (< pod grace 30s, 05 §1.5)
+	TeamMaxMembers        int           // TEAM_MAX_MEMBERS default 10: owner + active members + live invites (15-teams)
 }
 
 // Load reads the environment. Any missing required key is an error — the
@@ -319,6 +321,9 @@ func Load() (Config, error) {
 	}
 	if c.DrainTimeout, err = durationOr("DRAIN_TIMEOUT", 25*time.Second); err != nil {
 		return Config{}, err
+	}
+	if c.TeamMaxMembers, err = strconv.Atoi(envOr("TEAM_MAX_MEMBERS", "10")); err != nil || c.TeamMaxMembers < 1 {
+		return Config{}, fmt.Errorf("config: TEAM_MAX_MEMBERS=%q is not a positive integer (boot refusal R1)", os.Getenv("TEAM_MAX_MEMBERS"))
 	}
 	return c, nil
 }

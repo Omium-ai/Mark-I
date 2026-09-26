@@ -13,7 +13,12 @@
       "additionalProperties": false,
       "properties": {
         "code": { "type": "string", "pattern": "^M1E-[0-9]{4}$" },
-        "message": { "type": "string" }
+        "message": { "type": "string" },
+        "reason": {
+          "type": "string",
+          "pattern": "^[a-z_]+$",
+          "description": "a machine-readable refusal reason where the route defines one (15-teams: team_full, invite_invalid, ...)"
+        }
       }
     }
   }

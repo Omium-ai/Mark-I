@@ -140,3 +140,38 @@ func (c *RevocationCache) fetch(ctx context.Context, tenant, device uuid.UUID) (
 func tenantIDFor(tenant uuid.UUID) (querychoke.TenantID, error) {
 	return querychoke.FromClaims(auth.Claims{TenantID: tenant})
 }
+
+// RevokeSubjectDevices is revokeDevice for every device subject enrolled in tenant (15-teams: a removed member stops uploading into the team); idempotent, so a failed call is retried whole.
+func (m *Module) RevokeSubjectDevices(ctx context.Context, tenant uuid.UUID, subject, by string) (int, error) {
+	tid, err := tenantIDFor(tenant)
+	if err != nil {
+		return 0, err
+	}
+	var devices []uuid.UUID
+	err = m.db.WithTenant(ctx, tid, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT DISTINCT device_id FROM m1_device_enrollments WHERE oidc_subject = $1 AND status = 'approved' AND device_id IS NOT NULL`, subject)
+		if err != nil {
+			return err
+		}
+		devices, err = pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, d := range devices {
+		outcome, err := m.revokeDevice(ctx, tenant, d, by, "removed from team")
+		if err != nil {
+			return n, err
+		}
+		if outcome == revokedNow {
+			n++
+			transitionsTotal.WithLabelValues("revoked").Inc()
+			if m.cache != nil {
+				m.cache.Invalidate(d)
+			}
+		}
+	}
+	return n, nil
+}

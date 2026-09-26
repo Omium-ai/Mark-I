@@ -40,6 +40,12 @@ const tenantValueMarker = "{{tenant_value}}"
 // tenantValueSQL renders the value marker to the same bound parameter.
 const tenantValueSQL = "{tid:UUID}"
 
+// deviceParam is the builder-owned optional viewer filter (15-teams §Per-person visibility): absent renders the tenant predicate alone, present narrows it to those devices, and an empty list matches no row.
+const deviceParam = "device_ids"
+
+// devicePredSQL is what the marker renders to when deviceParam is bound; has() over an empty array is false, never a widening.
+const devicePredSQL = tenantPredSQL + " AND has({device_ids:Array(UUID)}, device_id)"
+
 // Timeout classes (05 §6.5).
 const (
 	timeoutReport      = 30 * time.Second
@@ -109,6 +115,8 @@ type template struct {
 	// widenDates: session-scoped templates take a required date range and
 	// Build widens it ±1 day — the ADR-0001 midnight-split rule.
 	widenDates bool
+	// devices: the marker's table carries device_id, so Build accepts the optional deviceParam.
+	devices bool
 }
 
 // seriesClass admits task_seg version/series labels: "task_seg.v1",
@@ -180,6 +188,7 @@ HAVING arrests > 0
 ORDER BY tokens_saved_estimate DESC`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},
+		devices:  true,
 		rowLimit: 10_000,
 		timeout:  timeoutReport,
 	},
@@ -198,6 +207,7 @@ FROM (SELECT event_id, agent, event_type
       LIMIT 1 BY event_id) AS e`,
 		params:   map[string]paramSpec{"session_id": {kind: pUUID}, "task_id": {kind: pUUID}},
 		readSet:  []string{"m1p_events"},
+		devices:  true,
 		rowLimit: 1,
 		timeout:  timeoutReport,
 	},
@@ -216,6 +226,7 @@ FROM (SELECT event_id, task_id
       LIMIT 1 BY event_id) AS e`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},
+		devices:  true,
 		rowLimit: 1,
 		timeout:  timeoutReport,
 	},
@@ -236,6 +247,7 @@ FROM (SELECT event_id, payload
 GROUP BY reason`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},
+		devices:  true,
 		rowLimit: 100,
 		timeout:  timeoutReport,
 	},
@@ -313,6 +325,7 @@ GROUP BY e.task_id, e.attempt_n
 ORDER BY e.task_id, e.attempt_n`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},
+		devices:  true,
 		rowLimit: maxRowLimit,
 		timeout:  timeoutReport,
 	},
@@ -358,6 +371,7 @@ WHERE e.event_type = 'RouteDecision'
 ORDER BY e.session_epoch, e.seq, e.event_id`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},
+		devices:  true,
 		rowLimit: maxRowLimit,
 		timeout:  timeoutReport,
 	},
@@ -656,6 +670,7 @@ GROUP BY day
 ORDER BY day`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},
+		devices:  true,
 		rowLimit: 1_000,
 		timeout:  timeoutInteractive,
 	},
@@ -692,6 +707,7 @@ GROUP BY day
 ORDER BY day`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},
+		devices:  true,
 		rowLimit: 10_000,
 		timeout:  timeoutInteractive,
 	},
@@ -929,6 +945,12 @@ func validate(t *template) error {
 	}
 	if strings.Contains(t.body, "{tid:") {
 		return fmt.Errorf("body references {tid:...} directly; the tenant binds only via %s / %s", tenantMarker, tenantValueMarker)
+	}
+	if _, declared := t.params[deviceParam]; declared || strings.Contains(t.body, "{"+deviceParam+":") {
+		return fmt.Errorf("parameter name %q is reserved for the builder-rendered device filter", deviceParam)
+	}
+	if t.devices && (t.write || len(t.readSet) != 1 || t.readSet[0] != "m1p_events") {
+		return fmt.Errorf("device-scoped template must be a read over m1p_events alone")
 	}
 	// The value marker is write-only: a read never needs the tenant as a
 	// projected value, so admitting it there would only widen the surface.

@@ -3,10 +3,11 @@ import readline from 'node:readline';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LOCAL_ROUTES, CLOUD_ROUTES } from './server.mjs';
+import { LOCAL_ROUTES, CLOUD_ROUTES, FIXTURE_NOW, scenarioMeta, loadScenario } from './server.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SCENARIOS = ['first-run', 'active', 'paused', 'offline', 'below-floor'];
+// every dir but controld's goldens, overlays included
+const SCENARIOS = fs.readdirSync(path.join(HERE, 'fixtures')).filter((d) => d !== 'controld');
 const LOCAL_PORT = Number(process.env.MOCK_CHECK_LOCAL_PORT || 4501);
 const CLOUD_PORT = Number(process.env.MOCK_CHECK_CLOUD_PORT || 4502);
 
@@ -41,7 +42,7 @@ async function checkJson(scenario, method, url, headers, wantStatus) {
       fail(`${scenario} ${method} ${url}: status ${res.status}, want ${wantStatus}`);
       return;
     }
-    if (wantStatus === 200) {
+    if (wantStatus !== 401) {
       const text = await res.text();
       if ((res.headers.get('content-type') || '').includes('application/x-ndjson')) {
         for (const line of text.split('\n').filter(Boolean)) JSON.parse(line);
@@ -89,20 +90,20 @@ async function run(scenario) {
     const control = JSON.parse(fs.readFileSync(path.join(HERE, 'control.json'), 'utf8'));
     const token = control.token;
     const authHeaders = { authorization: `Bearer ${token}` };
+    const { fixtures, status } = loadScenario(scenario);
 
     await checkJson(scenario, 'GET', `http://127.0.0.1:${LOCAL_PORT}/v1/status`, {}, 401);
 
-    for (const [method, p] of LOCAL_ROUTES) {
-      await checkJson(scenario, method, `http://127.0.0.1:${LOCAL_PORT}${p}`, authHeaders, 200);
+    for (const [method, p, fixture] of LOCAL_ROUTES) {
+      await checkJson(scenario, method, `http://127.0.0.1:${LOCAL_PORT}${p}`, authHeaders, status.get(fixture) ?? 200);
     }
-    const localEvents = JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures', scenario, 'local-events.json'), 'utf8'));
-    await checkSSE(scenario, token, localEvents.length > 0);
+    await checkSSE(scenario, token, (fixtures.get('local-events') ?? []).length > 0);
 
     if (scenario === 'offline') {
       await checkOfflineCloud(scenario);
     } else {
-      for (const [method, p] of CLOUD_ROUTES) {
-        await checkJson(scenario, method, `http://127.0.0.1:${CLOUD_PORT}${p}`, authHeaders, 200);
+      for (const [method, p, fixture] of CLOUD_ROUTES) {
+        await checkJson(scenario, method, `http://127.0.0.1:${CLOUD_PORT}${p}`, authHeaders, status.get(fixture) ?? 200);
       }
     }
   } finally {
@@ -111,7 +112,17 @@ async function run(scenario) {
 }
 
 for (const scenario of SCENARIOS) {
+  const meta = scenarioMeta(scenario);
+  if (meta.extends && !SCENARIOS.includes(meta.extends)) fail(`${scenario}: extends unknown scenario "${meta.extends}"`);
   await run(scenario);
+}
+
+// the relative clock: a fixture date keeps its distance from "now" whatever day the mock runs
+{
+  const at = Date.parse('2027-01-02T08:00:00Z');
+  const shifted = loadScenario('active', at).fixtures.get('cloud-sessions')[0].time;
+  const raw = JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures', 'active', 'cloud-sessions.json'), 'utf8'))[0].time;
+  if (at - Date.parse(shifted) !== FIXTURE_NOW - Date.parse(raw)) fail(`relative dates: ${raw} became ${shifted} at ${new Date(at).toISOString()}`);
 }
 
 if (failures.length) {

@@ -20,6 +20,40 @@ SIGNATURE_LINES = 2
 SIGNATURE_MAX_CHARS = 240
 # Allowlist: the DB enum's 'preference' is 06 §9.2's routing_hint class, bundles only, never served.
 INJECTABLE_KINDS = frozenset({"pitfall", "fix_pattern", "invariant"})
+# Doc 15 fragments over memory_artifacts: $1 is the tenant, $2 the viewer (NULL = unfiltered).
+# Once a tenant has had a member it stays per-person: a leaver's last token never reads tenant-wide.
+IS_TEAM = "EXISTS (SELECT 1 FROM m1_team_members WHERE tenant_id = $1 AND role = 'member')"
+# The newest consent row across a subject's approved devices in the tenant.
+LATEST_TEAM_CONSENT = (
+    "(SELECT c.team FROM m1_device_consents c JOIN m1_device_enrollments e "
+    "ON e.device_id = c.device_id AND e.tenant_id = c.tenant_id AND e.status = 'approved' "
+    "WHERE c.tenant_id = $1 AND e.oidc_subject = {subject} ORDER BY c.recorded_at DESC LIMIT 1)"
+)
+# NULL owner = the tenant owner's.
+OWNS = (
+    "($2::text IS NULL OR owner_subject = $2 OR (owner_subject IS NULL "
+    "AND $2 = (SELECT owner_subject FROM m1_tenants WHERE id = $1)))"
+)
+# The viewer is still on the team (owner or active member): a leaver never reads shared memory.
+PARTICIPANT = (
+    "($2 = (SELECT owner_subject FROM m1_tenants WHERE id = $1) OR EXISTS (SELECT 1 "
+    "FROM m1_team_members WHERE tenant_id = $1 AND subject = $2 AND role = 'member' "
+    "AND left_at IS NULL))"
+)
+VISIBLE = (
+    f"({OWNS} OR (scope = 'team' AND (SELECT shared_memory FROM m1_tenants WHERE id = $1) "  # noqa: S608 — literal fragments
+    f"AND {PARTICIPANT} "
+    f"AND {LATEST_TEAM_CONSENT.format(subject='memory_artifacts.owner_subject')} IS TRUE))"
+)
+
+
+async def team_viewer(conn: asyncpg.Connection, tenant_id: str, viewer: str | None) -> str | None:
+    """The viewer to filter by, or None: no viewer given, or the tenant is not a team (then every
+    artifact is the viewer's own, today's behaviour). Call under the tenant GUC."""
+    if viewer is None:
+        return None
+    return viewer if await conn.fetchval(f"SELECT {IS_TEAM}", uuid.UUID(tenant_id)) else None
+
 
 _LINE = re.compile(r"\r\n|\r|\n")
 _PATH = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][A-Za-z0-9_.\-]+){2,}")
@@ -87,20 +121,23 @@ def _row(r: asyncpg.Record) -> dict[str, Any]:
     return out
 
 
-async def admitted(conn: asyncpg.Connection, tenant_id: str) -> list[dict[str, Any]]:
+async def admitted(
+    conn: asyncpg.Connection, tenant_id: str, viewer: str | None = None
+) -> list[dict[str, Any]]:
     """The edge cache's sync source: every admitted injectable artifact, LCB-ranked (06 §9.4 with
     d̂ = 0 — no unlabeled repo features reach this service yet, so λ·d̂ is the owed term)."""
     async with conn.transaction():
         await set_local_tenant(conn, tenant_id)
         rows = await conn.fetch(
-            "SELECT id, kind, body, lcb, state::text AS state, scope, pinned, n_obs "
-            "FROM memory_artifacts WHERE tenant_id = $1 "
-            "AND state = 'admitted' AND kind::text = ANY($2::text[]) "
+            "SELECT id, kind, body, lcb, state::text AS state, scope, pinned, n_obs, "  # noqa: S608 — literal fragments, values bound
+            f"{OWNS} AS mine FROM memory_artifacts WHERE tenant_id = $1 "
+            f"AND state = 'admitted' AND kind::text = ANY($3::text[]) AND {VISIBLE} "
             "ORDER BY lcb DESC NULLS LAST, id",
             uuid.UUID(tenant_id),
+            await team_viewer(conn, tenant_id, viewer),
             sorted(INJECTABLE_KINDS),
         )
-    # state/scope/pinned/n are the app's action fields (spec §5.5); the edge cache ignores them.
+    # state/scope/pinned/n/mine are the app's action fields (spec §5.5); the edge ignores them.
     return [
         {
             **_row(r),
@@ -108,21 +145,25 @@ async def admitted(conn: asyncpg.Connection, tenant_id: str) -> list[dict[str, A
             "scope": str(r["scope"]),
             "pinned": bool(r["pinned"]),
             "n": int(r["n_obs"]),
+            "mine": bool(r["mine"]),
         }
         for r in rows
     ]
 
 
-async def outcomes(conn: asyncpg.Connection, tenant_id: str) -> list[dict[str, Any]]:
+async def outcomes(
+    conn: asyncpg.Connection, tenant_id: str, viewer: str | None = None
+) -> list[dict[str, Any]]:
     """Per-artifact ADMIT-LCB evidence for the app (spec §5.5): the stored lcb and the certified
     sample count it was computed from; verified_outcomes is that same count (the samples are
     certified tasks), not a satisfied-only subset, which no column holds."""
     async with conn.transaction():
         await set_local_tenant(conn, tenant_id)
         rows = await conn.fetch(
-            "SELECT id, lcb, n_obs FROM memory_artifacts WHERE tenant_id = $1 AND n_obs > 0 "
-            "ORDER BY lcb DESC NULLS LAST, id",
+            "SELECT id, lcb, n_obs FROM memory_artifacts WHERE tenant_id = $1 AND n_obs > 0 "  # noqa: S608 — literal fragments, values bound
+            f"AND {VISIBLE} ORDER BY lcb DESC NULLS LAST, id",
             uuid.UUID(tenant_id),
+            await team_viewer(conn, tenant_id, viewer),
         )
     return [
         {
@@ -142,6 +183,7 @@ async def fuzzy_match(
     *,
     limit: int = M_INJECT,
     max_distance: float = FUZZ_DISTANCE,
+    viewer: str | None = None,
 ) -> list[dict[str, Any]]:
     """06 §9.5 D29: admitted pitfalls within cosine 0.15 over ix_artifacts_error_signature."""
     v = embed(normalized)
@@ -150,11 +192,12 @@ async def fuzzy_match(
     async with conn.transaction():
         await set_local_tenant(conn, tenant_id)
         rows = await conn.fetch(
-            "SELECT id, kind, body, lcb, error_signature <=> $2::text::halfvec AS distance "
+            "SELECT id, kind, body, lcb, error_signature <=> $3::text::halfvec AS distance "  # noqa: S608 — literal fragments, values bound
             "FROM memory_artifacts WHERE tenant_id = $1 AND state = 'admitted' "
             "AND kind = 'pitfall' AND error_signature IS NOT NULL "
-            "ORDER BY error_signature <=> $2::text::halfvec LIMIT $3",
+            f"AND {VISIBLE} ORDER BY error_signature <=> $3::text::halfvec LIMIT $4",
             uuid.UUID(tenant_id),
+            await team_viewer(conn, tenant_id, viewer),
             vector_literal(v),
             limit,
         )

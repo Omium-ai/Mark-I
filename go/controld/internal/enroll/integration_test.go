@@ -1211,7 +1211,7 @@ func TestIntegrationPersonalTenantApprove(t *testing.T) {
 			t.Fatalf("want ErrRevoked, got %v", err)
 		}
 		st, body = h.post("/api/v1/enroll/device/approve", approveBody(pub), bearer(alice))
-		if st != http.StatusBadRequest || errCode(body) != "M1E-2001" {
+		if st != http.StatusForbidden || errCode(body) != "M1E-1003" || body["error"].(map[string]any)["reason"] != "device_key_revoked" {
 			t.Fatalf("approve after revoke must demand a new key: %d %v", st, body)
 		}
 		_ = priv
@@ -1354,4 +1354,83 @@ func mustHex(t *testing.T, s string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// TestIntegrationTeamSwitchReenrollsSameKey (15-teams): the daemon keeps one key; /approve resolves the effective tenant, so after accept the same key re-enrolls into the team as a new ACTIVE device (keys are unique per tenant, m1_090), and after leave it comes back to its personal device.
+func TestIntegrationTeamSwitchReenrollsSameKey(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	personal, team := uuid.New(), uuid.New()
+	alice, bob := h.userToken("u-team-alice", personal), h.userToken("u-team-bob", team)
+	bearer := func(tok string) map[string]string { return map[string]string{"Authorization": "Bearer " + tok} }
+	approveBody := func(pub ed25519.PublicKey) map[string]any {
+		return map[string]any{
+			"client": "mark1-app", "client_version": "0.1.0",
+			"device_pubkey": "ed25519:" + base64.StdEncoding.EncodeToString(pub),
+			"platform":      "linux-x64", "hostname_hash": "hmac-sha256:" + strings.Repeat("cd", 32),
+		}
+	}
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	bobPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	approve := func(tok string, pub ed25519.PublicKey) map[string]any {
+		t.Helper()
+		st, body := h.post("/api/v1/enroll/device/approve", approveBody(pub), bearer(tok))
+		if st != http.StatusOK || body["status"] != "active" {
+			t.Fatalf("approve: %d %v", st, body)
+		}
+		return body
+	}
+	personalDevice := approve(alice, pub)["device_id"]
+	approve(bob, bobPub)
+	if _, err := h.admin.Exec(ctx, `INSERT INTO m1_team_members (tenant_id, subject, role) VALUES ($1, 'omium:u-team-alice', 'member')`, team); err != nil {
+		t.Fatal(err)
+	}
+
+	joined := approve(alice, pub)
+	root, _ := h.mod.TenantRoot(team)
+	if joined["tenant_id"] != team.String() || joined["device_id"] == personalDevice || joined["tenant_root_hex"] != hex.EncodeToString(root) {
+		t.Fatalf("same key into the team: %v", joined)
+	}
+	claims, err := h.verify.Verify(ctx, joined["device_token"].(string))
+	if err != nil || claims.TenantID != team || claims.DeviceID.String() != joined["device_id"] {
+		t.Fatalf("team token: %+v %v", claims, err)
+	}
+	var keys int64
+	if err := h.admin.QueryRow(ctx, `SELECT count(DISTINCT tenant_id) FROM m1_device_keys WHERE public_key = $1`, []byte(pub)).Scan(&keys); err != nil || keys != 2 {
+		t.Fatalf("one key, two tenants: %d %v", keys, err)
+	}
+	if again := approve(alice, pub); again["device_id"] != joined["device_id"] {
+		t.Fatalf("retry inside the team re-issues the same device: %v", again)
+	}
+
+	refresh := func(device string) (int, map[string]any) {
+		t.Helper()
+		st, body := h.post("/api/v1/enroll/nonce", map[string]string{"tenant_id": team.String(), "device_id": device}, nil)
+		if st != http.StatusOK {
+			t.Fatalf("nonce: %d %v", st, body)
+		}
+		at := time.Now().UTC().Format(time.RFC3339)
+		sig := ed25519.Sign(priv, []byte(body["nonce"].(string)+device+at))
+		return h.post("/api/v1/enroll/token", map[string]any{"device_id": device, "signed_nonce": map[string]string{
+			"nonce": body["nonce"].(string), "requested_at": at, "sig": base64.RawURLEncoding.EncodeToString(sig)}}, nil)
+	}
+	if st, body := refresh(joined["device_id"].(string)); st != http.StatusOK {
+		t.Fatalf("a member refreshes its team token: %d %v", st, body)
+	}
+	if _, err := h.admin.Exec(ctx, `UPDATE m1_team_members SET left_at = now() WHERE tenant_id = $1`, team); err != nil {
+		t.Fatal(err)
+	}
+	// the tenant has no active member now, yet it stays a team: the leaver keeps the token it holds and never gets another
+	if st, body := refresh(joined["device_id"].(string)); st != http.StatusForbidden || errCode(body) != "M1E-1003" {
+		t.Fatalf("a leaver's team device must get no new token: %d %v", st, body)
+	}
+	back := approve(alice, pub)
+	if back["tenant_id"] != personal.String() || back["device_id"] != personalDevice {
+		t.Fatalf("after leave the personal device comes back: %v", back)
+	}
+	var dup string
+	err = h.admin.QueryRow(ctx, `INSERT INTO m1_device_keys (tenant_id, device_id, key_id, public_key) SELECT tenant_id, device_id, key_id, public_key FROM m1_device_keys WHERE tenant_id = $1 LIMIT 1 RETURNING key_id`, team).Scan(&dup)
+	if sqlState(err) != "23505" {
+		t.Fatalf("a key twice in ONE tenant must still be refused: %v", err)
+	}
 }

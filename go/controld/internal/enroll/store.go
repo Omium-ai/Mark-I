@@ -89,6 +89,18 @@ func (m *Module) ensurePersonalTenant(ctx context.Context, tenant uuid.UUID, own
 	return status, err
 }
 
+func (m *Module) tenantStatus(ctx context.Context, tenant uuid.UUID) (string, error) {
+	tid, err := tenantIDFor(tenant)
+	if err != nil {
+		return "", err
+	}
+	var status string
+	err = m.db.WithTenant(ctx, tid, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status FROM m1_tenants WHERE id = $1`, tenant).Scan(&status)
+	})
+	return status, err
+}
+
 // approveCodeHash keys a one-shot approval on the device key itself, so a retried /approve lands on the same row.
 func approveCodeHash(tenant uuid.UUID, pubkey []byte) []byte {
 	h := sha256.New()
@@ -115,6 +127,16 @@ func (m *Module) reissueUserDevice(ctx context.Context, tenant uuid.UUID, codeHa
 			   AND e.approval_kind = 'omium_user' AND e.oidc_subject = $2`, codeHash, subject).
 			Scan(&device, &keyID)
 		if errors.Is(scanErr, pgx.ErrNoRows) {
+			var revoked bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS (SELECT 1 FROM m1_device_enrollments e JOIN m1_devices d ON d.id = e.device_id
+				 WHERE e.device_code_hash = $1 AND e.approval_kind = 'omium_user' AND e.oidc_subject = $2 AND d.revoked_at IS NOT NULL)`,
+				codeHash, subject).Scan(&revoked); err != nil {
+				return err
+			}
+			if revoked {
+				return errKeyRevoked
+			}
 			return errCodeConsumed
 		}
 		if scanErr != nil {
@@ -248,6 +270,27 @@ func (m *Module) approveEnrollment(ctx context.Context, tenant uuid.UUID, codeHa
 }
 
 var errCodeConsumed = errors.New("enroll: device_code already consumed")
+
+// leftTeam: the tenant is a team and the subject that enrolled this device is neither its owner nor an active member.
+func (m *Module) leftTeam(ctx context.Context, tenant, device uuid.UUID) (bool, error) {
+	tid, err := tenantIDFor(tenant)
+	if err != nil {
+		return false, err
+	}
+	var gone bool
+	err = m.db.WithTenant(ctx, tid, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM m1_team_members WHERE tenant_id = $1 AND role = 'member')
+			   AND s.subject IS NOT NULL
+			   AND s.subject IS DISTINCT FROM (SELECT owner_subject FROM m1_tenants WHERE id = $1)
+			   AND NOT EXISTS (SELECT 1 FROM m1_team_members WHERE tenant_id = $1 AND subject = s.subject AND role = 'member' AND left_at IS NULL)
+			  FROM (SELECT (SELECT oidc_subject FROM m1_device_enrollments WHERE device_id = $2 AND status = 'approved'
+			                 ORDER BY started_at DESC LIMIT 1) AS subject) s`, tenant, device).Scan(&gone)
+	})
+	return gone, err
+}
+
+var errKeyRevoked = errors.New("enroll: this subject's key is revoked in the tenant")
 
 type deviceKeyRow struct {
 	revoked bool

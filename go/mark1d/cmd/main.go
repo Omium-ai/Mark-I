@@ -285,13 +285,14 @@ func openLogFile(stateDir string) (*os.File, error) {
 // module's internal/ tree is out of reach and the file, not the type, is the
 // contract — exactly as workspaces.json is handled by tailers.
 type enrollment struct {
-	State         string `json:"state"`
-	DeviceID      string `json:"device_id"`
-	TenantID      string `json:"tenant_id"`
-	DeviceToken   string `json:"device_token"`
-	TenantRootHex string `json:"tenant_root_hex"` // 04 §2.9 root, delivered at enrollment
-	Server        string `json:"server"`          // the control-plane origin: 08 §3.2's policy routes hang off it
-	Endpoints     struct {
+	State          string    `json:"state"`
+	TokenExpiresAt time.Time `json:"token_expires_at"`
+	DeviceID       string    `json:"device_id"`
+	TenantID       string    `json:"tenant_id"`
+	DeviceToken    string    `json:"device_token"`
+	TenantRootHex  string    `json:"tenant_root_hex"` // 04 §2.9 root, delivered at enrollment
+	Server         string    `json:"server"`          // the control-plane origin: 08 §3.2's policy routes hang off it
+	Endpoints      struct {
 		Ingest string `json:"ingest"`
 	} `json:"endpoints"`
 }
@@ -303,7 +304,10 @@ func enrollmentPath(stateDir string) string { return filepath.Join(stateDir, "en
 // it carries the bearer token and the tenant root. os.ErrNotExist passes
 // through unwrapped so the caller can tell "never enrolled" from "broken".
 func readEnrollment(stateDir string) (*enrollment, error) {
-	path := enrollmentPath(stateDir)
+	return readEnrollmentFile(enrollmentPath(stateDir))
+}
+
+func readEnrollmentFile(path string) (*enrollment, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -383,6 +387,7 @@ func applyEnrollment(cfg *config, log *slog.Logger) error {
 // — today nothing rewrites the token, so Refresh always parks, as before.
 type docTokens struct {
 	stateDir string
+	tenant   string // a document for another tenant is a re-enroll, never a refresh: its token must not carry this session's spool
 	mu       sync.Mutex
 	current  string
 }
@@ -395,7 +400,7 @@ func (d *docTokens) Token(context.Context) (string, error) {
 
 func (d *docTokens) Refresh(context.Context) error {
 	doc, err := readEnrollment(d.stateDir)
-	if err != nil || doc.State == "revoked" || doc.DeviceToken == "" {
+	if err != nil || doc.State == "revoked" || doc.DeviceToken == "" || doc.TenantID != d.tenant {
 		return uplink.ErrNoRefresh
 	}
 	d.mu.Lock()
@@ -464,6 +469,9 @@ func run(ctx context.Context, log *slog.Logger, cfg config) error {
 		}
 		if err := off.Wait(ctx, cfg.stateDir, cfg.offPoll); err != nil {
 			return nil // signal while parked: clean exit
+		}
+		if err := settleTenantSwitch(log, cfg); err != nil {
+			return fmt.Errorf("mark1d: tenant switch: %w", err)
 		}
 		sctx, cancel := context.WithCancel(ctx)
 		go func() {
@@ -1029,7 +1037,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		if cfg.deviceToken == "" {
 			return fail(errors.New("mark1d: an ingest URL needs a device token — enrollment.json's device_token or --device-token (08 §3.1)"))
 		}
-		tokens := &docTokens{stateDir: cfg.stateDir, current: cfg.deviceToken}
+		tokens := &docTokens{stateDir: cfg.stateDir, tenant: cfg.tenantID, current: cfg.deviceToken}
 		// The quarantine seal key is the device spill public half spill.Open
 		// just materialized (04 §2.5: encrypted with the device spill key §5.4).
 		spillPub, err := os.ReadFile(filepath.Join(cfg.stateDir, "spill", "spill.pub"))
@@ -1131,6 +1139,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		defer close(cxDone)
 		cx.Supervise(ctx)
 	}()
+	parkedDone := drainParked(ctx, log, cfg.stateDir)
 
 	// Sites: `mark1 enable` and `mark1 off`. The CLI cannot sign — 08 §7.6
 	// requires both to work with the daemon down and holds no device key — so
@@ -1183,6 +1192,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// — the exact pair the stale-port control exists to prevent.
 	<-supDone
 	<-cxDone
+	<-parkedDone
 	// Joined BEFORE the spool closes and before the uplink's final Flush, so
 	// the shutdown drain's `mark1 off` disable window is admitted in time to
 	// ride the same batch out. Unjoined, it would race the close and the
@@ -1200,7 +1210,11 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		// durable and upload on the next on-window. Only a signal-triggered
 		// exit (daemon stopping, user not off) keeps the full Flush.
 		if err := sp.Sync(); err == nil && !off.Off(cfg.stateDir) {
-			flushCtx, done := context.WithTimeout(context.Background(), 5*time.Second)
+			bound := 5 * time.Second
+			if switching(cfg.stateDir) {
+				bound = switchDrain
+			}
+			flushCtx, done := context.WithTimeout(context.Background(), bound)
 			up.Flush(flushCtx)
 			done()
 		}

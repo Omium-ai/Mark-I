@@ -1,0 +1,56 @@
+{
+  "members": [
+    {
+      "id": "usr_1",
+      "name": "Anurag",
+      "email": "anurag@omium.ai",
+      "role": "owner",
+      "joined_at": "2026-09-01T09:00:00.000Z",
+      "status": "active",
+      "last_active": "2026-09-16T14:32:00.000Z"
+    },
+    {
+      "id": "usr_2",
+      "name": null,
+      "email": "sara@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-05T09:00:00.000Z",
+      "status": "active",
+      "last_active": "2026-09-16T14:02:00.000Z"
+    },
+    {
+      "id": "usr_3",
+      "name": null,
+      "email": "farhan@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-08T09:00:00.000Z",
+      "status": "active",
+      "last_active": "2026-09-15T18:00:00.000Z"
+    },
+    {
+      "id": "invite:0191d000-0000-7000-8000-000000000001",
+      "name": null,
+      "email": "nida@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-15T10:00:00.000Z",
+      "status": "invited",
+      "last_active": null
+    }
+  ],
+  "you": {
+    "role": "owner"
+  },
+  "max_members": 10,
+  "invite_link": null,
+  "shared_memory": true,
+  "tvo": {
+    "tvo": 13000,
+    "coverage_band": {
+      "observed_fraction": 0.97,
+      "floor": 0.95
+    },
+    "cost_basis": "usd",
+    "guarantee_grade": true
+  },
+  "fleet_status": null
+}

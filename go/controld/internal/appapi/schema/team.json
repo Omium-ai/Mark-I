@@ -2,25 +2,42 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://omium.ai/mark1/appapi/team.json",
   "title": "GET /api/v1/team",
-  "description": "Team v1 (desktop spec §5.10): the tenant's principals as the schema knows them plus live invites, the shared-memory flag, the tenant's 30d TVO summary (null when the report refuses), and placeholders that are null until their feature lands.",
+  "description": "Team v1 (15-teams): the owner row, active members and live invites, the caller's role, the shared-memory flag, the tenant's 30d TVO summary (aggregate; null when the report refuses), and placeholders that are null until their feature lands.",
   "type": "object",
-  "required": ["members", "invite_link", "shared_memory", "tvo", "fleet_status"],
+  "required": ["members", "you", "max_members", "invite_link", "shared_memory", "tvo", "fleet_status"],
   "additionalProperties": false,
   "properties": {
     "members": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "name", "email", "role", "joined_at", "status"],
+        "required": ["id", "name", "email", "role", "joined_at", "last_active", "status"],
         "additionalProperties": false,
         "properties": {
-          "id": { "type": "string", "description": "the principal subject, device:<uuid>, or invite:<uuid>" },
+          "id": { "type": "string", "description": "GET /me user.id for a member (the token sub), or invite:<uuid>" },
           "name": { "type": "null", "description": "no users table: null until one lands" },
-          "email": { "type": ["string", "null"], "description": "the invited address on an invite row; null on a principal" },
+          "email": {
+            "type": ["string", "null"],
+            "description": "the address from the member's user token at accept (owner: at their last read/invite), or the invited address; null when none"
+          },
           "role": { "type": "string", "enum": ["owner", "member"] },
           "joined_at": { "type": "string", "format": "date-time" },
+          "last_active": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "latest device heartbeat of that member in this tenant; null for invites and members with no device yet"
+          },
           "status": { "type": "string", "enum": ["active", "invited"] }
         }
+      }
+    },
+    "max_members": { "type": "integer", "minimum": 1, "description": "TEAM_MAX_MEMBERS: owner + members + live invites" },
+    "you": {
+      "type": "object",
+      "required": ["role"],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "type": "string", "enum": ["owner", "member"] }
       }
     },
     "invite_link": { "type": "null", "description": "the raw token is answered once by POST /team/invites; m1_081 keeps only its hash" },
@@ -34,7 +51,15 @@
         "coverage_band": { "$ref": "honesty.json#/properties/coverage_band" },
         "cost_basis": { "type": "string", "enum": ["usd", "quota"] },
         "guarantee_grade": { "type": "boolean" },
-        "refusal": { "type": "string" }
+        "refusal": { "type": "string" },
+        "trend": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["day", "tvo"],
+            "properties": { "day": { "type": "string" }, "tvo": { "type": ["number", "null"] } }
+          }
+        }
       }
     },
     "fleet_status": { "type": "null", "description": "enterprise fleet/gateway status: null until it exists" }

@@ -1125,6 +1125,8 @@ Normative. Later documents (04, 05, 11, 12) cite these codes; they do not invent
 | auth | `M1E-1004` | device_code unknown/expired | 400 | no (restart flow) | yes | fail-closed |
 | auth | `M1E-1005` | user denied enrollment at IdP | 403 | no | yes | fail-closed |
 | auth | `M1E-1006` | device not found | 404 | no | yes | — |
+| auth | `M1E-1007` | team role does not permit this (`reason`: not_owner, not_member, invite_email_mismatch, user_token_required) — 15-teams | 403 | no | yes | fail-closed |
+| auth | `M1E-1008` | sharing to the team needs the author's team consent (`reason`: consent_required) — 15-teams | 403 | no | yes | fail-closed |
 | request | `M1E-2001` | malformed request/body | 400 | **no — quarantine-and-report** | via `mark1 status` | fail-open (capture continues locally) |
 | request | `M1E-2002` | duplicate batch/event (informational, in 200 body) | 200 | n/a | no | — |
 | ingest | `M1E-2003` | batch_id landed with different bytes | 409 | no — quarantine | yes (spool corruption warning) | fail-open |
@@ -1135,6 +1137,8 @@ Normative. Later documents (04, 05, 11, 12) cite these codes; they do not invent
 | query | `M1E-2008` | unknown query template | 400 | no | yes | fail-closed (chokepoint refuses, never improvises) |
 | receipts | `M1E-2009` | event not yet checkpointed | 404 | yes, after checkpoint interval | no | — |
 | ingest | `M1E-2010` | an `AnchorVote` carrying a non-empty `signature` that does not verify under the device's live enrolled key (FR-VERIFY-004, D-EI); a batch whose only violations are of this kind | 422 | remainder once; named events quarantine | via status | fail-closed (a forged vote never lands) |
+| team | `M1E-2011` | team state conflict (`reason`: already_in_team, own_team, owner_of_team, team_full, owner_cannot_leave) — 15-teams | 409 | no | yes | fail-closed |
+| team | `M1E-2012` | invite or member not found (`reason`: invite_invalid, member_not_found) — 15-teams | 404 | no | yes | — |
 | policy | `M1E-3001` | bundle signature invalid | local | next poll | doctor | **fail-static** (keep last-known-good) |
 | policy | `M1E-3002` | bundle seq non-monotonic | local | next poll | doctor | fail-static |
 | policy | `M1E-3003` | transparency-log inclusion proof missing/invalid | local | next poll | doctor | fail-static |

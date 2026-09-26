@@ -634,7 +634,7 @@ func TestOptInsDriveTheGateReaders(t *testing.T) {
 	}
 	_, body := call(t, s, http.MethodGet, "/v1/optins", nil)
 	decodeTo(t, body, &o)
-	if o.StopGate || o.Exploration || o.TestsByProject[repo] || o.Consents != (consents.Consents{}) || !strings.Contains(string(body), `"consents":{"e1":false,"cloud_judge":false,"training":false}`) {
+	if o.StopGate || o.Exploration || o.TestsByProject[repo] || o.Consents != (consents.Consents{}) || !strings.Contains(string(body), `"consents":{"e1":false,"cloud_judge":false,"training":false,"team":false}`) {
 		t.Fatalf("defaults are false until the user consents: %s", body)
 	}
 	resp, body := call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"training": true}})
@@ -653,7 +653,7 @@ func TestOptInsDriveTheGateReaders(t *testing.T) {
 	if o.Consents.Training || !o.Consents.E1 {
 		t.Fatalf("withdraw %s", body)
 	}
-	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 3 || !strings.Contains(lines[2], `"consents":{"e1":true,"cloud_judge":true,"training":false}`) {
+	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 3 || !strings.Contains(lines[2], `"consents":{"e1":true,"cloud_judge":true,"training":false,"team":false}`) {
 		t.Fatalf("every consent change is journalled: %v", lines)
 	}
 	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"nope": true}})
@@ -719,6 +719,24 @@ func TestOptInsDriveTheGateReaders(t *testing.T) {
 	}
 	if consents.Read(dir) != (consents.Consents{E1: true, CloudJudge: true}) {
 		t.Fatal("clearing the gate opt-ins must not touch the consent record")
+	}
+	_, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"team": true}})
+	decodeTo(t, body, &o)
+	if o.Consents != (consents.Consents{E1: true, CloudJudge: true, Team: true}) || !consents.Read(dir).Team {
+		t.Fatalf("team consent on %s", body)
+	}
+	_, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"e1": false}})
+	decodeTo(t, body, &o)
+	if !o.Consents.Team || o.Consents.E1 {
+		t.Fatalf("a patch without team (app v0.1.14) leaves it untouched %s", body)
+	}
+	_, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"team": false}})
+	decodeTo(t, body, &o)
+	if o.Consents != (consents.Consents{CloudJudge: true}) {
+		t.Fatalf("team consent off %s", body)
+	}
+	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 8 || !strings.Contains(lines[5], `"team":true`) || !strings.Contains(lines[7], `"consents":{"e1":false,"cloud_judge":true,"training":false,"team":false}`) {
+		t.Fatalf("team changes are journalled: %v", lines)
 	}
 }
 

@@ -6,19 +6,55 @@
       "email": "anurag@omium.ai",
       "role": "owner",
       "joined_at": "2026-09-01T09:00:00.000Z",
-      "status": "active"
+      "status": "active",
+      "last_active": "2026-09-16T14:32:00.000Z"
     }
   ],
-  "invite_link": "https://app.omium.ai/invite/tenant_1/abc123",
+  "you": {
+    "role": "owner"
+  },
+  "max_members": 10,
+  "invite_link": null,
   "shared_memory": false,
   "tvo": {
     "tvo": 13000,
     "coverage_band": {
-      "observed_fraction": 0.97,
+      "observed_fraction": 0.82,
       "floor": 0.95
     },
     "cost_basis": "usd",
-    "guarantee_grade": true
+    "guarantee_grade": false,
+    "refusal": "coverage 0.82 is below the 0.95 floor. Enable the proxy for API-key sessions to raise coverage",
+    "trend": [
+      {
+        "day": "2026-09-10",
+        "tvo": 18800
+      },
+      {
+        "day": "2026-09-11",
+        "tvo": 17600
+      },
+      {
+        "day": "2026-09-12",
+        "tvo": 16400
+      },
+      {
+        "day": "2026-09-13",
+        "tvo": 15300
+      },
+      {
+        "day": "2026-09-14",
+        "tvo": 14200
+      },
+      {
+        "day": "2026-09-15",
+        "tvo": 13500
+      },
+      {
+        "day": "2026-09-16",
+        "tvo": 13000
+      }
+    ]
   },
   "fleet_status": null
 }

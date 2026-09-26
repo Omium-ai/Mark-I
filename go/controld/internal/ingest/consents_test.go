@@ -44,7 +44,7 @@ func TestConsentsRouteIsDeviceTokenOnlyAndWhole(t *testing.T) {
 	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "M1E-1001") {
 		t.Fatalf("tenant-only principal (the Mark 1 user token): %d %s", rr.Code, rr.Body.String())
 	}
-	for _, body := range []string{`{"e1":true,"training":true}`, `{"e1":true,"cloud_judge":false,"training":true,"extra":1}`, `{"e1":"yes","cloud_judge":false,"training":true}`, ``} {
+	for _, body := range []string{`{"e1":true,"training":true}`, `{"e1":true,"cloud_judge":false,"training":true,"extra":1}`, `{"e1":"yes","cloud_judge":false,"training":true}`, `{"e1":true,"cloud_judge":false,"training":true,"team":"yes"}`, ``} {
 		if rec := h.putConsents(t, h.token, body); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "M1E-2001") {
 			t.Fatalf("body %q: %d %s", body, rec.Code, rec.Body.String())
 		}
@@ -52,7 +52,7 @@ func TestConsentsRouteIsDeviceTokenOnlyAndWhole(t *testing.T) {
 	if h.tomb.calls != 0 {
 		t.Fatalf("a refused body reached the store %d times", h.tomb.calls)
 	}
-	rec := h.putConsents(t, h.token, whole)
+	rec := h.putConsents(t, h.token, `{"e1":true,"cloud_judge":false,"training":true,"team":true}`)
 	if rec.Code != http.StatusOK || h.tomb.calls != 1 || !strings.Contains(rec.Body.String(), "recorded_at") {
 		t.Fatalf("whole body: %d %s (store calls %d)", rec.Code, rec.Body.String(), h.tomb.calls)
 	}

@@ -1,0 +1,15 @@
+{
+  "stop_gate": true,
+  "exploration": false,
+  "tests_by_project": {
+    "/Users/dev/myrepo": true,
+    "/Users/dev/api-service": true
+  },
+  "consents": {
+    "e1": true,
+    "cloud_judge": true,
+    "training": true,
+    "team": true
+  },
+  "statusline": true
+}

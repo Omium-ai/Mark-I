@@ -74,16 +74,16 @@ func TestConsentsRelayToControldUnderTheDeviceToken(t *testing.T) {
 		t.Fatalf("enrolled: err=%v pending=%v", err, consents.Pending(dir))
 	}
 	mu.Lock()
-	if len(got) != 1 || got[0]["training"] != true || got[0]["e1"] != false || got[0]["cloud_judge"] != false || bearer[0] != "Bearer "+active["device_token"].(string) {
+	if len(got) != 1 || got[0]["training"] != true || got[0]["e1"] != false || got[0]["cloud_judge"] != false || got[0]["team"] != false || bearer[0] != "Bearer "+active["device_token"].(string) {
 		t.Fatalf("relayed %v under %v", got, bearer)
 	}
 	mu.Unlock()
 
-	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"e1": true}})
+	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"e1": true, "team": true}})
 	want(t, resp, body, http.StatusOK, "")
 	waitFor(2)
 	mu.Lock()
-	if len(got) != 2 || got[1]["e1"] != true || got[1]["training"] != true {
+	if len(got) != 2 || got[1]["e1"] != true || got[1]["training"] != true || got[1]["team"] != true {
 		t.Fatalf("PUT /v1/optins relays the whole record off the request path: %v", got)
 	}
 	down = true
@@ -128,5 +128,55 @@ func TestConsentsRelayToControldUnderTheDeviceToken(t *testing.T) {
 	before := sent()
 	if err := s.relayConsents(context.Background()); err != nil || !consents.Pending(dir) || sent() != before {
 		t.Fatalf("expired enrollment: err=%v pending=%v sent=%d (was %d)", err, consents.Pending(dir), sent(), before)
+	}
+}
+
+// controld keys consents by device: a re-enroll under a new device id relays the record again; the same device does not.
+func TestConsentsRelayAgainForANewDevice(t *testing.T) {
+	s, dir := newServer(t)
+	var mu sync.Mutex
+	var got []map[string]any
+	var bearer []string
+	controld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		mu.Lock()
+		got, bearer = append(got, m), append(bearer, r.Header.Get("Authorization"))
+		mu.Unlock()
+	}))
+	defer controld.Close()
+	resp, body := call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"team": true}})
+	want(t, resp, body, http.StatusOK, "")
+	resp, body = call(t, s, http.MethodPost, "/v1/enroll/keygen", nil)
+	want(t, resp, body, http.StatusOK, "")
+	var kg struct {
+		KeyID string `json:"key_id"`
+	}
+	decodeTo(t, body, &kg)
+	enroll := func(tenant, device string) map[string]any {
+		a := activeFor(tenant, device, kg.KeyID)
+		a["endpoints"] = map[string]string{"ingest": controld.URL + "/m1p/v1/ingest"}
+		resp, body := call(t, s, http.MethodPost, "/v1/enroll", a)
+		want(t, resp, body, http.StatusOK, "")
+		return a
+	}
+	enroll(tenantA, deviceA)
+	if err := s.relayConsents(context.Background()); err != nil || consents.Pending(dir) {
+		t.Fatalf("first relay: err=%v", err)
+	}
+	enroll(tenantA, deviceA)
+	if consents.Pending(dir) {
+		t.Fatal("a same-device re-enroll does not re-relay")
+	}
+	b := enroll(tenantB, deviceB)
+	deadline := time.Now().Add(5 * time.Second)
+	for consents.Pending(dir) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 || got[1]["team"] != true || bearer[1] != "Bearer "+b["device_token"].(string) {
+		t.Fatalf("new device: relayed %v under %v", got, bearer)
 	}
 }

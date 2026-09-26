@@ -1,0 +1,7 @@
+{
+  "about": "first run with an invite whose POST /team/invites/accept refuses invite_email_mismatch: the invite names another email",
+  "extends": "first-run",
+  "status": {
+    "cloud-team-invites-accept": 403
+  }
+}

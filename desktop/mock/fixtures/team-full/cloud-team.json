@@ -1,0 +1,110 @@
+{
+  "members": [
+    {
+      "id": "usr_1",
+      "name": "Anurag",
+      "email": "anurag@omium.ai",
+      "role": "owner",
+      "joined_at": "2026-09-01T09:00:00.000Z",
+      "status": "active",
+      "last_active": "2026-09-16T14:32:00.000Z"
+    },
+    {
+      "id": "usr_2",
+      "name": null,
+      "email": "dev2@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-05T09:00:00.000Z",
+      "status": "active",
+      "last_active": "2026-09-16T12:32:00.000Z"
+    },
+    {
+      "id": "usr_3",
+      "name": null,
+      "email": "dev3@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-05T09:00:00.000Z",
+      "status": "active",
+      "last_active": "2026-09-16T12:32:00.000Z"
+    },
+    {
+      "id": "usr_4",
+      "name": null,
+      "email": "dev4@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-05T09:00:00.000Z",
+      "status": "active",
+      "last_active": "2026-09-16T12:32:00.000Z"
+    },
+    {
+      "id": "usr_5",
+      "name": null,
+      "email": "dev5@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-05T09:00:00.000Z",
+      "status": "active",
+      "last_active": "2026-09-16T12:32:00.000Z"
+    },
+    {
+      "id": "usr_6",
+      "name": null,
+      "email": "dev6@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-05T09:00:00.000Z",
+      "status": "active",
+      "last_active": "2026-09-16T12:32:00.000Z"
+    },
+    {
+      "id": "usr_7",
+      "name": null,
+      "email": "dev7@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-05T09:00:00.000Z",
+      "status": "active",
+      "last_active": "2026-09-16T12:32:00.000Z"
+    },
+    {
+      "id": "usr_8",
+      "name": null,
+      "email": "dev8@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-05T09:00:00.000Z",
+      "status": "active",
+      "last_active": "2026-09-16T12:32:00.000Z"
+    },
+    {
+      "id": "invite:0191d000-0000-7000-8000-000000000001",
+      "name": null,
+      "email": "nida@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-15T10:00:00.000Z",
+      "status": "invited",
+      "last_active": null
+    },
+    {
+      "id": "invite:0191d000-0000-7000-8000-000000000002",
+      "name": null,
+      "email": "omar@omium.ai",
+      "role": "member",
+      "joined_at": "2026-09-15T10:00:00.000Z",
+      "status": "invited",
+      "last_active": null
+    }
+  ],
+  "you": {
+    "role": "owner"
+  },
+  "max_members": 10,
+  "invite_link": null,
+  "shared_memory": true,
+  "tvo": {
+    "tvo": 13000,
+    "coverage_band": {
+      "observed_fraction": 0.97,
+      "floor": 0.95
+    },
+    "cost_basis": "usd",
+    "guarantee_grade": true
+  },
+  "fleet_status": null
+}

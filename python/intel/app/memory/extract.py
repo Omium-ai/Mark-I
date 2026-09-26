@@ -66,6 +66,7 @@ class Artifact:
     kind: str
     body: Mapping[str, Any]
     cert_id: str
+    owner_subject: str | None = None
 
     @property
     def abstraction(self) -> str:
@@ -144,6 +145,25 @@ async def live_certs(conn: asyncpg.Connection, tenant_id: str, cert_ids: set[str
     return {str(r["id"]) for r in rows}
 
 
+async def device_owners(
+    conn: asyncpg.Connection, tenant_id: str
+) -> tuple[dict[str, str], str | None]:
+    """Doc 15 ownership: device -> the subject of its latest approved (or since revoked)
+    enrollment in this tenant, and the tenant's owner_subject."""
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (device_id) device_id, oidc_subject FROM m1_device_enrollments "
+            "WHERE tenant_id = $1 AND device_id IS NOT NULL AND oidc_subject IS NOT NULL "
+            "AND status IN ('approved', 'revoked') ORDER BY device_id, started_at DESC",
+            uuid.UUID(tenant_id),
+        )
+        owner = await conn.fetchval(
+            "SELECT owner_subject FROM m1_tenants WHERE id = $1", uuid.UUID(tenant_id)
+        )
+    return {str(r["device_id"]): r["oidc_subject"] for r in rows}, owner
+
+
 async def certified_sessions(
     reader: QuerychokeReader,
     conn: asyncpg.Connection,
@@ -192,14 +212,28 @@ def grounded(candidate: Any, session: Session) -> bool:
     return all(isinstance(d, str) and d in session.digests for d in evidence)
 
 
-def artifact_id(tenant_id: str, kind: str, trigger: str, guidance: str) -> uuid.UUID:
-    return uuid.uuid5(_NAMESPACE, json.dumps([tenant_id, kind, trigger, guidance]))
+def artifact_id(
+    tenant_id: str, kind: str, trigger: str, guidance: str, owner: str | None = None
+) -> uuid.UUID:
+    key = [tenant_id, kind, trigger, guidance]
+    return uuid.uuid5(_NAMESPACE, json.dumps(key if owner is None else [*key, owner]))
+
+
+def owner_key(owner: str | None, tenant_owner: str | None) -> str | None:
+    """The merge key's owner part: None for the tenant owner (so personal and org tenants keep
+    today's ids), the subject for a teammate, so two owners never fold into one artifact."""
+    return owner if owner and tenant_owner and owner != tenant_owner else None
 
 
 async def cascade(
-    batch: BatchRunner, tenant_id: str, sessions: Sequence[Session]
+    batch: BatchRunner,
+    tenant_id: str,
+    sessions: Sequence[Session],
+    owners: Mapping[str, str] | None = None,
+    tenant_owner: str | None = None,
 ) -> tuple[list[Artifact], int, int]:
     """Cheap rung proposes, mechanics ground, the strong rung validates only what survived."""
+    owners = owners or {}
     by_id = {s.task_id: s for s in sessions}
     proposals = await batch.run(
         [
@@ -244,9 +278,10 @@ async def cascade(
         if not (isinstance(v, Mapping) and v.get("valid") is True):
             continue
         kind, trigger, guidance = str(c["kind"]), str(c.get("trigger", "")), str(c["guidance"])
+        owner = owners.get(s.device_id)
         artifacts.append(
             Artifact(
-                id=artifact_id(tenant_id, kind, trigger, guidance),
+                id=artifact_id(tenant_id, kind, trigger, guidance, owner_key(owner, tenant_owner)),
                 tenant_id=tenant_id,
                 kind=kind,
                 body={
@@ -262,6 +297,7 @@ async def cascade(
                     "support_n": 1,
                 },
                 cert_id=s.noise_cert_id,
+                owner_subject=owner,
             )
         )
     return artifacts, n_candidates, len(candidates)
@@ -276,15 +312,16 @@ async def insert_artifacts(
         await set_local_tenant(conn, tenant_id)
         for a in artifacts:
             row = await conn.fetchrow(
-                "INSERT INTO memory_artifacts (id, tenant_id, abstraction, kind, body, cert_id) "
-                "VALUES ($1, $2, $3::artifact_abstraction, $4::artifact_kind, $5::jsonb, $6) "
-                "ON CONFLICT (id) DO NOTHING RETURNING id",
+                "INSERT INTO memory_artifacts (id, tenant_id, abstraction, kind, body, cert_id, "
+                "owner_subject) VALUES ($1, $2, $3::artifact_abstraction, $4::artifact_kind, "
+                "$5::jsonb, $6, $7) ON CONFLICT (id) DO NOTHING RETURNING id",
                 a.id,
                 uuid.UUID(tenant_id),
                 a.abstraction,
                 a.kind,
                 json.dumps(a.body, sort_keys=True),
                 uuid.UUID(a.cert_id),
+                a.owner_subject,
             )
             inserted += row is not None
     return inserted
@@ -309,7 +346,10 @@ async def run_extract(
     )
     if not sessions:
         return ExtractReport(seen, 0, 0, 0, 0, 0)
-    artifacts, n_candidates, n_grounded = await cascade(batch, tenant_id, sessions)
+    owners, tenant_owner = await device_owners(conn, tenant_id)
+    artifacts, n_candidates, n_grounded = await cascade(
+        batch, tenant_id, sessions, owners, tenant_owner
+    )
     inserted = await insert_artifacts(conn, tenant_id, artifacts)
     log.info("extract %s: %d/%d sessions -> %d artifacts", tenant_id, len(sessions), seen, inserted)
     return ExtractReport(seen, len(sessions), n_candidates, n_grounded, len(artifacts), inserted)

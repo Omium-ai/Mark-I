@@ -23,7 +23,7 @@ func TestRelaySendsTheWholeRecordAndStaysPendingUntilAcknowledged(t *testing.T) 
 	if Pending(dir) {
 		t.Fatal("no record: nothing to relay")
 	}
-	if err := Write(dir, Consents{E1: true, CloudJudge: true, Training: true}); err != nil {
+	if err := Write(dir, Consents{E1: true, CloudJudge: true, Training: true, Team: true}); err != nil {
 		t.Fatal(err)
 	}
 	if !Pending(dir) {
@@ -55,14 +55,20 @@ func TestRelaySendsTheWholeRecordAndStaysPendingUntilAcknowledged(t *testing.T) 
 	if err := Relay(ctx, dir, srv.URL, fixed("tok")); err != nil || Pending(dir) {
 		t.Fatalf("acknowledged relay: err=%v pending=%v", err, Pending(dir))
 	}
-	if len(got) != 2 || got[1]["e1"] != true || got[1]["cloud_judge"] != true || got[1]["training"] != true || len(got[1]) != 3 || auth[1] != "Bearer tok" {
+	if len(got) != 2 || got[1]["e1"] != true || got[1]["cloud_judge"] != true || got[1]["training"] != true || got[1]["team"] != true || len(got[1]) != 4 || auth[1] != "Bearer tok" {
 		t.Fatalf("relayed %v under %v", got, auth)
 	}
-	if err := Write(dir, Consents{E1: true, CloudJudge: true, Training: false}); err != nil {
+	if err := Write(dir, Consents{E1: true, CloudJudge: true, Training: false, Team: false}); err != nil {
 		t.Fatal(err)
 	}
 	if !Pending(dir) {
 		t.Fatal("a revocation is pending until acknowledged")
+	}
+	if err := Relay(ctx, dir, srv.URL, fixed("tok")); err != nil || got[2]["team"] != false || got[2]["training"] != false || len(got[2]) != 4 {
+		t.Fatalf("a team revocation relays team:false: err=%v %v", err, got)
+	}
+	if err := Write(dir, Consents{E1: true}); err != nil {
+		t.Fatal(err)
 	}
 	srv.Close()
 	if err := Relay(ctx, dir, srv.URL, fixed("tok")); err == nil || !Pending(dir) {

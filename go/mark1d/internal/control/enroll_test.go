@@ -27,6 +27,7 @@ const (
 	tenantA = "0191a000-0000-7000-8000-000000000001"
 	tenantB = "0191a000-0000-7000-8000-000000000002"
 	deviceA = "0191b000-0000-7000-8000-000000000001"
+	deviceB = "0191b000-0000-7000-8000-000000000002"
 )
 
 // mintToken is controld auth.Signer.Mint's shape (m1tok.v1.<claims>.<sig>); the signature is junk because the daemon holds no server key to check it.
@@ -184,17 +185,31 @@ func TestEnrollHandoffPersistsTheCLIsDocument(t *testing.T) {
 		t.Fatalf("expires_at %q vs %v (%v)", st.ExpiresAt, doc.TokenExpiresAt, err)
 	}
 
+	prev := filepath.Join(dir, "enrollment.prev.json")
 	resp, body = do(http.MethodPost, "/v1/enroll/keygen", map[string]string{"tenant_id": tenantB})
-	want(t, resp, body, http.StatusConflict, "M1E-2001")
-	resp, body = do(http.MethodPost, "/v1/enroll", activeFor(tenantB, deviceA, kg.KeyID))
-	want(t, resp, body, http.StatusConflict, "M1E-2001")
-	if raw2, _ := os.ReadFile(filepath.Join(dir, "enrollment.json")); !bytes.Equal(raw, raw2) {
-		t.Fatal("a refused tenant switch must not touch the document")
-	}
+	want(t, resp, body, http.StatusOK, "")
 	resp, body = do(http.MethodPost, "/v1/enroll", activeFor(tenantA, deviceA, kg.KeyID))
 	want(t, resp, body, http.StatusOK, "")
 	if hooks != 2 {
 		t.Fatalf("re-enroll under the same tenant (token refresh) must run the hook: %d", hooks)
+	}
+	if _, err := os.Stat(prev); !os.IsNotExist(err) {
+		t.Fatal("a same-tenant re-enroll retires nothing")
+	}
+	raw, _ = os.ReadFile(filepath.Join(dir, "enrollment.json"))
+	resp, body = do(http.MethodPost, "/v1/enroll", activeFor(tenantB, deviceB, kg.KeyID))
+	want(t, resp, body, http.StatusOK, "")
+	decodeTo(t, body, &out)
+	if out.TenantID != tenantB || out.DeviceID != deviceB || hooks != 3 {
+		t.Fatalf("a Teams accept/leave re-enrolls into another tenant: %s hooks=%d", body, hooks)
+	}
+	if got, _ := os.ReadFile(prev); !bytes.Equal(got, raw) {
+		t.Fatalf("the outgoing document is retired for mark1d's drain: %s", got)
+	}
+	resp, body = do(http.MethodPost, "/v1/enroll", activeFor(tenantA, deviceA, kg.KeyID))
+	want(t, resp, body, http.StatusOK, "")
+	if got, _ := os.ReadFile(prev); !bytes.Equal(got, raw) || hooks != 4 {
+		t.Fatal("a second switch before the daemon settled keeps the document that owns the spool")
 	}
 
 	resp, body = do(http.MethodDelete, "/v1/enroll", nil)
@@ -208,12 +223,15 @@ func TestEnrollHandoffPersistsTheCLIsDocument(t *testing.T) {
 	if seed3, _ := os.ReadFile(filepath.Join(dir, "device.key")); !bytes.Equal(seed, seed3) {
 		t.Fatal("sign-out must keep the key")
 	}
-	if hooks != 3 {
+	if hooks != 5 {
 		t.Fatalf("hook after sign-out: %d", hooks)
+	}
+	if got, _ := os.ReadFile(prev); !bytes.Equal(got, raw) {
+		t.Fatal("sign-out keeps the retired document that still owns the spool")
 	}
 	resp, body = do(http.MethodDelete, "/v1/enroll", nil)
 	want(t, resp, body, http.StatusOK, "")
-	if hooks != 3 {
+	if hooks != 5 {
 		t.Fatal("a second sign-out has nothing to announce")
 	}
 	lines := readLines(t, coverage.JournalPath(dir))
@@ -350,7 +368,7 @@ func TestEnrollStateIsLiveNotStored(t *testing.T) {
 		t.Fatalf("%q, want active", got)
 	}
 	resp, body = call(t, s, http.MethodPost, "/v1/enroll/keygen", map[string]string{"tenant_id": tenantB})
-	want(t, resp, body, http.StatusConflict, "M1E-2001")
+	want(t, resp, body, http.StatusOK, "")
 	resp, body = call(t, s, http.MethodPost, "/v1/enroll/keygen", map[string]string{"tenant_id": tenantA})
 	want(t, resp, body, http.StatusOK, "")
 	if runtime.GOOS != "windows" {
@@ -446,4 +464,39 @@ func TestEnrollPinsTheBundleRingAndSignOutPurgesIt(t *testing.T) {
 	}
 	resp, body = call(t, s, http.MethodDelete, "/v1/enroll", nil)
 	want(t, resp, body, http.StatusOK, "")
+}
+
+func TestKeygenRotateSwapsOnlyWhenTheNewIdentityLands(t *testing.T) {
+	s, dir := newServer(t)
+	type kg struct {
+		KeyID string `json:"key_id"`
+	}
+	keygen := func(body any) kg {
+		t.Helper()
+		resp, raw := call(t, s, http.MethodPost, "/v1/enroll/keygen", body)
+		want(t, resp, raw, http.StatusOK, "")
+		var k kg
+		decodeTo(t, raw, &k)
+		return k
+	}
+	live := keygen(nil)
+	next := keygen(map[string]bool{"rotate": true})
+	if next.KeyID == "" || next.KeyID == live.KeyID || keygen(map[string]bool{"rotate": true}) != next {
+		t.Fatalf("rotate must mint one new key and repeat it: live %q next %q", live.KeyID, next.KeyID)
+	}
+	// the approve that follows may fail: until an identity under the new key lands, the live key stays the device's
+	if again := keygen(nil); again != live {
+		t.Fatalf("rotate replaced the live key before any enrollment: %+v", again)
+	}
+	resp, body := call(t, s, http.MethodPost, "/v1/enroll", activeFor(tenantB, deviceB, next.KeyID))
+	want(t, resp, body, http.StatusOK, "")
+	if now := keygen(nil); now != next {
+		t.Fatalf("the landed identity's key must become the device key: %+v", now)
+	}
+	if retired, _ := filepath.Glob(filepath.Join(dir, "device.key.retired-*")); len(retired) != 1 {
+		t.Fatalf("the replaced key stays on disk: %v", retired)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "device.key.next")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("device.key.next must be consumed: %v", err)
+	}
 }

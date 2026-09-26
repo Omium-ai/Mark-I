@@ -131,8 +131,8 @@ func TestDaemonBootsFromEnrollmentDocument(t *testing.T) {
 
 	t.Run("refresh_adopts_a_rewritten_document", func(t *testing.T) {
 		stateDir, _, _ := uplinkPaths(t)
-		writeEnrollmentDoc(t, stateDir, ingest, 0o600)
-		d := &docTokens{stateDir: stateDir, current: "tok-from-doc"}
+		tenant, _ := writeEnrollmentDoc(t, stateDir, ingest, 0o600)
+		d := &docTokens{stateDir: stateDir, tenant: tenant.String(), current: "tok-from-doc"}
 		if err := d.Refresh(t.Context()); err == nil {
 			t.Fatal("unchanged document must not count as a refresh (08 §2.4: park, do not loop)")
 		}
@@ -146,6 +146,10 @@ func TestDaemonBootsFromEnrollmentDocument(t *testing.T) {
 		}
 		if tok, _ := d.Token(t.Context()); tok != "tok-refreshed" {
 			t.Fatalf("Token after refresh = %q", tok)
+		}
+		writeEnrollmentDoc(t, stateDir, ingest, 0o600)
+		if err := d.Refresh(t.Context()); err == nil {
+			t.Fatal("a document for another tenant is a re-enroll, not a refresh: its token must not carry this session's spool")
 		}
 	})
 }

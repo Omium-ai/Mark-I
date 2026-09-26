@@ -17,7 +17,16 @@ a random per-boot `token`, the daemon's own field name) next to `server.mjs` —
 `<state>/run/control.json`. Any non-empty `Authorization` header is accepted
 on the cloud API (real auth is an OAuth session, not simulated here).
 
-`--scenario` is one of: `first-run | active | paused | offline | below-floor`.
+`--scenario` is any directory under `fixtures/` except `controld`: the five
+base scenarios below, or an overlay built on one of them.
+
+Dates are relative. The fixtures are written as of `2026-09-16T15:00:00Z`
+(`FIXTURE_NOW` in `server.mjs`); at load, every string that is a whole date or
+date-time moves by (now − `FIXTURE_NOW`), so "this week" and "last 7 days"
+hold on whatever day the mock runs. Dates inside other strings (the receipt
+export's canonical `payload`) are left alone. Code that reads the files
+directly (the GUI's unit tests, Storybook) sees the written dates and pins its
+clock to `FIXTURE_NOW` instead.
 
 ## Scenarios
 
@@ -37,6 +46,35 @@ on the cloud API (real auth is an OAuth session, not simulated here).
   are controld's own spelling (08 §3.3 honesty fields: a boolean and the
   stated refusals joined by `; `); `trend` is `[{day, tvo}]`, one point per
   rollup day.
+
+## Overlay scenarios
+
+A scenario directory holding a `scenario.json` is an overlay:
+`{"about": "…", "extends": "<scenario>", "status": {"<fixture>": <http status>}}`.
+It carries only the fixtures that differ; every other one comes from the
+scenario it `extends` (recursively). `status` makes a fixture a non-200 reply;
+such a fixture is controld's error envelope
+`{"error": {"code": "M1E-nnnn", "message": "<reason>", "reason": "<reason>"}}`
+(08 §9; clients match on `reason`, never on `code`). The GUI's loaders
+(`withOverlays` in `src/renderer/test/mark1-mock.ts`, `scripts/mock.cjs`)
+follow the same rule, and a scenario built on `first-run` starts signed out.
+
+Teams (`docs/design/15-teams.md`):
+
+- **team-owner** (on `active`) — the owner of a team: two active members
+  (`usr_2`, `usr_3`) and a live invite; this device consents to team memory
+  (`consents.team: true`); `art_fix_3` is a teammate's shared artifact
+  (`mine: false`).
+- **team-member** (on `active`) — the same team seen by `usr_2`: `you.role`
+  is `member`, `/me` is `usr_2`.
+- **team-full** (on `active`) — owner, seven members and two live invites
+  fill the 10 seats; `POST /team/invites` answers 409 `team_full`.
+- **invite-invalid · invite-email-mismatch · invite-already-in-team ·
+  invite-own-team · invite-team-full · invite-owner-of-team** (on
+  `first-run`) — `POST /team/invites/accept` refuses with that reason (404
+  M1E-2012, 403 M1E-1007, 409 M1E-2011 ×4).
+
+The base scenarios are a solo owner: one member row, `you.role: owner`.
 
 ## Fixtures
 
@@ -131,7 +169,7 @@ the daemon's, not a sketch of §7.1:
   and no `tier`; `last_run` is the newest anchor vote this daemon boot saw,
   `null` before one.
 - `/v1/optins.consents` is the Step-4 record (`e1`, `cloud_judge`,
-  `training`), all `false` until the user consents; `PUT` merges a partial
+  `training`, `team`), all `false` until the user consents; `PUT` merges a partial
   object. `tests_by_project` is writable the same way.
 - `/v1/receipts` is the local chain view: `{status: not_started|sealed,
   head:{seq, hash, checkpoint_seq}, checkpoints:[{seq, time,
@@ -180,15 +218,22 @@ that backend where the mock can and differ where the mock's static ids cannot:
   `fixtures/controld/cloud-*.json` are goldens written by controld's own
   handlers (`go test ./internal/appapi -run TestAppAPIMatchesDesktopFixtures -update`) and
   parsed by the GUI's contract test; the mock server does not serve them.
-- `GET /api/v1/team` members are the tenant's principals as the schema knows
-  them (the m1_078 owner, the approvers of device enrollments, the caller)
-  plus live invites as `status: "invited"`; there is no users table, so the
-  real backend sends `name: null, email: null` on a principal, and `invite_link:
-  null` (the raw token is answered exactly once by `POST /team/invites`, whose
-  hash is what `m1_team_invites` keeps for 7 days). `PUT /api/v1/team`
-  `{shared_memory}` answers `{shared_memory}`. `POST /api/v1/team/invites`
-  `{email?}` answers `{sent: true, invite_link, invited_email, status: "sent",
-  expires_at}`; nothing is emailed.
+- `GET /api/v1/team` members are the owner row, the active members and the
+  live invites (`status: "invited"`, id `invite:<uuid>`), each `{id, name,
+  email, role, joined_at, last_active, status}` with `id` in `/me`'s
+  `user.id` format; `you: {role: "owner"|"member"}` is the caller's own role
+  and `invite_link` is `null` (the raw token is answered exactly once by
+  `POST /team/invites`, whose hash is what `m1_team_invites` keeps for 7
+  days). `PUT /api/v1/team` `{shared_memory}` answers `{shared_memory}`.
+  `POST /api/v1/team/invites` `{email?}` answers `{sent: false, invite_link:
+  "https://mark.omium.ai/join#<token>", invited_email, status: "invited",
+  expires_at}`; nothing is emailed. `POST /api/v1/team/invites/accept`
+  `{token}` (the raw token or the whole link) answers `{tenant_id, role:
+  "member"}`; `POST /api/v1/team/leave` answers `{tenant_id}` (the personal
+  tenant); `DELETE /api/v1/team/members/{id}` (route literal `usr_2`)
+  answers `{id, status: "removed", revoked_devices}`. Memory artifact rows
+  carry `mine` (the viewer owns it; only then may they share, pin or retire
+  it).
 
 TBD shapes (spec marks these unfrozen) are listed in `TBD.md`.
 
@@ -198,10 +243,11 @@ TBD shapes (spec marks these unfrozen) are listed in `TBD.md`.
 node desktop/mock/check.mjs
 ```
 
-Starts the server once per scenario, hits every endpoint with the real
-bearer, asserts `200` + parseable JSON (or one JSON document per line on an
+Starts the server once per scenario (overlays included), hits every endpoint
+with the real bearer, asserts `200` (or the overlay's `status`) + parseable JSON (or one JSON document per line on an
 `application/x-ndjson` reply; `401` without a bearer on the local API;
 connection refused on the cloud port for `offline`), reads one replayed SSE
-event where the fixture has any. Exits non-zero on any failure. It binds
+event where the fixture has any, and checks that the relative clock keeps a
+fixture date's distance from now. Exits non-zero on any failure. It binds
 `4501`/`4502`; `MOCK_CHECK_LOCAL_PORT`/`MOCK_CHECK_CLOUD_PORT` move it when
 another mock holds them.

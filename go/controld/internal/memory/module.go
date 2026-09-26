@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -41,6 +42,8 @@ type Deps struct {
 	// IntelBaseURL and IntelServiceToken are the ADR-0010 §2.2 seam; an empty URL answers 503, never a guess.
 	IntelBaseURL      string
 	IntelServiceToken string
+	// Viewers resolves viewer_subject for every intel call (15-teams §Memory); nil sends none.
+	Viewers querychoke.Viewers
 }
 
 type Module struct {
@@ -214,6 +217,10 @@ func (m *Module) proxy(w http.ResponseWriter, r *http.Request, method, path stri
 		writeError(w, http.StatusServiceUnavailable, "M1E-9500", "memory service not configured")
 		return nil, false
 	}
+	path, ok := m.withViewer(w, r, path)
+	if !ok {
+		return nil, false
+	}
 	var rd io.Reader
 	if body != nil {
 		rd = bytes.NewReader(body)
@@ -244,6 +251,22 @@ func (m *Module) proxy(w http.ResponseWriter, r *http.Request, method, path stri
 	case http.StatusNotFound:
 		writeError(w, http.StatusNotFound, "M1E-2009", "artifact not found")
 		return nil, false
+	case http.StatusForbidden:
+		// intel's ownership refusals (15-teams: consent_required, not_owner) cross unchanged; any other 403 is the service credential, a deployment fault.
+		out, _ := io.ReadAll(io.LimitReader(resp.Body, maxActionBody))
+		var refusal struct {
+			Error struct {
+				Reason string `json:"reason"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(out, &refusal) == nil && (refusal.Error.Reason == "consent_required" || refusal.Error.Reason == "not_owner") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write(out)
+			return nil, false
+		}
+		writeError(w, http.StatusBadGateway, "M1E-9500", "memory service failed")
+		return nil, false
 	default:
 		writeError(w, http.StatusBadGateway, "M1E-9500", "memory service failed")
 		return nil, false
@@ -254,6 +277,23 @@ func (m *Module) proxy(w http.ResponseWriter, r *http.Request, method, path stri
 		return nil, false
 	}
 	return out, true
+}
+
+// withViewer appends viewer_subject as a query parameter on every intel memory call: the user token's subject, else the device's enrollment subject. Intel reads an absent one as unfiltered, so only a solo tenant's subject-less device omits it; in a team an empty one owns nothing.
+func (m *Module) withViewer(w http.ResponseWriter, r *http.Request, path string) (string, bool) {
+	v, err := querychoke.ViewerFrom(r.Context(), m.deps.Viewers)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "M1E-9500", "viewer lookup failed")
+		return "", false
+	}
+	if v.Subject == "" && !v.Team {
+		return path, true
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "viewer_subject=" + url.QueryEscape(v.Subject), true
 }
 
 func matchesETag(header, etag string) bool {

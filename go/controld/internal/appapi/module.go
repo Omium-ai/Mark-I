@@ -35,6 +35,10 @@ type Deps struct {
 	Regimes querychoke.RegimeSource
 	// TenantRoot is enroll's HKDF tenant root (04 §2.9): human gold labels digest (session, task) under it; nil refuses labels.
 	TenantRoot func(uuid.UUID) ([]byte, error)
+	// TeamMaxMembers is TEAM_MAX_MEMBERS (owner + members + live invites); 0 ⇒ 10.
+	TeamMaxMembers int
+	// RevokeSubject is enroll.Module.RevokeSubjectDevices: DELETE /team/members/{id} revokes the removed member's devices; nil refuses the route.
+	RevokeSubject func(ctx context.Context, tenant uuid.UUID, subject, by string) (int, error)
 }
 
 type Module struct {
@@ -75,6 +79,9 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/team", chain(http.HandlerFunc(m.handleTeam)))
 	mux.Handle("PUT /api/v1/team", chain(http.HandlerFunc(m.handleTeamUpdate)))
 	mux.Handle("POST /api/v1/team/invites", chain(http.HandlerFunc(m.handleTeamInvite)))
+	mux.Handle("POST /api/v1/team/invites/accept", chain(http.HandlerFunc(m.handleTeamAccept)))
+	mux.Handle("POST /api/v1/team/leave", chain(http.HandlerFunc(m.handleTeamLeave)))
+	mux.Handle("DELETE /api/v1/team/members/{id}", chain(http.HandlerFunc(m.handleTeamRemove)))
 }
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {

@@ -17,6 +17,7 @@ type consentsBody struct {
 	E1         *bool `json:"e1"`
 	CloudJudge *bool `json:"cloud_judge"`
 	Training   *bool `json:"training"`
+	Team       bool  `json:"team"` // optional (15-teams): absent reads as not consenting to share memory with the team
 }
 
 const maxConsentsBody = 4 << 10
@@ -47,9 +48,9 @@ func (m *Module) handleConsents(w http.ResponseWriter, r *http.Request) {
 	var at time.Time
 	err = m.db.WithTenant(r.Context(), tenant, func(tx pgx.Tx) error {
 		return tx.QueryRow(r.Context(), `
-			INSERT INTO m1_device_consents (tenant_id, device_id, e1, cloud_judge, training)
-			VALUES ($1, $2, $3, $4, $5) RETURNING recorded_at`,
-			tenant.UUID(), claims.DeviceID, *body.E1, *body.CloudJudge, *body.Training).Scan(&at)
+			INSERT INTO m1_device_consents (tenant_id, device_id, e1, cloud_judge, training, team)
+			VALUES ($1, $2, $3, $4, $5, $6) RETURNING recorded_at`,
+			tenant.UUID(), claims.DeviceID, *body.E1, *body.CloudJudge, *body.Training, body.Team).Scan(&at)
 	})
 	if err != nil {
 		writeErr(w, errServer("consent store unavailable"))

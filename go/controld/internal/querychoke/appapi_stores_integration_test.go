@@ -103,6 +103,8 @@ type appRig struct {
 	ingest *chconn.Conn
 	api    *httptest.Server
 	schema *schemacheck.Set
+	reg    *querychoke.Registry
+	runner querychoke.Runner
 }
 
 func setupApp(t *testing.T) *appRig {
@@ -174,7 +176,7 @@ func setupApp(t *testing.T) *appRig {
 	m.RegisterRoutes(mux)
 	api := httptest.NewServer(mux)
 	t.Cleanup(api.Close)
-	return &appRig{t: t, ingest: write, api: api, schema: schemacheck.Load(t, filepath.Join("..", "appapi", "schema"))}
+	return &appRig{t: t, ingest: write, api: api, schema: schemacheck.Load(t, filepath.Join("..", "appapi", "schema")), reg: reg, runner: runner}
 }
 
 const appKey = "appapi-ch-it-key"
@@ -220,9 +222,9 @@ func routeOf(path string) string {
 
 // planted is what one tenant's batch put in the ledger, by id.
 type planted struct {
-	session, task, clean, decision, cert uuid.UUID
-	workspaceHex                         string
-	tokens                               uint64
+	session, task, clean, decision, cert, device uuid.UUID
+	workspaceHex                                 string
+	tokens                                       uint64
 }
 
 // plant lands one session through the production projection path: SessionStart (workspace + capture paths), a task with its verdict trail, an anchor vote with typed evidence, a memory injection, a route decision followed by the Usage that served it, a task-bearing GuardDecision and a receipt checkpoint.
@@ -231,7 +233,7 @@ func plant(t *testing.T, r *appRig, tenant uuid.UUID, tokens uint64) planted {
 	ctx := context.Background()
 	at := time.Now().UTC().Add(-2 * time.Hour)
 	device, batchID := uuid.New(), uuid.Must(uuid.NewV7())
-	p := planted{session: uuid.Must(uuid.NewV7()), task: uuid.New(), clean: uuid.New(), decision: uuid.Must(uuid.NewV7()), cert: uuid.New(), tokens: tokens}
+	p := planted{session: uuid.Must(uuid.NewV7()), task: uuid.New(), clean: uuid.New(), decision: uuid.Must(uuid.NewV7()), cert: uuid.New(), device: device, tokens: tokens}
 	workspace := make([]byte, 32)
 	workspace[0], workspace[31] = byte(tokens), 0x7f
 	p.workspaceHex = hex.EncodeToString(workspace)

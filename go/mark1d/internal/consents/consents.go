@@ -11,6 +11,7 @@ type Consents struct {
 	E1         bool `json:"e1"`          // sanitized diff hunks (E1 evidence tier) may leave
 	CloudJudge bool `json:"cloud_judge"` // verdicts from Omium's cloud judge under the subprocessor terms
 	Training   bool `json:"training"`    // verified outcomes may enter the training corpus
+	Team       bool `json:"team"`        // memory this user shares reaches their teammates (15-teams)
 }
 
 func Path(stateDir string) string { return filepath.Join(stateDir, "gates", "consents.json") }

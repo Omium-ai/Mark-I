@@ -15,7 +15,8 @@ import asyncpg
 from mark1_receipts import ReceiptRef
 
 from app.db import set_local_tenant
-from app.memory.extract import live_certs
+from app.memory.extract import device_owners, live_certs
+from app.memory.retrieve import IS_TEAM, LATEST_TEAM_CONSENT, OWNS
 from app.tvo.reader import QuerychokeReader
 
 DELTA = 0.05
@@ -103,8 +104,10 @@ async def certified_outcomes(
     window_start: date,
     window_end: date,
     bearer: str,
+    devices: frozenset[str] | None = None,
 ) -> list[Outcome]:
-    """§5.4 outcome filter + D31 quota: uncertified rows are not evidence, excess is not counted."""
+    """§5.4 outcome filter + D31 quota: uncertified rows are not evidence, excess is not counted;
+    `devices` (a team artifact owner's) drops every other owner's tasks before the quota."""
     result = await reader.run_template(
         OUTCOME_TEMPLATE,
         {
@@ -125,7 +128,13 @@ async def certified_outcomes(
         )
         for r in result.rows
     ]
-    stamped = [o for o in rows if o.stage in _CERTIFIED_STAGES and o.noise_cert_id]
+    stamped = [
+        o
+        for o in rows
+        if o.stage in _CERTIFIED_STAGES
+        and o.noise_cert_id
+        and (devices is None or o.device_id in devices)
+    ]
     live = await live_certs(conn, tenant_id, {o.noise_cert_id for o in stamped})
     return [o for o in stamped if o.noise_cert_id in live][:B_QUOTA]
 
@@ -231,6 +240,35 @@ async def retire_artifact(
     return ref.receipt_id
 
 
+async def action_refusal(
+    conn: asyncpg.Connection,
+    *,
+    tenant_id: str,
+    artifact_id: uuid.UUID,
+    viewer: str | None,
+    share: bool = False,
+) -> str | None:
+    """Doc 15 in a team tenant: only the artifact's owner acts on it, and `share` needs the
+    caller's latest team consent. None = allowed (or not found: the action's own 404 answers)."""
+    if viewer is None:
+        return None
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        row = await conn.fetchrow(
+            f"SELECT {IS_TEAM} AS team, {OWNS} AS mine, "  # noqa: S608 — literal fragments, values bound
+            f"{LATEST_TEAM_CONSENT.format(subject='$2')} AS consent "
+            "FROM memory_artifacts WHERE id = $3 AND tenant_id = $1",
+            uuid.UUID(tenant_id),
+            viewer,
+            artifact_id,
+        )
+    if row is None or not row["team"]:
+        return None
+    if not row["mine"]:
+        return "not_owner"
+    return "consent_required" if share and row["consent"] is not True else None
+
+
 async def set_flag(
     conn: asyncpg.Connection, *, tenant_id: str, artifact_id: uuid.UUID, column: str, value: object
 ) -> bool:
@@ -279,15 +317,18 @@ async def run_admit(
     window_start = window_end - OUTCOME_WINDOW
     async with conn.transaction():
         await set_local_tenant(conn, tenant_id)
+        team = await conn.fetchval(f"SELECT {IS_TEAM}", uuid.UUID(tenant_id))
         rows = await conn.fetch(
-            "SELECT id, kind, body, pinned FROM memory_artifacts WHERE tenant_id = $1 "
-            "AND state IN ('extracted', 'shadow') ORDER BY created_at",
+            "SELECT id, kind, body, pinned, owner_subject FROM memory_artifacts "
+            "WHERE tenant_id = $1 AND state IN ('extracted', 'shadow') ORDER BY created_at",
             uuid.UUID(tenant_id),
         )
+    owners, tenant_owner = await device_owners(conn, tenant_id) if team else ({}, None)
     admitted = retired = held = refused = 0
     receipts: list[uuid.UUID] = []
     for r in rows:
         body = json.loads(r["body"])
+        owner = r["owner_subject"] or tenant_owner
         outcomes = await certified_outcomes(
             reader,
             conn,
@@ -296,6 +337,7 @@ async def run_admit(
             window_start=window_start,
             window_end=window_end,
             bearer=bearer,
+            devices=frozenset(d for d, s in owners.items() if s == owner) if team else None,
         )
         phi = median(o.task_cost for o in outcomes) if outcomes else 0.0
         d = decide([o.utility for o in outcomes], phi)

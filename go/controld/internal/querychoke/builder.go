@@ -37,6 +37,8 @@ var (
 	// property, not a convention (05 §6.3).
 	ErrWriteTemplate = errors.New("querychoke: write-shaped template requires BuildWrite")
 	ErrReadTemplate  = errors.New("querychoke: read template refused by BuildWrite")
+	// ErrTeamScope → 403 M1E-1001: a team member's read reached a template whose rows carry no device.
+	ErrTeamScope = errors.New("querychoke: template not readable per person")
 )
 
 var renderRefusals = promauto.NewCounter(prometheus.CounterOpts{
@@ -110,11 +112,11 @@ func build(t TenantID, tpl *template, p Params, jobKey string) (Query, error) {
 	}
 	// Every declared parameter present, nothing undeclared present.
 	for name := range p {
-		if _, ok := tpl.params[name]; !ok {
+		if _, ok := tpl.params[name]; !ok && (name != deviceParam || !tpl.devices) {
 			return Query{}, fmt.Errorf("%w: unknown parameter %q for template %q", ErrBadParams, name, tpl.name)
 		}
 	}
-	bind := make(map[string]string, len(tpl.params)+1)
+	bind := make(map[string]string, len(tpl.params)+2)
 	for name, spec := range tpl.params {
 		v, ok := p[name]
 		if !ok {
@@ -143,7 +145,15 @@ func build(t TenantID, tpl *template, p Params, jobKey string) (Query, error) {
 	// The value marker (write templates' projected tenant column) binds to
 	// the SAME parameter the predicate re-asserts, so a write's row tenant
 	// and its predicate tenant cannot diverge.
-	sql := strings.Replace(tpl.body, tenantMarker, tenantPredSQL, 1)
+	pred := tenantPredSQL
+	if devices, ok := p[deviceParam]; ok {
+		enc, err := encodeParam(paramSpec{kind: pUUIDArray}, devices)
+		if err != nil {
+			return Query{}, fmt.Errorf("%w: parameter %q: %v", ErrBadParams, deviceParam, err)
+		}
+		bind[deviceParam], pred = enc, devicePredSQL
+	}
+	sql := strings.Replace(tpl.body, tenantMarker, pred, 1)
 	sql = strings.ReplaceAll(sql, tenantValueMarker, tenantValueSQL)
 	bind["tid"] = t.String()
 	if !tpl.write {
@@ -174,7 +184,39 @@ func assertRendered(sql string, bind map[string]string) error {
 	if _, err := uuid.Parse(bind["tid"]); err != nil {
 		return fmt.Errorf("%w: tid binding is not a UUID", ErrRenderRefused)
 	}
+	if _, ok := bind[deviceParam]; ok && strings.Count(sql, devicePredSQL) != 1 {
+		return fmt.Errorf("%w: device_ids bound but the device predicate is not rendered exactly once", ErrRenderRefused)
+	}
 	return nil
+}
+
+// narrow re-renders a built read to the given devices (the viewer filter, 15-teams): a template whose rows carry no device refuses rather than answer tenant-wide, and a caller-bound device list is replaced, never kept.
+func narrow(q Query, devices []uuid.UUID) (Query, error) {
+	if q.tpl == nil || !q.tpl.devices {
+		name := ""
+		if q.tpl != nil {
+			name = q.tpl.name
+		}
+		return Query{}, fmt.Errorf("%w: template %q reads rows that carry no device", ErrTeamScope, name)
+	}
+	enc, err := encodeParam(paramSpec{kind: pUUIDArray}, devices)
+	if err != nil {
+		return Query{}, fmt.Errorf("%w: %v", ErrBadParams, err)
+	}
+	bind := make(map[string]string, len(q.bind)+1)
+	for k, v := range q.bind {
+		bind[k] = v
+	}
+	sql := q.sql
+	if _, ok := q.bind[deviceParam]; !ok {
+		sql = strings.Replace(sql, tenantPredSQL, devicePredSQL, 1)
+	}
+	bind[deviceParam] = enc
+	if err := assertRendered(sql, bind); err != nil {
+		renderRefusals.Inc()
+		return Query{}, err
+	}
+	return Query{tpl: q.tpl, sql: sql, bind: bind, jobKey: q.jobKey}, nil
 }
 
 // encodeParam turns a typed value into the server-side parameter string.
