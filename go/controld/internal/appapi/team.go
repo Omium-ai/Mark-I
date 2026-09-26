@@ -331,7 +331,7 @@ func (m *Module) handleTeam(w http.ResponseWriter, r *http.Request) {
 	var tvo any
 	from, to, _ := parseWindow("")
 	if full, rec := m.tvoReport(r.WithContext(querychoke.TenantWide(r.Context())), from, to); rec.code == http.StatusOK && full != nil {
-		tvo = pick(full, "tvo", "coverage_band", "cost_basis", "guarantee_grade", "refusal")
+		tvo = pick(full, "tvo", "coverage_band", "cost_basis", "guarantee_grade", "refusal", "trend")
 	}
 	writeJSON(w, map[string]any{"members": members, "you": map[string]string{"role": role}, "max_members": m.maxMembers(), "invite_link": nil, "shared_memory": shared, "tvo": tvo, "fleet_status": nil})
 }

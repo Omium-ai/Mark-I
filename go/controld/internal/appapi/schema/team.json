@@ -51,7 +51,15 @@
         "coverage_band": { "$ref": "honesty.json#/properties/coverage_band" },
         "cost_basis": { "type": "string", "enum": ["usd", "quota"] },
         "guarantee_grade": { "type": "boolean" },
-        "refusal": { "type": "string" }
+        "refusal": { "type": "string" },
+        "trend": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["day", "tvo"],
+            "properties": { "day": { "type": "string" }, "tvo": { "type": ["number", "null"] } }
+          }
+        }
       }
     },
     "fleet_status": { "type": "null", "description": "enterprise fleet/gateway status: null until it exists" }

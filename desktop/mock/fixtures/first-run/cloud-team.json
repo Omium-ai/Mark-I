@@ -17,13 +17,15 @@
   "invite_link": null,
   "shared_memory": false,
   "tvo": {
-    "tvo": 13000,
+    "tvo": null,
     "coverage_band": {
-      "observed_fraction": 0.97,
+      "observed_fraction": 0,
       "floor": 0.95
     },
     "cost_basis": "usd",
-    "guarantee_grade": true
+    "guarantee_grade": false,
+    "refusal": "not enough sessions yet. Your first report arrives after about a day of use",
+    "trend": []
   },
   "fleet_status": null
 }
