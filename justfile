@@ -181,6 +181,7 @@ test-py:
     uv run --frozen --all-packages -m pytest python/shared/mark1_receipts/tests -o asyncio_mode=auto
     uv run --frozen --all-packages -m pytest python/adjudicator/tests -o asyncio_mode=auto -m "not integration"
     uv run --frozen --all-packages -m pytest python/intel/tests -o asyncio_mode=auto -m "not integration"
+    uv run --frozen --all-packages -m pytest deploy/baseten/mark1-rm/tests
 
 # Cross-language conformance vectors: Rust ↔ Go ↔ Python must agree bit-identically.
 conformance:

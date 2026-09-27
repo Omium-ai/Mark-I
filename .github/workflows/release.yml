@@ -211,6 +211,10 @@ jobs:
             cp "$src" "dist/${{ matrix.triple }}/"
           done
           ls -l "dist/${{ matrix.triple }}"
+      # mark1-rm (16 §L6): the pinned llama.cpp CPU build mark1d supervises; mark1d finds it at rm-runtime/ beside itself.
+      - name: Stage the reward-model runtime
+        shell: bash
+        run: tools/release/fetch-rm-runtime.sh "${{ matrix.triple }}" "dist/${{ matrix.triple }}/rm-runtime"
       - uses: actions/upload-artifact@v4
         with:
           name: edge-${{ matrix.triple }}
@@ -253,6 +257,13 @@ jobs:
             lipo -create -output "dist/universal2/$b" \
               "dist/x86_64-apple-darwin/$b" "dist/aarch64-apple-darwin/$b"
             lipo -info "dist/universal2/$b"
+          done
+          mkdir -p dist/universal2/rm-runtime
+          for f in $(ls dist/x86_64-apple-darwin/rm-runtime dist/aarch64-apple-darwin/rm-runtime | grep -v ':$' | sort -u); do
+            x="dist/x86_64-apple-darwin/rm-runtime/$f" a="dist/aarch64-apple-darwin/rm-runtime/$f" o="dist/universal2/rm-runtime/$f"
+            if [ -f "$x" ] && [ -f "$a" ] && lipo -info "$a" >/dev/null 2>&1; then lipo -create -output "$o" "$x" "$a"
+            elif [ -f "$a" ]; then cp "$a" "$o"
+            else cp "$x" "$o"; fi
           done
       - name: Import Developer ID certificate
         env:

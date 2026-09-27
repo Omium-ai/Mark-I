@@ -1,0 +1,44 @@
+# Truss for the Mark 1 cloud reward model (16 §L6), the platform's docker_server pattern (omium-environments/tools/vllm-serving/baseten).
+# One deployment per published model: set model_name, RM_MANIFEST (the export's manifest.json, verbatim) and RM_GGUF_URL; never edited in place.
+# The runtime is the edge's pinned llama.cpp b11193 CPU build (sha256 as tools/release/fetch-rm-runtime.sh); data/rm_serve.py scores exactly as the edge.
+
+model_name: mark1-rm-a-1
+
+base_image:
+  image: python:3.12-slim-bookworm
+
+system_packages:
+  - libgomp1
+
+requirements:
+  - blake3==1.0.9
+
+build_commands:
+  - python -c "import urllib.request as u; u.urlretrieve('https://github.com/ggml-org/llama.cpp/releases/download/b11193/llama-b11193-bin-ubuntu-x64.tar.gz', '/tmp/llama.tgz')"
+  - echo "def277c3a4f0c5e2ec3b1413971878d7d5e7da7eee64f5120a0cd8f024f5a364  /tmp/llama.tgz" | sha256sum -c -
+  - mkdir -p /tmp/llama /opt/rm-runtime && tar -xzf /tmp/llama.tgz -C /tmp/llama
+  - d=$(dirname "$(find /tmp/llama -type f -name llama-server | head -1)") && cp "$d/llama-server" /opt/rm-runtime/ && find "$d" -maxdepth 1 -name '*.so*' -exec cp -P {} /opt/rm-runtime/ \; && rm -rf /tmp/llama /tmp/llama.tgz
+
+docker_server:
+  start_command: python /app/data/rm_serve.py
+  server_port: 8000
+  predict_endpoint: /predict
+  readiness_endpoint: /health
+  liveness_endpoint: /health
+
+resources:
+  cpu: "8"
+  memory: 8Gi
+  use_gpu: false
+
+runtime:
+  predict_concurrency: 1
+  health_checks:
+    restart_threshold_seconds: 900
+    stop_traffic_threshold_seconds: 300
+
+environment_variables:
+  RM_RUNTIME: /opt/rm-runtime/llama-server
+  RM_GGUF_URL: https://dl.omium.ai/mark1/models/rm/mark1-rm-a@1/model.gguf
+  RM_MANIFEST: '{"name":"mark1-rm-a","version":1,"sha256":"<from manifest.json>","size_bytes":0,"calibration_version":"<from manifest.json>","template_sha":"25bde84b67c7d026abd64369bdbe54ef81c6fd7b91f1a4747f5b0dab39e1d2c3","eval_card_sha":"<from manifest.json>","execution_hash":"<from manifest.json>","scoring":{"method":"logit_diff","yes":" yes","no":" no"}}'
+  RM_THREADS: "8"

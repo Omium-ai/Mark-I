@@ -20,6 +20,12 @@ resource "random_password" "service_token" {
   special = false
 }
 
+# the adjudicator's E1 read credential (GET /internal/v1/evidence); only controld and the adjudicator mount it, never intel
+resource "random_password" "evidence_token" {
+  length  = 48
+  special = false
+}
+
 locals {
   secrets = {
     "mark1-db-service-credentials" = { for k, v in random_password.db : k => v.result }
@@ -33,8 +39,11 @@ locals {
       server_chain_seed   = random_bytes.seed["server_chain_seed"].hex
       bundle_section_seed = random_bytes.seed["bundle_section_seed"].hex
     }
-    "mark1-hmac-pepper"   = { pepper = random_bytes.seed["pepper"].hex }
-    "mark1-service-token" = { token = random_password.service_token.result }
+    "mark1-hmac-pepper"     = { pepper = random_bytes.seed["pepper"].hex }
+    "mark1-service-token"   = { token = random_password.service_token.result }
+    "mark1-evidence-token"  = { token = random_password.evidence_token.result }
+    "mark1-training-policy" = { authorized_providers = "" } # founder sets the value in the console; ignore_changes keeps it
+    "mark1-baseten-rm"      = { api_key = "" }              # founder sets a Baseten key scoped to the mark1-rm deployment; empty = cloud RM skipped
   }
 }
 

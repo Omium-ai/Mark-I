@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""rm-publish: an export artifact to its edge catalog entry and m1_103 seal migration."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+CATALOG = ROOT / "go/mark1d/internal/rm/catalog.json"
+TEMPLATE_SHA = hashlib.sha256(
+    b"rm-input/v1\n<|end|>\nIs this change a correct and complete solution to the task? Answer:"
+).hexdigest()
+MANIFEST_KEYS = {
+    "name",
+    "version",
+    "sha256",
+    "size_bytes",
+    "calibration_version",
+    "template_sha",
+    "eval_card_sha",
+    "execution_hash",
+    "scoring",
+}
+ADAPTERS = "s3://omium-adapters-prod-965384155704/rm"
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+TOKEN = re.compile(r"^[A-Za-z0-9._:@-]{1,64}$")
+INT4_MAX, INT8_MAX = 2**31 - 1, 2**63 - 1  # m1_verifiers.version int; Go Manifest.SizeBytes int64
+
+
+class Refused(Exception):
+    pass
+
+
+def check_manifest(m: Any) -> dict[str, Any]:
+    """go/mark1d/internal/rm Manifest.Validate plus the strict decode, in Python."""
+    if not isinstance(m, dict) or set(m) != MANIFEST_KEYS:
+        raise Refused(
+            f"manifest keys {sorted(m) if isinstance(m, dict) else m!r} are not the export's"
+        )
+    if m["name"] not in ("mark1-rm-a", "mark1-rm-b"):
+        raise Refused(f"name {m['name']!r} is not mark1-rm-a or mark1-rm-b")
+    if (
+        isinstance(m["version"], bool)
+        or not isinstance(m["version"], int)
+        or not 1 <= m["version"] <= INT4_MAX
+    ):
+        raise Refused(f"version {m['version']!r} is not an integer in [1, {INT4_MAX}]")
+    for k in ("sha256", "eval_card_sha", "execution_hash"):
+        if not isinstance(m[k], str) or not HEX64.match(m[k]):
+            raise Refused(f"{k} is not 64 lowercase hex")
+    if (
+        isinstance(m["size_bytes"], bool)
+        or not isinstance(m["size_bytes"], int)
+        or not 0 < m["size_bytes"] <= INT8_MAX
+    ):
+        raise Refused("size_bytes must be a positive int64")
+    if not isinstance(m["calibration_version"], str) or not TOKEN.match(m["calibration_version"]):
+        raise Refused("calibration_version is not 1-64 of [A-Za-z0-9._:@-]")
+    if m["template_sha"] != TEMPLATE_SHA:
+        raise Refused("template_sha is not rm-input/v1")
+    if m["scoring"] != {"method": "logit_diff", "yes": " yes", "no": " no"}:
+        raise Refused("scoring is not logit_diff over ' yes'/' no'")
+    return m
+
+
+def check_eval_card(m: dict[str, Any], raw: bytes) -> dict[str, Any]:
+    if hashlib.sha256(raw).hexdigest() != m["eval_card_sha"]:
+        raise Refused("eval_card.json is not the card the manifest names (eval_card_sha)")
+    ev = json.loads(raw)
+    if not isinstance(ev, dict):
+        raise Refused("eval_card.json is not an object")
+    gates = ev.get("gates") or {}
+    failed = sorted(
+        k for k, g in gates.items() if not (isinstance(g, dict) and g.get("pass") is True)
+    )
+    served = ev.get("served_parity") or {}
+    failed += sorted(
+        f"served_parity.{q}"
+        for q, g in served.items()
+        if not (isinstance(g, dict) and g.get("pass") is True)
+    )
+    if not gates or not served or failed:
+        raise Refused(
+            f"recorded gates did not pass: {failed or 'no gates or served parity recorded'}"
+        )
+    cal = ev.get("calibration") or {}
+    if cal.get("version") != m["calibration_version"] or cal.get("gguf_sha256") != m["sha256"]:
+        raise Refused("the eval card's served calibration is not this manifest's GGUF and version")
+    th = cal.get("thresholds") or {}
+    if not all(_finite(cal.get(k)) for k in ("a", "b")) or not all(
+        _finite(th.get(k)) for k in ("t_lo", "t_hi")
+    ):
+        raise Refused("the served calibration lacks finite platt a/b or thresholds t_lo/t_hi")
+    if th["t_lo"] > th["t_hi"]:
+        raise Refused(f"thresholds t_lo {th['t_lo']} > t_hi {th['t_hi']}")
+    if bad := sorted(repr(k) for k in gates if not TOKEN.match(k)):
+        raise Refused(f"gate names are not 1-64 of [A-Za-z0-9._:@-]: {bad}")
+    mc = (ev.get("calibration_hf") or {}).get("model_checksum")
+    if mc not in (None, "") and not (isinstance(mc, str) and HEX64.match(mc)):
+        raise Refused("calibration_hf.model_checksum is not 64 lowercase hex")
+    return ev
+
+
+def _finite(x: Any) -> bool:
+    return isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def artifact(m: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
+    """07 §m1_098's sealed artifact, keyed by m1_103's execution_hash."""
+    cal = ev["calibration"]
+    ref = f"{m['name']}@{m['version']}"
+    return {
+        "status": "sealed",
+        "manifest_uri": f"{ADAPTERS}/{ref}/manifest.json",
+        "model_sha256": (ev.get("calibration_hf") or {}).get("model_checksum"),
+        "gguf_sha256": m["sha256"],
+        "template_sha256": m["template_sha"],
+        "calibration": {
+            "version": m["calibration_version"],
+            "scale": cal["a"],
+            "shift": cal["b"],
+            "reject_below": cal["thresholds"]["t_lo"],
+            "accept_above": cal["thresholds"]["t_hi"],
+        },
+        "eval_card": {"sha256": m["eval_card_sha"], "passed": True, "gates": sorted(ev["gates"])},
+        "execution_hash": m["execution_hash"],
+    }
+
+
+def seal_sql(m: dict[str, Any], ev: dict[str, Any], verifier_key: str | None = None) -> str:
+    key = verifier_key or f"rm:{m['name']}"
+    art = json.dumps(artifact(m, ev), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if "$" in art or not re.fullmatch(r"[a-z0-9:.-]+", key) or not HEX64.match(m["execution_hash"]):
+        raise Refused("artifact, key or execution_hash cannot be quoted safely")
+    if isinstance(m["version"], bool) or not isinstance(m["version"], int):
+        raise Refused("version is not an integer")
+    tag = hashlib.sha256(art.encode()).hexdigest()[:16]
+    do, a = f"$do_{tag}$", f"$a_{tag}$"
+    ref, xh, ver = f"{key}@{m['version']}", m["execution_hash"], m["version"]
+    return f"""-- rm-publish: seal {ref} (16 §L6, m1_103); idempotent, another artifact raises.
+BEGIN;
+DO {do}
+DECLARE cur jsonb; h bytea;
+BEGIN
+  SELECT definition, effective_execution_hash INTO cur, h FROM m1_verifiers
+   WHERE verifier_key = '{key}' AND version = {ver} AND kind = 'reward_model' FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'rm-publish: {ref} is not registered (a new version needs its migration)';
+  END IF;
+  IF cur #>> '{{artifact,status}}' = 'sealed' THEN
+    IF h = decode('{xh}', 'hex') AND cur -> 'artifact' = {a}{art}{a}::jsonb THEN
+      RETURN;
+    END IF;
+    RAISE EXCEPTION 'rm-publish: {ref} is sealed to another artifact; publish a new version';
+  END IF;
+  UPDATE m1_verifiers
+     SET definition = jsonb_set(definition, '{{artifact}}', {a}{art}{a}::jsonb),
+         effective_execution_hash = decode('{xh}', 'hex')
+   WHERE verifier_key = '{key}' AND version = {ver} AND kind = 'reward_model';
+END
+{do};
+COMMIT;
+"""  # noqa: S608
+
+
+def catalog_with(m: dict[str, Any], path: Path) -> str | None:
+    """The catalog with the manifest appended verbatim; None when an identical entry is there."""
+    cat = json.loads(path.read_text() or "[]")
+    for e in cat:
+        if (e.get("name"), e.get("version")) == (m["name"], m["version"]):
+            if e == m:
+                return None
+            raise Refused(f"catalog already pins {m['name']}@{m['version']} to another artifact")
+    return json.dumps([*cat, m], indent=2) + "\n"
+
+
+def _stage(path: Path, text: str) -> Path:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    os.fchmod(fd, 0o644)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    return Path(tmp)
+
+
+def publish(artifact_dir: Path, sql_out: Path, catalog: Path = CATALOG) -> tuple[bool, str]:
+    """Every check first, then both outputs staged and renamed into place as a pair: a refusal
+    writes none, and a failed catalog rename restores the seal file it replaced."""
+    m = check_manifest(json.loads((artifact_dir / "manifest.json").read_text()))
+    ev = check_eval_card(m, (artifact_dir / "eval_card.json").read_bytes())
+    sql, cat = seal_sql(m, ev), catalog_with(m, catalog)
+    old_sql = sql_out.read_text() if sql_out.exists() else None
+    sql_tmp = _stage(sql_out, sql)
+    try:
+        cat_tmp = _stage(catalog, cat) if cat is not None else None
+    except OSError:
+        sql_tmp.unlink(missing_ok=True)
+        raise
+    sql_tmp.replace(sql_out)
+    if cat_tmp is not None:
+        try:
+            cat_tmp.replace(catalog)
+        except OSError:
+            cat_tmp.unlink(missing_ok=True)
+            if old_sql is None:
+                sql_out.unlink(missing_ok=True)
+            else:
+                _stage(sql_out, old_sql).replace(sql_out)
+            raise
+    return cat is not None, f"rm:{m['name']}@{m['version']}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("artifact", type=Path, help="export stage dir: manifest.json + eval_card.json")
+    ap.add_argument("--sql", type=Path, required=True, help="where the seal migration is written")
+    ap.add_argument("--catalog", type=Path, default=CATALOG)
+    a = ap.parse_args(argv)
+    try:
+        added, ref = publish(a.artifact, a.sql, a.catalog)
+    except (Refused, OSError, json.JSONDecodeError, KeyError) as exc:
+        sys.stderr.write(f"rm-publish: refused: {exc}\n")
+        return 1
+    sys.stdout.write(
+        f"rm-publish: {ref} catalog {'added' if added else 'unchanged'}, seal -> {a.sql}\n"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

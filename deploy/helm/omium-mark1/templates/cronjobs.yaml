@@ -1,7 +1,8 @@
 {{- $jobs := list
   (dict "name" "mark1-intel-hourly" "svc" "intel" "app" "mark1-intel-jobs" "image" "mark1-intel" "sa" "intel" "schedule" .Values.cronJobs.intelHourly "cadence" "--hourly" "env" "mark1.intelEnv" "tmp" .Values.intel.tmpSizeLimit)
-  (dict "name" "mark1-intel-nightly" "svc" "intel" "app" "mark1-intel-jobs" "image" "mark1-intel" "sa" "intel" "schedule" .Values.cronJobs.intelNightly "cadence" "--nightly" "env" "mark1.intelEnv" "tmp" .Values.intel.tmpSizeLimit "anthropic" true)
-  (dict "name" "adjudicator-nightly" "svc" "adjudicator" "app" "adjudicator-jobs" "image" "mark1-adjudicator" "sa" "adjudicator" "schedule" .Values.cronJobs.adjudicatorNightly "cadence" "--nightly" "env" "mark1.adjEnv" "tmp" "256Mi" "anthropic" true)
+  (dict "name" "mark1-intel-nightly" "svc" "intel" "app" "mark1-intel-jobs" "image" "mark1-intel" "sa" "intel" "schedule" .Values.cronJobs.intelNightly "cadence" "--nightly" "env" "mark1.intelEnv" "tmp" .Values.intel.tmpSizeLimit)
+  (dict "name" "mark1-intel-weekly" "svc" "intel" "app" "mark1-intel-jobs" "image" "mark1-intel" "sa" "intel" "schedule" .Values.cronJobs.intelWeekly "job" "digest.weekly" "env" "mark1.intelEnv" "tmp" .Values.intel.tmpSizeLimit "mail" true)
+  (dict "name" "adjudicator-nightly" "svc" "adjudicator" "app" "adjudicator-jobs" "image" "mark1-adjudicator" "sa" "adjudicator" "schedule" .Values.cronJobs.adjudicatorNightly "cadence" "--nightly" "env" "mark1.adjEnv" "tmp" "256Mi")
 }}
 {{- range $j := $jobs }}
 {{- $svc := index $.Values $j.svc }}
@@ -46,16 +47,26 @@ spec:
             {{- include "omium.containerSecurityContext" (dict "root" $ "svc" $j.svc) | nindent 12 }}
             image: {{ include "mark1.image" (dict "root" $ "name" $j.image "tag" $svc.imageTag "key" (printf "%s.imageTag" $j.svc)) }}
             # every active tenant from m1_tenant_directory (m1_084): a tester's tenant born after the static list gets its rollups too; the list stays for the witness
-            command: ["python", "-m", "app.jobs", "run", "--all", {{ $j.cadence | quote }}, "--tenant", "all"]
+            command: ["python", "-m", "app.jobs", "run", {{ if $j.job }}"--job", {{ $j.job | quote }}{{ else }}"--all", {{ $j.cadence | quote }}{{ end }}, "--tenant", "all"]
             env:
             {{- include $j.env $ | nindent 12 }}
-            {{- if $j.anthropic }}
-            - name: ANTHROPIC_API_KEY
+            {{- if $j.mail }}
+            - name: CUSTOMERIO_APP_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ $.Values.secrets.anthropic }}
-                  key: api_key
+                  name: {{ $.Values.secrets.customerio }}
+                  key: app_api_key
                   optional: true
+            - name: CUSTOMERIO_REGION
+              value: {{ $.Values.email.customerioRegion | quote }}
+            - name: EMAIL_FROM
+              value: {{ $.Values.email.from | quote }}
+            - name: PUBLIC_BASE_URL
+              value: {{ $.Values.config.publicBaseUrl | quote }}
+            {{- with $.Values.email.postalAddress }}
+            - name: EMAIL_POSTAL_ADDRESS
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             resources:
               {{- toYaml $svc.resources | nindent 14 }}

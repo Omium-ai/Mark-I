@@ -17,6 +17,11 @@ imageRegistry:
 # Empty ⇒ witness/rollout/sweep loops stay off (controld logs it) and the CronJobs are suspended.
 # ponytail: static list; a values PR per tenant until a lister exists.
 tenants: []
+# Omium's own team tenants only, never a customer: their staff's devices default contribute_outcomes on at enrollment (16 L8).
+dogfoodTenants: []
+# Enrollment subjects ("omium:<user id>") that count as Omium staff for that default; a verified @omium.ai email also counts
+# where the issuer sends email_verified (the Mark 1 user token does not yet, so staff on the app path need an entry here).
+staffSubjects: []
 
 config:
   postgresql:
@@ -27,8 +32,11 @@ config:
     ingestBucket: ""          # required — S3_INGEST_BUCKET (R6 probe + HeadBucket readiness)
     corpusBucket: ""          # INTEL_CORPUS_ROOT_URI = s3://<corpusBucket>; empty ⇒ corpus.export parks
     witnessBucket: ""         # WITNESS_BUCKET; needs tenants non-empty (boot refusal R1 otherwise)
+    rmBucket: ""              # INTEL_RM_ROOT_URI = s3://<rmBucket>; empty ⇒ rm.contributions parks
+    rmContributionsKmsKeyArn: ""  # INTEL_RM_CONTRIBUTIONS_KMS_KEY_ARN (platform TF output rm_contributions_kms_key_arn); empty with rmBucket set ⇒ rm.contributions refuses
   publicBaseUrl: https://api.omium.ai   # PUBLIC_BASE_URL (enrollment advertises base + /m1p/v1/ingest)
   userIssuer: https://api.omium.ai      # OMIUM_USER_ISSUER (auth-service MARK1_TOKEN_ISSUER)
+  llmRouterUrl: http://llm-router.omium.svc.cluster.local:8005   # LLM_ROUTER_URL — cloud judge + memory.extract (Nebius Token Factory); empty ⇒ both skip
 
 # k8s Secret names, all synced by ExternalSecrets in the gitops tree (SM omium/prod/mark1-*).
 # The chart only references them; keys are the SM JSON keys.
@@ -39,7 +47,10 @@ secrets:
   signingSeeds: mark1-signing-seeds                    # keys: device_token_seed server_chain_seed bundle_section_seed
   hmacPepper: mark1-hmac-pepper                        # key: pepper
   serviceToken: mark1-service-token                    # key: token
-  anthropic: mark1-anthropic                           # key: api_key (optional; memory.extract needs it)
+  evidenceToken: mark1-evidence-token                  # key: token (optional until synced; unset ⇒ controld refuses every E1 read) — controld + adjudicator only
+  customerio: mark1-customerio                         # key: app_api_key (optional; unset ⇒ nothing is emailed)
+  basetenRm: mark1-baseten-rm                          # key: api_key (optional; unset ⇒ the cloud RM job is a counted skip)
+  trainingPolicy: mark1-training-policy                # key: authorized_providers (optional; unset ⇒ no closed-provider row is trainable)
 
 serviceAccounts:
   controld: { roleArn: "" }        # required in prod — IRSA role with s3/kms on the ingest+witness buckets
@@ -81,6 +92,8 @@ adjudicator:
   port: 8000
   command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
   postgresRole: adjudicator_app
+  rmEndpointUrl: ""                # ADJ_RM_ENDPOINT_URL — the Baseten RM predict URL (16 §L6); empty ⇒ no cloud RM call
+  promotionGlobalTenant: ""        # ADJ_PROMOTION_GLOBAL_TENANT — holds global-scope RM heads (06 §12.4); empty ⇒ no public-data RM ever serves
   resources:
     requests: { cpu: 250m, memory: 512Mi }
     limits: { cpu: 1000m, memory: 1Gi }
@@ -114,7 +127,14 @@ cronJobs:
   intelHourly: "5 * * * *"         # tvo.rollup_verify
   intelNightly: "0 2 * * *"        # memory.extract → memory.admit → policy_compiler.compile, ope.score, corpus.export
   adjudicatorNightly: "0 3 * * *"  # gold.refresh, spectral.estimate → certs.recompute, readjudicate.run → promotion.step
+  intelWeekly: "0 9 * * 1"         # digest.weekly: the opt-in weekly savings email for the week just closed
   activeDeadlineSeconds: 10800
+
+# Customer.io transactional email (16-release L3): team invites (controld) and the weekly digest (intel).
+email:
+  from: noreply@mail.omium.ai      # EMAIL_FROM — must be on a Customer.io-verified domain (mail.omium.ai is)
+  customerioRegion: us             # CUSTOMERIO_REGION us|eu — the workspace's data centre
+  postalAddress: ""                # EMAIL_POSTAL_ADDRESS — the founder supplies it; empty ⇒ digest.weekly refuses to send
 
 networkPolicy:
   enabled: true                    # inert until the vpc-cni network-policy agent is on; shipped for parity
@@ -123,6 +143,7 @@ networkPolicy:
     - 10.0.22.0/24
     - 10.0.23.0/24
   kongNamespace: omium
+  llmRouterNamespace: omium        # llm-router:8005, the adjudicator's and intel's only model path
 
 monitoring:
   prometheusRule: true

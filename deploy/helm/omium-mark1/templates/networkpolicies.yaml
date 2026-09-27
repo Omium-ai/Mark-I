@@ -13,12 +13,14 @@
   "clickhouse" (dict "podSelector" (dict "matchLabels" (dict "app" "clickhouse")))
   "migrate" (dict "podSelector" (dict "matchLabels" (dict "app" "mark1-db-migrate")))
   "kong" (dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" $np.kongNamespace)) "podSelector" (dict "matchLabels" (dict "app" "kong")))
+  "llmRouter" (dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" $np.llmRouterNamespace)) "podSelector" (dict "matchLabels" (dict "app" "llm-router")))
 }}
 {{- $port := dict
   "controld" (list (dict "protocol" "TCP" "port" .Values.controld.port))
   "intel" (list (dict "protocol" "TCP" "port" .Values.intel.port))
   "adjudicator" (list (dict "protocol" "TCP" "port" .Values.adjudicator.port))
   "clickhouse" (list (dict "protocol" "TCP" "port" 9000))
+  "llmRouter" (list (dict "protocol" "TCP" "port" 8005))
 }}
 {{- $policies := list
   (dict "name" "default-deny-all" "spec" (dict "podSelector" (dict) "policyTypes" (list "Ingress" "Egress")))
@@ -36,11 +38,13 @@
       "ingress" (list (dict "from" (list $sel.controld) "ports" $port.intel))
       "egress" (list $egressPg $egressHttps
         (dict "to" (list $sel.controld) "ports" $port.controld)
-        (dict "to" (list $sel.adjudicator) "ports" $port.adjudicator))))
+        (dict "to" (list $sel.adjudicator) "ports" $port.adjudicator)
+        (dict "to" (list $sel.llmRouter) "ports" $port.llmRouter))))
   (dict "name" "adjudicator" "spec" (dict "podSelector" (get $sel.adjudicator "podSelector") "policyTypes" (list "Ingress" "Egress")
       "ingress" (list (dict "from" (list $sel.intel) "ports" $port.adjudicator))
       "egress" (list $egressPg $egressHttps
-        (dict "to" (list $sel.controld) "ports" $port.controld))))
+        (dict "to" (list $sel.controld) "ports" $port.controld)
+        (dict "to" (list $sel.llmRouter) "ports" $port.llmRouter))))
   (dict "name" "clickhouse" "spec" (dict "podSelector" (get $sel.clickhouse "podSelector") "policyTypes" (list "Ingress" "Egress")
       "ingress" (list (dict "from" (list $sel.controld $sel.migrate) "ports" $port.clickhouse))))
   (dict "name" "mark1-db-migrate" "spec" (dict "podSelector" (get $sel.migrate "podSelector") "policyTypes" (list "Egress")

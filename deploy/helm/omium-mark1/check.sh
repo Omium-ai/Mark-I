@@ -37,6 +37,10 @@ ch = by("StatefulSet")[0]["spec"]["template"]["spec"]
 vol = lambda c, path: [m["name"] for m in c["volumeMounts"] if m["mountPath"] == path][0]
 assert vol(ch["initContainers"][0], "/users.d") == vol(ch["containers"][0], "/etc/clickhouse-server/users.d"), "users.d must be rendered into the volume the server reads"
 assert by("HorizontalPodAutoscaler")[0]["spec"]["scaleTargetRef"]["name"] == "controld"
+for d in by("Deployment") + by("CronJob"):
+    tpl = d["spec"]["template"] if d["kind"] != "CronJob" else d["spec"]["jobTemplate"]["spec"]["template"]
+    refs = [e["valueFrom"]["secretKeyRef"]["name"] for c in tpl["spec"]["containers"] for e in c.get("env", []) if "secretKeyRef" in e.get("valueFrom", {})]
+    assert ("mark1-evidence-token" in refs) == (tpl["metadata"]["labels"]["app"] in ("controld", "adjudicator", "adjudicator-jobs")), f"{d['metadata']['name']}: the E1 read credential belongs to controld and the adjudicator alone"
 rules = [r["alert"] for g in by("PrometheusRule")[0]["spec"]["groups"] for r in g["rules"]]
 assert "Mark1StructuralAssumptionBroken" in rules and by("PrometheusRule")[0]["metadata"]["labels"]["release"] == "kube-prometheus-stack"
 PY

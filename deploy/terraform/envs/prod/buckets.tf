@@ -104,6 +104,34 @@ resource "aws_s3_bucket_lifecycle_configuration" "ingest" {
       days = 32
     }
   }
+
+  rule {
+    id     = "contribution-ttl"
+    status = "Enabled"
+    filter {
+      tag {
+        key   = "class"
+        value = "contribution"
+      }
+    }
+    expiration {
+      days = 365
+    }
+  }
+
+  rule {
+    id     = "evidence-ttl"
+    status = "Enabled"
+    filter {
+      tag {
+        key   = "class"
+        value = "evidence"
+      }
+    }
+    expiration {
+      days = 32
+    }
+  }
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "corpus" {

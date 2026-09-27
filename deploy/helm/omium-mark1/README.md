@@ -15,7 +15,7 @@ Deployed by Argo CD (`omium-gitops/argocd-prod/omium-prod-mark1.yaml`, multi-sou
 | `mark1-signing-seeds` | `device_token_seed`, `server_chain_seed`, `bundle_section_seed` (32 B hex, distinct) |
 | `mark1-hmac-pepper` | `pepper` |
 | `mark1-service-token` | `token` |
-| `mark1-anthropic` (optional) | `api_key` — `memory.extract` constructs `AsyncAnthropic()`; absent ⇒ that job parks |
+| `mark1-evidence-token` | `token` — the adjudicator's E1 read credential (`EVIDENCE_READ_TOKEN` on controld, `ADJ_EVIDENCE_TOKEN` on the adjudicator; never intel). Optional ref: absent, controld refuses every E1 read and the judge falls back to E0 |
 
 IRSA roles (`serviceAccounts.*.roleArn`), the S3 buckets, the ECR repos `omium/mark1-{controld,intel,adjudicator,migrate}`
 and the `mark1` database's host come from the Mark 1 Terraform root. Images are pinned by `<sha7>` — an empty

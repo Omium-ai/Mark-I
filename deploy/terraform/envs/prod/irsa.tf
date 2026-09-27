@@ -26,10 +26,14 @@ data "aws_iam_policy_document" "controld" {
     resources = [local.bucket_arns.ingest]
   }
   statement {
-    sid       = "QuarantineSweep"
-    effect    = "Allow"
-    actions   = ["s3:DeleteObject"]
-    resources = ["${local.bucket_arns.ingest}/t/*/quarantine/*"]
+    sid     = "RetentionSweeps"
+    effect  = "Allow"
+    actions = ["s3:DeleteObject"]
+    resources = [
+      "${local.bucket_arns.ingest}/t/*/quarantine/*",
+      "${local.bucket_arns.ingest}/t/*/contributions/v1/*",
+      "${local.bucket_arns.ingest}/t/*/evidence/v1/*",
+    ]
   }
   statement {
     sid       = "WitnessAppend"
@@ -76,6 +80,12 @@ data "aws_iam_policy_document" "intel" {
     resources = [local.bucket_arns.ingest]
   }
   statement {
+    sid       = "RmContributionsWrite"
+    effect    = "Allow"
+    actions   = ["s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = ["arn:aws:s3:::omium-training-datasets-prod-${local.account_id}/rm/contributions/*"]
+  }
+  statement {
     sid       = local.kms_via_s3.sid
     effect    = "Allow"
     actions   = local.kms_via_s3.actions
@@ -118,7 +128,7 @@ locals {
   irsa = {
     controld = {
       service_account = "controld"
-      description     = "IRSA: controld -> ingest landing/quarantine sweep, witness heads, pooled KMS via S3"
+      description     = "IRSA: controld -> ingest landing, quarantine/contribution/evidence sweeps, witness heads, pooled KMS via S3"
       policy_json     = data.aws_iam_policy_document.controld.json
     }
     intel = {

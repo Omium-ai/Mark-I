@@ -205,7 +205,8 @@ def py_tests() -> frozenset[str]:
     # and is the Phase-1 gate's own harness (mark1d -> controld -> ClickHouse -> verifier);
     # the rows it proves are the ones the whole plan hangs on.
     for pkg in ("python/shared/mark1_receipts/tests", "python/adjudicator/tests",
-                "python/intel/tests", "conformance/tenancy", "conformance/e2e"):
+                "python/intel/tests", "conformance/tenancy", "conformance/e2e",
+                "deploy/baseten/mark1-rm/tests"):
         out = _run([sys.executable, "-m", "pytest", "--collect-only", "-q",
                     pkg, "-o", "asyncio_mode=auto"], ROOT)
         for line in out.splitlines():

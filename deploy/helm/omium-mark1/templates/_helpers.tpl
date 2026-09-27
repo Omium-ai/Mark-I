@@ -80,9 +80,25 @@ http://{{ .name }}.{{ include "mark1.ns" .root }}.svc.cluster.local:{{ .port }}
     secretKeyRef:
       name: {{ .Values.secrets.hmacPepper }}
       key: pepper
+- name: INTEL_AUTHORIZED_TRAINING_PROVIDERS
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.secrets.trainingPolicy }}
+      key: authorized_providers
+      optional: true
+- name: LLM_ROUTER_URL
+  value: {{ .Values.config.llmRouterUrl | quote }}
 {{- with .Values.config.s3.corpusBucket }}
 - name: INTEL_CORPUS_ROOT_URI
   value: "s3://{{ . }}"
+{{- end }}
+{{- with .Values.config.s3.rmBucket }}
+- name: INTEL_RM_ROOT_URI
+  value: "s3://{{ . }}"
+- name: INTEL_CONTRIBUTIONS_ROOT_URI
+  value: "s3://{{ $.Values.config.s3.ingestBucket }}"
+- name: INTEL_RM_CONTRIBUTIONS_KMS_KEY_ARN
+  value: {{ $.Values.config.s3.rmContributionsKmsKeyArn | quote }}
 {{- end }}
 - name: AWS_REGION
   value: {{ .Values.global.region | quote }}
@@ -97,11 +113,29 @@ http://{{ .name }}.{{ include "mark1.ns" .root }}.svc.cluster.local:{{ .port }}
     secretKeyRef:
       name: {{ .Values.secrets.serviceToken }}
       key: token
+- name: ADJ_EVIDENCE_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.secrets.evidenceToken }}
+      key: token
+      optional: true
 - name: ADJ_TENANT_HMAC_PEPPER
   valueFrom:
     secretKeyRef:
       name: {{ .Values.secrets.hmacPepper }}
       key: pepper
+- name: LLM_ROUTER_URL
+  value: {{ .Values.config.llmRouterUrl | quote }}
+- name: ADJ_RM_ENDPOINT_URL
+  value: {{ .Values.adjudicator.rmEndpointUrl | quote }}
+- name: ADJ_PROMOTION_GLOBAL_TENANT
+  value: {{ .Values.adjudicator.promotionGlobalTenant | quote }}
+- name: ADJ_RM_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.secrets.basetenRm }}
+      key: api_key
+      optional: true
 - name: AWS_REGION
   value: {{ .Values.global.region | quote }}
 {{- end -}}
