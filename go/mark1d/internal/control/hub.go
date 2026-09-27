@@ -68,6 +68,7 @@ type Hub struct {
 	lastRequest map[[16]byte]uint64
 	taskTokens  map[[16]byte]uint64
 	resolver    func(id uuid.UUID) (agent, root string, ok bool)
+	started     func() // called under h.mu on every SessionStart; must not block (the consent sync, handed to Server.background)
 }
 
 // SetTokensFile arms the per-session token persistence at path: the last run's counts seed a session's live card, and counts flush every few seconds while they change.
@@ -131,13 +132,6 @@ func (h *Hub) EstimateBlock(session [16]byte) uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.lastRequest[session]
-}
-
-// EstimateArrest is what the knee saved: the next attempt, at this task's mean attempt cost so far.
-func (h *Hub) EstimateArrest(task [16]byte, attempts uint32) uint64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.taskTokens[task] / uint64(max(attempts, 1))
 }
 
 func family(ev *m1pv1.Event) string {
@@ -210,22 +204,32 @@ func frameJSON(ev *m1pv1.Event) ([]byte, error) {
 	return json.Marshal(m)
 }
 
-// Arrest is the knee stop the gate answered (fabric.Gate.Answer's "retry loop arrested at the knee" row); the gate carries no event, so this is its only record.
-func (h *Hub) Arrest(session, task [16]byte, k verdict.KneeState, evidenceRef string) {
+// Arrest is the knee stop the gate answered (fabric.Gate.Answer's "retry loop arrested at the knee" row); the gate carries no event, so this is its only record. It returns the row's tokens_saved_estimate (EstimateArrest at k.N) so the ledger's GuardDecision states the same number the app was shown.
+func (h *Hub) Arrest(session, task [16]byte, k verdict.KneeState, evidenceRef string) uint64 {
 	row := map[string]any{
 		"type": "arrest", "id": uuid.NewString(), "time": time.Now().UTC().Format(time.RFC3339),
 		"task_id": uuid.UUID(task).String(), "session_id": uuid.UUID(session).String(),
 		"attempt": k.N, "p_lcb": nil, "v": nil, "c_n": nil, "inequality": nil, "evidence_ref": nullable(evidenceRef),
+		"knee_basis": nil, "round": nil,
+	}
+	if k.Basis != "unknown" {
+		row["knee_basis"] = nullable(k.Basis) // ADR-0013: an unrecorded basis is null beside a round, so an app that knows only the three words still parses the row
+	}
+	if k.Basis != "" {
+		row["round"] = k.R
 	}
 	if k.Evaluable {
 		row["p_lcb"], row["v"], row["c_n"] = k.PLCB, k.VTask, k.CostN
 		row["inequality"] = fmt.Sprintf("%.3f * %.2f <= %.2f", k.PLCB, k.VTask, k.CostN)
 	}
-	data, _ := json.Marshal(row)
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	saved := h.taskTokens[task] / uint64(max(k.N, 1)) // #nosec G115 -- attempt counts are small and positive
+	row["tokens_saved_estimate"] = saved
+	data, _ := json.Marshal(row)
 	h.verify = ring(append(h.verify, row), verifyRing)
 	h.fanout(frame{family: "arrest", data: data})
+	return saved
 }
 
 func (h *Hub) verifyRow(ev *m1pv1.Event, kind string, fields map[string]any) {
@@ -320,6 +324,9 @@ func (h *Hub) track(ev *m1pv1.Event) {
 	copy(sid[:], ev.GetSessionId())
 	switch b := ev.GetBody().(type) {
 	case *m1pv1.Event_SessionStart:
+		if h.started != nil {
+			h.started()
+		}
 		h.sessions[sid] = &LiveSession{Agent: b.SessionStart.GetAgent(), SessionID: uuid.UUID(sid).String(), Tokens: h.seeds[uuid.UUID(sid).String()], started: time.Now(), seen: time.Now()}
 		for len(h.sessions) > maxLiveSessions {
 			var oldest [16]byte

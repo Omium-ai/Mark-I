@@ -32,7 +32,7 @@ func violatedEntry(stop, stale bool) verdict.Cached {
 			Verdict:   m1pv1.Verdict_VERDICT_VIOLATED,
 			Posterior: []float64{0.02, 0.90, 0.05, 0.03},
 		},
-		Knee:       verdict.KneeState{N: 2, PLCB: 0.4, VTask: 10, CostN: 1, CostBasis: "usd", Stop: stop, Stale: stale, Evaluable: true},
+		Knee:       verdict.KneeState{N: 2, R: 2, PLCB: 0.4, Basis: "certified", VTask: 10, CostN: 1, CostBasis: "usd", Stop: stop, Stale: stale, Evaluable: true},
 		ComputedAt: time.Now(),
 	}
 }
@@ -447,8 +447,33 @@ func TestGateBlockReasonStatesNoFalseInequality(t *testing.T) {
 	}
 	// And an entry that WAS evaluated still shows its arithmetic.
 	g2 := blockableGate(t, stubReader{{1}: violatedEntry(false, false)})
-	if r := g2.Answer(query(1, 5000), testSession).GetReason(); !strings.Contains(r, "p̂_LCB 0.400 · V 10.00 > c(n) 1.00") {
+	if r := g2.Answer(query(1, 5000), testSession).GetReason(); !strings.Contains(r, "(attempt 2, repair round 2): p̂_LCB 0.400 · V 10.00 > c(r) 1.00") {
 		t.Fatalf("an evaluated knee lost its arithmetic: %q", r)
+	}
+}
+
+// TestGatePriorKneeIsNotWordedAsAMeasurement is ADR-0012's wording rule: a bootstrap prior reads "prior p(r)", never p̂_LCB, and the reason names both n and r.
+func TestGatePriorKneeIsNotWordedAsAMeasurement(t *testing.T) {
+	below, stop := violatedEntry(false, false), violatedEntry(true, false)
+	below.Knee.N, below.Knee.R, below.Knee.Basis = 3, 1, "prior"
+	stop.Knee.N, stop.Knee.R, stop.Knee.Basis = 5, 3, "prior"
+	g := blockableGate(t, stubReader{{1}: below, {2}: stop})
+	if r := g.Answer(query(1, 5000), testSession).GetReason(); r != "verdict violated below the knee (attempt 3, repair round 1): prior p(r) 0.400 · V 10.00 > c(r) 1.00" {
+		t.Fatalf("block reason %q", r)
+	}
+	v := g.Answer(query(2, 5000), testSession)
+	if !strings.Contains(v.GetReason(), "stop at attempt 5, repair round 3 — prior p(r) 0.400") || strings.Contains(v.GetSystemMessage(), "p̂_LCB") {
+		t.Fatalf("knee reason %q / message %q", v.GetReason(), v.GetSystemMessage())
+	}
+}
+
+// TestGateUnrecordedKneeBasisClaimsNeither is ADR-0013: a bundle that did not say where p came from is worded as neither a prior nor a measured bound.
+func TestGateUnrecordedKneeBasisClaimsNeither(t *testing.T) {
+	stop := violatedEntry(true, false)
+	stop.Knee.N, stop.Knee.R, stop.Knee.Basis = 4, 2, "unknown"
+	v := blockableGate(t, stubReader{{1}: stop}).Answer(query(1, 5000), testSession)
+	if !strings.Contains(v.GetReason(), "repair round 2 — p(r), basis unrecorded 0.400") || strings.Contains(v.GetSystemMessage(), "p̂_LCB") || strings.Contains(v.GetSystemMessage(), "prior p(r)") {
+		t.Fatalf("knee reason %q / message %q", v.GetReason(), v.GetSystemMessage())
 	}
 }
 
@@ -815,7 +840,7 @@ func TestGateKneeCarriesSystemMessage(t *testing.T) {
 	if v.GetDecision() != m1pv1.GateDecision_GATE_DECISION_ALLOW || v.GetEvidenceRef() != "" {
 		t.Fatalf("knee answered %v evidence_ref %q, want ALLOW with none (the shim reads evidence_ref on BLOCK only)", v.GetDecision(), v.GetEvidenceRef())
 	}
-	want := "mark1 stop-gate: retry loop arrested at the knee — verdict violated; knee governor: stop at attempt 2 — p̂_LCB 0.400 · V 10.00 ≤ c(n) 1.00 under usd; evidence: " + ref
+	want := "mark1 stop-gate: retry loop arrested at the knee — verdict violated; knee governor: stop at attempt 2, repair round 2 — p̂_LCB 0.400 · V 10.00 ≤ c(r) 1.00 under usd; evidence: " + ref
 	if v.GetSystemMessage() != want {
 		t.Fatalf("system_message\n got: %q\nwant: %q", v.GetSystemMessage(), want)
 	}

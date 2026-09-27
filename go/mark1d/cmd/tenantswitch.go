@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/contrib"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/memory"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spill"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
@@ -82,8 +83,20 @@ func settleTenantSwitch(log *slog.Logger, cfg config) error {
 			return err
 		}
 	}
+	if err := contrib.Purge(cfg.stateDir); err != nil {
+		return err
+	}
 	log.Info("mark1d: tenant switch settled", "from", prev.TenantID)
 	return nil
+}
+
+// reconcileContribution runs at every session start, whatever wrote the enrollment (`mark1 enroll` bypasses the control API): contribute_outcomes set under another tenant is turned off, undecided and purged (contrib.ReconcileTenant).
+func reconcileContribution(log *slog.Logger, cfg config) error {
+	reset, err := contrib.ReconcileTenant(cfg.stateDir, cfg.tenantID)
+	if reset {
+		log.Warn("mark1d: contribute_outcomes was set under another tenant; turned off and its pending contributions purged", "tenant_id", cfg.tenantID)
+	}
+	return err
 }
 
 // drainParked uploads every parked spool under the token it was captured under, never the live one, until it empties (then it is removed) or that token expires (then it stays on disk).

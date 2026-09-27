@@ -47,6 +47,10 @@ type taskVotes struct {
 	seen    map[string]string // per anchor, the fingerprint (tree + evidence) its last vote carried
 	tree    map[string]string // per anchor, the tree fingerprint the runner noted for its next vote
 	attempt int
+	// ADR-0012's repair round: round is r for the current attempt, prevSig/prevRound freeze the finished attempt's failure signature and r.
+	round     int
+	prevSig   map[string]bool
+	prevRound int
 	// evidence is the typed EvidenceRecord riding on each anchor's newest
 	// vote, kept beside the vote because the fusion tee strips it and the
 	// verdict cache never held it -- FR-VERIFY-011's evidence_ref has no
@@ -92,7 +96,7 @@ func (v *Votes) Admit(ctx context.Context, ev *m1pv1.Event) error {
 	if !ok {
 		return err
 	}
-	votes, attempt, slow := v.record(task, verdict.AnchorVote{
+	votes, attempt, round, slow := v.record(task, verdict.AnchorVote{
 		AnchorID: av.GetAnchorId(),
 		Vote:     av.GetVote(),
 		// The anti-tamper envelope decides admissibility, not the vote value:
@@ -100,10 +104,10 @@ func (v *Votes) Admit(ctx context.Context, ev *m1pv1.Event) error {
 		Tamper: av.GetIntegrity().GetTamper(),
 	}, av.GetEvidence())
 	if slow {
-		v.eng.PublishRevised(task, votes, attempt)
+		v.eng.PublishRevisedRound(task, votes, attempt, round)
 		return err
 	}
-	v.eng.Recompute(task, votes, attempt)
+	v.eng.RecomputeRound(task, votes, attempt, round)
 	return err
 }
 
@@ -147,7 +151,7 @@ func (v *Votes) resolve(ev *m1pv1.Event) (verdict.TaskID, bool) {
 // in, so it never bumps n on its own.
 // ponytail: per-task state is never evicted — task close (04 §9.2) is the
 // eviction trigger and the daemon does not segment tasks yet.
-func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote, ev *m1pv1.EvidenceRecord) ([]verdict.AnchorVote, int, bool) {
+func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote, ev *m1pv1.EvidenceRecord) ([]verdict.AnchorVote, int, int, bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	tv := v.tasks[task]
@@ -156,6 +160,7 @@ func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote, ev *m1pv1.E
 	}
 	fp := tv.tree[vote.AnchorID] + "|" + fingerprint(vote, ev)
 	if tv.voted[vote.AnchorID] && tv.seen[vote.AnchorID] != fp {
+		tv.prevSig, tv.prevRound = tv.signature(), tv.round
 		tv.attempt++
 		tv.voted = map[string]bool{}
 	}
@@ -163,11 +168,41 @@ func (v *Votes) record(task verdict.TaskID, vote verdict.AnchorVote, ev *m1pv1.E
 	tv.seen[vote.AnchorID] = fp
 	tv.latest[vote.AnchorID] = vote
 	tv.evidence[vote.AnchorID] = ev
+	tv.round = repairRound(tv.prevSig, tv.prevRound, tv.signature())
 	out := make([]verdict.AnchorVote, 0, len(tv.latest))
 	for _, id := range slices.Sorted(maps.Keys(tv.latest)) {
 		out = append(out, tv.latest[id])
 	}
-	return out, tv.attempt, v.slow[vote.AnchorID]
+	return out, tv.attempt, tv.round, v.slow[vote.AnchorID]
+}
+
+// signature is ADR-0012's failure signature of the task's current vote set: the tool:diagnostic_code of every untampered VIOLATED vote (the anchor id when it carried no evidence). Empty ⇔ nothing failing.
+func (tv *taskVotes) signature() map[string]bool {
+	sig := map[string]bool{}
+	for id, vote := range tv.latest {
+		if vote.Tamper || vote.Vote != m1pv1.Verdict_VERDICT_VIOLATED {
+			continue
+		}
+		if e := tv.evidence[id]; e != nil {
+			sig[e.GetTool()+":"+e.GetDiagnosticCode()] = true
+			continue
+		}
+		sig[id+":"] = true
+	}
+	return sig
+}
+
+// repairRound is ADR-0012's r: consecutive failing attempts whose signatures overlap the previous one's. A passing attempt is round 0; a failure sharing nothing with the last one starts a new repair at 1.
+func repairRound(prev map[string]bool, prevRound int, cur map[string]bool) int {
+	if len(cur) == 0 {
+		return 0
+	}
+	for k := range cur {
+		if prev[k] {
+			return prevRound + 1
+		}
+	}
+	return 1
 }
 
 // Evidence renders the failing evidence behind a task's current verdict for

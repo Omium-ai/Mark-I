@@ -226,6 +226,17 @@ func (g *Gate) resolve(q *m1pv1.GateQuery, session [16]byte) (verdict.TaskID, bo
 	return got, true
 }
 
+// pLabel names the knee's p by where the bundle says it came from: a bootstrap prior is never worded as a measured lower bound (ADR-0012), and a bundle that did not say claims neither (ADR-0013).
+func pLabel(k verdict.KneeState) string {
+	switch k.Basis {
+	case "prior":
+		return "prior p(r)"
+	case "certified", "anchor_grounded":
+		return "p̂_LCB"
+	}
+	return "p(r), basis unrecorded"
+}
+
 func allow(reason string) *m1pv1.GateVerdict {
 	return &m1pv1.GateVerdict{Decision: m1pv1.GateDecision_GATE_DECISION_ALLOW, Reason: reason}
 }
@@ -285,7 +296,7 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		capN = maxConsecutiveBlocks
 	}
 	if ctr.Consecutive >= capN {
-		// The cap is a retry loop Mark 1 ends: the human is told (08 §5.1's Stop row, like the knee) and the ledger records it (block_cap), else the loop's last state — the failure still there — is invisible to everyone; in bootstrap the knee never fires, so this is the arrest a tester actually gets.
+		// The cap is a retry loop Mark 1 ends: the human is told (08 §5.1's Stop row, like the knee) and the ledger records it (block_cap), else the loop's last state — the failure still there — is invisible to everyone; it is the arrest a loop gets when the knee is not evaluable or its repair rounds keep restarting (ADR-0012).
 		v := allow(CodeGateCap + " consecutive block cap")
 		if e, ok := g.reader.Get(task); ok && e.Verdict.GetVerdict() == m1pv1.Verdict_VERDICT_VIOLATED {
 			ev := g.evidence(task)
@@ -342,8 +353,8 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		v.Reason = CodeStaleCert + " stale_cert"
 		return note(v, e.UnknownVoters)
 	}
-	// BLOCK forces continuation: verdict violated AND another attempt is still
-	// economical (p̂_LCB(n)·V(task) > c(n)). At the knee — or any other verdict
+	// BLOCK forces continuation: verdict violated AND another repair round is
+	// still economical (p(r)·V(task) > c(r), ADR-0012). At the knee — or any other verdict
 	// — the agent is allowed to stop, with verdict + evidence as the reason.
 	if e.Verdict.GetVerdict() == m1pv1.Verdict_VERDICT_VIOLATED && !e.Knee.Stop {
 		// 7. FR-POLICY-006: the one closed answer opens unless the operator
@@ -378,15 +389,15 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		// certainly-hopeless — the reading D-Z forbids. Not evaluable ⇒ no
 		// numbers.
 		if e.Knee.Evaluable {
-			v.Reason = fmt.Sprintf("verdict violated below the knee (attempt %d): p̂_LCB %.3f · V %.2f > c(n) %.2f", e.Knee.N, e.Knee.PLCB, e.Knee.VTask, e.Knee.CostN)
+			v.Reason = fmt.Sprintf("verdict violated below the knee (attempt %d, repair round %d): %s %.3f · V %.2f > c(r) %.2f", e.Knee.N, e.Knee.R, pLabel(e.Knee), e.Knee.PLCB, e.Knee.VTask, e.Knee.CostN)
 		} else {
-			v.Reason = fmt.Sprintf("verdict violated; the knee is not evaluable at attempt %d, so continuation is not arrested", e.Knee.N)
+			v.Reason = fmt.Sprintf("verdict violated; the knee is not evaluable at attempt %d, repair round %d, so continuation is not arrested", e.Knee.N, e.Knee.R)
 		}
 		return note(v, e.UnknownVoters)
 	}
 	g.blocks.RecordAllow(task)
 	if e.Knee.Stop {
-		v.Reason = fmt.Sprintf("knee governor: stop at attempt %d — p̂_LCB %.3f · V %.2f ≤ c(n) %.2f under %s", e.Knee.N, e.Knee.PLCB, e.Knee.VTask, e.Knee.CostN, e.Knee.CostBasis)
+		v.Reason = fmt.Sprintf("knee governor: stop at attempt %d, repair round %d — %s %.3f · V %.2f ≤ c(r) %.2f under %s", e.Knee.N, e.Knee.R, pLabel(e.Knee), e.Knee.PLCB, e.Knee.VTask, e.Knee.CostN, e.Knee.CostBasis)
 		// 08 §5.1 Stop row at the knee: the human is told, never the model — and only where a BLOCK was otherwise due.
 		if e.Verdict.GetVerdict() == m1pv1.Verdict_VERDICT_VIOLATED && g.armed() {
 			v.SystemMessage = "mark1 stop-gate: retry loop arrested at the knee — verdict violated; " + v.Reason

@@ -241,30 +241,31 @@ func TestClassTag(t *testing.T) {
 // silence — which for a family that ought to be billing-grade is data loss.
 func TestClassCensusIsClosedOverEveryBodyType(t *testing.T) {
 	want := map[string]spool.Class{
-		"Usage":              spool.ClassBilling,
-		"VerdictEvent":       spool.ClassBilling,
-		"ReceiptCheckpoint":  spool.ClassBilling,
-		"SessionStart":       spool.ClassDiagnostic,
-		"SessionEnd":         spool.ClassDiagnostic,
-		"TaskOpen":           spool.ClassDiagnostic,
-		"TaskClose":          spool.ClassDiagnostic,
-		"Turn":               spool.ClassDiagnostic,
-		"ToolUse":            spool.ClassDiagnostic,
-		"ModelRequest":       spool.ClassDiagnostic,
-		"ModelResponse":      spool.ClassDiagnostic,
-		"CoverageTransition": spool.ClassDiagnostic, // per-event receipted AND diagnostic — 07 §6 names it
-		"GuardDecision":      spool.ClassDiagnostic,
-		"EdgeHealth":         spool.ClassDiagnostic,
-		"QuarantineDeletion": spool.ClassDiagnostic, // the on-disk device-signed receipt is the durable copy (NFR-OPERABILITY-003)
-		"AnchorVote":         spool.ClassDiagnostic,
-		"JudgeVote":          spool.ClassDiagnostic,
-		"RmScore":            spool.ClassDiagnostic,
-		"ConsistencyVote":    spool.ClassDiagnostic,
-		"CortexInjection":    spool.ClassDiagnostic,
-		"MemoryInjection":    spool.ClassDiagnostic,
-		"ArtifactOutcome":    spool.ClassDiagnostic,
-		"RouteDecision":      spool.ClassDiagnostic,
-		"EvidenceExcerpt":    spool.ClassDiagnostic,
+		"Usage":               spool.ClassBilling,
+		"VerdictEvent":        spool.ClassBilling,
+		"ReceiptCheckpoint":   spool.ClassBilling,
+		"SessionStart":        spool.ClassDiagnostic,
+		"SessionEnd":          spool.ClassDiagnostic,
+		"TaskOpen":            spool.ClassDiagnostic,
+		"TaskClose":           spool.ClassDiagnostic,
+		"Turn":                spool.ClassDiagnostic,
+		"ToolUse":             spool.ClassDiagnostic,
+		"ModelRequest":        spool.ClassDiagnostic,
+		"ModelResponse":       spool.ClassDiagnostic,
+		"CoverageTransition":  spool.ClassDiagnostic, // per-event receipted AND diagnostic — 07 §6 names it
+		"GuardDecision":       spool.ClassDiagnostic,
+		"EdgeHealth":          spool.ClassDiagnostic,
+		"QuarantineDeletion":  spool.ClassDiagnostic, // the on-disk device-signed receipt is the durable copy (NFR-OPERABILITY-003)
+		"AnchorVote":          spool.ClassDiagnostic,
+		"JudgeVote":           spool.ClassDiagnostic,
+		"RmScore":             spool.ClassDiagnostic,
+		"ConsistencyVote":     spool.ClassDiagnostic,
+		"CortexInjection":     spool.ClassDiagnostic,
+		"MemoryInjection":     spool.ClassDiagnostic,
+		"ArtifactOutcome":     spool.ClassDiagnostic,
+		"RouteDecision":       spool.ClassDiagnostic,
+		"EvidenceExcerpt":     spool.ClassDiagnostic,
+		"OutcomeContribution": spool.ClassDiagnostic, // shed is retried: contrib keeps the pending record until Admit succeeds (16 L8)
 	}
 
 	od := (&m1pv1.Event{}).ProtoReflect().Descriptor().Oneofs().ByName("body")

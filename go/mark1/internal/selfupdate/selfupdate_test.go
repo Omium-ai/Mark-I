@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -512,5 +513,29 @@ func TestSwapRollsBackWhenAStagedBinaryIsMissing(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, b+".old")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s.old left behind after rollback", b)
 		}
+	}
+}
+
+func TestExtractLeavesTheRewardModelRuntimeAlone(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "edge.tar.gz")
+	if err := os.WriteFile(archive, tarball(t, map[string]string{"mark1d": "new", "rm-runtime/llama-server": "stub", "rm-runtime/libllama.so.0": "lib"}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	names, err := extract(archive, filepath.Join(t.TempDir(), "stage"))
+	if err != nil || !reflect.DeepEqual(names, []string{"mark1d"}) {
+		t.Fatalf("extract: %v %v", names, err)
+	}
+}
+
+// every release tarball since v0.1.4 carries the offline receipt verifier; an update must install it, not refuse the release
+func TestExtractInstallsTheReceiptVerifier(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "edge.tar.gz")
+	if err := os.WriteFile(archive, tarball(t, map[string]string{"mark1d": "new", "mark1-verifier": "v"}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	names, err := extract(archive, filepath.Join(t.TempDir(), "stage"))
+	sort.Strings(names)
+	if err != nil || !reflect.DeepEqual(names, []string{"mark1-verifier", "mark1d"}) {
+		t.Fatalf("extract: %v %v", names, err)
 	}
 }

@@ -415,6 +415,7 @@ func (p *Plane) child(bin, root string) supervise.Child {
 				"--memory-file", memory.CustodyPath(p.cfg.StateDir),
 				"--ranker-file", RankerFile(p.cfg.StateDir))
 			procattr.Hide(cmd)
+			cmd.Env = supervise.ChildEnv()
 			cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 			cmd.Cancel = func() error {
 				// SIGINT is the only stop cortexd listens for (tokio ctrl_c,

@@ -39,9 +39,32 @@ type Report struct {
 	Bundle     *Bundle      `json:"bundle"` // null until the policy client persists one
 	Off        Off          `json:"off"`
 	StopGate   cli.StopGate `json:"stop_gate"`
+	// RewardModel is mark1d's <state>/rm/status.json (16 §L6); null until the daemon has reached the reward model.
+	RewardModel *RewardModel `json:"reward_model"`
 	// Control is GET /v1/status verbatim (desktop spec §7.1); absent when the daemon did not answer.
 	Control json.RawMessage `json:"control,omitempty"`
 	live    *Live
+}
+
+// RewardModel mirrors go/mark1d/internal/rm Status: the worst model's state and each model's own.
+type RewardModel struct {
+	State   string `json:"state"`
+	Detail  string `json:"detail"`
+	Backlog int64  `json:"rm_backlog,omitempty"`
+	Models  []struct {
+		ModelID string `json:"model_id"`
+		State   string `json:"state"`
+		Detail  string `json:"detail,omitempty"`
+	} `json:"models"`
+}
+
+func readRewardModel(stateDir string) *RewardModel {
+	var r RewardModel
+	b, err := os.ReadFile(filepath.Join(stateDir, "rm", "status.json")) //nolint:gosec // G304: under the state dir
+	if err != nil || json.Unmarshal(b, &r) != nil {
+		return nil
+	}
+	return &r
 }
 
 type Enrollment struct {
@@ -196,6 +219,7 @@ func Run(env *cli.Env, opts Options) error {
 	rep.Bundle = readBundleMeta(env)
 	rep.Off = readOff(env)
 	rep.StopGate = env.ReadStopGate()
+	rep.RewardModel = readRewardModel(env.StateDir)
 
 	return env.Emit(rep, func(w io.Writer) { renderHuman(w, &rep) })
 }
@@ -404,6 +428,23 @@ func renderHuman(w io.Writer, r *Report) {
 		_, _ = fmt.Fprintf(w, "off           inactive\n")
 	}
 	_, _ = fmt.Fprintf(w, "stop gate     %s\n", r.StopGate)
+	switch rm := r.RewardModel; {
+	case rm == nil:
+		_, _ = fmt.Fprintf(w, "reward model  not started (off, or the daemon has not reached it)\n")
+	case len(rm.Models) == 0:
+		_, _ = fmt.Fprintf(w, "reward model  %s: %s\n", rm.State, rm.Detail)
+	default:
+		for _, m := range rm.Models {
+			line := "reward model  " + m.ModelID + " " + m.State
+			if m.Detail != "" {
+				line += " — " + m.Detail
+			}
+			_, _ = fmt.Fprintln(w, line)
+		}
+	}
+	if rm := r.RewardModel; rm != nil && rm.Backlog > 0 {
+		_, _ = fmt.Fprintf(w, "reward model  %d finished tasks dropped unscored this session (queue full, oldest first)\n", rm.Backlog)
+	}
 }
 
 // Live is the daemon's own answer, GET /v1/status on the control API (desktop spec §7.1).

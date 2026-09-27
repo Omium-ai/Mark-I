@@ -76,6 +76,7 @@ type RunSpec struct {
 	Argv       []string          // argv[0] absolute — the consented BinaryPath
 	WorktreeRO string            // cwd; writes confined to here + scratch (doc.go)
 	CacheDir   string            // daemon-owned build cache the tool may also write (GOCACHE); "" ⇒ none
+	ReadOnly   []string          // extra roots the run reads (git's repository top and git dirs); only Windows confines reads, so only it grants these
 	Env        map[string]string // the allow-list, nothing inherited; HOME added by the sandbox
 	Limits     Limits
 	// RequireFSConfined refuses the run (ErrSandboxUnavailable) when write

@@ -128,3 +128,19 @@ func TestFromBundleNil(t *testing.T) {
 		t.Fatal("FromBundle(nil) must error — a caller bug, not a posture")
 	}
 }
+
+// TestFromBundleKneeBasis is ADR-0013: the knee's provenance is the bundle's route.knee.basis, whatever the verify section looks like; a bundle without the key reads "unknown", never an inferred prior or certified.
+func TestFromBundleKneeBasis(t *testing.T) {
+	b := bundleWith()
+	b.Verify.CorrelationGroups = []policy.CorrelationGroup{{GroupID: "syntactic", Members: []uint32{0}}, {GroupID: "test", Members: []uint32{1}}}
+	for basis, want := range map[string]string{"": "unknown", "prior": "prior", "anchor_grounded": "anchor_grounded", "certified": "certified"} {
+		b.Route.Knee.Basis = basis
+		m, err := FromBundle(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.KneeBasis != want || kneeFor(m, 3).Basis != want {
+			t.Fatalf("route.knee.basis %q: KneeBasis %q / KneeState %q, want %q", basis, m.KneeBasis, kneeFor(m, 3).Basis, want)
+		}
+	}
+}

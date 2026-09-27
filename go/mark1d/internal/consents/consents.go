@@ -8,10 +8,13 @@ import (
 )
 
 type Consents struct {
-	E1         bool `json:"e1"`          // sanitized diff hunks (E1 evidence tier) may leave
-	CloudJudge bool `json:"cloud_judge"` // verdicts from Omium's cloud judge under the subprocessor terms
-	Training   bool `json:"training"`    // verified outcomes may enter the training corpus
-	Team       bool `json:"team"`        // memory this user shares reaches their teammates (15-teams)
+	E1                 bool `json:"e1"`                  // sanitized diff hunks (E1 evidence tier) may leave
+	CloudJudge         bool `json:"cloud_judge"`         // verdicts from Omium's cloud judge under the subprocessor terms
+	Training           bool `json:"training"`            // verified outcomes may enter the training corpus
+	Team               bool `json:"team"`                // memory this user shares reaches their teammates (15-teams)
+	LocalRM            bool `json:"local_rm"`            // the reward model downloads and scores on this machine; nothing leaves (16 §L6)
+	CloudRM            bool `json:"cloud_rm"`            // the reward model scores E1 hunks in Omium's cloud (16 §L6 cloud half; needs e1)
+	ContributeOutcomes bool `json:"contribute_outcomes"` // task text, redacted diff and delayed outcome labels upload for model evaluation and training (16 L8)
 }
 
 func Path(stateDir string) string { return filepath.Join(stateDir, "gates", "consents.json") }

@@ -142,7 +142,7 @@ func Run(env *cli.Env, opts Options) error {
 	// It runs BEFORE the root lands in the allow-list so the consent record
 	// below can name what was provisioned, and so a provisioning I/O failure
 	// (exit 1) leaves nothing half-enabled for the re-run to skip.
-	pr, err := provision.Apply(provision.Options{Home: opts.Home, StateDir: env.StateDir})
+	pr, err := provision.Apply(provision.Options{Home: opts.Home, StateDir: env.StateDir, Version: env.Version})
 	if err != nil {
 		return cli.Failf(cli.ExitRuntime, "", "%v", err)
 	}

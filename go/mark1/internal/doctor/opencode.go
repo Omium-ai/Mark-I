@@ -5,6 +5,7 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 )
 
 // opencodeAgent fills the roster row; plugins load at opencode start (config/plugin.ts), so a fresh one is inert in a running instance.
@@ -42,6 +43,9 @@ func inspectOpenCode(env *cli.Env, opts Options) Fragment {
 		return f
 	}
 	f.Fixed = res.Changed
+	if err := provision.WriteStamp(env.StateDir, f.Agent, env.Version, res.Checksum); err != nil {
+		f.Detail = "release stamp not written: " + err.Error()
+	}
 	if after, aerr := opencode.Inspect(env.StateDir); aerr == nil {
 		f.State, f.Detail = string(after.State), after.Detail
 	}

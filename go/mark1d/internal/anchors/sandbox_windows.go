@@ -50,14 +50,23 @@ type WindowsSandbox struct {
 	scratchRoot string
 	sid         *windows.SID
 	reason      string // non-empty ⇒ every run is refused with it
+
+	mu      sync.Mutex
+	leases  map[string]int         // read roots granted for the runs in flight; the last run out schedules the revoke
+	kept    map[string]bool        // roots granted to stay (worktrees, caches, tool dirs): a read lease never revokes them
+	revokes map[string]*time.Timer // a released lease's revoke, held back leaseLinger so a burst of git reads walks the tree's DACL once
 }
+
+// leaseLinger is how long a released read grant outlives its last run; a var so tests can shorten it.
+// ponytail: a daemon stopped inside the linger leaves that read ACE on, and the next boot reads it as someone else's and never revokes it; persist pending revokes if that matters.
+var leaseLinger = 30 * time.Second
 
 // NewSandbox creates or derives the per-user profile and grants the package its roots once; scratchRoot is where per-run scratch dirs live ("" uses the OS temp dir) and they inherit its ACE.
 func NewSandbox(scratchRoot string) *WindowsSandbox {
 	if scratchRoot == "" {
 		scratchRoot = os.TempDir()
 	}
-	s := &WindowsSandbox{scratchRoot: scratchRoot}
+	s := &WindowsSandbox{scratchRoot: scratchRoot, leases: map[string]int{}, kept: map[string]bool{}, revokes: map[string]*time.Timer{}}
 	sid, err := appContainerSID()
 	if err != nil {
 		s.reason = "AppContainer profile refused: " + err.Error()
@@ -134,12 +143,19 @@ func (s *WindowsSandbox) Run(ctx context.Context, spec RunSpec) (RunResult, erro
 		if root == scratch { // inherits scratchRoot's ACE; the worktree and the build cache are granted per run
 			continue
 		}
-		if err := s.grant(root, modifyMask); err != nil {
+		if err := s.keep(root, modifyMask); err != nil {
 			return RunResult{}, fmt.Errorf("%w: %s grant refused: %v", ErrSandboxUnavailable, root, err)
 		}
 	}
-	if err := s.grant(toolRoot(spec.Argv[0]), readExecMask); err != nil {
+	if err := s.keep(toolRoot(spec.Argv[0]), readExecMask); err != nil {
 		return RunResult{}, fmt.Errorf("%w: toolchain grant refused: %v", ErrSandboxUnavailable, err)
+	}
+	for _, root := range spec.ReadOnly {
+		release, err := s.lease(root)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("%w: %s read grant refused: %v", ErrSandboxUnavailable, root, err)
+		}
+		defer release()
 	}
 
 	job, err := newJob(lim)
@@ -390,10 +406,10 @@ func envBlock(env []string) ([]uint16, error) {
 	return append(b, 0), nil
 }
 
-// toolRoot is the read-execute grant a binary needs: its own dir, or its parent when the dir is a `bin`/`Scripts` leaf (GOROOT\bin\go.exe needs GOROOT\pkg, a venv's Scripts\pytest.exe needs its python.exe and Lib). ponytail: two leaf names cover go/cargo/python layouts; any other layout surfaces as ERROR_ACCESS_DENIED naming the path.
+// toolRoot is the read-execute grant a binary needs: its own dir, or its parent when the dir is a `bin`/`Scripts`/`cmd` leaf (GOROOT\bin\go.exe needs GOROOT\pkg, a venv's Scripts\pytest.exe needs its python.exe and Lib, Git\cmd\git.exe execs Git\mingw64\bin\git.exe). ponytail: three leaf names cover go/cargo/python/git layouts; any other layout surfaces as ERROR_ACCESS_DENIED naming the path.
 func toolRoot(exe string) string {
 	dir := filepath.Dir(exe)
-	if b := filepath.Base(dir); b == "bin" || b == "Scripts" {
+	if b := filepath.Base(dir); b == "bin" || b == "Scripts" || b == "cmd" {
 		return filepath.Dir(dir)
 	}
 	return dir
@@ -422,8 +438,87 @@ func toolchainRoots() []string {
 	return out
 }
 
+// protectedRoots are the directories no grant may equal or contain (grantRefused): the profile and its AppData homes, the machine's program and Windows dirs, and the poisoned app roots.
+func protectedRoots() []string {
+	out := poisonedRoots()
+	for _, k := range []string{"USERPROFILE", "LOCALAPPDATA", "APPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData", "SystemRoot", "PUBLIC"} {
+		out = append(out, os.Getenv(k))
+	}
+	return out
+}
+
+// keep grants dir to stay (the worktree, the build cache, the tool's own dir), and marks it so no read lease revokes it.
+func (s *WindowsSandbox) keep(dir string, mask uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.grant(dir, mask); err != nil {
+		return err
+	}
+	s.kept[filepath.Clean(dir)] = true
+	return nil
+}
+
+// lease grants a run's read root (the repository top, a linked worktree's or submodule's git dir, the global excludes file) for that run: the last run holding it revokes the ACE leaseLinger later unless another run takes it first, and a root that already carried the package's own ACE (a kept root, a previous grant) is left as it was. Nothing at or below a poisoned root is ever leased.
+func (s *WindowsSandbox) lease(dir string) (func(), error) {
+	dir = filepath.Clean(dir)
+	if why := grantRefused(dir, protectedRoots(), poisonedRoots()); why != "" {
+		return nil, errors.New(why)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t := s.revokes[dir]; t != nil { // our ACE is still on: this run takes it over
+		t.Stop()
+		delete(s.revokes, dir)
+	} else if s.leases[dir] == 0 {
+		if s.kept[dir] || s.explicitACE(dir) {
+			return func() {}, nil
+		}
+		if err := s.grant(dir, readExecMask); err != nil {
+			return nil, err
+		}
+	}
+	s.leases[dir]++
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.leases[dir]--; s.leases[dir] > 0 {
+			return
+		}
+		delete(s.leases, dir)
+		if s.kept[dir] {
+			return
+		}
+		var t *time.Timer
+		t = time.AfterFunc(leaseLinger, func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.revokes[dir] != t {
+				return // a later lease took the ACE over
+			}
+			delete(s.revokes, dir)
+			if s.leases[dir] == 0 && !s.kept[dir] {
+				_ = s.revoke(dir)
+			}
+		})
+		s.revokes[dir] = t
+	}, nil
+}
+
+// explicitACE reports whether dir's own DACL already names the package.
+func (s *WindowsSandbox) explicitACE(dir string) bool {
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	dacl, _, err := sd.DACL()
+	return err == nil && dacl != nil && hasExplicitPackageACE(dacl, s.sid)
+}
+
 // grant adds an inheritable allow ACE for the package SID on dir unless one is already there (or, for read grants, the ALL APPLICATION PACKAGES ACE machine roots carry by default), so the tree walk SetNamedSecurityInfo does on propagation happens once per root, never per run. Non-NTFS volumes have no ACLs to grant on: refused by name.
 func (s *WindowsSandbox) grant(dir string, mask uint32) error {
+	if why := grantRefused(dir, protectedRoots(), nil); why != "" {
+		return errors.New(why)
+	}
 	fsName, err := volumeFS(dir)
 	if err != nil {
 		return fmt.Errorf("volume of %s: %w", dir, err)
@@ -442,10 +537,14 @@ func (s *WindowsSandbox) grant(dir string, mask uint32) error {
 	if dacl == nil || hasPackageACE(dacl, s.sid, mask) {
 		return nil // a NULL DACL already admits everyone; otherwise the ACE is in place
 	}
+	inherit := uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {
+		inherit = windows.NO_INHERITANCE // a single file (the global excludes): nothing below it to walk
+	}
 	ea := []windows.EXPLICIT_ACCESS{{
 		AccessPermissions: windows.ACCESS_MASK(mask),
 		AccessMode:        windows.GRANT_ACCESS,
-		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+		Inheritance:       inherit,
 		Trustee:           windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_UNKNOWN, TrusteeValue: windows.TrusteeValueFromSID(s.sid)},
 	}}
 	merged, err := windows.ACLFromEntries(ea, dacl)
@@ -493,7 +592,7 @@ func hasExplicitPackageACE(dacl *windows.ACL, sid *windows.SID) bool {
 	return false
 }
 
-// hasPackageACE reports an effective (not inherit-only) allow ACE on dir itself that covers mask for the package, or any ALL APPLICATION PACKAGES allow ACE when only read-execute is wanted.
+// hasPackageACE reports an effective (not inherit-only) allow ACE on dir itself that covers mask for the package, or any ALL APPLICATION PACKAGES allow ACE when only read-execute is wanted. The package's own ACE counts only when explicit: one inherited from a leased parent goes with that lease's revoke, and a kept dir under it would lose access.
 func hasPackageACE(dacl *windows.ACL, sid *windows.SID, mask uint32) bool {
 	anyPackage, _ := windows.CreateWellKnownSid(windows.WinBuiltinAnyPackageSid)
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
@@ -502,7 +601,7 @@ func hasPackageACE(dacl *windows.ACL, sid *windows.SID, mask uint32) bool {
 			continue
 		}
 		got := (*windows.SID)(unsafe.Pointer(&ace.SidStart)) //nolint:gosec // G103: the SID is stored inline after the ACE header
-		if got.Equals(sid) && uint32(ace.Mask)&mask == mask {
+		if got.Equals(sid) && uint32(ace.Mask)&mask == mask && ace.Header.AceFlags&windows.INHERITED_ACE == 0 {
 			return true
 		}
 		if mask == readExecMask && anyPackage != nil && got.Equals(anyPackage) {

@@ -34,6 +34,7 @@ import (
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/redact"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 )
 
@@ -73,8 +74,19 @@ type Config struct {
 	Verdict func(task [16]byte) (*m1pv1.VerdictEvent, bool)
 	// Evidence renders the task's typed E0 evidence (anchors.Votes.Evidence); "" ⇒ nothing to judge.
 	Evidence func(verdict.TaskID) string
-	Admit    func(context.Context, *m1pv1.Event) error
-	Log      *slog.Logger
+	// Diff returns the session's task diff already through the path axis (contrib.FilterDiff over anchors.Runner.TaskDiffFor: in the enabled root, not .mark1ignore'd, no secret-named file), the same input E1 reads; nil ⇒ no diff judge.
+	Diff func(ctx context.Context, session, task [16]byte) []byte
+	// Agent names the agent a session runs ("claudecode", "codex", …); the diff judge sends code to the customer's Anthropic key only for DiffJudgeAgent's sessions. nil ⇒ no diff judge.
+	Agent func(session [16]byte) string
+	// DiffDailyTasks and DiffDailyTokens cap the diff judge per UTC day (estimated input+output tokens); 0 takes the default, negative turns the diff judge off. A task past either cap is skipped and counted in <StateDir>/judge/diff_budget.json.
+	DiffDailyTasks  int
+	DiffDailyTokens int
+	// Intent returns the task's own text; nil or "" ⇒ the diff judge reads the diff alone (no wire body carries prompt text into the daemon today).
+	Intent func(task [16]byte) string
+	// Scanner redacts the diff and intent before the model call; nil ⇒ no diff judge, never an unredacted diff.
+	Scanner *redact.Scanner
+	Admit   func(context.Context, *m1pv1.Event) error
+	Log     *slog.Logger
 
 	HTTPClient *http.Client
 }
@@ -91,6 +103,7 @@ type Runner struct {
 	inflight map[string]bool
 	seenPath string
 	calls    chan struct{}
+	budget   diffBudget
 }
 
 func New(cfg Config) (*Runner, error) {
@@ -125,6 +138,7 @@ func New(cfg Config) (*Runner, error) {
 		return nil, err
 	}
 	r.seenPath = filepath.Join(dir, "seen")
+	r.loadBudget()
 	f, err := os.OpenFile(r.seenPath, os.O_CREATE|os.O_RDONLY, 0o600)
 	if err != nil {
 		return nil, err
@@ -193,6 +207,8 @@ func decode(data []byte) (*m1pv1.JudgeRequest, error) {
 		return nil, errors.New("token_budget outside bounds")
 	case req.GetLocus() != m1pv1.JudgeLocus_JUDGE_LOCUS_CLIENT_SIDE:
 		return nil, errors.New("locus is not CLIENT_SIDE")
+	case req.GetJudgeId() == DiffJudgeID:
+		return nil, errors.New(DiffJudgeID + " runs on every task close at the edge, never on a dispatched request")
 	}
 	return &req, nil
 }
@@ -215,30 +231,39 @@ func (r *Runner) serve(req *m1pv1.JudgeRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), callTimeout+10*time.Second)
 	defer cancel()
 	vote, reason := r.judge(ctx, req)
-	var tid [16]byte
-	copy(tid[:], req.GetTaskId())
-	ev := &m1pv1.Event{
+	// The cloud dispatches E0 requests only for tasks the fused verdict left ambiguous (judge_batch.py), so the trigger says so.
+	r.record(ctx, req.GetRequestId(), &m1pv1.Event{
 		SessionId: req.GetSessionId(), TaskId: req.GetTaskId(), OccurredAt: timestamppb.Now(),
 		Body: &m1pv1.Event_JudgeVote{JudgeVote: &m1pv1.JudgeVote{
 			JudgeId: req.GetJudgeId(), Vote: vote, TierUsed: m1pv1.EvidenceTier_EVIDENCE_TIER_E0,
 			RubricHash: r.rubricHash(req.GetRubric()), Locus: m1pv1.JudgeLocus_JUDGE_LOCUS_CLIENT_SIDE,
+			Trigger: m1pv1.JudgeTrigger_JUDGE_TRIGGER_AMBIGUOUS,
 		}},
-	}
+	}, reason)
+}
+
+// record admits one vote, marks its id seen, and releases it from inflight last.
+func (r *Runner) record(ctx context.Context, id string, ev *m1pv1.Event, reason string) {
 	err := r.cfg.Admit(ctx, ev)
 	r.mu.Lock()
 	if err == nil {
-		r.seen[req.GetRequestId()] = true
-		err = r.appendSeen(req.GetRequestId())
+		r.seen[id] = true
+		err = r.appendSeen(id)
 	}
 	r.mu.Unlock()
+	jv := ev.GetJudgeVote()
 	if err != nil {
-		r.log.Error("judge: vote not recorded", "request_id", req.GetRequestId(), "err", err)
+		r.log.Error("judge: vote not recorded", "request_id", id, "err", err)
 	} else {
-		r.log.Info("judge: vote spooled", "request_id", req.GetRequestId(), "judge_id", req.GetJudgeId(), "vote", vote.String(), "reason", reason)
+		r.log.Info("judge: vote spooled", "request_id", id, "judge_id", jv.GetJudgeId(), "vote", jv.GetVote().String(), "reason", reason)
 	}
-	// Released last: an empty inflight set means every accepted request is fully answered.
+	r.release(id)
+}
+
+// release is last: an empty inflight set means every accepted request is fully answered.
+func (r *Runner) release(id string) {
 	r.mu.Lock()
-	delete(r.inflight, req.GetRequestId())
+	delete(r.inflight, id)
 	r.mu.Unlock()
 }
 
@@ -254,14 +279,14 @@ func (r *Runner) judge(ctx context.Context, req *m1pv1.JudgeRequest) (m1pv1.Verd
 	}
 	var tid [16]byte
 	copy(tid[:], req.GetTaskId())
-	// ponytail: E0 only -- E1 needs redaction-receipted hunk assembly and consents.Read(stateDir).E1 (the control API's Step-4 record); E2 the vpc|selfhost profile. tier_used says so.
+	// E0 here (correlation group syntactic); the anchor-blind edge view is the diff judge (diff.go, tier E1_LOCAL).
 	evidence := r.cfg.Evidence(verdict.TaskID(tid))
 	if evidence == "" {
 		return m1pv1.Verdict_VERDICT_REFUSED, "no typed evidence on this device"
 	}
 	r.calls <- struct{}{}
 	defer func() { <-r.calls }()
-	stop, text, err := r.call(ctx, cred, req, evidence)
+	stop, text, err := r.call(ctx, cred, req.GetModel(), req.GetTokenBudget(), req.GetRubric(), evidence)
 	if err != nil {
 		r.log.Warn("judge: model call failed", "request_id", req.GetRequestId(), "err", err)
 		return m1pv1.Verdict_VERDICT_ERROR, "model call failed"
@@ -298,11 +323,11 @@ type messagesResponse struct {
 // call is the one Messages request, shaped exactly as the cloud locus's
 // (python/adjudicator/app/judges/cloud_path.py) minus its region pin, so the
 // two loci judge the same prompt bytes and calibrate as one population.
-func (r *Runner) call(ctx context.Context, cred string, req *m1pv1.JudgeRequest, evidence string) (string, string, error) {
+func (r *Runner) call(ctx context.Context, cred, model string, maxTokens uint32, rubric, user string) (string, string, error) {
 	body, err := json.Marshal(messagesRequest{
-		Model: req.GetModel(), MaxTokens: req.GetTokenBudget(),
-		System:   []systemBlock{{Type: "text", Text: req.GetRubric(), CacheControl: map[string]string{"type": "ephemeral"}}},
-		Messages: []message{{Role: "user", Content: evidence}},
+		Model: model, MaxTokens: maxTokens,
+		System:   []systemBlock{{Type: "text", Text: rubric, CacheControl: map[string]string{"type": "ephemeral"}}},
+		Messages: []message{{Role: "user", Content: user}},
 	})
 	if err != nil {
 		return "", "", err

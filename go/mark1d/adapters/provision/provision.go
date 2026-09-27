@@ -26,6 +26,7 @@ type Options struct {
 	StateDir string
 	Only     []string // restricts the walk; nil is every adapter
 	Repair   bool     // rewrite a FRAGMENT-DAMAGED fence instead of refusing it (08 §8.3(d), the `doctor --fix` bit)
+	Version  string   // the running Mark 1 release, stamped per provisioned agent; "" stamps nothing
 }
 
 type Refusal struct {
@@ -68,12 +69,15 @@ func Apply(opts Options) (Result, error) {
 		}
 	}
 	walk := func(name string) bool { return opts.Only == nil || slices.Contains(opts.Only, name) }
-	note := func(name string, changed bool, err error, refusalCode func(error) string) error {
+	note := func(name string, changed bool, checksum string, err error, refusalCode func(error) string) error {
 		var syntax *json.SyntaxError
 		switch code := refusalCode(err); {
 		case err == nil:
 			res.Provisioned = append(res.Provisioned, name)
 			res.Changed = res.Changed || changed
+			if err := WriteStamp(opts.StateDir, name, opts.Version, checksum); err != nil {
+				return fmt.Errorf("stamping %s: %w", name, err)
+			}
 		case code != "":
 			res.Refused = append(res.Refused, Refusal{name, code, err.Error()})
 		case name == "gemini" && errors.As(err, &syntax):
@@ -87,7 +91,7 @@ func Apply(opts Options) (Result, error) {
 	if walk("claudecode") {
 		a := &claudecode.Adapter{Home: opts.Home, StateDir: opts.StateDir}
 		r, err := pick(opts.Repair, a.Apply, a.Repair)()
-		if err := note(a.Name(), r.Changed, err, claudecode.RefusalCode); err != nil {
+		if err := note(a.Name(), r.Changed, r.Checksum, err, claudecode.RefusalCode); err != nil {
 			return res, err
 		}
 		pointer, perr := a.ApplyProxyPointer()
@@ -106,25 +110,25 @@ func Apply(opts Options) (Result, error) {
 	}
 	if cx := (&codex.Adapter{Home: opts.Home, StateDir: opts.StateDir}); walk(cx.Name()) && installed(cx.Detect()) {
 		r, err := pick(opts.Repair, cx.Apply, cx.Repair)()
-		if err := note(cx.Name(), r.Changed, err, codex.RefusalCode); err != nil {
+		if err := note(cx.Name(), r.Changed, r.Checksum, err, codex.RefusalCode); err != nil {
 			return res, err
 		}
 	}
 	if gm := (&gemini.Adapter{Home: opts.Home, StateDir: opts.StateDir}); walk(gm.Name()) && installed(gm.Detect()) {
 		r, err := pick(opts.Repair, gm.Apply, gm.Repair)()
-		if err := note(gm.Name(), r.Changed, err, gemini.RefusalCode); err != nil {
+		if err := note(gm.Name(), r.Changed, r.Checksum, err, gemini.RefusalCode); err != nil {
 			return res, err
 		}
 	}
 	if oc := (&opencode.Adapter{Home: opts.Home, StateDir: opts.StateDir}); walk(oc.Name()) && installed(oc.Detect()) {
 		r, err := pick(opts.Repair, oc.Apply, oc.Repair)()
-		if err := note(oc.Name(), r.Changed, err, opencode.RefusalCode); err != nil {
+		if err := note(oc.Name(), r.Changed, r.Checksum, err, opencode.RefusalCode); err != nil {
 			return res, err
 		}
 	}
 	if cp := (&copilot.Adapter{Home: opts.Home, StateDir: opts.StateDir}); walk(cp.Name()) && installed(cp.Detect()) {
 		r, err := pick(opts.Repair, cp.Apply, cp.Repair)()
-		if err := note(cp.Name(), r.Changed, err, copilot.RefusalCode); err != nil {
+		if err := note(cp.Name(), r.Changed, r.Checksum, err, copilot.RefusalCode); err != nil {
 			return res, err
 		}
 		// The BYOK env pointer is a separate owned file, never the user's profile (CON-003); every ineligibility is a normal outcome.
@@ -145,7 +149,7 @@ func Apply(opts Options) (Result, error) {
 	}
 	if cu := (&cursor.Adapter{Home: opts.Home, StateDir: opts.StateDir}); walk(cu.Name()) && installed(cu.Detect()) {
 		r, err := pick(opts.Repair, cu.Apply, cu.Repair)()
-		if err := note(cu.Name(), r.Changed, err, cursor.RefusalCode); err != nil {
+		if err := note(cu.Name(), r.Changed, r.Checksum, err, cursor.RefusalCode); err != nil {
 			return res, err
 		}
 	}
@@ -192,6 +196,7 @@ func Revert(stateDir string, only ...string) (done []Reverted, notReverted []str
 		r, err := cursor.Revert(stateDir)
 		add("cursor", claudecode.RevertResult(r), err)
 	}
+	dropStamps(stateDir)
 	dirs := only
 	if len(dirs) == 0 {
 		dirs = []string{"*"}

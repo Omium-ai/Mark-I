@@ -224,10 +224,16 @@ func Inspect(stateDir string) (Status, error) {
 	return st, nil
 }
 
-// Revert is 08 §8.4 for mechanism A: delete the owned file, manifest LAST —
-// unless its bytes are not ours any more (3b), in which case nothing is
-// written and the manifest stays so `mark1 off` keeps seeing it.
+// Revert is 08 §8.4 mechanism A: delete the owned file, manifest LAST, unless its bytes aren't ours any more (3b) — then nothing is written and the manifest stays so `mark1 off` still sees it; mark1.js's noted prompts go too, regardless of plugin state.
 func Revert(stateDir string) (RevertResult, error) {
+	r, err := revert(stateDir)
+	if perr := PurgeNotes(stateDir); err == nil {
+		err = perr
+	}
+	return r, err
+}
+
+func revert(stateDir string) (RevertResult, error) {
 	m, err := LoadManifest(stateDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return RevertResult{Kind: "not-provisioned", ByteEquality: true}, nil

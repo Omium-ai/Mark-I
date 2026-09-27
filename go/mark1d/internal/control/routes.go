@@ -36,9 +36,12 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/contrib"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/excerpt"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/rm"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/tailers"
 )
 
@@ -57,6 +60,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("DELETE /v1/projects", s.deleteProject)
 	mux.HandleFunc("GET /v1/anchors", s.getAnchors)
 	mux.HandleFunc("POST /v1/anchors/consent", s.postConsent)
+	mux.HandleFunc("POST /v1/anchors/probe", s.postProbe)
 	mux.HandleFunc("GET /v1/optins", s.getOptIns)
 	mux.HandleFunc("PUT /v1/optins", s.putOptIns)
 	mux.HandleFunc("POST /v1/pause", func(w http.ResponseWriter, _ *http.Request) { s.setOff(w, true) })
@@ -382,7 +386,11 @@ func (s *Server) agents() []map[string]any {
 			}
 		}
 		if files != nil {
-			row["provisioned"] = map[string]any{"mechanism": mechanism, "files": files, "notes": notes}
+			prov := map[string]any{"mechanism": mechanism, "files": files, "notes": notes, "provisioned_by": nil}
+			if st, err := provision.ReadStamp(d, slot.Name); err == nil {
+				prov["provisioned_by"] = st.Version
+			}
+			row["provisioned"] = prov
 		}
 		out = append(out, row)
 	}
@@ -479,6 +487,8 @@ func (s *Server) doctor(w http.ResponseWriter, _ *http.Request) {
 	if err != nil {
 		health[2].Detail = "daemon has not published candidates (" + err.Error() + ")"
 	}
+	rmOK, rmDetail := rm.Check(s.cfg.StateDir)
+	health = append(health, check{"rm_runtime", rmOK, rmDetail})
 	frags := s.fragments()
 	ok := true
 	for _, f := range frags {
@@ -489,7 +499,11 @@ func (s *Server) doctor(w http.ResponseWriter, _ *http.Request) {
 	for _, c := range health {
 		ok = ok && c.OK
 	}
-	writeJSON(w, map[string]any{"ok": ok, "agents": s.agents(), "fragments": frags, "anchors": rows, "health": health})
+	var rms *rm.Status
+	if st, ok := rm.ReadStatus(s.cfg.StateDir); ok {
+		rms = &st
+	}
+	writeJSON(w, map[string]any{"ok": ok, "agents": s.agents(), "fragments": frags, "anchors": rows, "health": health, "reward_models": rms})
 }
 
 type workspacesFile struct {
@@ -650,7 +664,7 @@ func (s *Server) postProject(w http.ResponseWriter, r *http.Request) {
 		internal(w, err)
 		return
 	}
-	pr, err := provision.Apply(provision.Options{StateDir: s.cfg.StateDir, Only: body.Agents})
+	pr, err := provision.Apply(provision.Options{StateDir: s.cfg.StateDir, Only: body.Agents, Version: s.cfg.Version})
 	if err != nil {
 		internal(w, err)
 		return
@@ -700,7 +714,7 @@ func (s *Server) provisionAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.files.Lock()
-	pr, err := provision.Apply(provision.Options{StateDir: s.cfg.StateDir, Only: []string{name}, Repair: true})
+	pr, err := provision.Apply(provision.Options{StateDir: s.cfg.StateDir, Only: []string{name}, Repair: true, Version: s.cfg.Version})
 	s.files.Unlock()
 	if err != nil {
 		internal(w, err)
@@ -778,6 +792,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	ws.Workspaces = kept
 	if err := s.saveWorkspaces(ws); err != nil {
+		internal(w, err)
+		return
+	}
+	roots := make([]string, 0, len(kept))
+	for _, e := range kept {
+		roots = append(roots, e.Path)
+	}
+	if err := opencode.PruneNotes(s.cfg.StateDir, roots); err != nil {
 		internal(w, err)
 		return
 	}
@@ -996,6 +1018,60 @@ func (s *Server) postConsent(w http.ResponseWriter, r *http.Request) {
 	refuse(w, http.StatusConflict, "M1E-2001", "candidate vanished during reconcile; re-read GET /v1/anchors")
 }
 
+// postProbe is first run's "checks ready": the project's consented static anchors run once in the background and land in GET /v1/anchors as last_run/last_code; no vote, no ledger event, never a verdict.
+func (s *Server) postProbe(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Project string `json:"project"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if body.Project == "" {
+		refuse(w, http.StatusBadRequest, "M1E-2001", "project is required")
+		return
+	}
+	project, _ := canonical(body.Project)
+	ws, err := s.workspaces()
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	if !slices.ContainsFunc(ws.Workspaces, func(e workspaceEntry) bool { return e.Path == project }) {
+		refuse(w, http.StatusNotFound, "M1E-2001", project+" is not an enabled project")
+		return
+	}
+	s.mu.Lock()
+	probe := s.probe
+	s.mu.Unlock()
+	if probe == nil {
+		refuse(w, http.StatusServiceUnavailable, "M1E-2001", "the anchor plane is not running")
+		return
+	}
+	n, err := probe(project, s.hub.noteProbe)
+	switch {
+	case errors.Is(err, anchors.ErrProbeUnknown):
+		refuse(w, http.StatusConflict, "M1E-2001", "no checks armed for "+project+" yet; re-read GET /v1/anchors")
+		return
+	case errors.Is(err, anchors.ErrProbeBusy):
+		refuse(w, http.StatusConflict, "M1E-2001", "a probe of "+project+" is already running")
+		return
+	case err != nil:
+		internal(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{"project": project, "anchors": n})
+}
+
+// noteProbe records a probe's run where a vote's would land, so GET /v1/anchors shows it; the verify ring and the SSE stream never see it.
+func (h *Hub) noteProbe(id, code string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lastRun[id] = time.Now().UTC().Format(time.RFC3339)
+	h.lastCode[id] = code
+}
+
 type optIn struct {
 	StopGate    bool   `json:"stop_gate"`
 	Exploration bool   `json:"exploration"`
@@ -1021,7 +1097,13 @@ func (s *Server) optIns() (map[string]any, error) {
 	}
 	a := s.readOptIn()
 	_, offErr := os.Stat(claudecode.StatusLineOffPath(s.cfg.StateDir))
-	return map[string]any{"stop_gate": a.StopGate, "exploration": a.Exploration, "tests_by_project": tests, "consents": consents.Read(s.cfg.StateDir), "statusline": offErr != nil}, nil
+	out := map[string]any{"stop_gate": a.StopGate, "exploration": a.Exploration, "tests_by_project": tests, "consents": consents.Read(s.cfg.StateDir), "statusline": offErr != nil}
+	for _, name := range []string{consents.ListCloudWithdrawal, consents.ListCopyReset} {
+		if l := consents.List(s.cfg.StateDir, name); len(l) > 0 {
+			out[name] = l // keys turned off by another device's withdrawal / by the copy reset that the person has not set here since
+		}
+	}
+	return out, nil
 }
 
 func (s *Server) getOptIns(w http.ResponseWriter, _ *http.Request) {
@@ -1034,10 +1116,33 @@ func (s *Server) getOptIns(w http.ResponseWriter, _ *http.Request) {
 }
 
 type consentsPatch struct {
-	E1         *bool `json:"e1"`
-	CloudJudge *bool `json:"cloud_judge"`
-	Training   *bool `json:"training"`
-	Team       *bool `json:"team"`
+	E1                 *bool `json:"e1"`
+	CloudJudge         *bool `json:"cloud_judge"`
+	Training           *bool `json:"training"`
+	Team               *bool `json:"team"`
+	LocalRM            *bool `json:"local_rm"`
+	CloudRM            *bool `json:"cloud_rm"`
+	ContributeOutcomes *bool `json:"contribute_outcomes"`
+}
+
+// consentCopyHeader names the consent copy the calling app showed; only copy 2 (the current register: Nebius/global judge, Baseten/us RM) may turn on a consent whose text changed, so v0.1.14's "Anthropic, US" screen can no longer grant one (08 §3.7b).
+const consentCopyHeader, consentCopy = "X-Mark1-Consent-Copy", consents.CopyVersion
+
+// outdatedCopyEnable names the first of cloud_judge, cloud_rm and training the patch turns on under any copy but the current one; "" when none. Offs and unchanged ons always pass.
+func outdatedCopyEnable(p *consentsPatch, was consents.Consents, copyHeader string) string {
+	if p == nil || copyHeader == consentCopy {
+		return ""
+	}
+	for _, f := range []struct {
+		name string
+		to   *bool
+		was  bool
+	}{{"cloud_judge", p.CloudJudge, was.CloudJudge}, {"cloud_rm", p.CloudRM, was.CloudRM}, {"training", p.Training, was.Training}} {
+		if f.to != nil && *f.to && !f.was {
+			return f.name
+		}
+	}
+	return ""
 }
 
 type optInBody struct {
@@ -1055,24 +1160,63 @@ func (s *Server) setConsents(patch *consentsPatch) error {
 	}
 	was := consents.Read(s.cfg.StateDir)
 	c := was
+	var set []string
 	for _, f := range []struct {
+		key string
 		dst *bool
 		src *bool
-	}{{&c.E1, patch.E1}, {&c.CloudJudge, patch.CloudJudge}, {&c.Training, patch.Training}, {&c.Team, patch.Team}} {
+	}{{"e1", &c.E1, patch.E1}, {"cloud_judge", &c.CloudJudge, patch.CloudJudge}, {"training", &c.Training, patch.Training}, {"team", &c.Team, patch.Team}, {"local_rm", &c.LocalRM, patch.LocalRM}, {"cloud_rm", &c.CloudRM, patch.CloudRM}, {"contribute_outcomes", &c.ContributeOutcomes, patch.ContributeOutcomes}} {
 		if f.src != nil {
 			*f.dst = *f.src
+			set = append(set, f.key)
 		}
 	}
+	if err := s.recordConsents(was, c, ""); err != nil {
+		return err
+	}
+	return errors.Join(consents.UpdateList(s.cfg.StateDir, consents.ListCloudWithdrawal, nil, set), // the person set these here: no longer the cloud's or the copy's doing
+		consents.UpdateList(s.cfg.StateDir, consents.ListCopyReset, nil, set))
+}
+
+// recordConsents writes c over was with everything a change carries: contribute_outcomes decided (and purged when off), pending E1 parts purged on an e1 off, the change journalled (reason names who made it when not the person here); local_rm needs nothing, the RM plane reads the record live and halts its child.
+func (s *Server) recordConsents(was, c consents.Consents, reason string) error {
 	if c == was {
 		return nil
 	}
 	if err := consents.Write(s.cfg.StateDir, c); err != nil {
 		return err
 	}
+	if c.ContributeOutcomes != was.ContributeOutcomes {
+		if err := s.contributionChanged(c.ContributeOutcomes); err != nil {
+			return err
+		}
+	}
+	if was.E1 && !c.E1 {
+		if err := excerpt.Purge(s.cfg.StateDir); err != nil { // E1 withdrawal: nothing prepared uploads later
+			return err
+		}
+	}
 	name, uid := osUser()
-	return appendJSONL(filepath.Join(s.cfg.StateDir, "consent.jsonl"), map[string]any{
-		"ts": now(), "user": name, "uid": uid, "workspace": "", "agents_provisioned": []string{}, "consents": c,
-	})
+	row := map[string]any{"ts": now(), "user": name, "uid": uid, "workspace": "", "agents_provisioned": []string{}, "consents": c}
+	if reason != "" {
+		row["reason"] = reason
+	}
+	return appendJSONL(filepath.Join(s.cfg.StateDir, "consent.jsonl"), row)
+}
+
+// contributionChanged records that the person chose, under the tenant they chose in (a later enrollment's staff default never overrides them, and another tenant never inherits it), and, on withdrawal, drops every pending upload (16 L8).
+func (s *Server) contributionChanged(on bool) error {
+	tenant := ""
+	if doc, err := s.readEnrollment(); err == nil {
+		tenant = doc.TenantID
+	}
+	if err := contrib.MarkDecided(s.cfg.StateDir, tenant); err != nil {
+		return err
+	}
+	if on {
+		return nil
+	}
+	return contrib.Purge(s.cfg.StateDir)
 }
 
 // setTestsOptIn read-modify-writes <root>/.mark1/anchors.json, the file anchors.TestsOptedIn reads (FR-VERIFY-003); only an enabled root may be written.
@@ -1104,12 +1248,19 @@ func (s *Server) putOptIns(w http.ResponseWriter, r *http.Request) {
 	}
 	s.files.Lock()
 	defer s.files.Unlock()
+	if f := outdatedCopyEnable(body.Consents, consents.Read(s.cfg.StateDir), r.Header.Get(consentCopyHeader)); f != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]map[string]string{"error": {"code": "M1E-2014", "reason": "consent_copy_outdated",
+			"message": "Update Mark 1 to turn on " + f + ": this app's consent text predates the processor it would go to. Turning consents off still works."}})
+		return
+	}
 	if err := s.setConsents(body.Consents); err != nil {
 		internal(w, err)
 		return
 	}
 	if body.Consents != nil {
-		go s.relayNow()
+		s.background(func() { s.relayNow() })
 	}
 	for p, on := range body.TestsByProject {
 		root, err := canonical(p)
@@ -1309,6 +1460,7 @@ func (s *Server) verifyReceipts(w http.ResponseWriter, r *http.Request) {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, verifier, args...) //nolint:gosec // G204: MARK1_VERIFIER or LookPath, args as a slice, no shell
 	procattr.Hide(cmd)
+	cmd.Env = supervise.ChildEnv()
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	var xe *exec.ExitError

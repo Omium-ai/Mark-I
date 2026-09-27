@@ -25,6 +25,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/contrib"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/control"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/memory"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
@@ -298,7 +299,7 @@ func TestSettleRerunAfterACrashFinishesTheSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedSpool(t, filepath.Join(dst, "spool"))
-	stale := []string{filepath.Join(stateDir, "policy", "lkg.cbor"), filepath.Join(stateDir, "receipt", "last-head"), memory.CustodyPath(stateDir)}
+	stale := []string{filepath.Join(stateDir, "policy", "lkg.cbor"), filepath.Join(stateDir, "receipt", "last-head"), memory.CustodyPath(stateDir), filepath.Join(contrib.Dir(stateDir), "task.json")}
 	for _, p := range stale {
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 			t.Fatal(err)

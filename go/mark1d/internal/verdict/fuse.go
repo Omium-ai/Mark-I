@@ -66,6 +66,7 @@ type BundleMatrices struct {
 	Ladders   []Ladder                  // bundle order; LadderStep takes the first naming a model
 	VTask     float64                   // V(task): bundle v_default (06 §8.1)
 	CostBasis string                    // "usd" | "quota" (06 §8.4)
+	KneeBasis string                    // "prior" | "anchor_grounded" | "certified" | "unknown" (ADR-0012, read from the bundle per ADR-0013)
 	// Stale is the M1E-3006 posture: past max_age or built-in defaults.
 	// Fusion still runs (priors-only built-ins) but the knee never stops and
 	// the cache entry is flagged stale_cert — gates answer allow (04 §2.3).

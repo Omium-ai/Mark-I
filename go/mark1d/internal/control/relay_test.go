@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,7 +53,7 @@ func TestConsentsRelayToControldUnderTheDeviceToken(t *testing.T) {
 		}
 	}
 
-	resp, body := call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"training": true}})
+	resp, body := call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"training": true}}, currentCopy)
 	want(t, resp, body, http.StatusOK, "")
 	if !consents.Read(dir).Training {
 		t.Fatal("the local record is written first")
@@ -123,7 +125,7 @@ func TestConsentsRelayToControldUnderTheDeviceToken(t *testing.T) {
 	if err := writeAtomic(s.enrollmentPath(), stale); err != nil {
 		t.Fatal(err)
 	}
-	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"cloud_judge": true}})
+	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"cloud_judge": true}}, currentCopy)
 	want(t, resp, body, http.StatusOK, "")
 	before := sent()
 	if err := s.relayConsents(context.Background()); err != nil || !consents.Pending(dir) || sent() != before {
@@ -178,5 +180,88 @@ func TestConsentsRelayAgainForANewDevice(t *testing.T) {
 	defer mu.Unlock()
 	if len(got) != 2 || got[1]["team"] != true || bearer[1] != "Bearer "+b["device_token"].(string) {
 		t.Fatalf("new device: relayed %v under %v", got, bearer)
+	}
+}
+
+func TestAdoptNeverTurnsAFieldOn(t *testing.T) {
+	on := consents.Consents{E1: true, CloudJudge: true, Training: true, Team: true, LocalRM: true, CloudRM: true, ContributeOutcomes: true}
+	if got := consents.Adopt(consents.Consents{}, on, consents.Consents{}); got != (consents.Consents{}) {
+		t.Fatalf("the cloud turned %+v on", got)
+	}
+	if got := consents.Adopt(on, on, on); got != on {
+		t.Fatalf("an all-on row turned %+v off", got)
+	}
+	if got := consents.Adopt(on, consents.Consents{}, on); got != (consents.Consents{}) {
+		t.Fatalf("an all-off row left %+v on", got)
+	}
+}
+
+// currentCopy is the header the current app (lane X3) sends on every consent write.
+func currentCopy(r *http.Request) { r.Header.Set(consentCopyHeader, consentCopy) }
+
+// TestOutdatedConsentCopyCannotEnable: an app without the current consent copy (v0.1.14 shows "Anthropic, US" for the cloud judge) cannot turn cloud_judge, cloud_rm or training on through the control API: a typed 409 it can show, nothing written or journalled. Turning anything off, re-sending an on already held, and the consents whose copy did not change still work; the current app (X-Mark1-Consent-Copy: 2) turns them on.
+func TestOutdatedConsentCopyCannotEnable(t *testing.T) {
+	s, dir := newServer(t)
+	for _, f := range []string{"cloud_judge", "cloud_rm", "training"} {
+		for _, hdr := range []string{"", "1", "3"} {
+			resp, body := call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"e1": true, f: true}, "stop_gate": true},
+				func(r *http.Request) {
+					if hdr != "" {
+						r.Header.Set(consentCopyHeader, hdr)
+					}
+				})
+			var e struct {
+				Error map[string]string `json:"error"`
+			}
+			decodeTo(t, body, &e)
+			if resp.StatusCode != http.StatusConflict || e.Error["code"] != "M1E-2014" || e.Error["reason"] != "consent_copy_outdated" || !strings.Contains(e.Error["message"], f) {
+				t.Fatalf("%s under copy %q: %d %s", f, hdr, resp.StatusCode, body)
+			}
+		}
+	}
+	if _, err := os.Stat(consents.Path(dir)); err == nil {
+		t.Fatal("a refused enable wrote the record")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "consent.jsonl")); err == nil {
+		t.Fatal("a refused enable was journalled")
+	}
+	resp, body := call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"e1": true, "team": true, "local_rm": true, "contribute_outcomes": true}})
+	want(t, resp, body, http.StatusOK, "")
+	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"cloud_judge": true, "cloud_rm": true, "training": true}}, currentCopy)
+	want(t, resp, body, http.StatusOK, "")
+	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"cloud_judge": true, "training": false}})
+	want(t, resp, body, http.StatusOK, "")
+	if c := consents.Read(dir); !c.CloudJudge || !c.CloudRM || c.Training || !c.E1 {
+		t.Fatalf("record %+v", c)
+	}
+	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"cloud_judge": false, "cloud_rm": false}})
+	want(t, resp, body, http.StatusOK, "")
+	if c := consents.Read(dir); c.CloudJudge || c.CloudRM {
+		t.Fatalf("an old app's off must always land: %+v", c)
+	}
+}
+
+// TestCloseWaitsForBackgroundWork: a background relay in flight when Close is called is cancelled and finishes before Close returns (it wrote the state dir after the test's TempDir cleanup began); none starts after Close.
+func TestCloseWaitsForBackgroundWork(t *testing.T) {
+	s, dir := newServer(t)
+	started, out := make(chan struct{}), filepath.Join(dir, "late")
+	s.background(func() {
+		close(started)
+		<-s.ctx.Done()
+		time.Sleep(50 * time.Millisecond)
+		_ = os.WriteFile(out, []byte("x"), 0o600)
+	})
+	<-started
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatal("Close returned before the background work finished")
+	}
+	ran := false
+	s.background(func() { ran = true })
+	s.bg.Wait()
+	if ran {
+		t.Fatal("background work started after Close")
 	}
 }

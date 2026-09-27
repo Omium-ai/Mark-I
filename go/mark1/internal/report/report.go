@@ -128,7 +128,11 @@ func Run(ctx context.Context, env *cli.Env, opts Options) error {
 }
 
 func renderHuman(w io.Writer, t *TVO) {
-	_, _ = fmt.Fprintf(w, "tvo           %s (%s basis)\n", t.TVO, t.CostBasis)
+	tvo := t.TVO.String()
+	if tvo == "" {
+		tvo = "none (no verified outcome)" // a null tvo: zero outcomes, never a perfect 0
+	}
+	_, _ = fmt.Fprintf(w, "tvo           %s (%s basis)\n", tvo, t.CostBasis)
 	if t.PriceTableVersion != "" {
 		_, _ = fmt.Fprintf(w, "prices        %s\n", t.PriceTableVersion)
 	}

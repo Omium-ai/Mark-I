@@ -181,6 +181,8 @@ const (
 
 type KneeTable struct {
 	CostBasis CostBasis
+	// ADR-0013: where the rows' p came from — "prior" | "anchor_grounded" | "certified", "" when the bundle predates the key.
+	Basis string
 	// c(n) at attempt n; the gate stops when p̂_LCB(n)·V(task) ≤ c(n).
 	Rows     []KneeRow
 	VDefault float64

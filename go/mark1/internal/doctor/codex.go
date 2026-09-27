@@ -9,6 +9,7 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 )
 
 const trustAdvice = "run codex once and accept the hooks review"
@@ -174,6 +175,9 @@ func inspectCodex(env *cli.Env, opts Options) Fragment {
 		return f
 	}
 	f.Fixed = res.Changed
+	if err := provision.WriteStamp(env.StateDir, f.Agent, env.Version, res.Checksum); err != nil {
+		f.Detail = "release stamp not written: " + err.Error()
+	}
 	if after, aerr := codex.Inspect(env.StateDir); aerr == nil {
 		f.State, f.Detail, f.Lines = string(after.State), after.Detail, lines(after.Lines)
 	}

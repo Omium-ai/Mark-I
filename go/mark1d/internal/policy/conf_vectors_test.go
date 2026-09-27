@@ -215,9 +215,9 @@ func TestConfVectorsBundle(t *testing.T) {
 			kindsSeen[v.Kind] = true
 		}
 	}
-	// The frozen contract: 5 accepts, 30 rejects covering all 10 kinds. A
+	// The frozen contract: 6 accepts, 31 rejects covering all 10 kinds. A
 	// shrunken manifest must fail loudly, not pass vacuously.
-	if accepts != 5 || rejects != 30 {
+	if accepts != 6 || rejects != 31 {
 		t.Fatalf("manifest shape changed: accepts=%d rejects=%d", accepts, rejects)
 	}
 	for _, k := range kindNames {
@@ -343,6 +343,17 @@ func TestConfVectorsBundleKneePLCB(t *testing.T) {
 }
 
 func ptr(f float64) *float64 { return &f }
+
+// TestConfVectorsBundleKneeBasis: ADR-0013's optional route.knee.basis must reach the decode verbatim, and a bundle without the key (knee_p_lcb) must stay empty — the knee's "unknown", never a default.
+func TestConfVectorsBundleKneeBasis(t *testing.T) {
+	m := loadBundleManifest(t)
+	for name, want := range map[string]string{"knee_basis": "anchor_grounded", "knee_p_lcb": ""} {
+		b, rej := VerifyAndDecode(readVectorFile(t, vectorByName(t, m, name)), bundleKeys(t, m), nil, nil)
+		if rej != nil || b.Route.Knee.Basis != want {
+			t.Fatalf("%s: basis %q / %v, want %q", name, b.Route.Knee.Basis, rej, want)
+		}
+	}
+}
 
 // TestConfVectorsBundleCortexLearnedRanker: the accept alone only proves the
 // key is tolerated; a decoder that dropped it would still accept. Assert the

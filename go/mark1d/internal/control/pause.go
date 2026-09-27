@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
 )
@@ -61,5 +62,25 @@ func (s *Server) setAgentOff(w http.ResponseWriter, r *http.Request, paused bool
 		internal(w, err)
 		return
 	}
+	if !paused {
+		s.Reprovision(name) // the daemon-start upgrade skipped this agent while it was paused
+	}
 	writeJSON(w, map[string]any{"agent": name, "paused": off.AgentOff(s.cfg.StateDir, name), "receipted_transition_id": nil})
+}
+
+// Reprovision is provision.Reconcile under the lock the enable and repair routes hold, logged: an upgraded fragment at Info, one left alone for a human at Warn.
+func (s *Server) Reprovision(only ...string) []provision.Outcome {
+	s.files.Lock()
+	out := provision.Reconcile(s.cfg.StateDir, s.cfg.Version, only...)
+	s.files.Unlock()
+	for _, o := range out {
+		switch o.Action {
+		case "current":
+		case "upgraded", "paused":
+			s.cfg.Log.Info("mark1d: agent integration reprovision", "agent", o.Agent, "action", o.Action, "version", s.cfg.Version, "detail", o.Detail)
+		default:
+			s.cfg.Log.Warn("mark1d: agent integration reprovision", "agent", o.Agent, "action", o.Action, "code", o.Code, "detail", o.Detail)
+		}
+	}
+	return out
 }

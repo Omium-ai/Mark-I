@@ -45,18 +45,23 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/bundle"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/capture"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/contrib"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/control"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/cortex"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/evidence"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/excerpt"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/harden"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/intent"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/judge"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/memory"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/receipt"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/redact"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/rm"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/route"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spill"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
@@ -131,6 +136,7 @@ type config struct {
 	// ingestURL/deviceToken switch the uplink drain on.
 	ingestURL   string
 	deviceToken string
+	attachURL   string // 08 §2.1's attach endpoint from enrollment.json; empty leaves the E1 excerpt path off
 	// tenantID/deviceID switch receipt sealing on: both ride INSIDE the signed
 	// checkpoint payload and must be the canonical UUIDs the server stamps
 	// from verified claims (07 §2) — which is why the document, not the
@@ -162,6 +168,8 @@ type config struct {
 	matrices *verdict.BundleMatrices
 	// gateway is `--fleet` (04 §3.4): the proxy runs `--mode gateway` behind mTLS and the local Detect()==apikey precondition does not apply.
 	gateway *supervise.GatewayFlags
+	// diffJudgeTasks/diffJudgeTokens cap the edge diff judge per UTC day on the customer's key (judge.Config); 0 takes the default, negative turns it off.
+	diffJudgeTasks, diffJudgeTokens int
 }
 
 func main() {
@@ -200,6 +208,8 @@ func main() {
 	flag.StringVar(&gw.CredDir, "gateway-cred-dir", "", "--fleet: credential directory for M1-Cred-Ref resolution (one 0600 file per ref)")
 	flag.StringVar(&cfg.policyURL, "policy-url", "", "control-plane ORIGIN for policy distribution (08 §3.2/§3.5 hang /api/v1/policy/{bundle,stream,ack} and /.well-known/mark1-keys off it); empty leaves fetching off, last-known-good still runs")
 	flag.StringVar(&cfg.policyChannel, "policy-channel", "stable", "policy rollout channel (08 §3.2)")
+	flag.IntVar(&cfg.diffJudgeTasks, "diff-judge-daily-tasks", judge.DefaultDiffDailyTasks, "closed Claude Code tasks the edge diff judge may send to the customer's Anthropic key per UTC day; past it tasks are skipped and counted; negative turns the diff judge off")
+	flag.IntVar(&cfg.diffJudgeTokens, "diff-judge-daily-tokens", judge.DefaultDiffDailyTokens, "estimated tokens (input+output) the edge diff judge may spend per UTC day on the customer's key; negative turns it off")
 	flag.Parse()
 	cfg.offPoll = time.Second
 	// The daemon keeps its own log: the app's stderr relay is what the WSL lane lost (no daemon line reached the app log through wsl.exe), and a crash is diagnosed from the file either way.
@@ -254,6 +264,15 @@ func enabledRootFor(stateDir, extra, cwd string) (string, bool) {
 	return best, best != ""
 }
 
+// diffRepo is the repository a session's task diff reads: the git top of its cwd when that sits inside the enabled root (an enabled folder can hold several repositories), else the enabled root.
+func diffRepo(root, cwd string) string {
+	top := anchors.GitTop(realPath(cwd))
+	if _, err := os.Stat(filepath.Join(top, ".git")); err == nil && anchors.Within(root, top) {
+		return top
+	}
+	return root
+}
+
 // realPath is EvalSymlinks that survives a path whose tail does not exist yet: the nearest existing ancestor is resolved and the rest re-joined (macOS /var → /private/var, Windows short names).
 func realPath(p string) string {
 	if r, err := filepath.EvalSymlinks(p); err == nil {
@@ -294,6 +313,7 @@ type enrollment struct {
 	Server         string    `json:"server"`          // the control-plane origin: 08 §3.2's policy routes hang off it
 	Endpoints      struct {
 		Ingest string `json:"ingest"`
+		Attach string `json:"attach"`
 	} `json:"endpoints"`
 }
 
@@ -359,7 +379,7 @@ func applyEnrollment(cfg *config, log *slog.Logger) error {
 	}
 	if doc.State == "revoked" {
 		log.Warn("mark1d: enrollment is REVOKED — uplink off, capture local-only; re-enroll with `mark1 enroll` (04 §9.3)")
-		doc.DeviceToken, doc.Endpoints.Ingest, doc.Server = "", "", ""
+		doc.DeviceToken, doc.Endpoints.Ingest, doc.Endpoints.Attach, doc.Server = "", "", "", ""
 	}
 	fill := func(dst *string, v string) {
 		if *dst == "" {
@@ -371,6 +391,7 @@ func applyEnrollment(cfg *config, log *slog.Logger) error {
 	fill(&cfg.deviceID, doc.DeviceID)
 	fill(&cfg.saltHex, doc.TenantRootHex)
 	fill(&cfg.ingestURL, doc.Endpoints.Ingest)
+	fill(&cfg.attachURL, doc.Endpoints.Attach)
 	fill(&cfg.policyURL, doc.Server)
 	log.Info("mark1d: identity from enrollment document", "path", enrollmentPath(cfg.stateDir),
 		"tenant_id", cfg.tenantID, "device_id", cfg.deviceID, "tenant_root", cfg.saltHex != "", "flag_overrides", flagged)
@@ -473,6 +494,12 @@ func run(ctx context.Context, log *slog.Logger, cfg config) error {
 		if err := settleTenantSwitch(log, cfg); err != nil {
 			return fmt.Errorf("mark1d: tenant switch: %w", err)
 		}
+		if err := reconcileContribution(log, cfg); err != nil {
+			return fmt.Errorf("mark1d: tenant switch: %w", err)
+		}
+		if len(enabledRoots(cfg)) > 0 {
+			ctl.Reprovision() // 08 §8.3(c): a `mark1 update` that ships new fragment bytes reaches the fences already on disk
+		}
 		sctx, cancel := context.WithCancel(ctx)
 		go func() {
 			select {
@@ -556,7 +583,48 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		_ = sp.Close()
 		return err
 	}
-	adm.Tap = ctl.Hub().Publish
+	var rmPlane atomic.Pointer[rm.Plane]
+	var contribPlane atomic.Pointer[contrib.Recorder]
+	var e1Plane atomic.Pointer[excerpt.Uploader]
+	var basePlane atomic.Pointer[anchors.Runner] // records each TaskOpen's base once the runner and its RepoFor exist
+	projects := ""
+	if home, herr := os.UserHomeDir(); herr == nil {
+		projects = filepath.Join(home, ".claude", "projects")
+	}
+	intents := intent.New(projects, func(cwd string) bool {
+		root, ok := enabledRootFor(cfg.stateDir, cfg.workspace, cwd)
+		if !ok {
+			return false
+		}
+		set, err := tailers.NewWorkspaceSet(root)
+		return err == nil && set.Allowed(cwd)
+	}, sc)
+	// cursor exposes no readable transcript (16 §E1 intent): its tasks carry the diff alone
+	if d, err := (&codex.Adapter{StateDir: cfg.stateDir}).SessionsDir(); err == nil {
+		intents.Sources = append(intents.Sources, codex.IntentSource(d))
+	}
+	if d, err := (&gemini.Adapter{StateDir: cfg.stateDir}).TmpDir(); err == nil {
+		intents.Sources = append(intents.Sources, gemini.IntentSource(d))
+	}
+	if d, err := (&copilot.Adapter{StateDir: cfg.stateDir}).SessionStateDir(); err == nil {
+		intents.Sources = append(intents.Sources, copilot.IntentSource(d))
+	}
+	if d, err := (&opencode.Adapter{StateDir: cfg.stateDir}).CaptureDir(); err == nil {
+		intents.Sources = append(intents.Sources, opencode.IntentSource(d))
+	}
+	adm.Tap = func(ev *m1pv1.Event) {
+		ctl.Hub().Publish(ev)
+		intents.Observe(ev)
+		if r := basePlane.Load(); r != nil {
+			r.Observe(ev)
+		}
+		if p := rmPlane.Load(); p != nil {
+			p.Observe(ev)
+		}
+		if c := contribPlane.Load(); c != nil {
+			c.Observe(ev)
+		}
+	}
 	ctl.Hub().SetSessionResolver(tailers.Resolve)
 	ctl.Hub().SetTokensFile(filepath.Join(cfg.stateDir, "run", "session-tokens.json"))
 	go func() {
@@ -733,6 +801,36 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		}
 		return c.Verdict, true
 	}
+	var sessionDiff atomic.Pointer[func(context.Context, [16]byte, [16]byte) []byte] // set once the anchor runner exists
+	jr, err := judge.New(judge.Config{
+		StateDir: cfg.stateDir, TenantRoot: tenantRoot, Log: log,
+		TaskFor: seg.TaskFor, Verdict: seg.Verdict, Evidence: votes.Evidence, Admit: adm.Admit,
+		Diff: func(ctx context.Context, s, task [16]byte) []byte {
+			if d := sessionDiff.Load(); d != nil {
+				return (*d)(ctx, s, task)
+			}
+			return nil
+		},
+		Agent: func(s [16]byte) string {
+			if agent, _, ok := tailers.Resolve(uuid.UUID(s)); ok && agent != "" {
+				return agent
+			}
+			return ctl.Hub().AgentFor(s)
+		},
+		DiffDailyTasks: cfg.diffJudgeTasks, DiffDailyTokens: cfg.diffJudgeTokens, Scanner: sc,
+		Intent: func(task [16]byte) string { s, _ := intents.Intent([16]byte{}, task); return s },
+	})
+	if err != nil {
+		_ = sp.Close()
+		return err
+	}
+	// 16 §L7: the anchor-blind diff judge runs on every closed task (customer key only), and the consented E1 excerpt feeds the cloud views; set before the engine can close one
+	seg.OnTaskClose = func(s [16]byte, t taskseg.TaskID, r m1pv1.Resolution) {
+		jr.OnTaskClose(s, t, r)
+		if u := e1Plane.Load(); u != nil {
+			u.OnTaskClose(s, t, r)
+		}
+	}
 	// D-AM(R3): an adjudicated verdict becomes an Event here, which is the only
 	// way a task ever closes RESOLUTION_VERDICT instead of aging out unresolved.
 	// The verdict is admitted BEFORE the segmenter sees it: capture mints its
@@ -778,14 +876,6 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	gate.AgentFor = ctl.Hub().AgentFor
 	if cfg.matrices == nil {
 		bc.ApplyGates = gate.ApplyGates
-	}
-	jr, err := judge.New(judge.Config{
-		StateDir: cfg.stateDir, TenantRoot: tenantRoot, Log: log,
-		TaskFor: seg.TaskFor, Verdict: seg.Verdict, Evidence: votes.Evidence, Admit: adm.Admit,
-	})
-	if err != nil {
-		_ = sp.Close()
-		return err
 	}
 	bc.OnJudgeRequest = jr.Handle
 	router := &route.Emitter{Next: adm.Admit, Seq: routeSeq.Load, Matrices: routeMatrices.Load, Verdicts: eng.Reader()}
@@ -840,6 +930,75 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		return ""
 	}
 	sched.Start(ctx)
+	// every task diff reads the session's own repository from the HEAD its task opened at (16 §Task diff)
+	repoFor := func(session [16]byte) string {
+		if cwd, ok := sessionCwd.Load(session); ok {
+			if root, ok := enabledRootFor(cfg.stateDir, cfg.workspace, cwd.(string)); ok {
+				return diffRepo(root, cwd.(string))
+			}
+		}
+		return ""
+	}
+	runner.RepoFor = repoFor
+	basePlane.Store(runner)
+	// 16 §L6: the on-device reward model reads only the task's intent and its diff from the HEAD the task opened at.
+	rmp, err := rm.New(rm.Config{
+		StateDir: cfg.stateDir, Log: log, Scanner: sc, Admit: adm.Admit, Intent: intents.Intent,
+		Consented: func() bool { return consents.Read(cfg.stateDir).LocalRM },
+		Diff: func(ctx context.Context, session, task [16]byte) []byte {
+			if wt := repoFor(session); wt != "" {
+				return runner.TaskDiffFor(ctx, task, wt)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		_ = sp.Close()
+		return err
+	}
+	rmPlane.Store(rmp)
+	// 16 L8: a consented task becomes one OutcomeContribution 30 days after close, labelled by survival, revert and the project's own tests.
+	contribRec, err := contrib.New(contrib.Config{
+		StateDir: cfg.stateDir, Scanner: sc, Admit: adm.Admit, Log: log,
+		Session: func(s [16]byte) (string, string, bool) { return tailers.Resolve(uuid.UUID(s)) },
+		Intent:  intents.Intent, Diff: runner.TaskDiffFor, Repo: repoFor, Git: runner.Git, Tests: sched.TestsPass,
+	})
+	if err != nil {
+		_ = sp.Close()
+		return err
+	}
+	contribPlane.Store(contribRec)
+	// 16 §L7: the diff judge and the E1 excerpt read one input, the session's task diff through the path axis (enabled root, .mark1ignore, secret names)
+	filteredDiff := func(ctx context.Context, s, task [16]byte) []byte {
+		if _, root, ok := tailers.Resolve(uuid.UUID(s)); ok && root != "" {
+			repo := repoFor(s)
+			if repo == "" {
+				repo = root
+			}
+			return contrib.FilterDiff(runner.TaskDiffFor(ctx, task, repo), repo, root)
+		}
+		return nil
+	}
+	sessionDiff.Store(&filteredDiff)
+	// 16 §L6/§L7 cloud views: under e1 consent, one redacted, receipted excerpt per closed task via the attach path; one shared TokenSource for the uploader, uplink, and sealer means a Refresh reaches all three without a restart.
+	tokens := &docTokens{stateDir: cfg.stateDir, tenant: cfg.tenantID, current: cfg.deviceToken}
+	var e1Up *excerpt.Uploader
+	if cfg.attachURL != "" && cfg.deviceToken != "" {
+		e1Token := func(ctx context.Context) (string, error) {
+			_ = tokens.Refresh(ctx) // re-reads enrollment.json: a token refreshed there since boot is sent, never the stale one (a 401 until restart)
+			return tokens.Token(ctx)
+		}
+		if e1Up, err = excerpt.New(excerpt.Config{
+			StateDir: cfg.stateDir, Store: runner.Evidence, Scanner: sc, AttachURL: cfg.attachURL, Token: e1Token, Version: version, Log: log,
+			Intent: func(task [16]byte) string { s, _ := intents.Intent([16]byte{}, task); return s },
+			Diff:   filteredDiff,
+			Emit:   runner.EmitExcerpt,
+		}); err != nil {
+			_ = sp.Close()
+			return err
+		}
+		e1Plane.Store(e1Up)
+	}
 	// The consent surface (anchors/candidates.go): derive for every enabled
 	// root, apply the CLI's approvals, publish candidates.json, arm the plane.
 	// The first step runs HERE, synchronously, so the boot derivation precedes
@@ -876,6 +1035,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	step := func() { stepMu.Lock(); defer stepMu.Unlock(); anchorStep() }
 	step()
 	ctl.SetReconcile(step)
+	ctl.SetProbe(func(project string, done func(id, code string)) (int, error) { return sched.Probe(ctx, project, done) })
 	anchorsDone := make(chan struct{})
 	go func() {
 		defer close(anchorsDone)
@@ -962,15 +1122,15 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// the only verdict surface with no method that computes (04 §2.3).
 	gate.Evidence = votes.Evidence // FR-VERIFY-011: evidence_ref on BLOCK
 	gate.Corrections = eng.TakeCorrections
-	// The verify plane's decisions land in the ledger with their savings estimate (policy.proto GuardDecision): the app's arrests, blocks and tokens-saved read from these rows and from nothing else.
-	decided := func(session, task [16]byte, outcome m1pv1.GuardOutcome, reason string, attempt uint32, saved uint64, evidence string) {
+	// The verify plane's decisions land in the ledger with their savings estimate and the applied bundle's cost basis (policy.proto GuardDecision, ADR-0013): the app's arrests, blocks and tokens-saved read from these rows and from nothing else.
+	decided := func(session, task [16]byte, outcome m1pv1.GuardOutcome, reason string, attempt uint32, saved uint64, evidence, kneeBasis string) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			if err := adm.Admit(ctx, &m1pv1.Event{
 				SessionId: session[:], TaskId: task[:], OccurredAt: timestamppb.Now(),
 				Body: &m1pv1.Event_GuardDecision{GuardDecision: &m1pv1.GuardDecision{
-					Outcome: outcome, SampleRate: 1, ReasonCode: reason, TokensSavedEstimate: saved, Attempt: attempt, Evidence: evidence,
+					Outcome: outcome, SampleRate: 1, ReasonCode: reason, TokensSavedEstimate: saved, Attempt: attempt, Evidence: evidence, KneeBasis: kneeBasis, BundleSeq: routeSeq.Load(), CostBasis: routeMatrices.Load().CostBasis,
 				}},
 			}); err != nil && !perEventLoss(err) {
 				log.Warn("gate: decision not recorded", "reason", reason, "err", err)
@@ -978,15 +1138,15 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		}()
 	}
 	gate.OnBlock = func(session, task [16]byte, k verdict.KneeState, evidenceRef string) {
-		decided(session, task, m1pv1.GuardOutcome_GUARD_OUTCOME_BLOCKED, "stop_gate_block", uint32(k.N), ctl.Hub().EstimateBlock(session), evidenceRef) //nolint:gosec // G115: attempts are small
+		decided(session, task, m1pv1.GuardOutcome_GUARD_OUTCOME_BLOCKED, "stop_gate_block", uint32(k.N), ctl.Hub().EstimateBlock(session), evidenceRef, "") //nolint:gosec // G115: attempts are small
 	}
 	gate.OnArrest = func(session, task [16]byte, k verdict.KneeState, evidenceRef string) {
-		ctl.Hub().Arrest(session, task, k, evidenceRef)
-		decided(session, task, m1pv1.GuardOutcome_GUARD_OUTCOME_ARRESTED, "knee_arrest", uint32(k.N), ctl.Hub().EstimateArrest(task, uint32(k.N)), "") //nolint:gosec // G115: attempts are small
+		saved := ctl.Hub().Arrest(session, task, k, evidenceRef)
+		decided(session, task, m1pv1.GuardOutcome_GUARD_OUTCOME_ARRESTED, "knee_arrest", uint32(k.N), saved, "", k.Basis) //nolint:gosec // G115: attempts are small
 	}
 	gate.OnCap = func(session, task [16]byte, blocks uint32, evidenceRef string) {
-		ctl.Hub().Arrest(session, task, verdict.KneeState{N: int(blocks)}, evidenceRef)
-		decided(session, task, m1pv1.GuardOutcome_GUARD_OUTCOME_ARRESTED, "block_cap", blocks, ctl.Hub().EstimateArrest(task, blocks), evidenceRef)
+		saved := ctl.Hub().Arrest(session, task, verdict.KneeState{N: int(blocks)}, evidenceRef)
+		decided(session, task, m1pv1.GuardOutcome_GUARD_OUTCOME_ARRESTED, "block_cap", blocks, saved, evidenceRef, "")
 	}
 	if cfg.matrices == nil {
 		gate.ApplyGates(bc.Gates())
@@ -1037,7 +1197,6 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		if cfg.deviceToken == "" {
 			return fail(errors.New("mark1d: an ingest URL needs a device token — enrollment.json's device_token or --device-token (08 §3.1)"))
 		}
-		tokens := &docTokens{stateDir: cfg.stateDir, tenant: cfg.tenantID, current: cfg.deviceToken}
 		// The quarantine seal key is the device spill public half spill.Open
 		// just materialized (04 §2.5: encrypted with the device spill key §5.4).
 		spillPub, err := os.ReadFile(filepath.Join(cfg.stateDir, "spill", "spill.pub"))
@@ -1094,6 +1253,11 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 			checkpoint = sealer.Seal
 			origin = &uplink.Origin{Key: key, TenantID: tid.String(), DeviceID: did.String()}
 			runner.SetSigner(key)
+			contribRec.SetIdentity(evidence.Identity{Key: key, TenantID: tid.String(), DeviceID: did.String()})
+			if e1Up != nil {
+				e1Up.SetIdentity(evidence.Identity{Key: key, TenantID: tid.String(), DeviceID: did.String()})
+			}
+			rmp.SetSigner(key)
 			log.Info("mark1d: receipt sealing armed", "key_id", key.KeyID(), "head", headURL)
 		}
 
@@ -1138,6 +1302,23 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	go func() {
 		defer close(cxDone)
 		cx.Supervise(ctx)
+	}()
+	rmDone := make(chan struct{})
+	go func() {
+		defer close(rmDone)
+		rmp.Run(ctx)
+	}()
+	contribDone := make(chan struct{})
+	go func() {
+		defer close(contribDone)
+		contribRec.Run(ctx)
+	}()
+	e1Done := make(chan struct{})
+	go func() {
+		defer close(e1Done)
+		if e1Up != nil {
+			e1Up.Run(ctx)
+		}
 	}()
 	parkedDone := drainParked(ctx, log, cfg.stateDir)
 
@@ -1185,6 +1366,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	<-memDone
 	<-anchorsDone // same: the consent reconcile owns a watcher and files, no spool
 	ctl.SetReconcile(nil)
+	ctl.SetProbe(nil)
 	// Joined before the spool closes, and joined at all because the join is what
 	// makes the proxy's stop ORDERED: Supervisor.Run returns only once the child
 	// has been signalled, reaped, and its proxy.port removed. A daemon that
@@ -1192,6 +1374,9 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// — the exact pair the stale-port control exists to prevent.
 	<-supDone
 	<-cxDone
+	<-rmDone
+	<-contribDone // admits into the spool, so joined before it closes
+	<-e1Done      // same: EmitExcerpt admits
 	<-parkedDone
 	// Joined BEFORE the spool closes and before the uplink's final Flush, so
 	// the shutdown drain's `mark1 off` disable window is admitted in time to

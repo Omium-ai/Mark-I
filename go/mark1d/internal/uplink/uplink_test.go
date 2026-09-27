@@ -1565,3 +1565,38 @@ func TestComposeStaysUnderTheRateLimitCapacities(t *testing.T) {
 		t.Fatal("categoryOf must read the body arm the server buckets by")
 	}
 }
+
+// TestContributionTravelsAlone: controld refuses an OutcomeContribution batched with anything, dropped rows included (16 L8), so compose cuts before it and ships it as a batch of one.
+func TestContributionTravelsAlone(t *testing.T) {
+	sp := openSpool(t)
+	session, _ := uuid.NewV7()
+	id, _ := uuid.NewV7()
+	payload, err := proto.Marshal(&m1pv1.Event{EventId: id[:], Seq: 2, SessionId: session[:], SessionEpoch: 1,
+		Body: &m1pv1.Event_OutcomeContribution{OutcomeContribution: &m1pv1.OutcomeContribution{DiffRedacted: "d"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendAll(t, sp, makeEvent(t, session, 1, spool.ClassDiagnostic), testEvent{id: id, payload: payload, class: spool.ClassDiagnostic}, makeEvent(t, session, 3, spool.ClassDiagnostic))
+	u, _, _ := newTestUplink(t, sp, &fakeIngest{respond: func(_ int, w http.ResponseWriter, bid string) { writeAck(w, http.StatusOK, bid, nil) }}, nil)
+	u.carry = []spool.Dropped{{Reason: 1, Class: spool.ClassDiagnostic, Quantity: 1}}
+	var sizes []int
+	for {
+		b, err := u.compose()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			break
+		}
+		if isContribution(b.recs[0].Payload) && len(b.dropped) != 0 {
+			t.Fatal("dropped rows rode the contribution batch")
+		}
+		sizes = append(sizes, len(b.recs))
+		if err := sp.Ack(b.end); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(sizes) != 3 || sizes[0] != 1 || sizes[1] != 1 || sizes[2] != 1 {
+		t.Fatalf("batches %v, want [1 1 1]: the contribution alone between its neighbours", sizes)
+	}
+}

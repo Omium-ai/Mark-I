@@ -26,6 +26,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
@@ -570,6 +571,61 @@ func TestAnchorsConsentAllStatic(t *testing.T) {
 	}
 }
 
+// POST /v1/anchors/probe: only an enabled project, 202 with the count the hook will run, refusals verbatim, and each result lands in GET /v1/anchors as last_run/last_code — never as a verify row.
+func TestAnchorsProbe(t *testing.T) {
+	s, dir := newServer(t)
+	repo, _ := canonical(t.TempDir())
+	derived := map[string][]anchors.CatalogEntry{repo: {catalogEntry()}}
+	if err := anchors.PublishCandidates(anchors.CandidatesPath(dir), nil, derived, nil, anchors.SandboxStatus{Available: true}); err != nil {
+		t.Fatal(err)
+	}
+	resp, body := call(t, s, http.MethodPost, "/v1/anchors/probe", map[string]any{"project": repo})
+	want(t, resp, body, http.StatusNotFound, "M1E-2001")
+	if err := s.saveWorkspaces(workspacesFile{Version: 1, Workspaces: []workspaceEntry{{Path: repo, EnabledAt: time.Now().UTC()}}}); err != nil {
+		t.Fatal(err)
+	}
+	resp, body = call(t, s, http.MethodPost, "/v1/anchors/probe", map[string]any{"project": repo})
+	want(t, resp, body, http.StatusServiceUnavailable, "M1E-2001")
+	resp, body = call(t, s, http.MethodPost, "/v1/anchors/probe", map[string]any{"project": repo, "all": true})
+	want(t, resp, body, http.StatusBadRequest, "M1E-2001")
+
+	var probeErr error
+	s.SetProbe(func(project string, done func(id, code string)) (int, error) {
+		if project != repo {
+			t.Errorf("probe of %q, want %q", project, repo)
+		}
+		if probeErr != nil {
+			return 0, probeErr
+		}
+		done("ruff@cat-1", "baseline_only")
+		return 1, nil
+	})
+	resp, body = call(t, s, http.MethodPost, "/v1/anchors/probe", map[string]any{"project": repo})
+	want(t, resp, body, http.StatusAccepted, "")
+	var accepted struct {
+		Project string `json:"project"`
+		Anchors int    `json:"anchors"`
+	}
+	decodeTo(t, body, &accepted)
+	if accepted.Project != repo || accepted.Anchors != 1 {
+		t.Fatalf("202 body %s", body)
+	}
+	var rows []map[string]any
+	_, body = call(t, s, http.MethodGet, "/v1/anchors?project="+repo, nil)
+	decodeTo(t, body, &rows)
+	if len(rows) != 1 || rows[0]["last_run"] == nil || rows[0]["last_code"] != "baseline_only" {
+		t.Fatalf("the probe's run is not on the anchor row: %s", body)
+	}
+	if n := len(s.hub.verifyEvents()); n != 0 {
+		t.Fatalf("a probe wrote %d verify rows; it is never a verdict", n)
+	}
+	for _, e := range []error{anchors.ErrProbeBusy, anchors.ErrProbeUnknown} {
+		probeErr = e
+		resp, body = call(t, s, http.MethodPost, "/v1/anchors/probe", map[string]any{"project": repo})
+		want(t, resp, body, http.StatusConflict, "M1E-2001")
+	}
+}
+
 // TestAnchorsOfWorktreesBelowAProject: a repository a session works in below an enabled folder derives its own candidates; the project's anchor list carries them with the worktree named, and consent-all reaches them.
 func TestAnchorsOfWorktreesBelowAProject(t *testing.T) {
 	s, dir := newServer(t)
@@ -634,16 +690,16 @@ func TestOptInsDriveTheGateReaders(t *testing.T) {
 	}
 	_, body := call(t, s, http.MethodGet, "/v1/optins", nil)
 	decodeTo(t, body, &o)
-	if o.StopGate || o.Exploration || o.TestsByProject[repo] || o.Consents != (consents.Consents{}) || !strings.Contains(string(body), `"consents":{"e1":false,"cloud_judge":false,"training":false,"team":false}`) {
+	if o.StopGate || o.Exploration || o.TestsByProject[repo] || o.Consents != (consents.Consents{}) || !strings.Contains(string(body), `"consents":{"e1":false,"cloud_judge":false,"training":false,"team":false,"local_rm":false,"cloud_rm":false,"contribute_outcomes":false}`) {
 		t.Fatalf("defaults are false until the user consents: %s", body)
 	}
-	resp, body := call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"training": true}})
+	resp, body := call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"training": true}}, currentCopy)
 	want(t, resp, body, http.StatusOK, "")
 	decodeTo(t, body, &o)
 	if o.Consents != (consents.Consents{Training: true}) || consents.Read(dir) != (consents.Consents{Training: true}) {
 		t.Fatalf("partial consents update %s", body)
 	}
-	_, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"e1": true, "cloud_judge": true}})
+	_, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"e1": true, "cloud_judge": true}}, currentCopy)
 	decodeTo(t, body, &o)
 	if o.Consents != (consents.Consents{E1: true, CloudJudge: true, Training: true}) {
 		t.Fatalf("merge keeps the untouched field %s", body)
@@ -653,7 +709,7 @@ func TestOptInsDriveTheGateReaders(t *testing.T) {
 	if o.Consents.Training || !o.Consents.E1 {
 		t.Fatalf("withdraw %s", body)
 	}
-	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 3 || !strings.Contains(lines[2], `"consents":{"e1":true,"cloud_judge":true,"training":false,"team":false}`) {
+	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 3 || !strings.Contains(lines[2], `"consents":{"e1":true,"cloud_judge":true,"training":false,"team":false,"local_rm":false,"cloud_rm":false,"contribute_outcomes":false}`) {
 		t.Fatalf("every consent change is journalled: %v", lines)
 	}
 	resp, body = call(t, s, http.MethodPut, "/v1/optins", map[string]any{"consents": map[string]bool{"nope": true}})
@@ -735,7 +791,7 @@ func TestOptInsDriveTheGateReaders(t *testing.T) {
 	if o.Consents != (consents.Consents{CloudJudge: true}) {
 		t.Fatalf("team consent off %s", body)
 	}
-	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 8 || !strings.Contains(lines[5], `"team":true`) || !strings.Contains(lines[7], `"consents":{"e1":false,"cloud_judge":true,"training":false,"team":false}`) {
+	if lines := readLines(t, filepath.Join(dir, "consent.jsonl")); len(lines) != 8 || !strings.Contains(lines[5], `"team":true`) || !strings.Contains(lines[7], `"consents":{"e1":false,"cloud_judge":true,"training":false,"team":false,"local_rm":false,"cloud_rm":false,"contribute_outcomes":false}`) {
 		t.Fatalf("team changes are journalled: %v", lines)
 	}
 }
@@ -908,7 +964,15 @@ func TestEventsStreamWithin100ms(t *testing.T) {
 		t.Fatalf("a proxy credential refusal is not a knee arrest; unlisted family leaked: %q", f)
 	case <-time.After(30 * time.Millisecond):
 	}
-	s.Hub().Arrest([16]byte{1}, [16]byte{3}, verdict.KneeState{N: 3, PLCB: 0.18, VTask: 6000, CostN: 2900, Stop: true, Evaluable: true}, "ev_3")
+	task3 := &m1pv1.Event{SessionId: ev.SessionId, TaskId: bytes.Repeat([]byte{0}, 16), Body: &m1pv1.Event_Usage{Usage: &m1pv1.Usage{InputTokens: 900, OutputTokens: 300}}}
+	task3.TaskId[0] = 3
+	s.Hub().Publish(task3)
+	if f := next(); !strings.HasPrefix(f, "event: usage\n") {
+		t.Fatalf("frame %q", f)
+	}
+	if saved := s.Hub().Arrest([16]byte{1}, [16]byte{3}, verdict.KneeState{N: 3, R: 2, Basis: "prior", PLCB: 0.18, VTask: 6000, CostN: 2900, Stop: true, Evaluable: true}, "ev_3"); saved != 400 {
+		t.Fatalf("arrest estimate %d, want the task's mean attempt cost 1200/3", saved)
+	}
 	f = next()
 	if !strings.HasPrefix(f, "event: arrest\ndata: ") {
 		t.Fatalf("frame %q", f)
@@ -918,17 +982,25 @@ func TestEventsStreamWithin100ms(t *testing.T) {
 	if arrest["type"] != "arrest" || arrest["attempt"] != 3.0 || arrest["p_lcb"] != 0.18 || arrest["v"] != 6000.0 || arrest["c_n"] != 2900.0 || arrest["inequality"] != "0.180 * 6000.00 <= 2900.00" || arrest["evidence_ref"] != "ev_3" || arrest["session_id"] != "01000000-0000-0000-0000-000000000000" || arrest["task_id"] != "03000000-0000-0000-0000-000000000000" {
 		t.Fatalf("arrest %v", arrest)
 	}
+	if arrest["tokens_saved_estimate"] != 400.0 || arrest["knee_basis"] != "prior" || arrest["round"] != 2.0 {
+		t.Fatalf("the SSE arrest carries the ledger's estimate, the knee basis and r (ADR-0012): %v", arrest)
+	}
+	s.Hub().Arrest([16]byte{1}, [16]byte{3}, verdict.KneeState{N: 4, R: 3, Basis: "unknown", PLCB: 0.1, VTask: 6000, CostN: 2900, Stop: true, Evaluable: true}, "")
+	decodeTo(t, []byte(strings.TrimPrefix(next(), "event: arrest\ndata: ")), &arrest)
+	if _, has := arrest["knee_basis"]; !has || arrest["knee_basis"] != nil || arrest["round"] != 3.0 {
+		t.Fatalf("an unrecorded basis is null beside its round, inside the app's three-word enum (ADR-0013): %v", arrest)
+	}
 	s.Hub().Arrest([16]byte{1}, [16]byte{3}, verdict.KneeState{N: 1}, "")
 	decodeTo(t, []byte(strings.TrimPrefix(next(), "event: arrest\ndata: ")), &arrest)
-	if arrest["p_lcb"] != nil || arrest["inequality"] != nil || arrest["evidence_ref"] != nil {
+	if arrest["p_lcb"] != nil || arrest["inequality"] != nil || arrest["evidence_ref"] != nil || arrest["knee_basis"] != nil || arrest["round"] != nil {
 		t.Fatalf("an unevaluable knee carries no numbers (D-Z): %v", arrest)
 	}
 
 	var rows []map[string]any
 	_, body := call(t, s, http.MethodGet, "/v1/verify/events?project=/w", nil)
 	decodeTo(t, body, &rows)
-	if len(rows) != 4 {
-		t.Fatalf("verify/events must hold tamper + verdict + 2 arrests, never the guard refusal: %s", body)
+	if len(rows) != 5 {
+		t.Fatalf("verify/events must hold tamper + verdict + 3 arrests, never the guard refusal: %s", body)
 	}
 	if rows[0]["type"] != "tamper" || rows[0]["anchor_id"] != "ruff@cat-1" || rows[0]["session_id"] != "01000000-0000-0000-0000-000000000000" {
 		t.Fatalf("tamper row %v", rows[0])
@@ -936,7 +1008,7 @@ func TestEventsStreamWithin100ms(t *testing.T) {
 	if rows[1]["type"] != "verdict" || rows[1]["verdict"] != "violated" || rows[1]["state"] != "bootstrapping" || rows[1]["certificate_id"] != "cert_1" || rows[1]["id"] != "02020202-0202-0202-0202-020202020202" || rows[1]["task_id"] != "03030303-0303-0303-0303-030303030303" || rows[1]["time"] != "2026-09-16T14:14:00Z" {
 		t.Fatalf("verdict row %v", rows[1])
 	}
-	if rows[2]["type"] != "arrest" || rows[3]["type"] != "arrest" {
+	if rows[2]["type"] != "arrest" || rows[3]["type"] != "arrest" || rows[4]["type"] != "arrest" {
 		t.Fatalf("arrest rows %v", rows[2:])
 	}
 	plain := sessionEvent(1, &m1pv1.VerdictEvent{})
@@ -1531,10 +1603,28 @@ func TestEnableProvisionsThroughTheControlAPI(t *testing.T) {
 
 	enable(repoA, nil)
 	enable(repoB, nil)
+	note := func(session, cwd string) string {
+		if err := os.MkdirAll(opencode.NotesDir(dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(map[string]any{"type": "chat.message", "properties": map[string]any{"sessionID": session, "cwd": cwd, "timestamp": "2026-09-26T00:00:00Z", "text": "raw prompt"}})
+		p := filepath.Join(opencode.NotesDir(dir), session+".jsonl")
+		if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	noteA, noteB := note("ses_a", repoA), note("ses_b", repoB)
 	resp, body = call(t, s, http.MethodDelete, "/v1/projects", map[string]string{"path": repoA})
 	want(t, resp, body, http.StatusOK, "")
 	if !strings.Contains(string(body), `"reverted":[]`) || !fragmentPresent() {
 		t.Fatalf("removing one of two projects must leave the other's hooks in place: %s", body)
+	}
+	if _, errA := os.Stat(noteA); !os.IsNotExist(errA) {
+		t.Fatalf("the removed project's opencode prompts outlived it: %v", errA)
+	}
+	if _, errB := os.Stat(noteB); errB != nil {
+		t.Fatalf("the still-enabled project's opencode prompts were pruned: %v", errB)
 	}
 	resp, body = call(t, s, http.MethodDelete, "/v1/projects", map[string]string{"path": repoB})
 	want(t, resp, body, http.StatusOK, "")

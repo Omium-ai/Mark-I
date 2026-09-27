@@ -433,6 +433,11 @@ func TestOnCloseFiresOnEveryClosePath(t *testing.T) {
 			}
 			var closed []TaskID
 			s.OnClose = func(id TaskID) { closed = append(closed, id) }
+			var closedIn [][16]byte
+			var res []m1pv1.Resolution
+			s.OnTaskClose = func(sess [16]byte, _ TaskID, r m1pv1.Resolution) {
+				closedIn, res = append(closedIn, sess), append(res, r)
+			}
 
 			id := sid(t)
 			s.Observe(prompt().event(id), nil)
@@ -453,6 +458,9 @@ func TestOnCloseFiresOnEveryClosePath(t *testing.T) {
 			}
 			if len(closed) != 1 || closed[0] != task {
 				t.Fatalf("OnClose fired %d time(s) with %x, want exactly once with %x (D-AR)", len(closed), closed, task)
+			}
+			if len(closedIn) != 1 || closedIn[0] != id || res[0] != tc.want {
+				t.Fatalf("OnTaskClose fired with %x %v, want once with session %x and %v", closedIn, res, id, tc.want)
 			}
 		})
 	}

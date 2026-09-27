@@ -114,7 +114,7 @@ func seedConformance(t *testing.T) seeded {
 		ev.TaskId = bytes.Repeat([]byte{9}, 16)
 		return ev
 	}
-	hub.Arrest(sid, [16]byte{9}, verdict.KneeState{N: 3, PLCB: 0.18, VTask: 6000, CostN: 2900, CostBasis: "usd", Stop: true, Evaluable: true}, "ev_task_401_3")
+	hub.Arrest(sid, [16]byte{9}, verdict.KneeState{N: 3, R: 3, Basis: "prior", PLCB: 0.18, VTask: 6000, CostN: 2900, CostBasis: "usd", Stop: true, Evaluable: true}, "ev_task_401_3")
 	hub.Publish(stamp(sessionEvent(1, &m1pv1.VerdictEvent{Stage: m1pv1.VerdictStage_VERDICT_STAGE_CERTIFIED, Verdict: m1pv1.Verdict_VERDICT_SATISFIED, Posterior: []float64{0.8, 0.1, 0.05, 0.05}, NoiseCertId: "cert_5591", BundleSeq: 4, VoteCount: 2, Certification: m1pv1.CertificationStatus_CERTIFICATION_STATUS_CERTIFIED}), 7))
 	hub.Publish(stamp(sessionEvent(1, &m1pv1.AnchorVote{AnchorId: "ruff@cat-1", Vote: m1pv1.Verdict_VERDICT_SATISFIED, Integrity: &m1pv1.AnchorIntegrity{Tamper: true}}), 9))
 	hub.Publish(stamp(&m1pv1.Event{Body: &m1pv1.Event_ReceiptCheckpoint{ReceiptCheckpoint: &m1pv1.ReceiptCheckpoint{CheckpointSeq: 4, MerkleRoot: bytes.Repeat([]byte{0xab}, 32), LeafCount: 87, KeyId: "ed25519:a1cf5c00b2784f6e"}}}, 1))
@@ -142,6 +142,7 @@ func seedConformance(t *testing.T) seeded {
 	})
 
 	s.SetShutdown(func() {})
+	s.SetProbe(func(string, func(id, code string)) (int, error) { return 1, nil })
 	writeFile(t, fabric.OptInPath(dir), []byte(`{"stop_gate":true,"ts":"2026-09-16T00:00:00Z","user":"test"}`), 0o600)
 	writeFile(t, filepath.Join(dir, "spool", "seg-0000000000000001.m1s"), make([]byte, 64), 0o600)
 	writeFile(t, filepath.Join(dir, "receipt", "last-head"), []byte(`{"seq":92,"hash":"`+strings.Repeat("ab", 32)+`","checkpoint_seq":4}`), 0o600)
@@ -149,6 +150,9 @@ func seedConformance(t *testing.T) seeded {
 	writeFile(t, settings, []byte(`{"model": "opus"}`), 0o600)
 	if _, err := claudecode.ApplyFragment(settings, dir, ""); err != nil {
 		t.Fatal(err)
+	}
+	if out := s.Reprovision(); len(out) != 1 || out[0].Action != "current" {
+		t.Fatalf("daemon-start reprovision over the seeded fragment: %+v", out) // stamps provisioned_by, as every start does
 	}
 	// The plan sources: ~/.claude.json's oauthAccount (never .credentials.json) and one status-line record in the vendor's published shape (https://code.claude.com/docs/en/statusline).
 	writeFile(t, filepath.Join(home, ".claude.json"), []byte(`{"oauthAccount":{"organizationRateLimitTier":"default_claude_max_20x","organizationType":"claude_max","billingType":"stripe_subscription","hasExtraUsageEnabled":false,"profileFetchedAt":1789501965151}}`), 0o600)
@@ -193,6 +197,8 @@ func (sd seeded) body(method, path string) any {
 		return map[string]string{"path": sd.repoC}
 	case "POST /v1/anchors/consent":
 		return map[string]any{"id": "ruff@cat-1", "consented": true}
+	case "POST /v1/anchors/probe":
+		return map[string]string{"project": sd.repoA}
 	case "PUT /v1/optins":
 		return map[string]any{"stop_gate": true, "tests_by_project": map[string]bool{sd.repoA: true}}
 	case "POST /v1/enroll":
@@ -221,7 +227,11 @@ func TestControlAPIMatchesDesktopFixtures(t *testing.T) {
 			t.Fatalf("%s.json: %v", name, err)
 		}
 		resp, body := call(t, sd.s, method, path, sd.body(method, path))
-		if resp.StatusCode != http.StatusOK {
+		ok := http.StatusOK
+		if name == "local-anchors-probe" { // server.mjs ACCEPTED: answers before its runs land
+			ok = http.StatusAccepted
+		}
+		if resp.StatusCode != ok {
 			t.Errorf("%s %s: status %d: %s", method, path, resp.StatusCode, body)
 			continue
 		}
@@ -362,7 +372,7 @@ func TestEventFramesMatchDesktopFixture(t *testing.T) {
 	for _, ev := range published {
 		hub.Publish(ev)
 	}
-	hub.Arrest([16]byte{1}, [16]byte{3}, verdict.KneeState{N: 3, PLCB: 0.18, VTask: 6000, CostN: 2900, Stop: true, Evaluable: true}, "ev_task_401_3")
+	hub.Arrest([16]byte{1}, [16]byte{3}, verdict.KneeState{N: 3, R: 3, Basis: "prior", PLCB: 0.18, VTask: 6000, CostN: 2900, Stop: true, Evaluable: true}, "ev_task_401_3")
 	got := map[string]any{}
 	for len(got) < len(published)+1 {
 		select {

@@ -23,6 +23,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
+	provisionpkg "github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 )
 
 func enrolledEnv(t *testing.T) (*cli.Env, *bytes.Buffer) {
@@ -102,11 +103,11 @@ func TestDoctorFailsOnLooseStateDir(t *testing.T) {
 	}
 }
 
-// provision applies a real fragment to a real settings file under env's state
+// provisionClaude applies a real fragment to a real settings file under env's state
 // root and returns the target path. It fails loudly if nothing was written —
 // a doctor test whose fixture was never provisioned would classify an absence
 // and pass while proving nothing.
-func provision(t *testing.T, env *cli.Env) string {
+func provisionClaude(t *testing.T, env *cli.Env) string {
 	t.Helper()
 	target := filepath.Join(t.TempDir(), "settings.json")
 	const body = `{
@@ -147,7 +148,7 @@ func runDoctor(t *testing.T, env *cli.Env, out *bytes.Buffer, opts Options) (Rep
 func TestDoctorClassifiesFragmentStates(t *testing.T) {
 	t.Run("OK with every provisioned line", func(t *testing.T) {
 		env, out := enrolledEnv(t)
-		provision(t, env)
+		provisionClaude(t, env)
 		rep, err := runDoctor(t, env, out, Options{})
 		if err != nil {
 			t.Fatalf("a healthy fragment failed doctor: %v", err)
@@ -167,7 +168,7 @@ func TestDoctorClassifiesFragmentStates(t *testing.T) {
 
 	t.Run("MISSING when the target is gone", func(t *testing.T) {
 		env, out := enrolledEnv(t)
-		target := provision(t, env)
+		target := provisionClaude(t, env)
 		if err := os.Remove(target); err != nil {
 			t.Fatal(err)
 		}
@@ -183,7 +184,7 @@ func TestDoctorClassifiesFragmentStates(t *testing.T) {
 
 	t.Run("FRAGMENT-DAMAGED on a hand edit inside our markers", func(t *testing.T) {
 		env, out := enrolledEnv(t)
-		damage(t, provision(t, env))
+		damage(t, provisionClaude(t, env))
 		rep, err := runDoctor(t, env, out, Options{})
 		if err == nil {
 			t.Fatal("a damaged fragment passed doctor")
@@ -403,7 +404,7 @@ func TestDoctorClassifiesTheBaseURLFragment(t *testing.T) {
 
 	t.Run("both fragments in one settings file stay green", func(t *testing.T) {
 		env, out := enrolledEnv(t)
-		provisionBaseURL(t, env, provision(t, env))
+		provisionBaseURL(t, env, provisionClaude(t, env))
 		rep, err := runDoctor(t, env, out, Options{})
 		if err != nil {
 			t.Fatalf("the ordinary two-fragment install failed doctor: %v\n%+v", err, rep.Fragments)
@@ -546,7 +547,7 @@ func TestDoctorRetentionWarning(t *testing.T) {
 // overwrite a fragment a human has touched.
 func TestDoctorFixRepairsOnlyWhatItMayTouch(t *testing.T) {
 	env, out := enrolledEnv(t)
-	target := provision(t, env)
+	target := provisionClaude(t, env)
 	damage(t, target)
 
 	rep, err := runDoctor(t, env, out, Options{Fix: true})
@@ -573,7 +574,7 @@ func TestDoctorFixRepairsOnlyWhatItMayTouch(t *testing.T) {
 // overwrite the design refuses.
 func TestDoctorFixLeavesAHealthyFragmentAlone(t *testing.T) {
 	env, out := enrolledEnv(t)
-	target := provision(t, env)
+	target := provisionClaude(t, env)
 	before, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatal(err)
@@ -1358,7 +1359,7 @@ func TestDoctorCursorRow(t *testing.T) {
 	}
 
 	writeFile(t, hooks, cursorHooksBody)
-	provision(t, env)
+	provisionClaude(t, env)
 	rep, _ = runDoctor(t, env, out, opts)
 	if row := agentRow(t, rep, "cursor"); strings.Contains(row.Note, "no ~/.cursor") || !strings.Contains(row.Note, "claudecode fragment") || !strings.Contains(row.Note, "MARK1_AGENT unset") {
 		t.Fatalf("claudecode provisioned: %+v", row)
@@ -1428,5 +1429,45 @@ func TestDoctorCursorRow(t *testing.T) {
 	rep, err = runDoctor(t, env, out, opts)
 	if err == nil || len(rep.Fragments) != 1 || rep.Fragments[0].State != "FRAGMENT-DAMAGED" || !strings.Contains(rep.Fragments[0].Detail, cursor.CodeManifestCorrupt) {
 		t.Fatalf("corrupt manifest: %v %+v", err, rep.Fragments)
+	}
+}
+
+// TestDoctorFixReprovisionsStaleFragment: a plugin an earlier release wrote reads OK (it is still ours) and names its release; --fix brings it to this release's bytes, says so, and restamps; the human report flags the stale one.
+func TestDoctorFixReprovisionsStaleFragment(t *testing.T) {
+	t.Setenv("MARK1_DISABLE", "")
+	env, out := enrolledEnv(t)
+	env.Version = "0.2.0"
+	plugin := filepath.Join(t.TempDir(), "opencode", "plugins", "mark1.js")
+	if err := os.MkdirAll(filepath.Dir(filepath.Dir(plugin)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := opencode.ApplyFragment(plugin, env.StateDir, "~/.omium/mark1/bin-old/mark1-hookshim"); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisionpkg.WriteStamp(env.StateDir, "opencode", "0.1.0", "blake3:00"); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{ClaudeSettings: noRetention(t), Socket: filepath.Join(t.TempDir(), "no.sock")}
+
+	rep, err := runDoctor(t, env, out, opts)
+	if err != nil || len(rep.Fragments) != 1 || rep.Fragments[0].ProvisionedBy != "0.1.0" || rep.Reprovisioned != nil {
+		t.Fatalf("plain doctor never writes, and names the release on disk: %v %+v", err, rep)
+	}
+	env.JSON = false
+	out.Reset()
+	_ = Run(env, opts)
+	if !strings.Contains(out.String(), "provisioned by 0.1.0 (this is 0.2.0") {
+		t.Fatalf("human report does not flag the stale fragment:\n%s", out.String())
+	}
+	env.JSON = true
+	out.Reset()
+
+	opts.Fix = true
+	rep, err = runDoctor(t, env, out, opts)
+	if err != nil || len(rep.Reprovisioned) != 1 || rep.Reprovisioned[0] != "opencode" || rep.Fragments[0].ProvisionedBy != "0.2.0" || rep.Fragments[0].State != "OK" {
+		t.Fatalf("--fix: %v %+v", err, rep)
+	}
+	if b, _ := os.ReadFile(plugin); string(b) != string(opencode.Plugin("")) {
+		t.Fatal("--fix left the old release's plugin in place")
 	}
 }

@@ -2,11 +2,16 @@ package anchors
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"maps"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"time"
+
+	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
 
 // Scheduling constants (04 §2.2 "Activity-aware scheduling"). Overridable per
@@ -66,7 +71,18 @@ type Scheduler struct {
 	lastTook     map[string]time.Duration    // per anchor, its newest run's wall time: the slow queue's order
 	lastAt       map[string]time.Time        // per worktree+anchor, when its newest run finished: the suspension clock
 	work         chan workItem
+	probing      map[string]bool // projects with a probe in flight: one at a time each
 }
+
+// probeTimeout bounds each anchor of a first-run probe: a cold compile can take a while, a probe must not take DefaultLimits' ten minutes.
+const probeTimeout = 2 * time.Minute
+
+var (
+	// ErrProbeUnknown: no armed worktree sits in the project (not enabled, or not reconciled yet).
+	ErrProbeUnknown = errors.New("anchors: no enabled worktree in this project")
+	// ErrProbeBusy: a probe of the project is still running.
+	ErrProbeBusy = errors.New("anchors: a probe of this project is already running")
+)
 
 // suspendFor: a slow anchor whose newest run the sandbox denied (sandbox_denied) is not owed again for this long — a suite that binds sockets fails the same way every Stop and costs minutes of CPU each time.
 const suspendFor = time.Hour
@@ -373,4 +389,89 @@ func (s *Scheduler) worker(ctx context.Context) {
 			s.runItem(ctx, w)
 		}
 	}
+}
+
+// Probe runs every consented static anchor of project's armed worktrees once, one after another, in the background, and hands done each anchor's diagnostic_code as it lands; it emits nothing (Runner.Probe). It answers how many anchors it will run, or refuses an unknown project or a second probe while one runs.
+func (s *Scheduler) Probe(ctx context.Context, project string, done func(id, code string)) (int, error) {
+	s.mu.Lock()
+	known := false
+	var items []workItem
+	for _, wt := range slices.Sorted(maps.Keys(s.catalogs)) {
+		if wt == "" || !Within(project, wt) {
+			continue
+		}
+		known = true
+		for _, e := range s.catalogs[wt] {
+			if e.SideEffect == SideEffectStatic {
+				items = append(items, workItem{entry: e, worktree: wt})
+			}
+		}
+	}
+	switch {
+	case !known:
+		s.mu.Unlock()
+		return 0, ErrProbeUnknown
+	case s.probing[project]:
+		s.mu.Unlock()
+		return 0, ErrProbeBusy
+	}
+	if s.probing == nil {
+		s.probing = map[string]bool{}
+	}
+	s.probing[project] = true
+	s.mu.Unlock()
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.probing, project)
+			s.mu.Unlock()
+		}()
+		for _, w := range items {
+			if ctx.Err() != nil {
+				return
+			}
+			if !stillConsented(s.consentPath, w.entry) {
+				continue
+			}
+			pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+			code, err := s.runner.Probe(pctx, w.entry, w.worktree)
+			cancel()
+			if err != nil {
+				s.log.Warn("anchors: probe run failed", "anchor", w.entry.ID, "err", err)
+				continue
+			}
+			done(w.entry.ID, code)
+		}
+	}()
+	return len(items), nil
+}
+
+// TestsPass runs project's consented test anchors once, in line, for 16 L8's tests_pass label: no vote, no ledger event, no stored evidence; an errored run is unknown, never a failure (F-31).
+func (s *Scheduler) TestsPass(ctx context.Context, project string) (pass, known bool) {
+	s.mu.Lock()
+	var items []workItem
+	for wt, es := range s.catalogs {
+		if wt == "" || !Within(project, wt) {
+			continue
+		}
+		for _, e := range es {
+			if e.SideEffect == SideEffectTest {
+				items = append(items, workItem{entry: e, worktree: wt})
+			}
+		}
+	}
+	s.mu.Unlock()
+	pass = true
+	for _, w := range items {
+		if !stillConsented(s.consentPath, w.entry) {
+			continue
+		}
+		j, err := s.runner.judge(ctx, w.entry, w.worktree, [16]byte{})
+		if err != nil || (j.verdict != m1pv1.Verdict_VERDICT_SATISFIED && j.verdict != m1pv1.Verdict_VERDICT_VIOLATED) {
+			continue
+		}
+		known = true
+		pass = pass && j.verdict == m1pv1.Verdict_VERDICT_SATISFIED
+	}
+	return pass && known, known
 }

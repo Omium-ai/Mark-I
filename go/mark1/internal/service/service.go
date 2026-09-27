@@ -201,6 +201,9 @@ func resolve(env *cli.Env, opts Options, probe bool) (*target, error) {
 
 func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 
+// DaemonPath is the mark1d this CLI manages: explicit, else beside this executable, else PATH.
+func DaemonPath(explicit string) (string, error) { return daemonPath(explicit) }
+
 func daemonPath(explicit string) (string, error) {
 	if explicit != "" {
 		return filepath.Abs(explicit)

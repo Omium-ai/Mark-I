@@ -159,8 +159,61 @@ func TestGrantAddsOnePackageACE(t *testing.T) {
 		t.Fatal(err)
 	}
 	dacl, _, err := sd.DACL()
-	if err != nil || !hasPackageACE(dacl, sb.sid, readExecMask) {
-		t.Fatalf("child did not inherit the package ACE (err=%v)", err)
+	if err != nil || !anyPackageACE(dacl, sb.sid) || hasPackageACE(dacl, sb.sid, readExecMask) {
+		t.Fatalf("child did not inherit the package ACE, or its inherited copy reads as its own grant (err=%v)", err)
+	}
+}
+
+// anyPackageACE: an ACE for sid, explicit or inherited.
+func anyPackageACE(dacl *windows.ACL, sid *windows.SID) bool {
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(dacl, i, &ace) == nil && (*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(sid) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestHasPackageACECountsOnlyExplicit (review M9): the package's own ACE counts only when the dir owns it; an inherited copy goes with its parent's revoke. ALL APPLICATION PACKAGES counts either way, for read-execute only.
+func TestHasPackageACECountsOnlyExplicit(t *testing.T) {
+	sid, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anyPkg, err := windows.CreateWellKnownSid(windows.WinBuiltinAnyPackageSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl := func(who *windows.SID, mask uint32, flags uint8) *windows.ACL {
+		a, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{AccessPermissions: windows.ACCESS_MASK(mask), AccessMode: windows.GRANT_ACCESS,
+			Trustee: windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_UNKNOWN, TrusteeValue: windows.TrusteeValueFromSID(who)}}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(a, 0, &ace); err != nil {
+			t.Fatal(err)
+		}
+		ace.Header.AceFlags |= flags
+		return a
+	}
+	for name, c := range map[string]struct {
+		dacl *windows.ACL
+		mask uint32
+		want bool
+	}{
+		"explicit read":          {acl(sid, readExecMask, 0), readExecMask, true},
+		"inherited read":         {acl(sid, readExecMask, windows.INHERITED_ACE), readExecMask, false},
+		"inherited modify":       {acl(sid, modifyMask, windows.INHERITED_ACE), modifyMask, false},
+		"explicit read, modify":  {acl(sid, readExecMask, 0), modifyMask, false},
+		"inherit-only":           {acl(sid, readExecMask, windows.INHERIT_ONLY_ACE), readExecMask, false},
+		"any package inherited":  {acl(anyPkg, readExecMask, windows.INHERITED_ACE), readExecMask, true},
+		"any package for modify": {acl(anyPkg, modifyMask, 0), modifyMask, false},
+	} {
+		if got := hasPackageACE(c.dacl, sid, c.mask); got != c.want {
+			t.Errorf("%s: %v, want %v", name, got, c.want)
+		}
 	}
 }
 
@@ -184,7 +237,7 @@ func TestRevokeRemovesThePackageACEFromTheTree(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return hasPackageACE(dacl, sb.sid, readExecMask)
+		return anyPackageACE(dacl, sb.sid)
 	}
 	if err := sb.grant(dir, readExecMask); err != nil {
 		t.Fatal(err)
@@ -204,6 +257,113 @@ func TestRevokeRemovesThePackageACEFromTheTree(t *testing.T) {
 	for _, r := range toolchainRoots() {
 		if strings.Contains(strings.ToLower(r), `\programs`) || strings.Contains(strings.ToLower(r), `windowsapps`) {
 			t.Fatalf("toolchainRoots grants an app-install root again: %s", r)
+		}
+	}
+}
+
+// TestReadLeaseRevokesAfterTheLastRun (M8, review M9): a read root carries the package ACE only while a run holds it and leaseLinger after, so a burst of runs walks the tree once; the last of two overlapping runs schedules the revoke, a run inside the linger takes the grant over, a kept root, a kept dir below a leased one and a root that already had the ACE are never revoked, a file is granted on itself alone, and a protected root is refused outright.
+func TestReadLeaseRevokesAfterTheLastRun(t *testing.T) {
+	was := leaseLinger
+	leaseLinger = 300 * time.Millisecond
+	defer func() { leaseLinger = was }()
+	sb := NewSandbox(t.TempDir())
+	if sb.reason != "" {
+		kernelLacks(t, sb.reason)
+	}
+	has := func(p string) bool {
+		sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hasExplicitPackageACE(dacl, sb.sid)
+	}
+	dir := t.TempDir()
+	a, err := sb.lease(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := sb.lease(dir)
+	if err != nil || !has(dir) {
+		t.Fatalf("lease: err=%v granted=%v", err, has(dir))
+	}
+	a()
+	if !has(dir) {
+		t.Fatal("the first run out revoked a grant the second still holds")
+	}
+	gone := func(p string) bool {
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			if !has(p) {
+				return true
+			}
+		}
+		return false
+	}
+	b()
+	if !has(dir) {
+		t.Fatal("the grant went at once: every run of a burst would walk the tree")
+	}
+	c, err := sb.lease(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * leaseLinger)
+	if !has(dir) {
+		t.Fatal("a pending revoke fired under a run that took the grant over")
+	}
+	c()
+	if !gone(dir) {
+		t.Fatal("the last run out left the read grant in place")
+	}
+	top := t.TempDir()
+	wt := filepath.Join(top, "wt")
+	if err := os.Mkdir(wt, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	d, err := sb.lease(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sb.keep(wt, modifyMask); err != nil {
+		t.Fatal(err)
+	}
+	d()
+	if !gone(top) || !has(wt) {
+		t.Fatal("a kept dir below a leased top lost its own grant with the top's revoke")
+	}
+	file := filepath.Join(t.TempDir(), "ignore")
+	if err := os.WriteFile(file, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := sb.lease(file)
+	if err != nil || !has(file) {
+		t.Fatalf("file lease: err=%v granted=%v", err, has(file))
+	}
+	f()
+	if !gone(file) {
+		t.Fatal("a file lease was never revoked")
+	}
+	kept := t.TempDir()
+	if err := sb.keep(kept, modifyMask); err != nil {
+		t.Fatal(err)
+	}
+	release, err := sb.lease(kept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if !has(kept) {
+		t.Fatal("a read lease revoked a kept root's grant")
+	}
+	for _, p := range []string{os.Getenv("USERPROFILE"), os.Getenv("LOCALAPPDATA"), filepath.VolumeName(dir) + `\`} {
+		if _, err := sb.lease(p); err == nil {
+			t.Fatalf("leased the protected root %s", p)
+		}
+		if err := sb.grant(p, readExecMask); err == nil {
+			t.Fatalf("granted the protected root %s", p)
 		}
 	}
 }
@@ -243,6 +403,7 @@ func TestToolRoot(t *testing.T) {
 	for exe, want := range map[string]string{
 		`C:\Go\bin\go.exe`:                         `C:\Go`,
 		`C:\w\.venv\Scripts\pytest.exe`:            `C:\w\.venv`,
+		`C:\Program Files\Git\cmd\git.exe`:         `C:\Program Files\Git`,
 		`C:\Users\u\AppData\Roaming\npm\tsc.cmd`:   `C:\Users\u\AppData\Roaming\npm`,
 		`C:\Users\u\AppData\Local\Temp\x\ruff.cmd`: `C:\Users\u\AppData\Local\Temp\x`,
 	} {

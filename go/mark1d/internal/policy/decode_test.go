@@ -48,6 +48,28 @@ func TestKneePLCBIsOptionalAndRangeChecked(t *testing.T) {
 	}
 }
 
+// TestKneeBasisIsOptionalClosedEnum — ADR-0013: route.knee.basis is optional (a bundle that predates it decodes to "" and the knee reads "unknown"), a closed enum when present, and a miss is a schema reject like cost_basis.
+func TestKneeBasisIsOptionalClosedEnum(t *testing.T) {
+	route := func(basis any) any {
+		knee := vmap{{"cost_basis", "quota"}, {"rows", []any{vmap{{"n", uint64(1)}, {"c_n", 0.5}}}}, {"v_default", 1.0}}
+		if basis != nil {
+			knee = append(knee, pair{"basis", basis})
+		}
+		return vmap{{"cpvs", []any{}}, {"ladders", []any{}}, {"knee", knee}}
+	}
+	for basis, want := range map[any]string{nil: "", "prior": "prior", "anchor_grounded": "anchor_grounded", "certified": "certified"} {
+		r, rej := decodeRoute(route(basis))
+		if rej != nil || r.Knee.Basis != want {
+			t.Fatalf("basis %v: got %q / %v, want %q", basis, r.Knee.Basis, rej, want)
+		}
+	}
+	for _, bad := range []any{"unknown", "Prior", "", uint64(1)} {
+		if _, rej := decodeRoute(route(bad)); rej == nil || rej.Kind() != "schema" {
+			t.Fatalf("basis %v must be a schema reject, got %v", bad, rej)
+		}
+	}
+}
+
 // TestEpsilonNeedsSignedOptInPresentOrAbsent — D-EF: ε>0 needs a signed
 // opt_in:true; present-false OR the key absent both refuse as M1E-3001,
 // fail closed the same as the controld publisher (re-freeze closed the

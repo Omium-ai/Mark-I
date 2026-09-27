@@ -363,6 +363,37 @@ func TestStatusShowsStopGatePosture(t *testing.T) {
 	}
 }
 
+// Both reward models appear with their own state, so a down RM-B is named while RM-A keeps scoring.
+func TestStatusShowsEachRewardModel(t *testing.T) {
+	env, out := enrolledEnv(t)
+	sock := filepath.Join(t.TempDir(), "no.sock")
+	env.JSON = false
+	if err := Run(env, Options{Socket: sock}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "reward model  not started") {
+		t.Fatalf("no status file must read as not started:\n%s", out.String())
+	}
+	body := `{"state":"failed","model_id":"rm:mark1-rm-a@1,rm:mark1-rm-b@1","detail":"x","models":[` +
+		`{"model_id":"rm:mark1-rm-a@1","state":"ready","detail":"scores after each task close"},` +
+		`{"model_id":"rm:mark1-rm-b@1","state":"failed","detail":"runtime crash-looped"}],"rm_backlog":3}`
+	if err := os.MkdirAll(filepath.Join(env.StateDir, "rm"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.StateDir, "rm", "status.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Run(env, Options{Socket: sock}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"reward model  rm:mark1-rm-a@1 ready — scores after each task close", "reward model  rm:mark1-rm-b@1 failed — runtime crash-looped", "reward model  3 finished tasks dropped unscored"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func controlStub(t *testing.T, env *cli.Env, token string, handler http.HandlerFunc) (*httptest.Server, string) {
 	t.Helper()
 	srv := httptest.NewServer(handler)

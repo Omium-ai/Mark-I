@@ -241,6 +241,12 @@ func checked(v any, path string, production func(string) bool) (string, *Reject)
 // ranges and then detonates fusion at runtime.
 const distSumTol = 1e-9
 
+// kneeBases is route.knee.basis's closed enum (ADR-0013).
+var kneeBases = map[string]bool{"prior": true, "anchor_grounded": true, "certified": true}
+
+// BundleFeatures is X-Mark1-Bundle-Features on every bundle request: the optional keys this decoder accepts, so controld never publishes one to a fleet with an edge that would refuse it (ADR-0013).
+const BundleFeatures = "knee_basis"
+
 func sumsToOne(entries []float64, path string) *Reject {
 	sum := 0.0
 	for _, e := range entries {
@@ -575,8 +581,16 @@ func decodeRoute(v any) (RouteSection, *Reject) {
 	if rej != nil {
 		return out, rej
 	}
-	if rej = strictKeys(km, []string{"cost_basis", "rows", "v_default"}, nil, kp); rej != nil {
+	if rej = strictKeys(km, []string{"cost_basis", "rows", "v_default"}, []string{"basis"}, kp); rej != nil {
 		return out, rej
+	}
+	if bv, ok := km["basis"]; ok {
+		if out.Knee.Basis, rej = textVal(bv, kp); rej != nil {
+			return out, rej
+		}
+		if !kneeBases[out.Knee.Basis] {
+			return out, schemaErr(kp+".basis", "not a knee basis: "+out.Knee.Basis) // ADR-0013's closed enum, M1E-3001 like cost_basis
+		}
 	}
 	basis, rej := textVal(km["cost_basis"], kp)
 	if rej != nil {

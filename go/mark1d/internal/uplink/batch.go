@@ -39,6 +39,8 @@ const (
 	eventSessionIDField = 3
 	// Event.body's receipt_checkpoint arm is field 21 (envelope.proto).
 	eventReceiptCheckpointField = 21
+	// Event.body's outcome_contribution arm is field 40 (envelope.proto, 16 L8).
+	eventOutcomeContributionField = 40
 	// Batch.events is field 5 of the Batch envelope (envelope.proto).
 	batchEventsField = 5
 )
@@ -91,6 +93,13 @@ func (u *Uplink) compose() (*outBatch, error) {
 		take, raw := 0, 0
 		cats := map[string]int{}
 		for take < len(recs) && take < maxBatchEvents {
+			// A contribution travels alone (controld lands it where withdrawal can delete it, never in the replay log): it closes the batch before it and is a batch of one.
+			if isContribution(recs[take].Payload) {
+				if take == 0 {
+					take = 1
+				}
+				break
+			}
 			// Always take at least one record: a single oversized record must
 			// move (and fail loudly server-side) rather than wedge the queue.
 			if take > 0 && raw+len(recs[take].Payload) > targetRawBytes {
@@ -134,6 +143,9 @@ func (u *Uplink) compose() (*outBatch, error) {
 				}
 				continue
 			}
+		}
+		if isContribution(kept[0].Payload) {
+			return u.rebatch(kept, nil, end) // dropped rows ride the next batch: controld refuses a contribution batch carrying anything else
 		}
 		dropped := u.carry
 		u.carry = nil
@@ -249,6 +261,11 @@ func sessionIDOf(payload []byte) []byte {
 		return nil
 	}
 	return v
+}
+
+func isContribution(payload []byte) bool {
+	_, ok := topLevelBytes(payload, eventOutcomeContributionField)
+	return ok
 }
 
 // isCheckpoint reports whether the encoded Event's body is a ReceiptCheckpoint

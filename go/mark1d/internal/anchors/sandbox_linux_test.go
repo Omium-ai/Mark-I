@@ -3,13 +3,17 @@
 package anchors
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -82,5 +86,53 @@ func TestHelperRefusesUnconfinedInvocation(t *testing.T) {
 	}
 	if !strings.Contains(string(out), helperStderrPrefix+"confinement check") {
 		t.Fatalf("helper refused for the wrong reason: %q", out)
+	}
+}
+
+// TestTaskDiffWithoutLandlockStaysInTheSandbox (FR-VERIFY-021): a kernel without Landlock still hosts hardened git in the user+net namespaces; before, RequireFSConfined refused it and every task diff came back empty.
+func TestTaskDiffWithoutLandlockStaysInTheSandbox(t *testing.T) {
+	repo := fixtureRepo(t)
+	write(t, filepath.Join(repo, "new.py"), "x = 1\n")
+	sb := NewSandbox(t.TempDir())
+	sb.landlockMask = 0
+	r := NewRunner(sb, &fakeEmitter{}, nil, false)
+	r.StateDir = t.TempDir()
+	if got := r.TaskDiff(context.Background(), repo); !bytes.Contains(got, []byte("diff --git a/new.py b/new.py")) {
+		t.Fatalf("no task diff without Landlock: %q", got)
+	}
+	if st := diffStatus(t, r.StateDir, repo); st.Via != "sandbox" {
+		kernelLacks(t, "unprivileged user namespaces for git ("+st.Detail+")")
+	}
+}
+
+// TestNewFileSectionNeverBlocksOnAFIFO (review M9): a FIFO where an untracked file was never hangs the read and renders nothing; a file past the cap reads as git's binary section, never whole.
+func TestNewFileSectionNeverBlocksOnAFIFO(t *testing.T) {
+	dir := canonTemp(t)
+	if err := unix.Mkfifo(filepath.Join(dir, "pipe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big"), bytes.Repeat([]byte("a\n"), maxNewFileBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	done := make(chan []byte, 1)
+	go func() { done <- newFileSection(root, "pipe", "pipe") }()
+	select {
+	case got := <-done:
+		if got != nil {
+			t.Fatalf("a FIFO rendered %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read blocked on a FIFO")
+	}
+	if _, err := readRegular(root, "pipe"); err == nil {
+		t.Fatal("readRegular accepted a FIFO")
+	}
+	if got := string(newFileSection(root, "big", "big")); !strings.Contains(got, "Binary files /dev/null and b/big differ") {
+		t.Fatalf("an oversize file: %.200s", got)
 	}
 }

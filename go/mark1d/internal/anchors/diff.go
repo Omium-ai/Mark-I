@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -14,7 +13,7 @@ import (
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
 
-// diffFacts is AnchorIntegrity's touched-file input (06 §2.4), read with git inside the sandbox since CortexInjection carries only root_hash.
+// diffFacts is AnchorIntegrity's touched-file input (06 §2.4), read with hardened git (gitread.go) since CortexInjection carries only root_hash.
 type diffFacts struct {
 	class m1pv1.DiffClassification
 	delta int32
@@ -88,47 +87,41 @@ func suppressionDelta(diff []byte) int32 {
 	return n
 }
 
-// diff runs git status/diff in the sandbox; no git, no confinement or a failing git ⇒ UNSPECIFIED, never a guess.
-func (r *Runner) diff(ctx context.Context, worktree string) diffFacts {
-	git, err := exec.LookPath("git")
-	if err != nil {
-		return diffFacts{}
+// git runs one hardened git command (gitread.go), in the sandbox or through the 10 §7.5 fallback; no git or a failing git ⇒ false, never a guess.
+func (r *Runner) git(ctx context.Context, worktree string, args ...string) ([]byte, bool) {
+	ov, g := r.gitOverrides(ctx, worktree)
+	if g.abstain != "" {
+		return nil, false
 	}
-	if git, err = filepath.Abs(git); err != nil {
-		return diffFacts{}
-	}
-	if resolved, rerr := filepath.EvalSymlinks(git); rerr == nil {
-		git = resolved
-	}
-	run := func(args ...string) ([]byte, bool) {
-		res, err := r.sb.Run(ctx, RunSpec{
-			Argv:              append([]string{git, "-c", "core.fsmonitor=false", "--no-pager"}, args...),
-			WorktreeRO:        worktree,
-			Env:               map[string]string{"PATH": filepath.Dir(git), "LANG": "C"},
-			Limits:            DefaultLimits(ClassFast),
-			RequireFSConfined: true,
-		})
-		if err != nil || res.ExitCode != 0 {
-			return nil, false
-		}
-		return res.Stdout, true
-	}
-	status, ok := run("status", "--porcelain", "-z", "--no-renames", "--untracked-files=all")
-	if !ok {
-		return diffFacts{}
-	}
-	var paths []string
-	for _, ent := range bytes.Split(status, []byte{0}) {
-		if len(ent) > 3 {
-			paths = append(paths, string(ent[3:]))
-		}
-	}
-	raw, _ := run("diff", "HEAD", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv")
-	delta := suppressionDelta(raw)
-	return diffFacts{class: classifyDiff(paths, delta), delta: delta, raw: raw, paths: paths, known: true}
+	g = r.gitRun(ctx, worktree, ov, args...)
+	return g.out, g.abstain == ""
 }
 
-// fingerprint names the state of the tree these facts describe: the status paths plus the diff against HEAD; empty when git could not answer. Content edits inside an untracked file do not move it — the vote tee ORs it with the evidence fingerprint for that case.
+// Git is git for callers outside the package (16 L8's outcome labels): the same hardened read.
+func (r *Runner) Git(ctx context.Context, worktree string, args ...string) ([]byte, bool) {
+	return r.git(ctx, worktree, args...)
+}
+
+// TaskDiff is the task diff without a task (TaskDiffFor has one): the worktree against HEAD with 3 lines of context, the shape its training patches carry, then every untracked file as a new-file section; nil when there is nothing to show, and diff_status.json says why.
+func (r *Runner) TaskDiff(ctx context.Context, worktree string) []byte {
+	t := r.readTree(ctx, worktree, 3, [16]byte{})
+	if t.abstain != "" {
+		return nil
+	}
+	return t.raw
+}
+
+// diff reads git status and the task's diff (from its open-time base) in one readTree; no git, no repository or a failing status ⇒ UNSPECIFIED, never a guess.
+func (r *Runner) diff(ctx context.Context, worktree string, task [16]byte) diffFacts {
+	t := r.readTree(ctx, worktree, 0, task)
+	if !t.known {
+		return diffFacts{}
+	}
+	delta := suppressionDelta(t.raw)
+	return diffFacts{class: classifyDiff(t.paths, delta), delta: delta, raw: t.raw, paths: t.paths, known: true}
+}
+
+// fingerprint names the state of the tree these facts describe: the status paths plus the diff against HEAD, untracked files' content included; empty when git could not answer.
 func (d diffFacts) fingerprint() string {
 	if !d.known {
 		return ""

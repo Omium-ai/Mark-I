@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/consents"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/contrib"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/receipt"
@@ -60,6 +61,9 @@ type activeBody struct {
 	TenantRootHex  string    `json:"tenant_root_hex"`
 	// BundleSectionKeys is 08 §3.5's bundle_section_keys list, delivered by controld's enroll module; it becomes the daemon's pinned ring (bundle/client.go keysFile).
 	BundleSectionKeys json.RawMessage `json:"bundle_section_keys,omitempty"`
+	// ContributeOutcomesDefault is controld's dogfood flag (DOGFOOD_TENANTS, Omium's own tenants only): contribute_outcomes starts on unless the person already chose (16 L8). It applies only with ContributeOutcomesDefaultReason == contrib.StaffDefaultReason, and is recorded as a default, never as the person's choice.
+	ContributeOutcomesDefault       bool   `json:"contribute_outcomes_default,omitempty"`
+	ContributeOutcomesDefaultReason string `json:"contribute_outcomes_default_reason,omitempty"`
 }
 
 func (s *Server) pinnedKeysPath() string { return filepath.Join(s.cfg.StateDir, "policy", "keys.json") }
@@ -285,15 +289,52 @@ func (s *Server) postEnroll(w http.ResponseWriter, r *http.Request) {
 	if err == nil && newDevice {
 		err = consents.MarkUnrelayed(s.cfg.StateDir) // consents are per device: the new one starts with none on the cloud side
 	}
+	switched := false
+	if err == nil {
+		switched, err = s.reconcileContribution(doc.TenantID)
+	}
+	dogfood := err == nil && body.ContributeOutcomesDefault && body.ContributeOutcomesDefaultReason == contrib.StaffDefaultReason &&
+		!contrib.Decided(s.cfg.StateDir) && !consents.Read(s.cfg.StateDir).ContributeOutcomes
+	if dogfood {
+		err = s.applyContributionDefault(doc.TenantID)
+	}
 	if err != nil {
 		internal(w, err)
 		return
 	}
 	s.notifyEnrolled()
-	if newDevice {
-		go s.relayNow()
+	if newDevice || dogfood || switched {
+		s.background(func() { s.relayNow() })
 	}
 	writeJSON(w, map[string]any{"tenant_id": doc.TenantID, "device_id": doc.DeviceID, "enrolled_at": ts.Format(time.RFC3339)})
+}
+
+// reconcileContribution turns contribute_outcomes off, undecided and purged when it was set under another tenant than tenant (contrib.ReconcileTenant), journalled like any consent change.
+func (s *Server) reconcileContribution(tenant string) (bool, error) {
+	reset, err := contrib.ReconcileTenant(s.cfg.StateDir, tenant)
+	if err != nil || !reset {
+		return false, err
+	}
+	name, uid := osUser()
+	return true, appendJSONL(filepath.Join(s.cfg.StateDir, "consent.jsonl"), map[string]any{
+		"ts": now(), "user": name, "uid": uid, "workspace": "", "agents_provisioned": []string{}, "consents": consents.Read(s.cfg.StateDir), "reason": "tenant_switch",
+	})
+}
+
+// applyContributionDefault turns contribute_outcomes on as tenant's staff default: written and journalled as a default, not as the person's choice, so it never survives a tenant switch and never reads as consent they gave.
+func (s *Server) applyContributionDefault(tenant string) error {
+	c := consents.Read(s.cfg.StateDir)
+	c.ContributeOutcomes = true
+	if err := consents.Write(s.cfg.StateDir, c); err != nil {
+		return err
+	}
+	if err := contrib.MarkDefault(s.cfg.StateDir, tenant); err != nil {
+		return err
+	}
+	name, uid := osUser()
+	return appendJSONL(filepath.Join(s.cfg.StateDir, "consent.jsonl"), map[string]any{
+		"ts": now(), "user": name, "uid": uid, "workspace": "", "agents_provisioned": []string{}, "consents": c, "reason": "default:" + contrib.StaffDefaultReason,
+	})
 }
 
 func (s *Server) getEnroll(w http.ResponseWriter, _ *http.Request) {

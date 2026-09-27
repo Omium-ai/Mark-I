@@ -236,6 +236,31 @@ func FindVerifier() (string, error) {
 	return findBinary("mark1-verifier", "MARK1_VERIFIER", ErrNoVerifierBinary)
 }
 
+var ErrNoRMBinary = errors.New("supervise: rm-runtime/llama-server not found")
+
+// FindRM resolves the pinned reward-model runtime: MARK1_RM, else rm-runtime/ beside mark1d; never PATH, since an unpinned llama-server would score under a hash nobody released.
+func FindRM() (string, error) {
+	name := "llama-server"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if p := os.Getenv("MARK1_RM"); p != "" {
+		if err := isFile(p); err != nil {
+			return "", fmt.Errorf("%w: MARK1_RM=%s: %w", ErrNoRMBinary, p, err)
+		}
+		return p, nil
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrNoRMBinary, err)
+	}
+	p := filepath.Join(filepath.Dir(self), "rm-runtime", name)
+	if err := isFile(p); err != nil {
+		return "", fmt.Errorf("%w: %s absent and MARK1_RM unset", ErrNoRMBinary, p)
+	}
+	return p, nil
+}
+
 func findBinary(name, envVar string, missing error) (string, error) {
 	if runtime.GOOS == "windows" {
 		name += ".exe"
@@ -305,16 +330,5 @@ func proxyHome(stateDir string) (string, error) {
 }
 
 func childEnv(home string) []string {
-	parent := os.Environ()
-	out := make([]string, 0, len(parent)+2)
-	for _, kv := range parent {
-		k, _, _ := strings.Cut(kv, "=")
-		// EqualFold because Windows environment names are case-insensitive: a
-		// surviving `Home=` would win over the `HOME=` appended below.
-		if strings.EqualFold(k, "HOME") || strings.EqualFold(k, "USERPROFILE") {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return append(out, "HOME="+home, "USERPROFILE="+home)
+	return ChildEnv("HOME="+home, "USERPROFILE="+home)
 }

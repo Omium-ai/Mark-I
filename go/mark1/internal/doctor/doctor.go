@@ -21,7 +21,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1/internal/apparmor"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
+	"github.com/Omium-ai/omium-mark1/go/mark1/internal/service"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/codex"
@@ -29,6 +31,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 )
 
 type Options struct {
@@ -44,14 +47,17 @@ type Options struct {
 }
 
 type Report struct {
-	OK          bool         `json:"ok"`
-	Anchors     []Anchor     `json:"anchors"`
-	Looked      []Looked     `json:"anchors_looked"` // per workspace: the kinds the daemon looked for and did not derive
-	Agents      []Agent      `json:"agents"`
-	Fragments   []Fragment   `json:"fragments"`
-	Health      []Check      `json:"health"`
-	StopGate    cli.StopGate `json:"stop_gate"`
-	Exploration cli.StopGate `json:"exploration"`
+	OK        bool       `json:"ok"`
+	Anchors   []Anchor   `json:"anchors"`
+	Looked    []Looked   `json:"anchors_looked"` // per workspace: the kinds the daemon looked for and did not derive
+	Agents    []Agent    `json:"agents"`
+	Fragments []Fragment `json:"fragments"`
+	Health    []Check    `json:"health"`
+	// Reprovisioned names each agent `--fix` brought to this release's fragment (08 §8.3 c).
+	Reprovisioned []string `json:"reprovisioned,omitempty"`
+	version       string
+	StopGate      cli.StopGate `json:"stop_gate"`
+	Exploration   cli.StopGate `json:"exploration"`
 }
 
 // Anchor is one row of the FR-CLI-004 join between what mark1d can run
@@ -107,6 +113,8 @@ type Fragment struct {
 	Detail    string            `json:"detail,omitempty"`
 	Lines     []claudecode.Line `json:"lines,omitempty"`
 	Fixed     bool              `json:"fixed,omitempty"`
+	// ProvisionedBy is the Mark 1 release whose capture fragment is on disk (provision.Stamp); empty for pointer fragments and unstamped installs.
+	ProvisionedBy string `json:"provisioned_by,omitempty"`
 }
 
 type Check struct {
@@ -122,10 +130,17 @@ func Run(env *cli.Env, opts Options) error {
 		}
 		return cli.Failf(cli.ExitRuntime, "", "reading enrollment: %v", err)
 	}
-	rep := Report{OK: true}
+	rep := Report{OK: true, version: env.Version}
 	anchors, looked, anchorChecks := readAnchors(env)
 	rep.Anchors, rep.Looked = anchors, looked
 	rep.Agents = roster(env, opts)
+	if opts.Fix {
+		for _, o := range provision.Reconcile(env.StateDir, env.Version) {
+			if o.Action == "upgraded" {
+				rep.Reprovisioned = append(rep.Reprovisioned, o.Agent)
+			}
+		}
+	}
 	rep.Fragments = scanFragments(env, opts)
 	rep.Health = append(healthChecks(env, opts), anchorChecks...)
 	rep.StopGate, rep.Exploration = env.ReadStopGate(), env.ReadExploration()
@@ -322,6 +337,18 @@ func scanFragments(env *cli.Env, opts Options) []Fragment {
 	if _, err := os.Stat(cursor.ManifestPath(env.StateDir)); err == nil {
 		out = append(out, inspectCursor(env, opts))
 	}
+	capture := map[string]string{
+		"claudecode": claudecode.ManifestPath(env.StateDir), "codex": codex.ManifestPath(env.StateDir),
+		"gemini": gemini.ManifestPath(env.StateDir), "opencode": opencode.ManifestPath(env.StateDir),
+		"copilot": copilot.ManifestPath(env.StateDir), "cursor": cursor.ManifestPath(env.StateDir),
+	}
+	for i, f := range out {
+		if f.Manifest == capture[f.Agent] {
+			if st, err := provision.ReadStamp(env.StateDir, f.Agent); err == nil {
+				out[i].ProvisionedBy = st.Version
+			}
+		}
+	}
 	// Any OTHER manifest under <state>/provisioned/ belongs to an agent this
 	// build cannot classify. Listing it beats hiding it: an unclassifiable
 	// fragment is one `mark1 off` will also refuse to revert.
@@ -390,6 +417,9 @@ func inspectClaudeCode(env *cli.Env, opts Options) Fragment {
 		return f
 	}
 	f.Fixed = res.Changed
+	if err := provision.WriteStamp(env.StateDir, f.Agent, env.Version, res.Checksum); err != nil {
+		f.Detail = "release stamp not written: " + err.Error()
+	}
 	if after, aerr := claudecode.Inspect(env.StateDir); aerr == nil {
 		f.State, f.Detail, f.Lines = string(after.State), after.Detail, after.Lines
 	}
@@ -430,8 +460,74 @@ func healthChecks(env *cli.Env, opts Options) []Check {
 		}
 	}
 
-	checks = append(checks, retentionCheck(opts), agentVersionCheck())
+	checks = append(checks, retentionCheck(opts), agentVersionCheck(), rmRuntimeCheck(env.StateDir), taskDiffCheck(env.StateDir))
+	if runtime.GOOS == "linux" {
+		checks = append(checks, apparmorCheck())
+	}
 	return checks
+}
+
+// apparmorCheck is the apparmor_userns row: on a kernel that restricts unprivileged user namespaces the anchor sandbox needs the omium-mark1d profile, and doctor names the root command that loads it.
+func apparmorCheck() Check {
+	d, err := daemonPath("")
+	if err != nil {
+		return Check{"apparmor_userns", true, "mark1d not found beside this executable or on PATH"}
+	}
+	self, _ := os.Executable()
+	ok, detail := apparmor.Check(d, self)
+	return Check{"apparmor_userns", ok, detail}
+}
+
+// daemonPath is the mark1d the apparmor row inspects; a test seam like apparmor's host paths.
+var daemonPath = service.DaemonPath
+
+// taskDiffCheck reads mark1d's <state>/anchors/diff_status.json (go/mark1d/internal/anchors DiffState): a worktree whose diff cannot be read starves the reward model, the diff judge and contributions, so that fails; a read that answered outside the sandbox (10 §7.5 fallback) passes and says why.
+func taskDiffCheck(stateDir string) Check {
+	var f struct {
+		Worktrees map[string]struct {
+			Via     string `json:"via"`
+			Abstain string `json:"abstain"`
+			Detail  string `json:"detail"`
+		} `json:"worktrees"`
+	}
+	b, err := os.ReadFile(filepath.Join(stateDir, "anchors", "diff_status.json")) //nolint:gosec // G304: under the state dir
+	if err != nil || json.Unmarshal(b, &f) != nil || len(f.Worktrees) == 0 {
+		return Check{"task_diff", true, "no task diff read yet"}
+	}
+	ok, lines := true, []string{}
+	for _, wt := range slices.Sorted(maps.Keys(f.Worktrees)) {
+		w := f.Worktrees[wt]
+		switch {
+		case w.Abstain == "no_git" || w.Abstain == "not_a_repository" || w.Abstain == "git_failed" || w.Abstain == "unsafe_git_config" || w.Abstain == "unsafe_git_dir":
+			ok = false
+			lines = append(lines, wt+": "+w.Abstain+" "+w.Detail)
+		case w.Via == "direct":
+			lines = append(lines, wt+": read outside the sandbox ("+w.Detail+")")
+		case w.Abstain != "":
+			lines = append(lines, wt+": "+w.Abstain)
+		default:
+			lines = append(lines, wt+": ok")
+		}
+	}
+	return Check{"task_diff", ok, strings.Join(lines, "; ")}
+}
+
+// rmRuntimeCheck reads mark1d's <state>/rm/status.json (go/mark1d/internal/rm Status): only a crash-looped runtime, a failed model fetch or a refused execution hash is a failure.
+func rmRuntimeCheck(stateDir string) Check {
+	var s struct {
+		State   string `json:"state"`
+		ModelID string `json:"model_id"`
+		Detail  string `json:"detail"`
+	}
+	b, err := os.ReadFile(filepath.Join(stateDir, "rm", "status.json")) //nolint:gosec // G304: under the state dir
+	if err != nil || json.Unmarshal(b, &s) != nil {
+		return Check{"rm_runtime", true, "not started (reward model off, or the daemon is not running)"}
+	}
+	d := s.State
+	if s.ModelID != "" {
+		d += " " + s.ModelID
+	}
+	return Check{"rm_runtime", s.State != "failed" && s.State != "download_failed" && s.State != "refused", d + ": " + s.Detail}
 }
 
 // agentVersionCheck is D-EE's admission as doctor sees it: pinned,
@@ -544,11 +640,21 @@ func renderHuman(w io.Writer, r *Report) {
 		}
 		_, _ = fmt.Fprintf(w, "agent         %-12s %s\n", a.Name, line)
 	}
+	for _, a := range r.Reprovisioned {
+		_, _ = fmt.Fprintf(w, "reprovisioned %s to %s\n", a, r.version)
+	}
 	if len(r.Fragments) == 0 {
 		_, _ = fmt.Fprintln(w, "fragments     none provisioned")
 	}
 	for _, f := range r.Fragments {
 		_, _ = fmt.Fprintf(w, "fragment      %s/%s -> %s [%s] %s\n", f.Agent, f.Fragment, f.Target, f.State, f.Detail)
+		if f.ProvisionedBy != "" {
+			stale := ""
+			if f.ProvisionedBy != r.version {
+				stale = " (this is " + r.version + ": mark1d re-provisions at its next start, or run `mark1 doctor --fix`)"
+			}
+			_, _ = fmt.Fprintf(w, "  provisioned by %s%s\n", f.ProvisionedBy, stale)
+		}
 		// Every provisioned line, one line each: a user must be able to see
 		// exactly what we put in their file without opening it, and nine
 		// pretty-printed blocks is a thing nobody reads. The --json Lines keep

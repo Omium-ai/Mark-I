@@ -71,6 +71,8 @@ type Segmenter struct {
 	// before the cache is ever read (D-AR). Wired to verdict.Blocks.ResetTask;
 	// nil is legal.
 	OnClose func(TaskID)
+	// OnTaskClose is OnClose with the owning session and the resolution (the edge diff judge admits a vote after the close); it runs under the segmenter lock, so it must not call back in. nil is legal.
+	OnTaskClose func(session [16]byte, t TaskID, r m1pv1.Resolution)
 	// Verdict is D-AS's close-time cache read: the verdict the cache holds for a
 	// task at ANY stage. `unresolved` means NO VERDICT, never "no slow anchor
 	// ran" — a ruff-only PROVISIONAL is a weak verified outcome, and the D-X/D-AB
@@ -410,6 +412,9 @@ func (s *Segmenter) closeOpen(sid [16]byte, ss *session, t *task) []*m1pv1.Event
 func (s *Segmenter) closeTask(sid [16]byte, ss *session, t *task, r m1pv1.Resolution, verdictID []byte) []*m1pv1.Event {
 	if s.OnClose != nil {
 		s.OnClose(t.id) // D-AR: the streak is per attempt, and a close ends one
+	}
+	if s.OnTaskClose != nil {
+		s.OnTaskClose(sid, t.id, r)
 	}
 	if r != m1pv1.Resolution_RESOLUTION_VERDICT {
 		ss.tasks = slices.DeleteFunc(ss.tasks, func(x *task) bool { return x == t })

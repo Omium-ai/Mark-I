@@ -8,6 +8,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/claudecode"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 )
 
 // cursorClaudeNote: conformance/hooks/cursor/*/README.md — Cursor loads ~/.claude/settings.json hooks too, so the claudecode fragment fires the shim from Cursor with MARK1_AGENT unset (maps nothing, emits nothing).
@@ -56,6 +57,9 @@ func inspectCursor(env *cli.Env, opts Options) Fragment {
 		return f
 	}
 	f.Fixed = res.Changed
+	if err := provision.WriteStamp(env.StateDir, f.Agent, env.Version, res.Checksum); err != nil {
+		f.Detail = "release stamp not written: " + err.Error()
+	}
 	if after, aerr := cursor.Inspect(env.StateDir); aerr == nil {
 		f.State, f.Detail, f.Lines = string(after.State), after.Detail, lines(after.Lines)
 	}

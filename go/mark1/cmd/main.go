@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1/internal/apparmor"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/corpus"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/doctor"
@@ -241,7 +243,39 @@ func main() {
 	updateCmd.Flags().StringVar(&updOpts.InstallDir, "install-dir", "", "where the edge binaries live (default: this executable's directory)")
 	updateCmd.Flags().StringVar(&updOpts.Ring, "ring", "", "manifest ring (default: the enrollment channel, else stable)")
 
-	root.AddCommand(enrollCmd, enableCmd, statusCmd, doctorCmd, reportCmd, offCmd, onCmd, verifyCmd, corpusCmd, verifyReleaseCmd, serviceCmd, updateCmd)
+	var aaDaemon string
+	apparmorCmd := &cobra.Command{Use: "apparmor", Short: "The AppArmor profile that lets mark1d's anchor sandbox create a user namespace on Ubuntu >= 23.10 (10 §7.4); root only"}
+	apparmorCmd.PersistentFlags().StringVar(&aaDaemon, "daemon", "", "mark1d binary (default: beside this executable, then PATH)")
+	apparmorCmd.AddCommand(&cobra.Command{
+		Use: "install", Short: "Write and load the userns profile for mark1d when the kernel restricts user namespaces (idempotent)", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d, err := service.DaemonPath(aaDaemon)
+			if err != nil {
+				return cli.Failf(cli.ExitRuntime, "", "%v", err)
+			}
+			ok, err := apparmor.Install(d)
+			if err != nil {
+				return cli.Failf(cli.ExitRuntime, "", "%v", err)
+			}
+			return env.Emit(map[string]any{"installed": ok, "daemon": d}, func(w io.Writer) {
+				if ok {
+					_, _ = fmt.Fprintf(w, "AppArmor profile %s loaded for %s\n", apparmor.Name, d)
+				} else {
+					_, _ = fmt.Fprintln(w, "unprivileged user namespaces are not restricted here; nothing to install")
+				}
+			})
+		},
+	}, &cobra.Command{
+		Use: "uninstall", Short: "Unload and remove the profile install wrote", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := apparmor.Uninstall(); err != nil {
+				return cli.Failf(cli.ExitRuntime, "", "%v", err)
+			}
+			return env.Emit(map[string]any{"removed": true}, func(w io.Writer) { _, _ = fmt.Fprintln(w, "AppArmor profile removed") })
+		},
+	})
+
+	root.AddCommand(enrollCmd, enableCmd, statusCmd, doctorCmd, reportCmd, offCmd, onCmd, verifyCmd, corpusCmd, verifyReleaseCmd, serviceCmd, updateCmd, apparmorCmd)
 
 	if err := root.Execute(); err != nil {
 		var ee *cli.ExitError

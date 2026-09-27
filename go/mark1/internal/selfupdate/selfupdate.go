@@ -80,7 +80,7 @@ var verify = verifyrelease.Run
 
 var stopTimeout = 15 * time.Second
 
-var binaries = []string{"mark1d", "mark1", "mark1-proxy", "mark1-hookshim", "cortexd"}
+var binaries = []string{"mark1d", "mark1", "mark1-proxy", "mark1-hookshim", "cortexd", "mark1-verifier"}
 
 // ponytail: package-manager ownership by prefix (09 §11.2: notified, never overwritten); a receipt/db lookup per manager is the upgrade.
 var managedPrefixes = []string{"/usr/bin", "/usr/lib", "/usr/local/Cellar", "/opt/homebrew", "/home/linuxbrew", `C:\Program Files`}
@@ -322,6 +322,10 @@ func extract(archive, dir string) ([]string, error) {
 		}
 		name := strings.TrimPrefix(filepath.ToSlash(hdr.Name), "./")
 		if hdr.Typeflag == tar.TypeDir && (name == "" || name == ".") {
+			continue
+		}
+		// ponytail: the reward-model runtime (rm-runtime/, llama.cpp libs) is left as installed; the desktop app's updater ships it, a CLI swap of a library set is the upgrade.
+		if name == "rm-runtime" || name == "rm-runtime/" || strings.HasPrefix(name, "rm-runtime/") {
 			continue
 		}
 		if hdr.Typeflag != tar.TypeReg || !isBinary(name) {

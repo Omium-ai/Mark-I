@@ -7,6 +7,7 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/cli"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/copilot"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/provision"
 )
 
 // copilotAgent fills the roster row; mechanism A owns $COPILOT_HOME/hooks/mark1.json but never creates $COPILOT_HOME itself.
@@ -71,6 +72,9 @@ func inspectCopilot(env *cli.Env, opts Options) Fragment {
 		return f
 	}
 	f.Fixed = res.Changed
+	if err := provision.WriteStamp(env.StateDir, f.Agent, env.Version, res.Checksum); err != nil {
+		f.Detail = "release stamp not written: " + err.Error()
+	}
 	if after, aerr := copilot.Inspect(env.StateDir); aerr == nil {
 		f.State, f.Detail = string(after.State), after.Detail
 	}

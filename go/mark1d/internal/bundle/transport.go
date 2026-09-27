@@ -66,6 +66,7 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	req.Header.Set("X-Mark1-Edge-Version", c.edgeVersion)
+	req.Header.Set("X-Mark1-Bundle-Features", policy.BundleFeatures)
 	return req, nil
 }
 

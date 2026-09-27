@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -873,14 +874,33 @@ func TestRunOneTestAnchorRepoOptIn(t *testing.T) {
 // gitFake answers the runner's sandboxed git calls with planted output, everything else with res.
 func gitFake(status, diff string, res RunResult) func(RunSpec) (RunResult, error) {
 	return func(spec RunSpec) (RunResult, error) {
-		switch {
-		case len(spec.Argv) > 4 && spec.Argv[4] == "status":
+		switch gitSub(spec.Argv) {
+		case "config":
+			return RunResult{}, nil
+		case "status":
 			return RunResult{Stdout: []byte(status)}, nil
-		case len(spec.Argv) > 4 && spec.Argv[4] == "diff":
+		case "diff":
 			return RunResult{Stdout: []byte(diff)}, nil
 		}
 		return res, nil
 	}
+}
+
+// gitSub is the subcommand of a hardened git argv ("" for any other binary's argv).
+func gitSub(argv []string) string {
+	if len(argv) == 0 || strings.TrimSuffix(filepath.Base(argv[0]), filepath.Ext(argv[0])) != "git" {
+		return ""
+	}
+	for i := 1; i < len(argv); i++ {
+		if argv[i] == "-c" {
+			i++
+			continue
+		}
+		if !strings.HasPrefix(argv[i], "-") {
+			return argv[i]
+		}
+	}
+	return ""
 }
 
 func TestDiffTaxonomy(t *testing.T) {
@@ -913,9 +933,12 @@ func TestDiffTaxonomy(t *testing.T) {
 func TestRunOneDiffReachesTheEnvelope(t *testing.T) {
 	e, wt := enabledRuff(t)
 	fakeBin(t, filepath.Dir(e.BinaryPath), "git", "git version 2.46.0")
+	if err := os.Mkdir(filepath.Join(wt, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	em := &fakeEmitter{}
 	sb := &fakeSandbox{run: gitFake(
-		" M src/app.py\x00?? tests/test_new.py\x00",
+		"# branch.oid 1111111111111111111111111111111111111111\x001 .M N... 100644 100644 100644 aaaa aaaa src/app.py\x00? tests/test_new.py\x00",
 		"--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n+import os  # noqa\n",
 		RunResult{ExitCode: 0})}
 	if err := NewRunner(sb, em, nil, false).RunOne(context.Background(), e, testSession, testTask, wt); err != nil {
@@ -925,12 +948,12 @@ func TestRunOneDiffReachesTheEnvelope(t *testing.T) {
 	if in.GetDiffClassification() != m1pv1.DiffClassification_DIFF_CLASSIFICATION_TEST_TOUCHED || in.GetSuppressionDirectiveDelta() != 1 {
 		t.Fatalf("integrity %v, want TEST_TOUCHED with delta 1", in)
 	}
-	if len(sb.specs) != 3 || sb.specs[2].Argv[0] != e.BinaryPath {
-		t.Fatalf("%d sandbox runs, want two git reads then the anchor", len(sb.specs))
+	if len(sb.specs) != 4 || sb.specs[3].Argv[0] != e.BinaryPath {
+		t.Fatalf("%d sandbox runs, want three git reads (config, status, diff) then the anchor", len(sb.specs))
 	}
-	for _, s := range sb.specs[:2] {
-		if !s.RequireFSConfined || strings.TrimSuffix(filepath.Base(s.Argv[0]), filepath.Ext(s.Argv[0])) != "git" || s.WorktreeRO != wt {
-			t.Fatalf("git read %+v is not confined to the worktree", s.Argv)
+	for i, s := range sb.specs[:3] {
+		if gitSub(s.Argv) != []string{"config", "status", "diff"}[i] || s.WorktreeRO != wt || !slices.Equal(s.Argv[1:1+len(gitHardening)], gitHardening) {
+			t.Fatalf("git read %+v is not the hardened read of the worktree", s.Argv)
 		}
 	}
 	// No git on PATH ⇒ UNSPECIFIED, never a guess.
@@ -1133,5 +1156,58 @@ func TestSchedulerSuspendsASandboxDeniedSuite(t *testing.T) {
 	scancel()
 	if got := s.slowOrder(wt); len(got) != 1 {
 		t.Fatalf("a genuinely failing suite is owed as before: %v", got)
+	}
+}
+
+// Probe is first run's "checks ready": the project's consented static anchors run once through RunOne's path, no vote is emitted, tests stay out, and a second probe or an unarmed project is refused.
+func TestSchedulerProbeRunsStaticOnceAndEmitsNothing(t *testing.T) {
+	e, wt := enabledRuff(t)
+	tests := e
+	tests.ID, tests.Kind, tests.Tool, tests.SideEffect = "pytest@cat-1", KindPytest, "pytest", SideEffectTest
+	release := make(chan struct{})
+	sb := &fakeSandbox{run: func(RunSpec) (RunResult, error) {
+		<-release
+		return RunResult{ExitCode: 0}, nil
+	}}
+	em := &fakeEmitter{}
+	s := NewScheduler(NewRunner(sb, em, nil, true), []CatalogEntry{e, tests}, consentFor(t, e, tests), wt, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if _, err := s.Probe(ctx, t.TempDir(), func(string, string) {}); !errors.Is(err, ErrProbeUnknown) {
+		t.Fatalf("an unarmed project must be refused, got %v", err)
+	}
+	got := make(chan [2]string, 4)
+	n, err := s.Probe(ctx, wt, func(id, code string) { got <- [2]string{id, code} })
+	if err != nil || n != 1 {
+		t.Fatalf("Probe = %d, %v; want the one static anchor", n, err)
+	}
+	if _, err := s.Probe(ctx, wt, func(string, string) {}); !errors.Is(err, ErrProbeBusy) {
+		t.Fatalf("a second probe while one runs must be refused, got %v", err)
+	}
+	close(release)
+	select {
+	case r := <-got:
+		if r[0] != e.ID || r[1] != "" {
+			t.Fatalf("done(%q, %q), want (%q, \"\")", r[0], r[1], e.ID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe never reported")
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := s.Probe(ctx, wt, func(id, code string) { got <- [2]string{id, code} }); err == nil {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("the finished probe still holds the project: %v", err)
+		}
+	}
+	<-got
+	if n := len(em.all()); n != 0 {
+		t.Fatalf("a probe emitted %d events; it must emit no AnchorVote", n)
+	}
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	if n := len(sb.specs); n != 2 {
+		t.Fatalf("sandbox ran %d times over two probes, want 2 (static only)", n)
 	}
 }

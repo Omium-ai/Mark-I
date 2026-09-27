@@ -144,13 +144,14 @@ type cp struct {
 	ackFail      bool   // ⇒ POST /ack 503s
 	keysDoc      []byte // the manifest's key lists served beside tlog (rotation tests)
 
-	acks     []ackBody
-	getN     int
-	notModN  int
-	headN    int
-	ackN     int
-	condSeen []string // If-None-Match values observed, in order
-	sizeSeen []string // ?tree_size values observed on the keys route, in order
+	acks         []ackBody
+	getN         int
+	notModN      int
+	headN        int
+	ackN         int
+	condSeen     []string // If-None-Match values observed, in order
+	featuresSeen []string // X-Mark1-Bundle-Features values observed, in order
+	sizeSeen     []string // ?tree_size values observed on the keys route, in order
 }
 
 func (s *cp) set(fn func(*cp)) {
@@ -174,6 +175,7 @@ func (s *cp) handler() http.Handler {
 		defer s.mu.Unlock()
 		s.getN++
 		s.condSeen = append(s.condSeen, r.Header.Get("If-None-Match"))
+		s.featuresSeen = append(s.featuresSeen, r.Header.Get("X-Mark1-Bundle-Features"))
 		if s.bundleStatus != 0 {
 			w.WriteHeader(s.bundleStatus)
 			return
@@ -620,6 +622,17 @@ func TestClientConditionalPoll(t *testing.T) {
 	h.cp.mu.Unlock()
 	if sent != `"t7-stable-000002"` {
 		t.Fatalf("If-None-Match = %q, want the applied bundle's ETag", sent)
+	}
+	h.cp.mu.Lock()
+	features := h.cp.featuresSeen
+	h.cp.mu.Unlock()
+	if len(features) == 0 {
+		t.Fatal("no poll observed")
+	}
+	for _, f := range features {
+		if f != "knee_basis" {
+			t.Fatalf("every poll advertises what the decoder accepts (ADR-0013), got %q", features)
+		}
 	}
 
 	// ETag lost (fresh proxy, cleared cache): the same bytes come back 200.

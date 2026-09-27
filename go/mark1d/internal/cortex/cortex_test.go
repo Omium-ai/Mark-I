@@ -44,7 +44,8 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	case "record":
 		out := filepath.Join(os.Getenv(childOutVar), strconv.Itoa(os.Getpid()))
-		if err := os.WriteFile(out, []byte(strings.Join(os.Args[1:], "\n")), 0o600); err != nil {
+		tmp := os.Getenv(childOutVar) + "." + strconv.Itoa(os.Getpid())
+		if os.WriteFile(tmp, []byte(strings.Join(os.Args[1:], "\n")), 0o600) != nil || os.Rename(tmp, out) != nil {
 			os.Exit(2)
 		}
 		time.Sleep(time.Hour)

@@ -15,12 +15,12 @@ import (
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
 
-// KneeState is the knee-governor evaluation frozen at publish time so the
-// gate read stays a lookup (04 §2.3): stop when p̂_LCB(n)·V(task) ≤ c(n),
-// c(n) under the bundle cost_basis.
+// KneeState is the knee-governor evaluation frozen at publish time so the gate read stays a lookup (04 §2.3): stop when p(r)·V(task) ≤ c(r), c under the bundle cost_basis, r the repair round (ADR-0012).
 type KneeState struct {
-	N         int     // attempt index the evaluation was made at
-	PLCB      float64 // p̂_LCB(n): 95% Wilson LCB of the attempt-n success rate
+	N         int     // attempt count n at publish: the ledger's attempt, never the knee index
+	R         int     // repair round r the table was read at (ADR-0012); 0 = not a failing attempt
+	PLCB      float64 // p(r): the row's p_lcb — Paper I's prior or a 95% Wilson LCB, per Basis
+	Basis     string  // "prior" | "anchor_grounded" | "certified" | "unknown": the bundle's word for where the table's p came from (ADR-0013)
 	VTask     float64 // V(task)
 	CostN     float64 // c(n) under CostBasis
 	CostBasis string  // "usd" | "quota"
@@ -156,16 +156,9 @@ func (b *Blocks) roll(now time.Time) {
 	}
 }
 
-// kneeFor evaluates the governor for attempt n against the bundle's knee
-// table (ascending n; lookup clamps to the LAST row). No table or a stale
-// bundle ⇒ never stop — fail-static then fail-open (04 §2.3).
-//
-// D-Y(b): n below the first row does NOT clamp up to it — you cannot be past
-// the knee before the first attempt exists, and row 1's economics are not a
-// conservative default for attempt 0. D-Z: a row with no p_lcb is not
-// evaluable at that n. Both answer Stop = false.
+// kneeFor evaluates the governor at table index n against the bundle's knee table (ascending n; lookup clamps to the LAST row; ADR-0012's index is the repair round r, not the attempt count); no table or a stale bundle ⇒ never stop (fail-static then fail-open, 04 §2.3); D-Y(b): n below the first row does not clamp up to it, and D-Z: a row with no p_lcb is not evaluable — both answer Stop = false.
 func kneeFor(m *BundleMatrices, n int) KneeState {
-	k := KneeState{N: n, VTask: m.VTask, CostBasis: m.CostBasis, Stale: m.Stale}
+	k := KneeState{N: n, R: n, VTask: m.VTask, CostBasis: m.CostBasis, Stale: m.Stale, Basis: m.KneeBasis}
 	if len(m.Knee) == 0 || n < m.Knee[0].N {
 		return k
 	}
@@ -192,12 +185,12 @@ type Correction struct {
 	Previous, Revised m1pv1.Verdict
 }
 
-// job is one recompute request. Attempt is the retry index n the knee is
-// evaluated at — the caller (anchor orchestration) owns attempt counting.
+// job is one recompute request. The caller (anchor orchestration) owns counting: attempt is n for the ledger, round is the repair round r the knee is read at (ADR-0012).
 type job struct {
 	task    TaskID
 	votes   []AnchorVote
 	attempt int
+	round   int
 	revised bool
 }
 
@@ -258,7 +251,12 @@ func (e *Engine) SetBundle(m BundleMatrices) { e.m.Store(&m) }
 // A superseded pending job is correct to drop — fusion over stale votes is
 // repaired by the newest trigger (04 §8.2).
 func (e *Engine) Recompute(task TaskID, votes []AnchorVote, attempt int) {
-	j := job{task: task, votes: votes, attempt: attempt}
+	e.RecomputeRound(task, votes, attempt, attempt)
+}
+
+// RecomputeRound is Recompute with the knee read at repair round r instead of at n (ADR-0012).
+func (e *Engine) RecomputeRound(task TaskID, votes []AnchorVote, attempt, round int) {
+	j := job{task: task, votes: votes, attempt: attempt, round: round}
 	for {
 		select {
 		case e.fast <- j:
@@ -275,7 +273,12 @@ func (e *Engine) Recompute(task TaskID, votes []AnchorVote, attempt int) {
 // PublishRevised queues a slow-anchor completion: the REVISED verdict
 // supersedes the cache entry and is never debounced away.
 func (e *Engine) PublishRevised(task TaskID, votes []AnchorVote, attempt int) {
-	e.slow <- job{task: task, votes: votes, attempt: attempt, revised: true}
+	e.PublishRevisedRound(task, votes, attempt, attempt)
+}
+
+// PublishRevisedRound is PublishRevised with the knee read at repair round r (ADR-0012).
+func (e *Engine) PublishRevisedRound(task TaskID, votes []AnchorVote, attempt, round int) {
+	e.slow <- job{task: task, votes: votes, attempt: attempt, round: round, revised: true}
 }
 
 // Run is the recompute goroutine. It is the only code that ever constructs
@@ -308,9 +311,11 @@ func (e *Engine) step(ctx context.Context, j job) {
 	if prev, ok := e.cache.Get(j.task); ok && j.revised {
 		e.queueCorrection(j.task, prev.Verdict.GetVerdict(), ve.GetVerdict())
 	}
+	knee := kneeFor(m, j.round)
+	knee.N = j.attempt
 	e.cache.publish(j.task, Cached{
 		Verdict:       ve,
-		Knee:          kneeFor(m, j.attempt),
+		Knee:          knee,
 		Blocks:        BlockCounters{Consecutive: e.blocks.ConsecutiveFor(j.task)},
 		UnknownVoters: unknownVoters(m, j.votes),
 		ComputedAt:    now,

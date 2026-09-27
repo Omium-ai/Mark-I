@@ -178,6 +178,11 @@
 //     vote sandbox_unavailable, and candidates.json's sandbox field carries
 //     the reason (candidates.go).
 //
+//     mark1d's own git reads (gitread.go) are not anchors: hardened so no
+//     repository-named program runs and nothing is written, run in this
+//     sandbox without RequireFSConfined, and run directly where the sandbox
+//     cannot host git (10 §7.5); diff_status.json says which, per worktree.
+//
 // The runner registry mirrors the estate's PROBE_HANDLERS discipline
 // (recovery-orchestrator app/verify/probes.py, adopted per 06 §2.1): a map of
 // kind → handler with an init-time exhaustiveness assert against the detector

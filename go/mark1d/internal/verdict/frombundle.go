@@ -71,6 +71,7 @@ func FromBundle(b *policy.Bundle) (*BundleMatrices, error) {
 	// kneeFor documents "ascending n"; the CDDL does not require the compiler
 	// to emit them sorted, so sort rather than trust.
 	slices.SortFunc(m.Knee, func(a, b KneeRow) int { return a.N - b.N })
+	m.KneeBasis = kneeBasis(b.Route.Knee.Basis)
 
 	for _, l := range b.Route.Ladders {
 		rungs := make([]Rung, len(l.Rungs))
@@ -97,6 +98,14 @@ func FromBundle(b *policy.Bundle) (*BundleMatrices, error) {
 // Gates allow, verdicts are flagged stale_cert, the knee never stops.
 func Builtins() BundleMatrices {
 	return BundleMatrices{Priors: DefaultPriors, Verifiers: map[string]VerifierParams{}, Stale: true}
+}
+
+// kneeBasis is the bundle's own word for where the knee's p came from (ADR-0013): a bundle that predates route.knee.basis says nothing, and "unknown" is recorded rather than a guess.
+func kneeBasis(b string) string {
+	if b == "" {
+		return "unknown"
+	}
+	return b
 }
 
 func costBasisName(c policy.CostBasis) string {

@@ -2,6 +2,7 @@
 package control
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -44,10 +45,32 @@ type Server struct {
 	hardStop    atomic.Bool
 	mu          sync.Mutex
 	reconcile   func()
+	probe       func(project string, done func(id, code string)) (int, error)
 	enrolled    func()
 	shutdown    func()
 	compat      map[string]compatVerdict // "<agent>@<version>" -> verdict + probe text
 	files       sync.Mutex               // ponytail: serializes this process's read-modify-writes only; a concurrent `mark1 enable` races exactly as two CLIs do today
+	consentSync atomic.Bool              // the next relay PUTs even with nothing pending, to learn the cloud's effective row (boot, each session start)
+	ctx         context.Context          // cancelled by Close: every background relay's parent
+	cancel      context.CancelFunc
+	bgMu        sync.Mutex
+	bgClosed    bool
+	bg          sync.WaitGroup // background work that writes the state dir; Close waits for it
+	relayMu     sync.Mutex     // one consent relay (PUT + adoption) at a time
+}
+
+// background runs fn off the caller's path, tracked so Close waits for it; after Close it never starts.
+func (s *Server) background(fn func()) {
+	s.bgMu.Lock()
+	defer s.bgMu.Unlock()
+	if s.bgClosed {
+		return
+	}
+	s.bg.Add(1)
+	go func() {
+		defer s.bg.Done()
+		fn()
+	}()
 }
 
 func Path(stateDir string) string { return filepath.Join(stateDir, "run", "control.json") }
@@ -110,9 +133,18 @@ func Listen(cfg Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, l: l, host: l.Addr().String(), token: hex.EncodeToString(raw[:]), since: time.Now(), hub: NewHub(), compat: map[string]compatVerdict{}}
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: readHeaderTimeout}
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.consentSync.Store(true)
+	s.hub.started = func() { s.background(s.syncConsents) }
+	if err := s.resetOldCopy(); err != nil {
+		s.cancel()
+		_ = l.Close()
+		return nil, err
+	}
 	port := l.Addr().(*net.TCPAddr).Port
 	b, _ := json.Marshal(discovery{Port: port, Token: s.token})
 	if err := writeAtomic(Path(cfg.StateDir), b); err != nil {
+		s.cancel()
 		_ = l.Close()
 		return nil, err
 	}
@@ -133,6 +165,13 @@ func (s *Server) SetReconcile(fn func()) {
 	s.mu.Unlock()
 }
 
+// SetProbe: the scheduler's one-shot run of a project's consented static anchors (anchors.Scheduler.Probe); nil (parked) refuses POST /v1/anchors/probe.
+func (s *Server) SetProbe(fn func(project string, done func(id, code string)) (int, error)) {
+	s.mu.Lock()
+	s.probe = fn
+	s.mu.Unlock()
+}
+
 // SetEnrolled: run after POST/DELETE /v1/enroll rewrites the enrollment document; nil (parked) leaves the next boot to adopt it.
 func (s *Server) SetEnrolled(fn func()) {
 	s.mu.Lock()
@@ -148,18 +187,24 @@ func (s *Server) SetShutdown(fn func()) {
 }
 
 func (s *Server) Serve() error {
-	stop := make(chan struct{})
-	defer close(stop)
-	go s.relayLoop(stop)
+	s.background(s.relayLoop)
 	if err := s.http.Serve(s.l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
 }
 
+// Close stops serving, cancels every background relay and waits for it, so nothing writes the state dir after it returns.
 func (s *Server) Close() error {
+	s.bgMu.Lock()
+	s.bgClosed = true
+	s.bgMu.Unlock()
+	if s.cancel != nil { // a Server not built by Listen has no background work
+		s.cancel()
+	}
 	err := s.http.Close()
 	_ = s.l.Close()
+	s.bg.Wait()
 	var d discovery // only this boot's file: a later boot's discovery is theirs to keep
 	if b, rerr := os.ReadFile(Path(s.cfg.StateDir)); rerr == nil && json.Unmarshal(b, &d) == nil && d.Token == s.token {
 		_ = os.Remove(Path(s.cfg.StateDir))

@@ -296,10 +296,15 @@ type Runner struct {
 	StateDir string
 	// OnDropped receives the Dropped{reason} accounting for an excerpt refused at the door (wired to capture.AccountDropped); nil is legal.
 	OnDropped func(reason string)
+	// RepoFor names the repository a session works in, for the task bases Observe records; nil records none.
+	RepoFor func(session [16]byte) string
 
 	mu       sync.Mutex
 	l0roots  map[string][]byte // per worktree ("" = the single-root form): latest cortexd L0 root; absent ⇒ integrity incomplete
 	lastCode map[string]string // per worktree+anchor, the newest vote's diagnostic_code: the scheduler's suspension signal
+
+	diffStates map[string]DiffState    // per worktree, the last tree read's outcome as diff_status.json carries it
+	bases      map[[16]byte]*baseEntry // per task, the HEAD its diff starts from (taskbase.go)
 	// signer mints AnchorVote.signature (verify.proto field 5, founder ruling
 	// 2026-09-16); nil ⇒ votes stay unsigned, the same fail-soft posture
 	// receipt sealing already has with no enrolled device key.
@@ -345,11 +350,63 @@ func (r *Runner) SetL0RootFor(worktree string, root []byte) {
 // or refuses with ErrRefused and emits nothing. Infra failure emits
 // VERDICT_ERROR, never VIOLATED (F-31).
 func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]byte, worktree string) error {
+	j, err := r.judge(ctx, e, worktree, task)
+	if err != nil {
+		return err
+	}
+	verdict, evidence, integrity, d := j.verdict, j.evidence, j.integrity, j.d
+	r.mu.Lock()
+	if r.lastCode == nil {
+		r.lastCode = map[string]string{}
+	}
+	r.lastCode[worktree+"\x00"+e.ID] = evidence.GetDiagnosticCode()
+	r.mu.Unlock()
+	// Raw evidence stays on this device; a failed local write never fails the vote.
+	_, _ = r.Evidence.Put(task, e.ID, j.stdout, j.stderr, d.raw)
+
+	av := &m1pv1.AnchorVote{
+		AnchorId:  e.ID,
+		Vote:      verdict,
+		Evidence:  evidence,
+		Integrity: integrity,
+	}
+	r.signVote(av)
+	if n, ok := r.emit.(treeNoter); ok {
+		n.NoteTree(task, e.ID, d.fingerprint()) // the attempt boundary the vote tee counts on: the tree this vote judged
+	}
+	ev := &m1pv1.Event{
+		SessionId:  session[:],
+		TaskId:     task[:],
+		OccurredAt: timestamppb.Now(), // mark1d IS the origin of this event
+		Body:       &m1pv1.Event_AnchorVote{AnchorVote: av},
+	}
+	return r.emit.Admit(ctx, ev)
+}
+
+// Probe runs e once on worktree through RunOne's gates and handler and answers the run's diagnostic_code ("" when clean): no AnchorVote, no ledger event, no stored evidence — "checks ready", never a verdict.
+func (r *Runner) Probe(ctx context.Context, e CatalogEntry, worktree string) (string, error) {
+	j, err := r.judge(ctx, e, worktree, [16]byte{})
+	if err != nil {
+		return "", err
+	}
+	return j.evidence.GetDiagnosticCode(), nil
+}
+
+type judged struct {
+	verdict        m1pv1.Verdict
+	evidence       *m1pv1.EvidenceRecord
+	integrity      *m1pv1.AnchorIntegrity
+	stdout, stderr []byte
+	d              diffFacts
+}
+
+// judge is the one execution path RunOne and Probe share: consent and opt-in gates, the pre/post binary hash, the sandboxed run and the kind's handler.
+func (r *Runner) judge(ctx context.Context, e CatalogEntry, worktree string, task [16]byte) (judged, error) {
 	handler, ok := defaultHandlers[e.Kind]
 	if !ok {
 		// Unreachable for table-derived entries (init asserts the sets match);
 		// kept because a hand-built entry must be REFUSED, never faked.
-		return fmt.Errorf("%w: no handler for kind %q", ErrRefused, e.Kind)
+		return judged{}, fmt.Errorf("%w: no handler for kind %q", ErrRefused, e.Kind)
 	}
 	// EvidenceRecord.tool and the resolved_binary_hashes key are the SAME
 	// finite-vocabulary contract as diagnostic_code (artifacts.proto: "the
@@ -360,10 +417,10 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 	// init() exhaustiveness assert, since the handler lookup above succeeded.
 	tool := detectors[e.Kind].tool
 	if e.ConsentedAt.IsZero() || len(e.BinaryHash) == 0 {
-		return fmt.Errorf("%w: entry %s is not consented (04 §2.2: nothing runs without consent)", ErrRefused, e.ID)
+		return judged{}, fmt.Errorf("%w: entry %s is not consented (04 §2.2: nothing runs without consent)", ErrRefused, e.ID)
 	}
 	if e.SideEffect == SideEffectTest && !r.testOptIn && !TestsOptedIn(worktree) {
-		return fmt.Errorf("%w: test-class anchor %s without per-repo opt-in %s (FR-VERIFY-003)", ErrRefused, e.ID, RepoOptInPath(worktree))
+		return judged{}, fmt.Errorf("%w: test-class anchor %s without per-repo opt-in %s (FR-VERIFY-003)", ErrRefused, e.ID, RepoOptInPath(worktree))
 	}
 
 	// Env allow-list (04 §2.2): PATH = the resolved catalog dir only, LANG/TZ
@@ -425,7 +482,7 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 			Category:       categoryOf(e.Kind),
 		}
 	} else {
-		d = r.diff(ctx, worktree) // read before the run: the touched set is the baseline boundary the handler judges against, and the anchor is side-effect-free so the tree it sees is this one
+		d = r.diff(ctx, worktree, task) // read before the run: the touched set is the baseline boundary the handler judges against, and the anchor is side-effect-free so the tree it sees is this one
 		res, runErr := r.sb.Run(ctx, spec)
 		res.Touched, res.Worktree = d.touchedSet(), worktree
 
@@ -461,32 +518,7 @@ func (r *Runner) RunOne(ctx context.Context, e CatalogEntry, session, task [16]b
 		}
 	}
 	integrity.DiffClassification, integrity.SuppressionDirectiveDelta = d.class, d.delta
-	r.mu.Lock()
-	if r.lastCode == nil {
-		r.lastCode = map[string]string{}
-	}
-	r.lastCode[worktree+"\x00"+e.ID] = evidence.GetDiagnosticCode()
-	r.mu.Unlock()
-	// Raw evidence stays on this device; a failed local write never fails the vote.
-	_, _ = r.Evidence.Put(task, e.ID, stdout, stderr, d.raw)
-
-	av := &m1pv1.AnchorVote{
-		AnchorId:  e.ID,
-		Vote:      verdict,
-		Evidence:  evidence,
-		Integrity: integrity,
-	}
-	r.signVote(av)
-	if n, ok := r.emit.(treeNoter); ok {
-		n.NoteTree(task, e.ID, d.fingerprint()) // the attempt boundary the vote tee counts on: the tree this vote judged
-	}
-	ev := &m1pv1.Event{
-		SessionId:  session[:],
-		TaskId:     task[:],
-		OccurredAt: timestamppb.Now(), // mark1d IS the origin of this event
-		Body:       &m1pv1.Event_AnchorVote{AnchorVote: av},
-	}
-	return r.emit.Admit(ctx, ev)
+	return judged{verdict: verdict, evidence: evidence, integrity: integrity, stdout: stdout, stderr: stderr, d: d}, nil
 }
 
 // LastCode is the diagnostic_code of the newest vote this Runner cast for (worktree, anchor); "" when none.

@@ -285,6 +285,9 @@ func TestRunOneOutputHMACIsTenantScoped(t *testing.T) {
 func TestEvidenceStoreNeverReachesTheWire(t *testing.T) {
 	entries, wt := enabledAll(t)
 	fakeBin(t, filepath.Dir(entries[0].BinaryPath), "git", "git version 2.46.0")
+	if err := os.Mkdir(filepath.Join(wt, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	state := t.TempDir()
 	store, err := evidence.Open(state)
 	if err != nil {
@@ -301,7 +304,7 @@ func TestEvidenceStoreNeverReachesTheWire(t *testing.T) {
 				e = x
 			}
 		}
-		r := NewRunner(&fakeSandbox{run: gitFake(" M src/billing/secret_module.py\x00", diff, c.res)}, em, key, false)
+		r := NewRunner(&fakeSandbox{run: gitFake("1 .M N... 100644 100644 100644 aaaa aaaa src/billing/secret_module.py\x00", diff, c.res)}, em, key, false)
 		r.Evidence = store
 		if err := r.RunOne(context.Background(), e, testSession, testTask, wt); err != nil {
 			t.Fatalf("%s: %v", c.kind, err)

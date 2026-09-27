@@ -214,3 +214,68 @@ func TestVotesNeverFuseUnderTheSentinel(t *testing.T) {
 		t.Fatalf("the sentinel holds a %v verdict — it is an address again", e.Verdict.GetVerdict())
 	}
 }
+
+// TestVotesRepairRoundReadsTheKnee is ADR-0012: the knee reads r (consecutive failing attempts whose tool:diagnostic_code sets overlap), the cache keeps n for the ledger — a fresh defect after two repairs is round 1 at attempt 3, not a third strike.
+func TestVotesRepairRoundReadsTheKnee(t *testing.T) {
+	m := voteMatrices()
+	p1, p3 := 0.5, 0.05
+	m.VTask, m.KneeBasis = 1, "prior"
+	m.Knee = []verdict.KneeRow{{N: 1, CostN: 0.2, PLCB: &p1}, {N: 3, CostN: 0.2, PLCB: &p3}}
+	eng := runEngine(t, m)
+	v := votesFor(&fakeEmitter{}, eng, []CatalogEntry{{ID: "ruff@cat-1", Class: ClassFast}})
+	task := verdict.TaskID{6}
+	vote := func(verd m1pv1.Verdict, code string, errs uint32) *m1pv1.Event {
+		ev := anchorVoteEvent(task, "ruff@cat-1", verd, false)
+		ev.GetAnchorVote().Evidence = &m1pv1.EvidenceRecord{Tool: "ruff", DiagnosticCode: code, Counts: &m1pv1.EvidenceCounts{Errors: errs}}
+		return ev
+	}
+	steps := []struct {
+		ev          *m1pv1.Event
+		n, r        int
+		stop        bool
+		description string
+	}{
+		{vote(m1pv1.Verdict_VERDICT_VIOLATED, "F821", 3), 1, 1, false, "first failure opens round 1"},
+		{vote(m1pv1.Verdict_VERDICT_VIOLATED, "E501", 2), 2, 1, false, "a disjoint failure restarts the repair"},
+		{vote(m1pv1.Verdict_VERDICT_VIOLATED, "E501", 1), 3, 2, false, "the same defect again is round 2"},
+		{vote(m1pv1.Verdict_VERDICT_VIOLATED, "E501", 4), 4, 3, true, "round 3 reaches the knee row"},
+		{vote(m1pv1.Verdict_VERDICT_SATISFIED, "", 0), 5, 0, false, "a passing attempt resets"},
+		{vote(m1pv1.Verdict_VERDICT_VIOLATED, "E501", 1), 6, 1, false, "after a pass the old defect is a new repair"},
+	}
+	for _, s := range steps {
+		if err := v.Admit(context.Background(), s.ev); err != nil {
+			t.Fatal(err)
+		}
+		e := waitCached(t, eng.Reader(), task, s.description, func(e verdict.Cached) bool { return e.Knee.N == s.n })
+		if e.Knee.R != s.r || e.Knee.Stop != s.stop || e.Knee.Basis != "prior" {
+			t.Fatalf("%s: n=%d r=%d stop=%v basis=%q, want r=%d stop=%v", s.description, e.Knee.N, e.Knee.R, e.Knee.Stop, e.Knee.Basis, s.r, s.stop)
+		}
+	}
+}
+
+func TestRepairRoundOverlap(t *testing.T) {
+	set := func(ks ...string) map[string]bool {
+		m := map[string]bool{}
+		for _, k := range ks {
+			m[k] = true
+		}
+		return m
+	}
+	for _, c := range []struct {
+		prev      map[string]bool
+		prevRound int
+		cur       map[string]bool
+		want      int
+	}{
+		{nil, 0, set(), 0},
+		{nil, 0, set("ruff:F821"), 1},
+		{set("ruff:F821"), 1, set("ruff:F821", "tsc:TS2304"), 2},
+		{set("ruff:F821", "tsc:TS2304"), 4, set("tsc:TS2304"), 5},
+		{set("ruff:F821"), 2, set("tsc:TS2304"), 1},
+		{set("ruff:F821"), 2, set(), 0},
+	} {
+		if got := repairRound(c.prev, c.prevRound, c.cur); got != c.want {
+			t.Errorf("repairRound(%v, %d, %v) = %d, want %d", c.prev, c.prevRound, c.cur, got, c.want)
+		}
+	}
+}
