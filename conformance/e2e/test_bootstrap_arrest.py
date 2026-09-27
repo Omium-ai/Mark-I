@@ -265,14 +265,17 @@ def arrest() -> ArrestRig:
 
 def test_enrollment_publishes_the_bootstrap_bundle(arrest: ArrestRig) -> None:
     """Enrollment minted stable seq 1 for the tenant: one catalog row, one tlog leaf, one
-    bundle_publication receipt, and never a second seq 1."""
+    bundle_publication receipt, and never a second seq 1. The device had not polled yet, so no
+    device of the tenant was known to refuse route.knee.basis and seq 1 carries the bootstrap's
+    prior (ADR-0013); the daemon's first poll advertised the key, so nothing was republished."""
     rows = arrest.pg(
-        "SELECT channel, seq, tlog_index, max_age FROM policy_bundles "
-        "WHERE tenant_id = $1 ORDER BY seq",
+        "SELECT channel, seq, tlog_index, max_age, knee_basis, knee_basis_intended "
+        "FROM policy_bundles WHERE tenant_id = $1 ORDER BY seq",
         arrest.tenant_id,
     )
     assert [(r["channel"], r["seq"], r["tlog_index"]) for r in rows] == [("stable", 1, 0)], rows
     assert rows[0]["max_age"].days == 365
+    assert (rows[0]["knee_basis"], rows[0]["knee_basis_intended"]) == ("prior", "prior"), rows
     head = arrest.pg(
         "SELECT head_seq FROM bundle_channel_heads WHERE tenant_id = $1 AND channel = 'stable'",
         arrest.tenant_id,
@@ -340,6 +343,8 @@ def test_retry_loop_is_arrested_at_the_knee(arrest: ArrestRig) -> None:
     assert (
         f"stop at attempt {KNEE_ATTEMPT}" in msg and "under quota" in msg and "ruff:F401" in msg
     ), msg
+    # ADR-0012: one F401 throughout is one repair (r == n); the bootstrap knee is a prior
+    assert f"repair round {KNEE_ATTEMPT}" in msg and "prior p(r)" in msg and "p̂_LCB" not in msg, msg
 
 
 def test_arrest_is_on_the_daemons_verify_surface(arrest: ArrestRig) -> None:
@@ -352,6 +357,8 @@ def test_arrest_is_on_the_daemons_verify_surface(arrest: ArrestRig) -> None:
     assert row == arrests[0], (row, arrests[0])
     assert row["type"] == "arrest"
     assert row["attempt"] == KNEE_ATTEMPT
+    assert row["round"] == KNEE_ATTEMPT and row["knee_basis"] == "prior", row
+    assert isinstance(row["tokens_saved_estimate"], int), row
     assert (
         row["p_lcb"] == pytest.approx(0.18) and row["v"] == 1.0 and row["c_n"] == pytest.approx(0.2)
     )

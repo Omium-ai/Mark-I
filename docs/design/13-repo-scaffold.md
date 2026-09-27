@@ -1335,7 +1335,7 @@ Dialect parsers version independently *inside* the edge version: each `mark1-fra
 
 ### 9.4 Update channels
 
-`stable` (ring 2), `canary` (ring 1), `dogfood` (ring 0) — selected server-side per tenant, carried in the update manifest; `mark1d` pulls the manifest, verifies the update-key signature + monotonic `manifest_seq`, and self-updates its supervised set. Package-manager installs (brew/winget/apt) are notified, never overwritten. Update key ≠ bundle key, deliberately: a compromised bundle key can steer policy but not ship code; a compromised update key can ship code only through the staged-ring + SLSA gate but not alter policy (09 §11.2).
+`stable` (ring 2), `canary` (ring 1), `dogfood` (ring 0) — selected server-side per tenant, carried in the update manifest; `mark1d` pulls the manifest, verifies the update-key signature + monotonic `manifest_seq`, and self-updates its supervised set. Package-manager installs (brew/winget/apt) are notified, never overwritten. Agent-integration fragments follow the binaries: the first mark1d start on the new release reconciles every fragment it still owns to the new bytes (08 §8.3.1). Update key ≠ bundle key, deliberately: a compromised bundle key can steer policy but not ship code; a compromised update key can ship code only through the staged-ring + SLSA gate but not alter policy (09 §11.2).
 
 ### 9.5 The `<sha7>` discipline — and why `latest` is banned
 

@@ -803,7 +803,7 @@ data "aws_iam_policy_document" "intel" {
 
 **`omium-prod-mark1-adjudicator-irsa`** — the smallest: read-only on `evidence/` (E1/E2 cloud-judge paths, tenant-consented) plus decrypt on tenant keys. Default judge execution is client-side (C4), so at pilot this role may go weeks without a single API call — which is the correct resting state for it, and a CloudTrail query proving it is part of the compliance story.
 
-Deliberately absent everywhere: `secretsmanager:*` on any service role (ESO materialises secrets; pods read mounted Secrets), `s3:DeleteObject` on ingest/witness (lifecycle deletes, identities don't), any ClickHouse-related IAM (ClickHouse auth is its own credential plane, §4.3), and any cross-account anything.
+Deliberately absent everywhere: `secretsmanager:*` on any service role (ESO materialises secrets; pods read mounted Secrets), `s3:DeleteObject` on witness and on the ingest replay log (lifecycle deletes, identities don't; controld's one delete grant, `RetentionSweeps`, covers only the ingest bucket's `t/*/quarantine/*`, `t/*/contributions/v1/*` and `t/*/evidence/v1/*`, the prefixes its retention and withdrawal sweeps delete, held to the code by `TestControldRoleMayDeleteEverySweptPrefix`), any ClickHouse-related IAM (ClickHouse auth is its own credential plane, §4.3), and any cross-account anything.
 
 ### 6.3 ESO wiring
 
@@ -816,6 +816,7 @@ Nothing new is needed at the store level: `ClusterSecretStore omium-aws-secrets`
 | `mark1-clickhouse` | `omium/prod/mark1-clickhouse` | controld (ingest + choke), Job (DDL) |
 | `mark1-oidc-client` | `omium/prod/mark1-oidc-client` | controld.enroll |
 | `mark1-hmac-pepper` | `omium/prod/mark1-hmac-pepper` (per-tenant HMAC salt derivation root, 07 evidence digests) | controld |
+| `mark1-baseten-rm` | `omium/prod/mark1-baseten-rm` (`api_key`: a Baseten key scoped to the mark1-rm deployment, set by the founder; Terraform seeds it empty with `ignore_changes`; never the llm-router's `omium/prod/baseten-api-key`) | adjudicator (cloud RM, 16 §L6) |
 
 ### 6.4 Signing-key custody
 
@@ -1021,7 +1022,7 @@ One prerequisite the estate README already documents for its own repos: prod Arg
 
 ### 8.4 Releases: promote-by-SHA
 
-Identical to the platform flow, because it is the same machinery: `omium-mark1` CI builds on merge to main, pushes `omium/mark1-*:<sha7>` to the prod-account ECR (repos are IMMUTABLE — a re-push of an existing tag fails, which is the point), and **a release is a one-line `imageTag` bump in `helm/values.prod.mark1.yaml`**. Argo CD (automated, selfHeal, prune) reconciles within its poll interval; the SHA-pin commit *is* the deploy, and `git log` on that file *is* the release history. Rollback is `git revert` of the pin commit — no imperative kubectl anywhere. `latest` never appears: on IMMUTABLE repos it is a permanent pin masquerading as a pointer (retired estate-wide 2026-08-13), and Mark 1's chart refuses to render without an explicit tag (§7.2's `required`).
+Identical to the platform flow, because it is the same machinery: `omium-mark1` CI builds on merge to main, pushes `omium/mark1-*:<sha7>` to the prod-account ECR (repos are IMMUTABLE — a re-push of an existing tag fails, which is the point), and **a release is a one-line `imageTag` bump in `helm/values.prod.mark1.yaml`**. Argo CD (automated, selfHeal, prune) reconciles within its poll interval; the SHA-pin commit *is* the deploy, and `git log` on that file *is* the release history. Rollback is `git revert` of the pin commit — no imperative kubectl anywhere. A schema-bearing rollback is not free: rolling controld back to f85bff9 (before m1_107) drops the consent holds in `m1_device_consents.person_off`, so a device's next stale relay re-grants on that device. That is accepted for the cloud-first rollout; once X2 edges ship, do not roll controld back past m1_107 without re-applying the holds (08 §3.7a). `latest` never appears: on IMMUTABLE repos it is a permanent pin masquerading as a pointer (retired estate-wide 2026-08-13), and Mark 1's chart refuses to render without an explicit tag (§7.2's `required`).
 
 ---
 
@@ -1136,6 +1137,8 @@ The estate has never shipped a binary to a machine it doesn't own; this channel 
 | Linux | `.deb` + `.rpm` repos (GPG-signed metadata) and a plain tarball | Repo GPG key for apt/yum; every binary additionally carries a detached signature verifiable by `mark1 verify-release` | `apt`/`dnf` repo; tarball for the allergic |
 
 All three platforms install the same layout (`mark1d` supervises the rest, per the plan) and CI builds/tests on macOS/Linux/Windows from day one (plan §Deployment).
+
+**Linux and AppArmor's user-namespace restriction.** Ubuntu ≥ 23.10 ships `kernel.apparmor_restrict_unprivileged_userns=1`, which refuses the unprivileged user namespace the anchor sandbox is built on (10 §7.4): without a profile every anchor is refused and git falls back to the direct read (10 §7.5). Mark 1 ships one profile, `omium-mark1d` — `flags=(unconfined)` plus `userns,`, attached to mark1d's exact resolved path, nothing else — written and loaded by `mark1 apparmor install` (`/etc/apparmor.d/omium-mark1d`, `apparmor_parser -r -W -T`) and unloaded and removed by `mark1 apparmor uninstall`. Install is a no-op unless the sysctl reads `1`, needs root, and **refuses** a mark1d that is not root-owned all the way up (a profile on a user-writable path would hand user namespaces to anything a user drops there — the restriction's whole point). The desktop app's `.deb` (Mark1-GUI `build/linux/after-install.sh`, electron-builder's own script plus one block) runs it at install from `/opt/Mark 1/resources/bin/mark1`; `after-remove.sh` unloads and deletes the file. The AppImage, a tarball under `$HOME` and the WSL lane (`~/.omium/mark1/bin`) are user-writable, so they get no profile: WSL's kernel does not restrict, and on a restricting host `mark1 doctor` (`apparmor_userns`) fails and says what to do — install the `.deb`, or move the binaries under a root-owned directory and run `sudo mark1 apparmor install`. llama-server (the local RM runtime) creates no namespace and needs no profile. Proof on a live restricting kernel: Mark1-GUI `ci.yml` job `deb-apparmor-smoke` (ubuntu-24.04, restriction left on) installs the `.deb`, asserts the profile file and its loaded state, `mark1 doctor`'s `apparmor_userns`, that the installed mark1d derives an anchor through the sandbox while an unprofiled copy is refused, and that `dpkg -r` unloads and removes it.
 
 ### 11.2 The update channel — and why update key ≠ bundle key
 

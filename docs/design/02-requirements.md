@@ -122,11 +122,12 @@ Ownership: `mark1d` (anchor runner, verdict fusion, stop-gate, knee governor), `
 | FR-VERIFY-013 | P0 | Noise certificates **must** be preconditioned on a size- and freshness-gated, server-selected, edge-indistinguishable gold set plus identifiability diagnostics. Below threshold, status **must** be `uncertified/bootstrapping`, and such verdicts **must not** gate memory extraction or corpus admission. |
 | FR-VERIFY-014 | P0 | Gold-set tasks **must** be server-selected and edge-indistinguishable from ordinary tasks; the edge **must** have no code path that treats a gold task differently. |
 | FR-VERIFY-015 | P1 | Judge execution **must** default to client-side through the customer's own key, so evidence never leaves. Cloud judges **must** require tenant consent + subprocessor disclosure + region pinning, and **must** fire only where anchors are ambiguous. |
-| FR-VERIFY-016 | P1 | Evidence tiers **must** be enforced at the type level: E0 typed `EvidenceRecord` only (default, modeled as a low-power ensemble member); E1 sanitized diff hunks, per-tenant opt-in, redaction-receipted; E2 full diff, VPC/self-host only. |
+| FR-VERIFY-016 | P1 | Evidence tiers **must** be enforced at the type level: E0 typed `EvidenceRecord` only (default, modeled as a low-power ensemble member); E1 sanitized diff hunks, per-tenant opt-in, redaction-receipted; E2 full diff, VPC/self-host only. E1 (16 L10) **must** move only under the device's `e1` consent (off by default): one part per closed task (task intent ≤ 1 KiB + diff hunks, ≤ 64 KiB), redacted fail-closed before it is written, uploaded through the attach path (08 §2.1), rescanned server-side, served only once bound to its excerpt, and deleted with a receipt at 30 d or on withdrawal. |
 | FR-VERIFY-017 | P1 | Consistency votes **must** be scoped to escalation events and T3 runs only, and **must** be excluded from ensemble-size assumptions. |
 | FR-VERIFY-018 | P1 | The adjudicator **must** reproduce Paper II's posterior/verdict table on synthetic verifier outputs, with crowd-kit as test oracle only (never a runtime dependency). |
 | FR-VERIFY-019 | P1 | Cross-tenant deviation of estimated priors beyond bundle-configured bounds **must** route the tenant's certification to manual review. |
 | FR-VERIFY-020 | P0 | `VerdictEvent.stage` **must** be exactly `PROVISIONAL \| CERTIFIED \| REVISED`, and `posterior` **must** be a 4-vector over exactly the CON-006 verdict vocabulary. |
+| FR-VERIFY-021 | P0 | The task diff every learned and judged view reads (and the anchor diff facts) **must** start at the HEAD recorded when the task opened (surviving a restart; merge-base when HEAD moved, a typed refusal when no history is shared), **must** read the session's own repository, **must** include each untracked, non-ignored file as a new-file section without writing the user's index or worktree, **must** run git so that no program the repository or its config names executes, **must** answer on every OS (in the anchor sandbox, else through the documented hardened direct read, 10 §7.5), and an empty diff **must** carry a typed reason visible in `mark1 doctor`. |
 
 End of FR-VERIFY.
 
@@ -184,6 +185,9 @@ End of FR-VERIFY.
 | FR-LEARN-005 | P1 | A learned router **must** beat the incumbent on held-out DR/SNIPS before canary; DR/SNIPS inputs obey FR-ROUTE-002. |
 | FR-LEARN-006 | P1 | The data-refinery integration **must** be an added constructor + method pair on the existing `CorpusReader` struct following its `scan_worm`/`read_train_rows` signatures — not an invented trait (grounding delta 2). |
 | FR-LEARN-007 | P1 | Export-batch receipts **must** record checkpoint lineage sufficient to execute retrain-on-erasure, and the erasure path **must** be documented and testable. |
+| FR-LEARN-008 | P1 | A device consent class `contribute_outcomes` (off by default; dogfood tenants only may default it on, `DOGFOOD_TENANTS`) **must** gate every upload of task text, redacted diff and outcome labels (16 L8); withdrawal **must** purge the edge's pending records, stamp `withdrawn_at` on the device's past contributions, and delete their objects in the daily sweep. |
+| FR-LEARN-009 | P1 | Contribution labels **must** be execution- or time-grounded only and computed on the device after 30 days: code survival (git blame on HEAD), revert detection, the project's consented test anchors on a clean HEAD, plus m1_086 human gold joined at export; never a fused verdict or an LLM label (16 "Independence rules"). |
+| FR-LEARN-010 | P1 | An `OutcomeContribution` **must** pass the path axis and the admit axis with a device-signed redaction receipt before the spool, travel as a batch of one, be refused at ingest without the device's live consent, land only under `t/<tenant>/contributions/v1/`, and reach training only through `rm.contributions`, whose rows are `training_eligible` only for providers with authorization on file (`INTEL_AUTHORIZED_TRAINING_PROVIDERS`), evaluation-only otherwise. |
 
 End of section 5.
 
@@ -339,7 +343,8 @@ End of section 7.
 | NFR-PRIVACY-003 | P0 | Every DP release and DP-SGD run **must** debit the per-tenant ε ledger under tenant-level composition (FR-FED-005, FR-LEARN-003). |
 | NFR-PRIVACY-004 | P0 | Per-tenant S3 prefixes and per-tenant KMS keys **must** govern all tenant data at rest in Omium's stores. |
 | NFR-PRIVACY-005 | P1 | Raw evidence under `~/.omium/mark1/evidence/` **must never** be uploaded by default; E1/E2 movement is opt-in, scrubbed, receipted (FR-VERIFY-016). |
-| NFR-PRIVACY-006 | P1 | All Anthropic-bound cloud-judge evidence **must** be gated on tenant consent flags, listed in the subprocessor register, and region-pinned. |
+| NFR-PRIVACY-006 | P1 | All cloud-judge evidence and memory-extraction sessions sent to a model vendor (Nebius Token Factory through the platform llm-router, 16 §L1) **must** be gated on a live tenant consent row (`judge:grounded-rubric@2`, `mem:extract@1`), listed in the subprocessor register, and processed only in the region that row names ("global", disclosed as such); the served model must equal the pinned catalog id and no tenant identity is sent to the router. |
+| NFR-PRIVACY-007 | P1 | Contributed task text and diffs (FR-LEARN-008…010) **must** never enter Postgres or `m1p_events` beyond an index row, **must** expire from the ingest bucket within 365 days (`contribution-ttl`), and a withdrawal **must** remove them from the landing store within 40 days and from the training snapshot at the next nightly export. |
 
 ### 8.7 NFR-PORTABILITY
 
@@ -454,11 +459,12 @@ End of §9.2.
 | FR-VERIFY-013 | Certificate preconditions | P0 | Below gold-set size/freshness threshold, status is `uncertified/bootstrapping` and memory/corpus gates reject the verdict; above, a certificate issues with (ρ₊, ρ₋) | Phase 4 | negative |
 | FR-VERIFY-014 | Edge-indistinguishable gold | P0 | Diff of edge-observable behavior on gold vs ordinary tasks is empty (no marker field, no timing tell in fixtures); selection is server-side only | Phase 4 | negative |
 | FR-VERIFY-015 | Client-side-first judges | P1 | Default-config judge run makes zero cloud-judge calls; cloud path refuses without the consent flag + subprocessor entry + region pin | Phase 4 | negative |
-| FR-VERIFY-016 | Evidence tiers typed | P1 | E1 payload without a redaction receipt fails admission; E2 payload outside VPC/self-host mode fails at type level | Phase 4 | negative |
+| FR-VERIFY-016 | Evidence tiers typed | P1 | E1 payload without a redaction receipt fails admission; E2 payload outside VPC/self-host mode fails at type level; no E1 upload without the `e1` consent, no secret in the spool or on the wire, attach idempotent, second-ruleset hit quarantined, internal read service-credentialed and tenant-scoped, 30 d / withdrawal deletion receipted (`go/mark1d/internal/excerpt`, `go/controld/internal/ingest/attach*_test.go`, `python/adjudicator/tests/test_evidence_e1.py`) | Phase 4 | negative |
 | FR-VERIFY-017 | Scoped consistency votes | P1 | `ConsistencyVote` emitted only on escalation/T3 fixtures; ensemble-size accounting excludes them | Phase 4 | unit |
 | FR-VERIFY-018 | Paper II reproduction | P1 | Adjudicator reproduces the posterior/verdict table on synthetic outputs; crowd-kit matches as oracle; crowd-kit absent from runtime deps | Phase 2 | unit |
 | FR-VERIFY-019 | Prior-deviation review | P1 | Tenant with planted deviant priors is routed to manual review, not auto-certified | Phase 4 | unit |
 | FR-VERIFY-020 | Verdict stage/posterior shape | P0 | Schema validation rejects any stage outside `PROVISIONAL\|CERTIFIED\|REVISED` and any posterior not a 4-vector over the CON-006 vocabulary | Phase 2 | unit |
+| FR-VERIFY-021 | Complete, hardened task diff | P0 | Work the agent committed stays in the diff across a restart; reset ⇒ merge-base, orphan/gc'd/other-repo ⇒ `base_unreachable`; a folder of repositories diffs the session's; untracked files render byte-identical to `git diff` of an intent-to-add path; `.gitignore`/`.mark1ignore` honoured; a planted filter/fsmonitor never runs and the index is unchanged; the real sandbox on each CI leg answers, a refusing sandbox falls back and says so; clean, non-repo, no-git and oversize reads each name their reason | Phase 2 | unit |
 
 End of §9.3.
 
@@ -497,6 +503,9 @@ End of §9.3.
 | FR-LEARN-005 | Router promotion bar | P1 | Candidate router with held-out DR/SNIPS ≤ incumbent is not canaried (promotion gate test) | Phase 6 | unit |
 | FR-LEARN-006 | CorpusReader extension | P1 | `mark1-parquet` source is a constructor + method pair on `CorpusReader` matching existing signatures; no new trait introduced (API diff) | Phase 5 | unit |
 | FR-LEARN-007 | Erasure lineage | P1 | Given an erasure request fixture, lineage identifies every affected export/checkpoint and the retrain path executes on a toy corpus | Phase 6 | conformance |
+| FR-LEARN-008 | Consented contribution, withdrawable | P1 | Consent reads false with no record; PUT `contribute_outcomes:false` purges `<state>/contrib`; controld marks the device's rows withdrawn and the sweep deletes the object (`internal/contrib`, `control/contrib_test.go`, `contribution_integration_test.go`); dogfood default applies once and never overrides a choice | Phase 6 | negative |
+| FR-LEARN-009 | Grounded outcome labels | P1 | Fixture repo: half the added lines kept ⇒ survival 0.5; `git revert` ⇒ reverted YES; uncommitted ⇒ unknown; tests run only on a clean tree (`contrib_test.go` `TestLabelsOnAFixtureRepo`) | Phase 6 | unit |
+| FR-LEARN-010 | Redacted, isolated, consented upload | P1 | Planted secret, `.env` and `.mark1ignore`d file never persist in the pending record or the event; ingest 422s an unconsented or mixed batch; `m1p_events` payload carries no text; export excludes withdrawn, revoked and quarantined rows and marks unauthorized providers eval-only (`test_contributions.py`) | Phase 6 | negative |
 
 End of §9.4.
 
@@ -586,7 +595,8 @@ End of §9.5.
 | NFR-PRIVACY-003 | ε accounting universal | P0 | Any DP release/DP-SGD run without a matching ledger debit is transactionally impossible | Phase 5 | negative |
 | NFR-PRIVACY-004 | Per-tenant prefixes + KMS | P0 | Cross-tenant S3 read with tenant A's role on tenant B's prefix denied; KMS key policy per tenant verified | Phase 1 | negative |
 | NFR-PRIVACY-005 | Evidence stays local | P1 | Default-config soak: zero bytes from `~/.omium/mark1/evidence/` on the wire | Phase 2 | negative |
-| NFR-PRIVACY-006 | Consent-gated cloud judges | P1 | Cloud-judge call without consent flag + register entry + region pin refused (shared with FR-VERIFY-015) | Phase 4 | negative |
+| NFR-PRIVACY-006 | Consent-gated cloud judges and memory extraction | P1 | Cloud-judge or extraction call without a live consent row naming the subprocessor and region refused; a reply from an unpinned model refused; no tenant header on any router call (shared with FR-VERIFY-015) | Phase 4 | negative |
+| NFR-PRIVACY-007 | Contributions bounded and erasable | P1 | Index-only CH/PG rows; tag `class=contribution` on every contributions object; withdrawn rows deleted by `SweepContributions` and absent from the next `rm/contributions/<tenant>.parquet` | Phase 6 | negative |
 | NFR-PORTABILITY-001 | 3-OS CI | P0 | CI matrix runs macOS/Linux/Windows on every PR from the first commit; any red platform blocks merge | Phase 1 | conformance |
 | NFR-PORTABILITY-002 | Windows named pipes | P0 | Fabric conformance suite passes on Windows with equivalent perms/framing/single-writer semantics | Phase 1 | conformance |
 | NFR-PORTABILITY-003 | Static shim | P1 | `ldd`/dependency audit: shim binary has no dynamic runtime requirement beyond platform libc contract | Phase 1 | unit |
@@ -624,7 +634,7 @@ Concurrent spike artifacts (gate the *adapter slots*, not this phase): FR-AGENT-
 
 > **Gate: retry loops demonstrably arrested at the knee on live sessions; Cortex uplift measurable in the ledger.**
 
-Green required: CON-009 (catalog/consent half), CON-013 · FR-VERIFY-001…011, FR-VERIFY-018, FR-VERIFY-020 · FR-CORTEX-001…006 · FR-AGENT-005, FR-AGENT-011 (adapter live, given a "go") · FR-CLI-004 · NFR-LATENCY-002, -003 · NFR-AVAILABILITY-001 · NFR-PRIVACY-005. Evidence: the A/B on our own tasks with and without the stop-gate, iteration-count delta reported with confidence intervals; cortex uplift as a ledger query (FR-CORTEX-008 methodology).
+Green required: CON-009 (catalog/consent half), CON-013 · FR-VERIFY-001…011, FR-VERIFY-018, FR-VERIFY-020, FR-VERIFY-021 · FR-CORTEX-001…006 · FR-AGENT-005, FR-AGENT-011 (adapter live, given a "go") · FR-CLI-004 · NFR-LATENCY-002, -003 · NFR-AVAILABILITY-001 · NFR-PRIVACY-005. Evidence: the A/B on our own tasks with and without the stop-gate, iteration-count delta reported with confidence intervals; cortex uplift as a ledger query (FR-CORTEX-008 methodology).
 
 ### Phase 3 — Wire proxy + ROUTE
 
@@ -682,10 +692,12 @@ Requirement → owning component → design-doc section → test home in `12-tes
 | FR-VERIFY-001…005 | `mark1d.anchors`, `cortexd` (merkle) | TBD-04 | TBD-12 (negative: sandbox + anti-tamper suite) |
 | FR-VERIFY-006…011 | `mark1d.verdict` (fusion, gate, knee) | TBD-04 | TBD-12 (unit: fusion/knee golden; conformance: gate UX) |
 | FR-VERIFY-012…019 | `adjudicator-svc` | TBD-06 | TBD-12 (unit: Paper II reproduction; negative: cert preconditions) |
+| FR-VERIFY-021 | `mark1d.anchors` (`gitread.go`, `taskbase.go`), `mark1d.contrib`, `mark1 doctor` (`task_diff`, `apparmor_userns`), `mark1 apparmor` | 16 (task diff), 10 §7.5, 09 §11.1 | `gitread_test.go`, `taskbase_test.go`, `contrib_test.go`, `cmd/diffrepo_test.go`, `doctor/taskdiff_test.go`, `apparmor_linux_test.go` |
 | FR-CORTEX-001…008, NFR-FOOTPRINT-003 | `cortexd` | TBD-04 | TBD-12 (unit: index/rank; negative: scoping) |
 | FR-ROUTE-001…008 | `mark1d.policy`+`verdict`, `mark1-intel.policy_compiler`, `mark1-intel.ope` | TBD-04, TBD-06 | TBD-12 (unit: ladders/knee; negative: fidelity gating) |
 | FR-REMEMBER-001…008 | `mark1-intel.memory`, migrations (pgvector) | TBD-06, TBD-07 | TBD-12 (unit: LCB; negative: certified-only; conformance: delivery) |
 | FR-LEARN-001…007 | `mark1-intel.corpus`, `omium-training-plane` (data-refinery `CorpusReader`), adjudicator (registry) | TBD-06 | TBD-12 (conformance: dual export; negative: opt-in/probation) |
+| FR-LEARN-008…010, NFR-PRIVACY-007 | `mark1d` `internal/contrib`, `controld.ingest` (stage 6/8, sweep), `mark1-intel.corpus.contributions`, m1_096 | 16 L8 | `contrib_test.go`, `contribution_test.go`, `contribution_integration_test.go`, `test_contributions.py` |
 | FR-AGENT-001…005 | `mark1d.adapters` (shared), `mark1-hookshim`, bundles `agent_maps` | TBD-04, TBD-08 | TBD-12 (conformance: fixture replay; negative: version sniff) |
 | FR-AGENT-010…016 | `mark1d/adapters/{claudecode,codex,gemini,opencode,copilot,cursor,crush}` | TBD-03 (capability matrix), TBD-04 | TBD-12 (conformance per pinned version; manual: spike artifacts) |
 | FR-CLI-001…008 | `go/mark1` | TBD-08 | TBD-12 (conformance: CLI suite) |

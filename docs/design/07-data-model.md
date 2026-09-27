@@ -206,6 +206,7 @@ message Event {
     ArtifactOutcome artifact_outcome = 37;
     RouteDecision route_decision = 38;
     EvidenceExcerpt evidence_excerpt = 39;  // opt-in tiers only (E1/E2)
+    OutcomeContribution outcome_contribution = 40;  // consented training upload (16 L8)
   }
 
   // ---- SERVER-STAMPED band (900–999) --------------------------------------
@@ -244,7 +245,7 @@ Privacy classes used in field comments, here and in §4:
 
 - **[P0] operational** — counts, timings, enum codes, public tool/model names. No user content, nothing derived from it.
 - **[P1] pseudonymous** — vendor-issued opaque IDs and per-tenant-HMAC digests. Joinable within a tenant, meaningless across tenants and to Omium.
-- **[P2] content-derived** — never appears in this file. The only P2 carrier is `EvidenceExcerpt` (§4), an opt-in class.
+- **[P2] content-derived** — never appears in this file. The only P2 carriers are `EvidenceExcerpt` (§4), an opt-in class, and `OutcomeContribution` (§4), the `contribute_outcomes` consent class (16 L8).
 
 `// SERVER-STAMPED` marks fields controld fills; everything else is client-supplied. Enum zero values follow buf `STANDARD` (`*_UNSPECIFIED`) and decode as "sender newer than receiver — retain, don't guess".
 
@@ -457,11 +458,28 @@ message GuardDecision {
   // session's newest request size), an arrest saves the next attempt at the
   // task's mean attempt cost. Labelled an estimate wherever it is summed;
   // 0 when the edge had no usage to size it from. These rows are what the
-  // app's arrests, blocks and tokens-saved read (querychoke savings.v1,
-  // interventions.v3, app_sessions.v5) — before them nothing was recorded and
-  // every such figure was 0.
+  // app's arrests, blocks and tokens-saved read (querychoke savings.v3,
+  // interventions.v4, app_sessions.v10) — before them nothing was recorded and
+  // every such figure was 0. savings.v3 nets them against plain Claude Code
+  // (doc 16 ruling 4): a block is credited only when its task then resolved,
+  // the usage after a block on a task that never resolved is debited, and an
+  // arrest is reported apart as a forced retry avoided; ADR-0013 splits the
+  // net by each decision's cost_basis and restates a closed day's late moves.
   uint64 tokens_saved_estimate = 5;
-  uint32 attempt = 6;
+  uint32 attempt = 6;           // the attempt count n (ADR-0012: never the knee index)
+  string evidence = 7;          // [P1] the block's failing evidence, typed fields only
+  string knee_basis = 8;        // [P1] ADR-0012: "prior" | "anchor_grounded" |
+                                //      "certified" — where the knee's p(r) came
+                                //      from, read from the bundle's route.knee.basis
+                                //      (ADR-0013); "unknown" when the bundle predates
+                                //      the key; empty on a block and a block cap
+  uint64 bundle_seq = 9;        // [P1] the applied bundle's seq, projected into
+                                //      m1p_events.bundle_seq (the interventions read)
+  string cost_basis = 10;       // [P1] ADR-0013: the applied bundle's
+                                //      route.knee.cost_basis ("usd" | "quota") on every
+                                //      verify-plane decision; empty from an edge that
+                                //      predates it (savings reads "unknown"). Ingest
+                                //      refuses any other word (M1E-2006 guard_basis).
 }
 
 enum GuardOutcome {
@@ -629,6 +647,32 @@ enum EvidenceTier {
   EVIDENCE_TIER_E2 = 3;  // full diff (VPC/self-host only)
 }
 
+// 16 L8, artifacts.proto. One per consented task, emitted 30 d after close; spool
+// class diagnostic (a shed is retried from the edge's pending record); always a
+// batch of one. Stage 6 refuses it without the device's live consent (08 §2.4).
+message OutcomeContribution {
+  bytes task_id = 1;               // [P1] 16 bytes, equals Event.task_id
+  string intent_text_redacted = 2; // [P2] opening prompt, admit-axis redacted, ≤ 4 KiB
+  string diff_redacted = 3;        // [P2] worktree diff, path + admit axes, ≤ 256 KiB
+  OutcomeLabels labels = 4;        // [P0] execution- and time-grounded only
+  bytes redaction_receipt_ref = 5; // [P1] 32-byte hash of the device-signed redaction receipt
+  string generator = 6;            // [P0] "<agent>/<model>[,<model>]"
+  uint32 label_age_days = 7;       // [P0] days between task close and labelling
+}
+
+message OutcomeLabels {
+  double survival_30d = 1;         // [P0] fraction of added lines alive at HEAD; -1 = unknown
+  OutcomeLabel reverted = 2;       // [P0]
+  OutcomeLabel tests_pass = 3;     // [P0] consented test anchors on a clean HEAD
+  Verdict human = 4;               // [P0] unset at the edge; export joins m1_086 gold
+}
+
+enum OutcomeLabel {
+  OUTCOME_LABEL_UNSPECIFIED = 0;   // unknown
+  OUTCOME_LABEL_YES = 1;
+  OUTCOME_LABEL_NO = 2;
+}
+
 // ---------------------------------------------------------------------------
 // Verifier votes (contract C2)
 // ---------------------------------------------------------------------------
@@ -682,8 +726,11 @@ enum JudgeLocus {
 
 message RmScore {
   string model_id = 1;             // [P0] "rm:<name>@<version>"
-  double score = 2;                // [P0] raw scalar
+  double score = 2;                // [P0] uncalibrated P(yes) = sigmoid(logit(" yes") − logit(" no")) in [0,1]; calibration_version maps log(p/(1−p))
   string calibration_version = 3;  // [P0] mapping used to fold into the ensemble
+  bytes execution_hash = 4;        // [P0] rm-exec/v1 BLAKE3(gguf ‖ 0x00 ‖ "llama.cpp b<build>" ‖ 0x00 ‖ template_sha hex) at CLIENT_SIDE
+  bytes signature = 5;             // [P0] Ed25519 by the device origin key over canonical(RmScore, signature cleared), as AnchorVote
+  JudgeLocus locus = 6;            // [P0] CLIENT_SIDE (mark1-rm on the device) | CLOUD
 }
 
 // Escalation-scoped only (T3 runs and escalation events); excluded from
@@ -2616,7 +2663,7 @@ CREATE INDEX IF NOT EXISTS ix_acks_command_string ON bundle_acks (tenant_id, cha
 --     SELECT DISTINCT ON (a.device_id) a.device_id, a.seq, a.result
 --       FROM bundle_acks a
 --      WHERE a.tenant_id = $1 AND a.channel = 'canary'
---      ORDER BY a.device_id, a.acked_at DESC
+--      ORDER BY a.device_id, a.row_seq DESC   -- m1_105: the last-written ACK, never the clock
 --   )
 --   SELECT h.head_seq,
 --          count(d.id)                                                            AS active_devices,
@@ -3036,6 +3083,8 @@ CREATE TABLE mark1.m1p_events
     session_epoch    UInt32                  CODEC(Delta(4), ZSTD(1)),-- query-time causal order is the PAIR (session_epoch, seq), never seq alone: seq restarts at 1 on daemon reboot (§2). Not part of the table's ORDER BY — that is §21's key, and unalterable. Constant across a boot ⇒ Delta collapses it to nothing
     ingested_at      DateTime64(6, 'UTC') DEFAULT now64(6)
                                              CODEC(Delta(8), ZSTD(1)),-- the ReplacingMergeTree version column: latest server ingest wins
+    received_at      DateTime64(6, 'UTC') DEFAULT ingested_at
+                                             CODEC(Delta(8), ZSTD(1)),-- m1_ch_003 (ADR-0013): the projector's receipt time; replay reproduces it from S3 LastModified
     device_id        UUID                    CODEC(ZSTD(1)),
     task_id          UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000')
                                              CODEC(ZSTD(1)),          -- zero-UUID sentinel, not Nullable: Nullable costs a mask subcolumn and poisons skip indexes
@@ -3449,6 +3498,13 @@ cpvs-row = { task_class: tstr, model_id: tstr, p_pass: float, tokens_est: uint }
 knee-table = {
     cost_basis: "usd" / "quota",       ; DUAL basis: usd = tokens×price+verifier spend (API-key tenants);
                                        ; quota = rate-limit-window fraction × wall-clock shadow price (subscription tenants)
+    ? basis: "prior" / "anchor_grounded" / "certified",
+                                       ; ADR-0013: where the rows' p_lcb came from, stamped by the producer
+                                       ; (controld bootstrap: prior; intel compiler: certified). OPTIONAL:
+                                       ; absent ⇒ the edge records "unknown" and never infers one. A word
+                                       ; outside the enum is M1E-3001 (schema). "unknown" is never a wire value.
+                                       ; controld withholds it from a tenant with a device known not to decode
+                                       ; it (m1_104 bundle_features) and records the producer's word apart.
     rows: [+ { n: uint, c_n: float, ? p_lcb: float }],
                                        ; c(n) at attempt n; gate stops when p̂_LCB(n)·V(task) ≤ c(n).
                                        ; DECISION D-Z (lead, binding): p_lcb IS the wire source of
@@ -3546,6 +3602,14 @@ t/<tenant>/ingest/v1/dt=<YYYY-MM-DD>/hh=<HH>/<batch_uuidv7>.m1p.zst
     listing ≈ chronological replay order.
 t/<tenant>/quarantine/v1/dt=<YYYY-MM-DD>/<batch_uuidv7>.m1p.zst
     4xx / pre-egress-scanner-flagged batches; never replayed automatically.
+t/<tenant>/contributions/v1/dt=<YYYY-MM-DD>/hh=<HH>/<batch_uuidv7>.m1p.zst
+    Consented OutcomeContribution batches (16 L8), each a batch of one, kept
+    OUT of ingest/ so withdrawal can delete them; tagged class=contribution;
+    indexed by m1_outcome_contributions; replay lists this prefix too.
+t/<tenant>/evidence/v1/<task_uuid>.e1
+    One E1 part per task (16 L10): redacted task intent NUL diff hunks,
+    ≤ 64 KiB, landed by POST /api/v1/attach under the device's e1 consent,
+    tagged class=evidence, indexed by m1_evidence_attachments; never replayed.
 
 ── omium-mark1-corpus-<env> ──────────────────────────────────────────
 t/<tenant>/parquet/v1/export=<export_uuidv7>/dt=<YYYY-MM-DD>/part-<n>.parquet
@@ -3574,7 +3638,8 @@ heads/<tenant>/dt=<YYYY-MM-DD>/<hour>.json
 | `ingest/` (replay log) | On | **GOVERNANCE**, 35 days | Lifecycle: Glacier IR at 90 d, delete at 760 d | The replay window must survive an operator mistake or a compromised writer (governance lock), but tenant offboarding must be able to delete it — COMPLIANCE mode would make a legal deletion obligation unsatisfiable. Governance bypass requires the offboarding role under dual control. |
 | `quarantine/` | On | GOVERNANCE, 30 days | controld sweep deletes at 30 d with a `quarantine_deletion` receipt row (founder ruling 2026-09-16, D-EI); lifecycle expires at 32 d as the backstop, and a sweep that finds the object already gone still writes the receipt naming the backstop | Same tamper posture; short life — quarantine is a triage queue, not an archive. The never-replay marker is the Postgres tombstone (`m1_quarantined_batches`), not the object's existence. |
 | `parquet/`, `kto/` (corpus) | On | None | Tenant-configured; default delete at 400 d | Integrity comes from the export receipt (digests in the chain), not from lock; corpus must be deletable on demand (erasure → retrain path). |
-| `evidence/` | On | None | ≤ 90 d hard ceiling | Highest-sensitivity class gets the shortest life; opt-in never means indefinite. |
+| `evidence/` (ingest bucket) | On | GOVERNANCE, 35 days (bucket-wide) | controld `SweepEvidence` deletes at 30 d, or at the next daily sweep after an `e1` withdrawal (the person's, m1_106), under the IRSA grant `RetentionSweeps` (`s3:DeleteObject` on `t/*/quarantine/*`, `t/*/contributions/v1/*`, `t/*/evidence/v1/*`, never `ingest/`). The bucket is versioned with a 35 d GOVERNANCE lock, so a delete writes a delete marker: the current object is gone at once, the bytes stay as a noncurrent version until the 40 d noncurrent expiry. True wording: "removed within 30 days; deleted copies clear from version history within about 40 days". Each deletion lands an `evidence_deletion` receipt in the transaction that closes the `m1_evidence_attachments` row; lifecycle `evidence-ttl` (tag `class=evidence`) at 32 d is the backstop | Highest-sensitivity class gets the shortest life; opt-in never means indefinite. |
+| `contributions/` (ingest bucket) | On | GOVERNANCE, 35 days (bucket-wide) | Lifecycle rule `contribution-ttl` (tag `class=contribution`) deletes at 365 d; a withdrawal's sweep deletes earlier under the same `RetentionSweeps` grant (a delete marker: the noncurrent version clears within about 40 d of the deletion) | Consented training content (16 L8); deletable per person (m1_106), unlike the replay log. |
 | `witness/heads/` | On | **COMPLIANCE**, 2 years | No delete | Chain heads are 32-byte hashes — zero content, maximal integrity value; this is the one class where "cannot be deleted by anyone including us" is exactly the product promise. |
 
 The S3-first sequencing, spelled once: device uploads batch → `controld.ingest` verifies token + stamps tenancy → runs the pre-egress secret scanner → `PutObject` to `ingest/` → **HTTP 200 to the device** → async-insert to ClickHouse. A ClickHouse outage delays the ledger view; it never loses events and never blocks the device's ack.
@@ -3766,7 +3831,9 @@ Two rings, one shape: the proxy tee's spill and the hookshim's emergency spill. 
 | S3 `ingest/` | raw batches (replay log) | 760 d; Glacier IR at 90 d | lifecycle + 35 d GOVERNANCE lock |
 | S3 `quarantine/` | flagged batches | 30 d | controld sweep + receipt (lifecycle 32 d backstop) |
 | S3 corpus (`parquet/`, `kto/`) | exports | tenant-configured, default 400 d | lifecycle per tenant prefix |
-| S3 `evidence/` | E1/E2 blobs | ≤ 90 d hard ceiling | lifecycle; ceiling is not tenant-raisable |
+| S3 `evidence/` | E1 parts | 30 d; the next daily sweep after withdrawal | `SweepEvidence` + `evidence_deletion` receipt; lifecycle `evidence-ttl` 32 d backstop |
+| S3 `contributions/` | consented task text + redacted diff (16 L8) | ≤ 365 d; ≤ 40 d after withdrawal | lifecycle `contribution-ttl` + `SweepContributions` |
+| S3 training root `rm/contributions/` | per-tenant snapshot | overwritten nightly; withdrawn rows gone at the next run | `rm.contributions` |
 | S3 `witness/heads/` | chain heads | ≥ 2 y, COMPLIANCE-locked | object lock; contains hashes only |
 | Postgres | receipt chain, ε ledger, ACK ledger, bundle catalog | **indefinite** | append-only by trigger; hashes/signatures/params only, no tenant content |
 | Postgres | memory artifacts, gold sets, noise certs, device registry | life of tenancy | offboarding job deletes |
@@ -3829,7 +3896,7 @@ Same reconciliation rules as the table above: FORCE-RLS `tenant_isolation` on ev
 | `m1_079_noise_certs_controld_read` | `GRANT SELECT ON noise_certificates TO controld_app` | 08 §3.3 (`GET /api/v1/verify/certificates`) | Certification remains the adjudicator's alone. |
 | `m1_080_quarantine_deletion` | `quarantine_deletion` receipt class (subject = batch_id; origin `edge` for the device-signed on-disk receipt, `server` for the daily S3 sweep) admitted to both `m1_receipts` CHECKs | NFR-OPERABILITY-003 (D-EI: 30-day quarantine, then receipted delete) | Written twice over: stage 11 persists the edge receipt after verifying its signature; the sweep receipts its own deletions. |
 | `m1_081_memory_actions_team` | `memory_artifacts.pinned boolean`, `memory_artifacts.scope ∈ mine\|team` (a label, not a serving predicate); `m1_tenants.shared_memory boolean`; `m1_team_invites(id, tenant_id, token_hash 32B UNIQUE, invited_email, invited_by, created_at, expires_at ≤ created_at + 7 d, accepted_at)` + partial index on live invites | Desktop spec §5.5 (memory actions) / §5.10 (team), FR-ENROLL-008 | `memory/admit.py`'s LCB retire branch never auto-retires a pinned row (a user retire still may, receipted under `memory_admission` act=retire). Invite raw token exists only in the POST response; `accepted_at` is reserved for a dashboard accept flow that does not exist yet. `controld_app`: SELECT/INSERT/UPDATE(`accepted_at`); intel owns the artifact columns via m1_040. |
-| `m1_082_device_consents` | `m1_device_consents(id, tenant_id, device_id → m1_devices, e1, cloud_judge, training, recorded_at)`; append-only (no UPDATE/DELETE/TRUNCATE triggers); index `(tenant_id, device_id, recorded_at DESC)` | 08 §3.7a (`PUT /api/v1/consents`), FR-LEARN-001 (training gate), FR-VERIFY-015 (`cloud_judge` beside m1_065) | Cloud twin of `<state>/gates/consents.json`; the latest row per device is that device's state. `corpus.export` reads the tenant as consented only when every device that ever recorded a row currently consents and at least one did (`bool_and`; no rows ⇒ refused). `controld_app` SELECT/INSERT; `intel_app`, `adjudicator_app` SELECT. |
+| `m1_082_device_consents` | `m1_device_consents(id, tenant_id, device_id → m1_devices, e1, cloud_judge, training, recorded_at)`; append-only (no UPDATE/DELETE/TRUNCATE triggers); index `(tenant_id, device_id, recorded_at DESC)` | 08 §3.7a (`PUT /api/v1/consents`), FR-LEARN-001 (training gate), FR-VERIFY-015 (`cloud_judge` beside m1_065) | Cloud twin of `<state>/gates/consents.json`; the latest row per device (the last written, `row_seq`, since m1_105) is that device's state. `corpus.export` reads the tenant as consented only when every device that ever recorded a row currently consents and at least one did (`bool_and`; no rows ⇒ refused). `controld_app` SELECT/INSERT; `intel_app`, `adjudicator_app` SELECT. |
 | `adj_003_judge_dispatches` (adjudicator) | `judge_dispatches(tenant_id, task_id, judge_id) PK → request_id, window_start, locus ∈ client_side\|cloud, vote verdict (cloud only; NULL = dispatched, the edge's vote lands in the ledger), model, batch_id, the four token counts, dispatched_at`; CHECK cloud ⇔ vote/model/batch present | 06 §1.2 batch table, §6.2 step 1 (`judge_batch` nightly job), §7.3.5 | One row per (tenant, task, judge); `request_id` is what the edge dedupes on. A cloud row with a vote is a spent call — a retried job re-posts it, never re-calls the model. No `judge_batch` receipt class exists yet; the row is the durable fact a future receipt cites (m1_074 precedent). |
 
 ## Schema additions landed 2026-09-26 (migration m1_090, Teams v1)
@@ -3839,3 +3906,100 @@ Same reconciliation rules; the contract is `15-teams.md`.
 | Migration | Objects | Extends | Notes |
 |---|---|---|---|
 | `m1_090_teams` | `m1_team_members(tenant_id, subject, email, role ∈ owner\|member, joined_at, left_at)` PK `(tenant_id, subject)` + partial unique `(subject) WHERE left_at IS NULL AND role='member'` (one active workspace); `m1_team_invites.accepted_by`; `m1_device_consents.team boolean`; `memory_artifacts.owner_subject` (backfilled from the provenance device's enrollment subject, else the tenant owner); `m1_device_keys` unique per `(tenant_id, key_id)` (was global) with the `m1_receipts` / `m1_redaction_receipts` FKs moved to `(tenant_id, device_key_id)`; SECURITY DEFINER `m1_team_effective_tenant(subject)` and `m1_team_invite_lookup(hash)` (pinned `search_path`, EXECUTE to `controld_app` only) | 15-teams (membership, per-person visibility, owned memory, team consent); m1_081's `accepted_at` now written | One device key re-enrolls into its team tenant and back; a key twice in one tenant is still refused, and a revoked key never returns (the app rotates it). A tenant that has ever had a member stays per-person. `controld_app`: rw on members, UPDATE(`accepted_at`, `accepted_by`, `expires_at`) on invites; `intel_app`: SELECT on members and column-level SELECT on `m1_device_enrollments(tenant_id, device_id, oidc_subject, status, started_at)`. |
+
+## Schema additions landed 2026-09-26 (migration m1_091, 16 §L3)
+
+Same reconciliation rules; the contract is `16-release-savings-rm.md` §L3.
+
+| Migration | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_091_notification_prefs` | `m1_notification_prefs(tenant_id, subject, email, weekly_digest default false, unsub_token text UNIQUE default 64 hex chars from two gen_random_uuid(), updated_at)` PK `(tenant_id, subject)`; `m1_notification_sends(tenant_id, subject, kind ∈ weekly_digest, period_start date, outcome ∈ sending\|sent\|failed, delivery_id, error, updated_at)` PK `(tenant_id, subject, kind, period_start)`; both FORCE RLS; SECURITY DEFINER `m1_notification_unsub_lookup(token) → (pref_tenant, pref_subject)` (pinned `search_path`, EXECUTE to `controld_app` only) | 08 §3.7c (`/me/notifications`, public `/unsubscribe/{token}`); intel `digest.weekly` | The public unsubscribe resolves the token through the definer, then flips the row under that tenant's GUC. `digest.weekly` writes `sending` before each Customer.io send and `sent`/`failed` after: a re-run retries failures only, and a crash between the two leaves `sending`, which is never resent (at most once). `controld_app`: SELECT/INSERT and UPDATE(`email`, `weekly_digest`, `updated_at`) on prefs, nothing on sends; `intel_app`: SELECT on prefs, SELECT/INSERT/UPDATE on sends. |
+
+## Schema additions landed 2026-09-26 (migrations m1_092, adj_005; 16 §L1)
+
+Same reconciliation rules; the contract is `16-release-savings-rm.md` §L1.
+
+| Migration | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_092_router_judge_consents` | `m1_cloud_judge_consents` judge_id CHECK rewritten to `^(judge\|rm\|t3\|mem):[a-z0-9-]+@[1-9][0-9]*$` (full prefix set, m1_074 rule); every live `judge:grounded-rubric@1` row naming `anthropic` revoked by UPDATE (`revoked_reason='subprocessor_changed:anthropic->nebius'`); `GRANT SELECT` to `intel_app` | m1_065 register; 06 §6.5, §9.1 | The cloud judge is now `judge:grounded-rubric@2` (`nebius`, `global`, E1) and `@1` is the edge judge on the customer's key, so no Anthropic consent admits anything. Memory extraction's own key `mem:extract@1` (`nebius`, `global`, E0) is read by `memory.extract` before any session leaves; controld writes both through `GET\|PUT /api/v1/verify/cloud-judge` and `/api/v1/memory/extract-consent` (08 §3.7b). |
+| `adj_005_judge_dispatches_tier` (adjudicator) | `judge_dispatches.evidence_tier text CHECK IN ('E0','E1')`, NULL for rows written before it | adj_003; 06 §6.5 | The cloud diff judge reads E1 hunks when receipted ones exist and falls back to E0 anchor facts otherwise; a spent row records the tier its vote was cast on so a re-post carries the same `tier_used`. `batch_id` stays NULL for router calls (no batch). |
+
+## Schema additions landed 2026-09-26 (migrations m1_100, m1_101; 16 §L1/§L6/§L7)
+
+Same reconciliation rules; the contract is `16-release-savings-rm.md` §L1, §L6, §L7.
+
+| Migration | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_100_cloud_judge_verifier` | seed row `judge:grounded-rubric` version 2: `{"judge_id":"judge:grounded-rubric@2","kind":"judge","group":"judge","locus":"cloud","rubric_sha256":<sha256 of JUDGE_SPECS @2 rubric>,"rubric_version":2,"model":"zai-org/GLM-5.2","subprocessor":"nebius","region":"global","max_tier":"E1","evidence_tier":"E1","trigger":"always","e0_fallback":{"group":"syntactic","evidence_tier":"E0","rubric_sha256":<sha256 of its E0 rubric>}}`, no execution hash, `ON CONFLICT DO NOTHING` | m1_020, m1_088, m1_095 | The cloud judge's catalog row, so its votes resolve in `registry_by_wire_id` and `certs.recompute` writes it a certificate. E1 votes are the independent `judge` group; a vote with `tier_used = E0` (no E1 part for that task: the E0 anchor facts on the @1 rubric) is estimated and fused as its own column `judge:grounded-rubric@2/E0` in `syntactic` (`votes.column_of`, from `e0_fallback`; `NormalizedVote.column` carries it into `bundle_for` and `adjudicate`), so one fallback never demotes the E1 view and never fuses on its law; a column with no estimated law fuses at the calibrated judge prior. Both rubric hashes are pinned to `app/judges/specs.py` by `test_m1_100_seeds_the_cloud_judge_with_its_pinned_rubrics_and_groups`. |
+| `m1_101_llm_spend_days` | `m1_llm_spend_days(tenant_id → m1_tenants, day date, spend_key text CHECK ^(judge\|rm\|mem):…@N$, units int ≥ 0, updated_at)` PK `(tenant_id, day, spend_key)`, FORCE RLS `tenant_isolation`; `adjudicator_app` and `intel_app` SELECT/INSERT/UPDATE, never DELETE/TRUNCATE | m1_067 (job_runs is per window, this is per UTC day) | The paid cloud calls' daily caps: `app/llm.py reserve_today` locks the tenant-day row (`INSERT … ON CONFLICT DO UPDATE … RETURNING day, units`) and adds `min(want, cap − units)` BEFORE any call, on the database clock's UTC date. Keys: `judge:grounded-rubric@2` (`ADJ_JUDGE_MAX_TASKS_PER_DAY`, 60 tasks), `rm:mark1-rm-a@1` (`ADJ_RM_MAX_TASKS_PER_DAY`, 200 tasks), `mem:extract@1` (`INTEL_MEMORY_MAX_SESSIONS_PER_DAY`, 30 sessions). A reservation is never returned, so a crash, retry, rerun or backfilled window can under-spend the cap, never exceed it. The per-run bounds stay (`*_PER_RUN`, same defaults). |
+
+## Schema additions landed 2026-09-26 (migrations m1_102, m1_104, m1_ch_003, proto GuardDecision.cost_basis, bundle route.knee.basis; ADR-0013)
+
+Same reconciliation rules; the decision is ADR-0013.
+
+| Migration / wire / template | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_104_knee_basis_gate` | `m1_devices.bundle_features text[]` (NULL = not polled since enrolling; every pre-existing device marked `{}`), `policy_bundles.knee_basis_intended` / `knee_basis` (closed enum, NULL when none) | m1_001, m1_042 | ADR-0013 §8–§9: the per-tenant emission gate, the resync that adds/withholds the key, and the one-time re-issue of a pre-ADR-0013 `stable` seq 1 bootstrap. |
+| `m1_ch_003_received_at` | `m1p_events.received_at DateTime64(6,'UTC') DEFAULT ingested_at` | m1_ch_001 | ADR-0013 §11: the projector's receipt time (live request time; on replay the landing object's S3 `LastModified`), never re-stamped by a replay the way the `ingested_at` version column is. savings.v3's `*_at_close` reads cut on it. |
+| `m1_102_digest_sent_figure` | `m1_notification_sends.tokens_saved bigint` (NULL on rows sent before it) | m1_091 | The figure each weekly email carried; the next week's run recomputes that week through today and prints "restated: X (was Y)" when a late verdict moved it. |
+| `GuardDecision.cost_basis` (field 10) | the applied bundle's `route.knee.cost_basis` on every verify-plane decision | `policy.proto` | Additive: old edges send none (savings reads `unknown`), old controld ignores it. `knee_basis` gains the value `unknown`. Ingest stage 6 refuses other words as `guard_basis`. |
+| `route.knee.basis` (bundle) | optional closed enum `prior` \| `anchor_grounded` \| `certified` | knee-table CDDL | Frozen vectors `knee_basis` / `knee_basis_bad` (35 → 37). An edge older than ADR-0013 refuses a bundle carrying it (strict maps) and keeps its LKG. |
+| `savings.v3` (querychoke) | per task with a decision in `[from, to]`: `decision_basis` (the first decision's `cost_basis`), `decision_day`, the verdict/posterior/post-block usage read through today and the same cut at the decision day's close (`*_at_close`) | `savings.v2` | The report splits `tokens_saved` by basis (`by_cost_basis`), certifies only the report's own basis, and states `restated {tasks, total}` for closed days whose net moved after they closed. |
+| `team_device_totals.v2`, `app_sessions.v10` (querychoke) | `tokens_saved` credits blocks inside `[from, to]` and resolves them with every verdict through the end of the scan; `team_device_totals` scans to today (sessions/tokens/tasks_verified stay inside the window) | `.v1`, `.v9` | A past window (the weekly digest's) resolves on verdicts that landed after it. |
+
+## Schema additions landed 2026-09-26 (migration m1_107: a withdrawal is a transition)
+
+m1_106 read every explicit false as a person-wide withdrawal. Every edge sends every consent field on every relay, so a toggle of anything, onboarding a second device, a tenant switch's `contribute_outcomes: false` or the post-upgrade re-send turned the field off on all of the person's devices and withdrew their E1 parts and contributions.
+
+| Migration | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_107_consent_transitions` | `m1_device_consents.person_off text[]` (NULL on a device's own row); `m1_withdraw_person_consents(p_device uuid, p_off text[])` replaced in place (same signature, grants unchanged); a one-shot `cloud_judge = false` row | m1_082, m1_105, m1_106; 08 §3.7a | **Transition rule**: controld calls the function on every PUT, before the sender's row, with the body's explicit falses. It locks the sender and every person-device (`m1_consent:<device>`, ascending; the sender is always locked, closing m1_106's lost update where a concurrent withdrawal read under the sender's carried fields). Moved = the explicit falses the sender's own latest row had true. Each other device of the person (latest subject-bearing enrollment, `row_seq`) loses the moved fields if its latest enrollment is `approved`, or every explicit false if it is not (revoked or re-enrolled away: it can never relay again); a row is appended only where one of those was on, with `person_off` = its previous `person_off` ∪ the fields it just lost. `withdrawn_at` is stamped on `m1_evidence_attachments` / `m1_outcome_contributions` only for devices whose `e1` / `contribute_outcomes` went true → false in this call, the sender included. **`person_off`**: every later PUT of that device stores the held fields off whatever its body says. It writes `person_off` = previous holds minus the body's explicit falses, so a hold lifts only when the device sends that field `false` (the X2 edge sends back the adopted offs once). A stale true from a racing relay, or one whose answer was lost, cannot re-grant. The PUT answers the effective row for the edge to adopt (08 §3.7a). `cloud_rm` and `local_rm` are not in the person-wide set (per-device choices; `e1` gates cloud RM reads too). A rollback of controld past m1_107 drops the holds (08 §3.7a). **H3 reset (`cloud_judge` and `training`, both re-worded this release)**: a three-field body stores each of the two off when it sends true, adding it to `person_off`, and stores an explicit false as sent (which releases that hold). The one-shot appends one row for every device whose latest row granted either before the cut. That row has both fields false and `person_off` ∪ the fields it turned off. The edge's one-shot local copy reset then relays them `false`: the row is already false, so this is no transition and withdraws nothing person-wide; it only releases the hold. A new-copy grant the person made on another device after the cut stays on. The cut is this file's own `schema_migrations.applied_at` (now() on first apply), so a manual re-run appends nothing; `SET LOCAL row_security = off` so the migrator sees every tenant. Proven by `TestIntegrationOnlyATransitionWithdrawsPersonWide`, `TestIntegrationWithdrawalIsPerPerson`, `TestIntegrationRevokedDeviceTakesAnExplicitOff`, `TestIntegrationLegacyCopyGrantsAreReset` (runs the file twice), `TestIntegrationCopyResetRelayWithdrawsNothing`, `TestIntegrationAbsentLaterConsentFieldsWithdrawNothing`, `TestIntegrationAttachSerialisesWithAWithdrawal`, `TestIntegrationCloudRMIsPerDevice`, `TestIntegrationAWithdrawalBeforeTheLandingLeavesNoObject` (attach re-reads the row after landing and deletes and receipts a part withdrawn in between). |
+
+## Schema additions landed 2026-09-26 (migration m1_106: withdrawal per person, task bound to its device)
+
+| Migration | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_106_person_withdrawal` | `m1_task_devices(tenant_id, task_id, device_id → m1_devices, bound_at)` PK `(tenant_id, task_id)`, append-only (no UPDATE/DELETE), FORCE RLS `tenant_isolation`, `controld_app` SELECT/INSERT; `m1_withdraw_person_consents(p_device uuid, p_off text[])` SECURITY INVOKER (FORCE RLS keeps it in the session tenant; no definer policy is needed because nothing crosses a tenant), `search_path = pg_catalog, public`, EXECUTE to `controld_app` only; partial index `ix_m1_device_enrollments_subject (tenant_id, oidc_subject)` | m1_082, m1_096, m1_099, m1_105; 08 §2.1, §3.7a | **Task binding**: ingest stage 11 inserts `(tenant, task, device)` for every TaskOpen/TaskClose, `ON CONFLICT DO NOTHING`, so the first device to land either owns the task; attach admits a part only from that device (another: 403, unbound: 503 and the edge retries). The task id is minted on the device at task open and shipped in its next batch, so a teammate cannot land a TaskOpen for it first. A person who re-enrolls mid-task (a new device id) loses that one task's E1 part. **Person-level withdrawal**: the function runs under the caller's tenant GUC, refuses a device outside it, takes the subject and `approval_kind` from the caller device's latest enrollment (`row_seq`), and collects every device of the tenant whose latest subject-bearing enrollment (approved or revoked) has the same subject. Not across tenants: consent follows the tenant (16 L8), a tenant switch resets `contribute_outcomes` to undecided; the personal-tenant grant is withdrawn from a device enrolled in the personal tenant (leaving the team re-enrolls there, and the same subject reaches every earlier personal device). It takes `pg_advisory_xact_lock(hashtextextended('m1_consent:' ‖ device, 0))` for each, in ascending id order, appends an `m1_device_consents` row for every other device whose latest row has any of `p_off` on (its latest state with those fields off; `local_rm` kept), and stamps `withdrawn_at` on the person's live `m1_evidence_attachments` (`e1`) and `m1_outcome_contributions` (`contribute_outcomes`). **Superseded by m1_107**: only a true → false transition of the sender's own row propagates, and data is withdrawn only where a field actually went off. controld passes only fields the PUT names explicitly as false; a later field (`team`, `contribute_outcomes`, `local_rm`, `cloud_rm`) left out of the body is carried from the device's previous row and withdraws nothing (08 §3.7a). Every reader keeps reading the latest row per device and agrees: controld `e1Consented`, `contributionConsented`, `SweepEvidence`, `SweepContributions`, the E1 read; intel `contributions.LIVE_ROWS`, `training_consented`, `retrieve.LATEST_TEAM_CONSENT`; the adjudicator's `rm.cloud.cloud_devices`. Proven by `TestIntegrationWithdrawalIsPerPerson`, `TestIntegrationAttachSerialisesWithAWithdrawal`, `TestIntegrationAttachOnlyFromTheTasksDevice`. |
+
+## Schema additions landed 2026-09-26 (migration m1_105: the write order, not the wall clock)
+
+A latest-row read ordered by a `now()`-stamped column trusts the wall clock across transactions, and clocks step backwards (NTP, a VM resync; measured on a WSL2 dev host: 2.5-2.7 s steps every ~30 s under load). Two writes seconds apart then read in the wrong order, and the worst case is a consent withdrawn right after it was granted reading as granted again. Every table whose "latest" is load-bearing now carries `row_seq`, and its readers order by it; the timestamps stay what they are (freshness, retention, display).
+
+| Migration | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_105_row_seq` | `row_seq bigint NOT NULL GENERATED ALWAYS AS IDENTITY UNIQUE` on `m1_device_consents`, `m1_device_enrollments`, `bundle_acks`, `gold_sets`, `gold_set_members`, `noise_certificates`, `m1_verifier_promotion_transitions`; indexes `(device_id, row_seq DESC)` on consents and enrollments, `(tenant_id, channel, device_id, row_seq DESC)` on acks | m1_082, m1_001, m1_042, m1_021, m1_069 | Existing rows are numbered in the order the readers used before (`recorded_at, id`; `started_at, id`; `acked_at, seq, device_id`; `coalesce(frozen_at, created_at), id`; `labeled_at, gold_set_id, task_digest`; `issued_at NULLS FIRST, id`; `at, from_state, id`) with the user triggers off for the one backfill statement, so no current answer moves. A write that makes a row newer re-draws it with `row_seq = DEFAULT`: a relabel (`gold.select.add_members`, controld labels), a freeze (`freeze_gold_set`), a re-armed pending enrollment. Readers: consents in controld `e1Consented`, `contributionConsented`, `SweepEvidence`, `SweepContributions`, the adjudicator's `rm.cloud.cloud_devices`, intel `training_consented`, `contributions.LIVE_ROWS`, `retrieve.LATEST_TEAM_CONSENT`; enrollments in `leftTeam`, `subjectOf`, `deviceOwners`, `viewerSQL`, intel `extract.device_owners`, `digest.weekly`; ACK coverage in `AckCoverage`; gold sets and labels in `nightly._latest_set`, `gold_refresh`, `_gold_labels`, controld labels; certificates in `certs.current_cert` and `GET /api/v1/verify/certificates`. Left on timestamps because order is not load-bearing there: `job_runs` (PK per window; no reader orders it), `m1_witness_heads` (listed by time for display, the hourly cursor is itself a clock interval), `epsilon_ledger` (the budget is a sum), key listings, retention sweeps (age by definition) and queue-processing orders. `SET LOCAL jit = off` keeps the one-shot backfill off hosts that ship no llvmjit. `SET LOCAL row_security = off` makes a migration role that FORCE RLS would filter fail the whole file ("query would be affected by row-level security policy") instead of numbering a subset: the prod migrate Job runs as the RDS master, which bypasses RLS through `rds_superuser`, and anything less must be loud (`TestIntegrationRowSeqBackfillRefusesARoleThatCannotSeeEveryRow`). A column-level SELECT never covers a column added after it, so the file also grants `SELECT (row_seq) ON m1_device_enrollments TO intel_app` (m1_090's grant is the only column grant on the seven tables; `digest.weekly` and `extract.device_owners` order by it). `TestIntegrationEveryRoleThatReadsARowSeqTableReadsRowSeq` asserts, for every table with `row_seq` and every runtime role, that a role reading any column reads `row_seq`; `TestIntegrationRowSeqReadersRunAsTheirProdRoles` runs the intel and adjudicator `row_seq` statements verbatim as `intel_app` / `adjudicator_app` under the tenant GUC. |
+
+## Schema additions landed 2026-09-26 (migration m1_099, 16 L10)
+
+| Migration | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_099_evidence_attachments` | `m1_evidence_attachments(tenant_id, task_id, attachment_name, receipt_id → m1_redaction_receipts, post_hash, device_id → m1_devices, object_key, size_bytes ≤ 65536, received_at, withdrawn_at, deleted_at, deletion_receipt_id)` PK `(tenant_id, task_id)`, `attachment_name = 'attach.' ‖ task_id ‖ '.e1'`, deletion only with its receipt, update-once trigger (only the three stamps move), no DELETE, FORCE RLS `tenant_isolation`; the `evidence_deletion` receipt class admitted to both `m1_receipts` CHECKs | m1_077, m1_080, m1_082; 08 §2.1, §3.8 | Written by the attach request before the object lands. `evidence_deletion` (subject = task_id, fields `origin`, `tier`, `reason` retention_30d \| withdrawn, `object` deleted \| lifecycle_backstop, `received_at`, `deleted_at`) is controld's own act and not requestable over `/internal/v1/receipts/append`. `controld_app`: SELECT/INSERT, UPDATE(`withdrawn_at`, `deleted_at`, `deletion_receipt_id`). The adjudicator has no grant: it reads through `GET /internal/v1/evidence/{task}`. |
+
+## Schema additions landed 2026-09-26 (migration m1_098, template adjudication_votes.v3; 16 §L6)
+
+Same reconciliation rules; the contract is `16-release-savings-rm.md` §L6 and the independence rules above it.
+
+| Migration / template | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_098_rm_catalog_promotion` | `ck_m1_verifiers_anchor_hash` widened to `CASE kind WHEN 'anchor' THEN hash NOT NULL WHEN 'reward_model' THEN true ELSE hash NULL END`; `m1_verifier_immutable()` admits exactly one extra UPDATE; seed rows `rm:mark1-rm-a@1` (`group` `rm-a`, Qwen family) and `rm:mark1-rm-b@1` (`group` `rm-b`, a different base family), both `scope` `global`, `artifact.status` `pending`; `m1_verifier_promotions.gold_n int` (CHECK ≥ 0); `promoted_is_earned` and `m1_promotion_transition()` accept `cert_id IS NOT NULL OR gold_n >= 200`, and `canary → active` refuses inside 48 h (`canary_hold`) | m1_020, m1_069; 06 §2, §4.4, §12.4 | A client-side RM executes on the customer's machine, so its identity is an execution like an anchor's. **Publish = the seal**, run once per model as a release migration generated from `s3://omium-adapters-prod-965384155704/rm/<name>@<ver>/manifest.json`: `UPDATE m1_verifiers SET definition = jsonb_set(definition, '{artifact}', <sealed>), effective_execution_hash = decode(<execution_sha256>, 'hex') WHERE verifier_key = 'rm:mark1-rm-a' AND version = 1`, where `<sealed>` is `{"status":"sealed","manifest_uri","model_sha256","gguf_sha256","template_sha256","calibration":{"version","scale","shift","reject_below","accept_above"},"eval_card":{…,"passed"},"execution_sha256"}` and `execution_sha256 = sha256(canonical_json({"calibration_version","gguf_sha256","template_sha256"}))` (the RFC 8785 form the T3 anchors hash). The trigger admits it only pending → sealed, only `definition.artifact` and the hash changing, only with the hash equal to `artifact.execution_sha256`; any later change is a new version. **Superseded by m1_103**: the sealed key is `artifact.execution_hash`, the manifest's rm-exec/v1 hash (16 §L6), and `execution_sha256` no longer seals. `promotion.step` moves a sealed row `probation → shadow` when `artifact.eval_card.passed` is true. |
+| `adjudication_votes.v3` (querychoke) | adds `calibration_version`, `locus` (RmScore), `tier_used`, `vote_trigger` (JudgeVote; protojson enum names, `''` when the edge predates them), `task_verdict` + `task_noise_cert_id` (the task's stage-final verdict, `argMaxIf … verdict_stage IN ('certified','revised')`), `device_id` | v2; 06 §4.1 | Readers: `nightly.vote_matrix` folds an RmScore through its calibration (the sealed artifact's, else `rm-cal@1`), takes groups from `m1_verifiers.definition.group` (a judge with an E0 vote or no group is `syntactic`, tests are `tests`), drops `JUDGE_TRIGGER_AMBIGUOUS` rows from estimation only, and orients G4 on compile/test; `promotion.step` pairs a head's vote with the task's human/T3 gold label, else its certified verdict; `rm_cloud.run` reads `device_id` against `m1_device_consents.cloud_rm`. |
+| `m1_103_rm_execution_hash` | `m1_verifier_immutable()` re-created: the one pending → sealed RM update now requires `artifact.execution_hash` (64 lowercase hex) and `effective_execution_hash = decode(artifact.execution_hash, 'hex')` | m1_098; 16 §L6 | The seal copies the export manifest's `execution_hash` (rm-exec/v1: `BLAKE3-256(GGUF bytes ‖ 0x00 ‖ "llama.cpp b<build>" ‖ 0x00 ‖ template_sha hex)`), the same value the device computes and stamps on `RmScore.execution_hash`. Nothing was sealed under m1_098's `execution_sha256`. The seal migration is generated by `tools/rm-publish` from the export artifact. |
+| `adjudication_votes.v4` (querychoke) | adds `execution_hash` (RmScore, protojson base64, `''` when absent) | v3 | `votes.vote_of` counts an RmScore (client-side and cloud alike) only when it equals the model's sealed `effective_execution_hash`; otherwise the row does not vote and `rm_refused_total` counts `refused_rm_execution_hash` / `refused_rm_unsealed`. |
+
+`RmScore` reading rule (the wire message above is unchanged by this lane; L6a adds `execution_hash`, `signature`, `locus`): `score` is the raw scalar; `g_v = artifact.calibration` for `calibration_version = v` maps it to `p = σ(scale·s + shift)` (or `p = s` when `scale` is absent, the pre-training `rm-cal@1`), then `p < reject_below` ⇒ violated, `p > accept_above` ⇒ satisfied, in-band ⇒ refused (abstain). An unknown `calibration_version` or a non-finite score is not a vote.
+
+## Schema additions landed 2026-09-26 (migration m1_097, 16 §L6a)
+
+| Migration | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_097_local_rm_consent` | `m1_device_consents.local_rm boolean NOT NULL DEFAULT false`, `m1_device_consents.cloud_rm boolean NOT NULL DEFAULT false` | m1_082 (`PUT /api/v1/consents` accepts both as optional booleans; absent reads false) | The Settings choice "Reward model: On this computer \| In Omium's cloud \| Off". `local_rm`: mark1d downloads the pinned GGUF (`https://dl.omium.ai/mark1/models/rm/<name>@<version>/model.gguf`, sha256 from the edge's embedded catalog) and scores task text + worktree diff on the device; nothing but the signed `RmScore{locus: CLIENT_SIDE}` leaves. `cloud_rm`: read by `rm_cloud.run` beside E1 and the tenant's `m1_cloud_judge_consents` row. |
+
+## Schema additions landed 2026-09-26 (migration m1_096, 16 §L8)
+
+Same reconciliation rules; the contract is `16-release-savings-rm.md` §L8 and its independence rules.
+
+| Migration | Objects | Extends | Notes |
+|---|---|---|---|
+| `m1_096_outcome_contributions` | `m1_device_consents.contribute_outcomes boolean NOT NULL DEFAULT false`; `m1_outcome_contributions(tenant_id, event_id, batch_id, device_id → m1_devices, session_id, task_id, object_key, received_at, withdrawn_at, deleted_at)` PK `(tenant_id, event_id)`, partial indexes on live and on withdrawn-not-deleted rows, FORCE RLS `tenant_isolation` | m1_082; 08 §2.4, §3.7a | The index row is written in the ingest request path BEFORE the landing (the tombstone's order); content lives only in the landing object. A consent PUT with `contribute_outcomes=false` stamps `withdrawn_at` in the same transaction; `SweepContributions` (daily, beside the quarantine sweep) first withdraws rows whose device's latest consent is off, then deletes each withdrawn object and stamps `deleted_at`. `controld_app`: SELECT/INSERT, UPDATE(`withdrawn_at`, `deleted_at`); `intel_app`: SELECT, plus SELECT on `m1_quarantined_batches`, `gold_sets`, `gold_set_members`. |
+
+**`rm/contributions/<tenant>.parquet`** (`rm_contribution.v1`, written by intel `rm.contributions` to `INTEL_RM_ROOT_URI`, overwritten nightly, an empty file included): `event_id`, `tenant_id`, `task_id`, `intent`, `diff`, `survival_30d` (null = unknown), `reverted`, `tests_pass` (null = unknown), `human` (m1_086 `label_source='human'` by `task_digest`), `label_age_days`, `generator`, `provider` (from model-id prefixes, agent fallback, else `unknown`), `training_eligible` (every provider ∈ `INTEL_AUTHORIZED_TRAINING_PROVIDERS`, the providers with authorization on file; otherwise evaluation-only), `redaction_receipt_ref`, `received_at`. Rows: index rows neither withdrawn nor deleted, device's latest consent on, batch not tombstoned; an unreadable object is counted `missing_object`. Beside it `<tenant>.manifest.json`: object key/sha256/byte_len, `rows`, `training_eligible_rows`, `eval_only_rows`, `consent.withdrawn_excluded`, `licence{source, use, providers_with_authorization_on_file, retention_days: 365}`, `excluded`.

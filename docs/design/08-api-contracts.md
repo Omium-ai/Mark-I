@@ -84,7 +84,22 @@ Constraints, all normative:
 - `tenant_id` and `device_id` **do not appear in the envelope trust path**. `controld.ingest` stamps both onto every stored row from the verified token claims. If the envelope carries either field and it disagrees with the token, the batch is **rejected (403, `M1E-8003`) and a security event is recorded**. The client cannot assert its own identity — that is the anti-`rds_superuser` lesson applied to ingest.
 - Every event in `events[]` MUST already have passed the edge's admit-to-upload redaction axis (fail-closed, no off switch). Ingest runs an **independent second scanner** with its own ruleset; a high-confidence secret hit quarantines the batch (202 + `quarantined[]`, below) and alerts the tenant — client-side redaction never gets to be the last line.
 - `Usage` events MUST carry `idem_key = HMAC_tenant(session_id, message.id, request_id)`. This is a protocol invariant (the verified ~2.5× streaming-overcount defense), not parser etiquette; ingest enforces its presence.
-- Large artifacts (opt-in evidence blobs) do not ride this endpoint; they upload as multipart `attach.{event_id}.{name}` to the S3 attachment path named in the enrollment document.
+- `RmScore` (16 L6a) is refused at stage 6 (422 `M1E-2006`, named events) as `rm_score_model_id` (not `^rm:[a-z0-9-]+@[1-9][0-9]*$`), `rm_score_range` (`score` is the uncalibrated P(yes) = σ(logit("yes") − logit("no")); NaN or outside [0, 1]), `rm_score_locus` (`CLOUD` is the adjudicator's alone, via service ingest and unsigned; a device speaks only `CLIENT_SIDE`) `rm_score_unsigned` (a device's `CLIENT_SIDE` score with an empty `signature`: an edge with no enrolled key has no score to send) or `rm_score_signature` (a device's `signature` that does not verify under its live key, the `AnchorVote` scheme). The 422 remainder flow quarantines only the named score on the edge.
+- `GuardDecision` (ADR-0013) is refused at stage 6 (422 `M1E-2006`, named events) as `guard_basis` when `knee_basis` is not one of `""`, `prior`, `anchor_grounded`, `certified`, `unknown`, or `cost_basis` is not one of `""`, `usd`, `quota` (`""` = an edge that predates the field).
+- `OutcomeContribution` (16 L8) travels alone: stage 6 refuses it (422 `M1E-2006`, named events) as `contribution_shape` (`task_id` not 16 bytes or ≠ `Event.task_id`, `redaction_receipt_ref` not 32 bytes, empty `diff_redacted`), `contribution_not_alone` (batched with any other event or with `dropped[]` rows) or `contribution_consent` (the device's latest `m1_device_consents` row lacks `contribute_outcomes`, a service principal, or no store); a consent-store read error is 503 `M1E-9500`. An admitted batch lands at `t/<tenant>/contributions/v1/…` (07 S3 layout) after its `m1_outcome_contributions` index row, never under `ingest/`; its `m1p_events` row carries no text.
+- Large artifacts (opt-in evidence blobs) do not ride this endpoint; they upload as multipart `attach.{event_id}.{name}` to the attach endpoint named in the enrollment document (`endpoints.attach`, below).
+
+**The attach upload (E1, 16 L10; built 2026-09-26).**
+
+```
+POST /api/v1/attach                                       auth: device token (a user token is refused)
+Content-Type: multipart/form-data                         # body ≤ 80 KiB
+  part "receipt"               the edge's redaction receipt file {payload, device_key_id, device_signature (hex), receipt_hash}
+  part "attach.<task_id>.e1"   the sanitized part: task intent (≤ 1 KiB) NUL unified diff hunks; ≤ 64 KiB, exactly one NUL
+→ 200 { "status": "landed" | "duplicate", "attachment", "receipt_id" }
+→ 202 { "status": "quarantined", "classes": [...] }       # the second ruleset hit; nothing is indexed or served
+```
+One part per task: `evidence_event_id` = `task_id`, and the receipt's `subject_id` must name it and its `post_hash` must equal sha256(part), else 422 `e1_receipt_mismatch`. Order: the device's latest `m1_082` row must say `e1` (else 422 `e1_consent`, nothing lands) → the task must be this device's: `m1_task_devices` (07 m1_106) binds a task to the device whose TaskOpen/TaskClose landed first (ingest stage 11); unbound is 503 M1E-9500 (the edge retries until its batch lands), another device's task is 403 M1E-1001 `e1_task_device` → the receipt is verified under the enrolled key and stored in `m1_redaction_receipts` (idempotent) → the ingest scanner's independent ruleset scans the part (a hit: `m1_quarantined_batches` tombstone, the twin at `t/<tenant>/quarantine/v1/dt=…/e1-<task>.bin`, the M1E-7002 tenant alert, 202) → the `m1_evidence_attachments` index row (m1_099) lands before the object, in a transaction that first takes the device's consent lock shared (`pg_advisory_xact_lock_shared(hashtextextended('m1_consent:' ‖ device, 0))`, held exclusively by every consent PUT, §3.7a) and re-reads the latest `e1` (off: 422 `e1_consent`, nothing indexed or landed) → conditional PUT to `t/<tenant>/evidence/v1/<task>.e1` under the tenant's KMS key. A re-upload of the same bytes answers `duplicate`; different bytes for a landed (or deleted) task is 409 M1E-2003. After a 200 the edge admits the `EvidenceExcerpt{tier: E1, evidence_event_id: task, attachment_name, redaction_receipt_id}` event, and stage 11 binds the receipt to it; only a bound receipt's part is ever read. The edge retries 5xx/401/429 from a local pending part (post-redaction bytes only) and waits while its consent record is not yet relayed; any other answer settles the part. Errors: 400 M1E-2001 (shape) · 401 M1E-1002 · 403 M1E-1001 (`e1_task_device`) · 403 M1E-1007 (a leaver's device) · 413 M1E-2004 (part size or shape) · 415 M1E-2005 · 422 M1E-2006 (`e1_consent`, `e1_receipt_mismatch`, `e1_receipt_<defect>`) · 409 M1E-2003 · 503 M1E-9500 (store, or the task not yet bound).
 
 ### 2.2 The S3-first landing rule
 
@@ -102,7 +117,7 @@ Three layers, one key: transcript `(message.id, requestId)` at the edge → `eve
 | `202 Accepted` | Batch landed, but ≥1 event was quarantined by the pre-egress scanner or held for schema review. Body lists `quarantined[]`. | Delete acked segments; surface quarantine via `mark1 status`; a `Dropped{reason: quarantined}` for the affected events goes in the next batch. |
 | `400 Bad Request` | Malformed: zstd/protobuf decode failure, missing `M1P-Batch-Id`, unbounded frame. `M1E-2001`. | **Quarantine-and-report** (4xx rule). Never retried. |
 | `401 Unauthorized` | Token missing/expired/unparseable. `M1E-1002`. | Refresh token via §3.1; if refresh succeeds, the same batch is re-sent (this is a new attempt, not a 4xx quarantine — 401 with a refreshable token is the one 4xx the uploader may retry **after** re-auth; with no refresh path it parks). |
-| `403 Forbidden` | Device revoked (`M1E-1003`) or envelope/token identity disagreement (`M1E-8003`, + security event). | Quarantine-and-report; `mark1d` drops to capture-local-only and surfaces re-enrollment. |
+| `403 Forbidden` | Device revoked (`M1E-1003`), envelope/token identity disagreement (`M1E-8003`, + security event), or the device's enrolling subject has left its team tenant (`M1E-1007`, the token's last ≤24 h; attach and §3.7a answer the same). | Quarantine-and-report; `mark1d` drops to capture-local-only and surfaces re-enrollment. |
 | `409 Conflict` | `M1P-Batch-Id` already landed with different content bytes. `M1E-2003`. | Quarantine-and-report — this indicates local spool corruption; never overwrite a landed batch. |
 | `413 Payload Too Large` | Decoded batch > 32 MiB. `M1E-2004`. | Split the batch and re-send halves (deterministic split; not a "retry" in the backoff sense). |
 | `415 Unsupported Media Type` | Wrong `Content-Type`/`Content-Encoding`. `M1E-2005`. | Quarantine-and-report. |
@@ -203,8 +218,13 @@ POST /api/v1/enroll/device/poll                          auth: none (device_code
         "server_min_edge": "1.2.0",                      # §10.1 minimum-version handshake
         "endpoints": { "ingest": "https://ingest.…", "attach": "https://…", "policy_stream": "…" },
         "key_manifest_uri": "/.well-known/mark1-keys",
-        "tenant_root_hex": "…" }                         # 04 §2.9's per-tenant HMAC root (idem_key salt); only on an ACTIVE body,
+        "tenant_root_hex": "…",                          # 04 §2.9's per-tenant HMAC root (idem_key salt); only on an ACTIVE body,
                                                         # never in a list; absent (not empty) when the server holds no pepper
+        "contribute_outcomes_default": true,            # only for Omium staff enrolling into a DOGFOOD_TENANTS tenant (16 L8):
+        "contribute_outcomes_default_reason": "omium_staff" }  # a STAFF_SUBJECTS entry, or an @omium.ai email the issuer marks
+                                                        # email_verified; both fields or neither (an invited non-staff teammate
+                                                        # gets neither, and so does a refresh body). mark1d applies the default
+                                                        # once, only with that reason, unless the person already set it
 Errors: 400 M1E-1004 (unknown/expired device_code → state EXPIRED),
         403 M1E-1005 (user denied at IdP), 429 M1E-9001 (poll faster than `interval`).
 
@@ -233,6 +253,8 @@ Bundles are canonical CBOR, signed with section-split KMS-resident keys, sequenc
 ```
 GET /api/v1/policy/bundle?channel=stable                 auth: device token
   If-None-Match: "<etag of currently-applied bundle>"
+  X-Mark1-Bundle-Features: knee_basis      # ADR-0013: optional keys this edge decodes; absent ⇒ none. controld never serves a head
+                                           # carrying route.knee.basis to a poll without the word (it republishes without it first)
 → 200
   Content-Type: application/cbor          ETag: "t7-stable-000482"
   X-Mark1-Bundle-Seq: 482                 X-Mark1-Bundle-Sig: <echo of the in-map sigs>
@@ -304,11 +326,20 @@ Every read below is generated and executed exclusively by `controld.query-choke`
 ```
 GET /api/v1/reports/tvo?window=30d&cohort=all&cost_basis=auto     auth: operator token
 → 200 { "tvo": …, "trend": […], "coverage_band": {"observed_fraction": 0.94, "floor": 0.85},
-        "cost_basis": "usd" | "quota",                  # never mixed; `auto` splits cohorts
+        "cost_basis": "usd" | "quota",                  # never mixed; `auto` is the tenant's m1_075 row, else quota (ADR-0013 §10: the bootstrap bundle's rule)
         "task_seg_version": "task_seg.v1",
         "waste": { "retry_loop_tokens": …, "re_exploration_tokens": …, "over_model_tokens": … },
         "price_table_version": "model_prices.v1@sha256:…",   # usd only: the pinned price table the figures were priced under (06 §8.4)
+        "tokens_saved": { "label": "estimated", "version": "savings.v3", "total": ±…,   # net vs plain Claude Code (doc 16 ruling 4); may be negative
+                          "blocks": …, "block_count": …, "blocks_resolved": …, "debit": …,
+                          "arrests": …, "arrest_count": …,                        # forced retries avoided, never in total
+                          "certified": ± …,                                       # the net over certified tasks decided under this report's cost_basis; 0 until certification
+                          "by_cost_basis": { "usd"|"quota"|"unknown": {"total": ±…, "block_count": …, "arrest_count": …} },  # ADR-0013: total split by the basis each decision was priced under; "unknown" = an edge that predates GuardDecision.cost_basis
+                          "restated": { "tasks": …, "total": ±… } },               # ADR-0013: the part of total that verdicts/usage dated after a closed decision day moved
+        "closed": { "tvo": …|null, "guarantee_grade": …, "days": …, "refusal"? }, # the rolled-up days graded apart from today's live day (absent for a team member)
         "guarantee_grade": true | false }
+# "tvo" is null when the window has zero verified outcomes — an unmeasured denominator, never 0; a day with zero verified outcomes has no trend point at all (absent, never null: app releases before v0.2 parse trend[].tvo as a number)
+# tokens_saved (ADR-0013): a task is in the window when its verify-plane decision is dated inside it; its verdict and post-block usage are read through today, so late verdicts count, and a closed day whose net moved after it closed is counted in "restated", never changed silently
 → 200 with "guarantee_grade": false and "refusal": "M1E-5004 coverage below floor"
         # the number still renders, the guarantee is refused — refused outright, not footnoted
 Errors: 400 M1E-2001 (bad window), 403 M1E-1001.
@@ -431,11 +462,56 @@ The reactive fuzz tier (06 §9.5 D29): admitted `pitfall` artifacts within cosin
 ### 3.7a Device consents (desktop onboarding Step 4; 04 §2.7, 07 `m1_082`)
 
 ```
-PUT /api/v1/consents                                      auth: device token (a user token is refused)
-  { "e1": bool, "cloud_judge": bool, "training": bool }   # exactly these three, all present; ≤4 KiB, unknown field refused
-→ 200 { "recorded_at": "<RFC 3339>" }
+PUT /api/v1/consents                                      auth: device token (a user token is refused; a leaver's device 403 M1E-1007)
+  { "e1": bool, "cloud_judge": bool, "training": bool }   # all three present, every edge generation; ≤4 KiB, unknown field refused
+  + tri-state "team", "contribute_outcomes",              # 15-teams, 16 L8, 16 L6a (07 m1_097): absent (or null) = unchanged
+              "local_rm", "cloud_rm": bool                #   for this device; explicit false = off for this device, and person-wide
+                                                          #   only on a true→false transition (below); explicit true = this device only
+→ 200 { "recorded_at": "<RFC 3339>",
+        "consents": { "e1": bool, "cloud_judge": bool, "training": bool, "team": bool,
+                      "contribute_outcomes": bool, "local_rm": bool, "cloud_rm": bool } }   # this device's EFFECTIVE latest row, all seven
 ```
-The body is the device's whole consent state, not a patch: each PUT appends one `m1_device_consents` row stamped with the token's `(tenant, device)`, and the latest row per device is that device's consent (the table is append-only; history stays answerable). The edge relays the same record it wrote to `<state>/gates/consents.json` and keeps it pending until acknowledged, so the cloud's view never runs ahead of the local one. Consumers: `e1` gates `EmitExcerpt`'s E1 case on the edge (a `Dropped{e1_consent_absent}` row when absent); `cloud_judge` is the §3.8 judge path's precondition; `training` gates `corpus.export` — the job runs only when every device of the tenant that has ever recorded consent currently consents (`bool_and` over latest rows; a tenant with no rows is refused, never assumed). Errors: 400 M1E-2001 (shape) · 401 M1E-1002 · 403 M1E-1001 (no device claim) · 503 M1E-9500 (store unavailable or unconfigured).
+
+**The response is the effective row (m1_107).** `consents` is exactly the `m1_device_consents` row this PUT appended, all seven fields, never absent. It differs from the body in one direction only: a field the body sends `true` can come back `false`, never the reverse (an explicit false is always stored false; an absent later field comes back as the carried value). A `true` → `false` difference means the field is **held** in the row's `person_off`, for one of two reasons: (1) **person-wide off**: another device of the same person withdrew the field (a transition, below) and wrote this device's row with `person_off` naming it; (2) **old copy**: `cloud_judge` and `training` were both re-worded this release. A three-field body (only an edge older than this release sends one) cannot carry new-copy consent, so it stores either field `false` and holds it when it asks for true; an explicit false is stored as sent. m1_107 resets every pre-cut grant of either the same way, and the edge's one-shot local copy reset relays both `false`, which only releases those holds (the row is already false: no transition, nothing person-wide). **A hold lasts until this device sends THAT field explicitly `false`**: every PUT stores `person_off` = the previous holds minus the body's explicit falses (plus the legacy `cloud_judge` hold), and a held field is stored off whatever the body says, so a racing relay or one whose answer was lost cannot re-grant it with a stale true. An explicit false on a held field is never a transition (its row is already false), so the release withdraws nothing. After the release, an explicit true re-grants this device only. **Edge contract (X2):** on every 2xx the edge MUST adopt each field that is `true` in its sent body and `false` in `consents` into `<state>/gates/consents.json` as off (journalled with reason `cloud_withdrawal`), then PUT the adopted record once (it carries those fields `false`, which releases the holds), and only then treat the record as acknowledged; a later grant is an ordinary relay. It must never adopt a `false` → `true` difference (there is none by construction; treat one as a server fault and keep the local off). The edge serializes every relay (the loop, the boot and session-start syncs, the `/v1/optins` and enroll kicks) so no relay reads the record before another's adoption and PUTs a stale true after its release. **`contribute_outcomes` while undecided:** a tenant switch resets it to undecided (neither the person's stamp nor a staff default), and the edge then sends it ABSENT, never `false`: returning to a tenant whose device row still holds `true` would otherwise read as a true → false transition and sweep the person's contributions. When a 2xx row says `true` for an undecided `contribute_outcomes`, the edge restores it locally as the person's own choice in that tenant (it is this device's prior choice there, carried; journalled `restored_prior_choice`); every other `false` → `true` difference is still never adopted. **Copy reset (edge-local, one-shot):** a `gates/consents.json` never stamped with consent copy 2 (`gates/consents_copy`) has `cloud_judge` and `training` turned off at mark1d's boot (journalled `copy_reset`, relayed as ordinary offs), then is stamped; grants from then on pass the `X-Mark1-Consent-Copy: 2` gate below. An edge that ignores the body (≤ v0.1.19) keeps sending the stale true, so its holds never lift: it cannot re-grant a person-wide off, and its `cloud_judge` and `training` stay off. The legacy fallback ack (`legacy_cloud`, 16) predates the field and carries no `consents`. **Rollback:** controld at f85bff9 predates `person_off` and writes rows without it, so rolling controld back past m1_107 drops every hold (the next stale true re-grants on that device). That is accepted because the rollout is cloud-first and no edge depends on holds before X2 ships. Do not roll controld back past m1_107 without re-applying the holds afterwards (re-run the one-shot `cloud_judge`/`training` reset and redo the person-wide offs from `m1_device_consents` history).
+The body is the device's consent state. **Tri-state later fields:** `e1`, `cloud_judge` and `training` are sent by every edge generation and are always the device's new value (except the held offs above). `team`, `contribute_outcomes`, `local_rm` and `cloud_rm` are decoded as absent / false / true: absent (an edge that predates the field, or the legacy three-field body the current edge falls back to when a legacy cloud 400s) carries this device's previous latest value into the new row (a device that never had it stays false) and withdraws nothing, on this device or any other; an explicit false turns it off for this device; an explicit true turns it on for this device only. The current edge always sends all seven explicitly. **A withdrawal is a transition, per person** (07 m1_106, m1_107): every edge sends every field on every relay (a toggle, onboarding, a tenant switch's `contribute_outcomes: false`, the post-upgrade re-send), so an explicit false alone says nothing. A field among `e1`, `cloud_judge`, `training`, `team`, `contribute_outcomes` is withdrawn person-wide only when the body sends it false AND this device's own previous latest row had it true. Those moved fields are then turned off, in the same transaction, on every other device of this tenant whose latest enrollment carries this device's subject, by appending a row that copies that device's latest state with them off and names them in `person_off`. **Ruling (MEDIUM-4, privacy first):** a device of the person whose latest enrollment is not `approved` (revoked, or re-enrolled away) can never relay again, so it takes every explicit false in the body, transition or not. The person's current visible setting governs data from their revoked devices, so after a team removal and re-invite, the new device's current consent governs the old device's data. E1 parts (`e1`) and contributions (`contribute_outcomes`) are marked withdrawn only on the devices whose field went true → false in this PUT, the sender included. Every re-enroll with a new key mints a new device id, so without this a re-enrolled person's old device kept exporting. Not across tenants: consent follows the tenant (16 L8) and a tenant switch resets `contribute_outcomes` to undecided, so an off in a team tenant says nothing about what the person granted in their personal one. Grants stay per device. `local_rm` and `cloud_rm` never propagate: where the reward model scores is a per-device choice, and `e1` stays the person-wide kill switch for E1 data (a cloud RM read needs `e1` too). The PUT always holds the sender's consent lock and each person-device's (`m1_consent:<device>`, ascending) until commit, so a concurrent withdrawal can't be lost under the sender's carried fields, and an attach in flight on any of them either commits first (and is withdrawn by this PUT) or waits and is refused. Identity is the enrollment's `oidc_subject` as stored: an `omium_user` approval stores `omium:<sub>`, an `idp_device_code` approval the IdP's raw subject, and no mapping between the two exists, so one human enrolled both ways in one tenant is two people here (a missed propagation, never a wrong withdrawal). each PUT appends one `m1_device_consents` row stamped with the token's `(tenant, device)`, and the latest row per device (the last written, `row_seq` (m1_105), never the newest `recorded_at`: a withdrawal stamped by a stepped-back clock still wins) is that device's consent (the table is append-only; history stays answerable). The edge relays the same record it wrote to `<state>/gates/consents.json` and keeps it pending until acknowledged, so the cloud's view never runs ahead of the local one. Consumers: `e1` gates `EmitExcerpt`'s E1 case on the edge (a `Dropped{e1_consent_absent}` row when absent) and the attach upload (§2.1); a PUT whose `e1` goes true → false stamps `withdrawn_at` on the live `m1_evidence_attachments` rows of every device it turned off in the same transaction, the internal read stops serving them at once, and the daily sweep deletes them with an `evidence_deletion` receipt; `cloud_judge` is the §3.8 judge path's precondition; `training` gates `corpus.export` — the job runs only when every device of the tenant that has ever recorded consent currently consents (`bool_and` over latest rows; a tenant with no rows is refused, never assumed). `contribute_outcomes` (07 `m1_096`) is per device: ingest admits an `OutcomeContribution` only under a latest row saying true, and a true → false transition stamps `withdrawn_at` on the past contributions of every device it turned off in the same transaction (the daily sweep deletes their objects). The edge sets it through the local control API, `PUT /v1/optins {"consents": {"contribute_outcomes": bool}}` (a partial patch; off also purges `<state>/contrib`). `local_rm` / `cloud_rm` (07 `m1_097`) are the Settings choice "Reward model: On this computer | In Omium's cloud | Off", set the same way (`PUT /v1/optins {"consents": {"local_rm": bool, "cloud_rm": bool}}`); `local_rm` arms mark1d's supervised `mark1-rm` child (no cloud call), `cloud_rm` is read by the adjudicator's cloud scorer beside `e1`. `PUT /v1/optins` turns `cloud_judge`, `cloud_rm` or `training` on only for a request carrying `X-Mark1-Consent-Copy: 2` (the app showing the current register copy); without it such an enable is 409 `{"error":{"code":"M1E-2014","reason":"consent_copy_outdated","message"}}` and nothing is written, while offs and the other fields need no header. `GET /v1/optins` and the PUT's echo carry two optional lists beside `consents`, each absent when empty, persisted beside `gates/consents.json` (`consents_<name>.json`) across restarts, cleared per key when the person sets that key here again, and refused in a PUT body (400 M1E-2001, unknown field): `cloud_withdrawal: string[]`, the keys mark1d turned off adopting another device's withdrawal (journal reason `cloud_withdrawal`), and `copy_reset: string[]`, the keys turned off because they were granted under the outdated copy — the edge's one-shot copy reset, or controld's m1_107 reset of pre-cut `cloud_judge`/`training` grants when it arrives as an adoption on a record not yet stamped copy 2. Errors: 400 M1E-2001 (shape) · 401 M1E-1002 · 403 M1E-1001 (no device claim) · 403 M1E-1007 (the device's enrolling subject has left the team tenant; ingest and attach answer the same, `teams.Participant`) · 503 M1E-9500 (store unavailable or unconfigured, or the membership lookup failed).
+
+### 3.7b Tenant register consents (06 §6.5, §9.1; 07 `m1_065`, `m1_073`, `m1_092`; 16 §L1/§L6)
+
+```
+GET /api/v1/verify/cloud-judge                            auth: user or device token
+GET /api/v1/verify/cloud-rm
+GET /api/v1/memory/extract-consent
+→ 200 { "enabled": bool, "judge_id", "subprocessor", "region", "max_tier", "consented_at": <RFC 3339>|null, "consented_by": str|null }
+PUT /api/v1/verify/cloud-judge                            auth: user or device token; team owner only in a team
+PUT /api/v1/verify/cloud-rm
+PUT /api/v1/memory/extract-consent
+  { "enabled": true,  "judge_id": "<the route's key>" }  # enable: judge_id is REQUIRED and must equal the key the caller's consent copy describes
+  { "enabled": false }                                    # disable: judge_id optional and ignored; always allowed
+                                                          # nothing else; ≤4 KiB, unknown field refused
+→ 200 (the GET body)
+→ 409 M1E-2014 reason consent_copy_outdated               # enable with judge_id absent or not the route's current key; nothing written
+```
+The keys to send today: `judge:grounded-rubric@2` (cloud-judge), `rm:mark1-rm-a@1` (cloud-rm), `mem:extract@1` (extract-consent). A client sends the key its own compiled consent copy describes, never the `judge_id` it just read from GET: consent is to the processor the person was shown. Why: v0.1.14 shows "Anthropic, US" for the cloud judge and PUTs a bare `{"enabled":true}`; the route's key is now Nebius/global, and a bare enable would record consent to a processor the person never saw. A bare enable is 409, a bare disable still works, so an old app can always turn a consent off.
+One `m1_cloud_judge_consents` row per route: the cloud judge `judge:grounded-rubric@2` (`nebius`, `global`, `max_tier` E1), the cloud reward model `rm:mark1-rm-a@1` (`baseten`, `us`, E1; the app writes it with the Settings choice "Reward model: In Omium's cloud", and the adjudicator scores only devices whose own record also says `cloud_rm` and `e1`) and memory extraction `mem:extract@1` (`nebius`, `global`, E0) — "Learn from my sessions" in Settings, off by default. Each key's processor, region and retention is a row of the subprocessor register (`appapi.Register`, 10 §10.4), which the app's consent copy renders. Absent a live row GET answers `enabled:false` with the static disclosure; PUT true inserts the row (idempotent under the partial unique index), PUT false revokes it (`revoked_reason='settings'`, never a DELETE). `judge_id` is the register key column for both. Schemas: `go/controld/internal/appapi/schema/{cloud_judge,cloud_rm,memory_extract_consent}.json`. Errors: 400 M1E-2001 (shape) · 403 M1E-1001 (no tenant) · 403 M1E-1007 `not_owner` (a team member) · 409 M1E-2014 `consent_copy_outdated` · 500 M1E-9500.
+
+### 3.7c Team rounded and the weekly email (15-teams; 16 §L3; 07 `m1_091`)
+
+```
+GET    /api/v1/team                                        auth: user or device token
+→ 200 { …15-teams…, "members": [ { …, "totals": {sessions, tasks_verified, tokens, tokens_saved} | null } ],
+        "totals": { "window": {from, to}, "team": {…}, "unattributed": {…} } | null }
+POST   /api/v1/team/invites          { "email"? }          auth: user token; owner
+→ 200 { "sent": bool, "invite_link", "invited_email", "status": "invited", "expires_at" }
+DELETE /api/v1/team/invites/{id}                           auth: user token; owner   ({id} = invite:<uuid> or <uuid>)
+→ 200 { "id": "invite:<uuid>", "status": "cancelled" }
+GET    /api/v1/me/notifications                            auth: user token
+PUT    /api/v1/me/notifications      { "weekly_digest": bool }   # exactly this field; ≤4 KiB
+→ 200 { "weekly_digest": bool, "email": str|null }
+GET    /api/v1/unsubscribe/{token}                         auth: NONE, the path token is the credential
+POST   /api/v1/unsubscribe/{token}   (form body ignored; RFC 8058 one-click posts List-Unsubscribe=One-Click)
+→ 200|404|503 text/html (no-store, no-referrer, CSP default-src 'none')
+```
+Totals are 30 d aggregates from `team_device_totals.v2` read under `querychoke.TenantWide`; controld maps each device to the subject of its latest enrollment in Postgres and answers no device id and no session; devices of no listed member land in `unattributed`, and `team` sums everything. `tokens_saved` is savings.v3's net estimate and may be negative (blocks inside the window, resolved by every verdict through today, ADR-0013). An invite with an email is sent after the commit through Customer.io (5 s timeout, click tracking and message retention off so the `#token` never passes a tracking redirect); a failed or unconfigured send keeps the invite and answers `sent:false`. Cancel sets `expires_at = now()` (the seat frees). `email` is exactly one bare address (`net/mail`; a list, a display name, a group or `<…>` is 400), stored and mailed lowercased; the mailer itself refuses any other recipient. At most 2 × `TEAM_MAX_MEMBERS` invites per tenant per rolling 24 h, cancelled ones included (cancel frees the seat, not the quota), counted from `m1_team_invites.created_at`, so a restart forgets nothing: over it, 429 M1E-9001 `invite_rate_limited`. Every app route (this section and §3.7b, sessions, reports, `/me`) refuses a device token whose enrolling subject is neither the tenant's owner nor an active member of a team tenant with 403 M1E-1007 `not_member`: a leaver's device keeps its token up to 24 h and reads nothing of the team with it. The digest opt-in is per (tenant, subject) in the tenant the person works in now, off until turned on; PUT true needs an email on the sign-in. GET on the unsubscribe path only renders a confirm form (link scanners change nothing); POST turns the digest off. Unknown or malformed tokens answer the same 404 page. Kong routes `/api/v1/unsubscribe` (prefix) and `~/api/v1/me/notifications$` to controld. Schemas: `go/controld/internal/appapi/schema/{team,team_invite,team_invite_cancel,notifications}.json`. Errors: 400 M1E-2001 (shape) · 403 M1E-1007 (`not_owner`, `not_member`, `user_token_required`) · 404 M1E-2012 `invite_invalid` · 429 M1E-9001 `invite_rate_limited` · 500 M1E-9500.
 
 ### 3.8 Internal service surface (never public; service credential, ADR-0010 §2.2)
 
@@ -446,6 +522,13 @@ POST /internal/v1/receipts/append                         auth: Bearer <INTEL_SE
     "subject_id", "idempotency_key", "payload": { …integers and strings only… } }
 → 200 { "receipt_id", "seq", "receipt_hash", "payload" }
 ```
+```
+GET /internal/v1/evidence/{task_id}?purpose=judge|rm      auth: Bearer <EVIDENCE_READ_TOKEN>, M1P-Tenant-Id: <tenant>
+→ 200 { "task_id", "tier": "E1", "attachment", "receipt_id", "post_hash", "intent", "hunks" }
+→ 404 M1E-2013                                            # none uploaded, not yet bound, withdrawn, deleted, past 30 d, or the purpose's consent is off
+```
+The adjudicator's E1 read (16 L10): the cloud judge `judge:grounded-rubric@2` reads it by default (`app/judges/evidence.py`, absent ⇒ the E0 fallback) and the cloud RM through `rm_input_reader`. Served only under the tenant GUC from a live, unwithdrawn index row under 30 days whose receipt is bound to a landed excerpt, only while the part's device's latest `m1_082` row (by `row_seq`) still says `e1` **and** the purpose's consent — `purpose=judge` needs `cloud_judge`, `purpose=rm` needs `cloud_rm` — and only when the object's sha256 still equals that receipt's `post_hash`. The credential is the adjudicator's own `EVIDENCE_READ_TOKEN` (SM `omium/prod/mark1-evidence-token`, k8s Secret `mark1-evidence-token` key `token`; controld env `EVIDENCE_READ_TOKEN`, adjudicator env `ADJ_EVIDENCE_TOKEN`), never the shared `INTEL_SERVICE_TOKEN` intel also holds; compared in constant time, and an unset token refuses every caller (controld refuses to boot when it equals `INTEL_SERVICE_TOKEN`). Errors: 403 M1E-1001 (credential) · 400 M1E-2001 (tenant header, task id, `purpose` absent or not `judge`/`rm`) · 404 M1E-2013 · 503 M1E-9500.
+
 The one chain writer (m1_002 §5): the intelligence services hold no chain key and no `m1_receipts` INSERT grant; they request their per-event rare-class receipts here and commit their own row in the same local transaction AFTER the receipt id returns. The credential is asserted before the body is decoded; the tenant comes from the body only because the verified principal is the service. Idempotency is keyed on the caller's attempt — `(tenant, record_type, idempotency_key)`, m1_072 — never on `subject_id` (re-admission and cert re-issue legitimately repeat a subject); a repeat answers the existing receipt. Errors: 401/403 on the credential, 400 on a class outside the set above or a payload the canonical form refuses.
 
 ---
@@ -544,6 +627,21 @@ Responses: 204 (event accepted), 200 (gate verdict), 400 M1E-2001, 401 M1E-1002,
 ```
 
 The loopback listener accepts events **only** for sessions whose token it issued; it is a constrained door into the same single-writer spool path, not a second fabric.
+
+### 4.6 Local control API (app ↔ daemon)
+
+The desktop app's `/v1/...` routes sit behind the same three walls as §4.5 (literal Host, no Origin, bearer from `<state>/run/control.json`). Their shapes are held to `desktop/mock/fixtures/*/local-*.json` by `internal/control/conformance_test.go`; the mock README lists them. One route is specified here because it is the only one that runs anchors on request:
+
+```
+POST /v1/anchors/probe   body: {"project": "<enabled root>"}      (16 §L4, first run)
+202  {"project", "anchors": n}   n consented static anchors will run once, one after another, in the background
+400  M1E-2001  missing project / unknown field (strict decoder)
+404  M1E-2001  not an enabled project
+409  M1E-2001  no catalog armed for it yet, or a probe of it is already running (one at a time per project)
+503  M1E-2001  the anchor plane is not running
+```
+
+Each run takes `RunOne`'s path (consent + binary-hash gates, sandbox, the kind's handler) under a 2-minute per-anchor timeout, but emits **no AnchorVote and no ledger event** and stores no evidence: the result lands only as `last_run`/`last_code` on `GET /v1/anchors`, which the app polls. Test-class anchors never run here. The app frames the result as "checks ready", never "verified".
 
 ---
 
@@ -907,7 +1005,13 @@ stdout (--json): { "ok": true, "enrollment": {...}, "workspaces": [ { "path": �
   "adapter":"active|dropped:unsupported_agent_version"} ] } ],
   "spool": { "depth_by_class": {...}, "parked": 0, "quarantined": 0 },
   "bundle": { "channel":"stable", "seq":483, "age_s":1200, "stale": false },
-  "off": { "active": false } }
+  "off": { "active": false },
+  "reward_model": null | { "state": <worst served model's>, "detail": …, "models": [
+    { "model_id": "rm:mark1-rm-a@1", "state": "starting|downloading|verifying|ready|
+      no_runtime|download_failed|failed|refused|not_served", "detail": …, "size_bytes": … } ],
+    "rm_backlog": <closed tasks dropped unscored, oldest first> } }
+  (reward_model is <state>/rm/status.json, 16 §L6: one row per model, so a down RM-B is
+  named while RM-A keeps scoring; null until the daemon has reached the reward model.)
 Exit: 0 even when the daemon is degraded (status must always answer); 3 not enrolled.
 WHY: this command is the product's transparency promise — the §5 scope rules are
   auditable here, not asserted in a doc.
@@ -925,12 +1029,18 @@ Read-only unless --fix. Shows:
   2. Fenced-config diffs: for every provisioned agent file, the §8 manifest entry vs
      the bytes on disk — OK (post-image matches) | USER-EDITED (fragment intact,
      surrounding file changed) | FRAGMENT-DAMAGED (checksum mismatch inside our
-     markers) | MISSING. Byte-level diff on request.
+     markers) | MISSING. Byte-level diff on request. Each capture fragment also names
+     the Mark 1 release whose bytes are on disk (`provisioned_by`, from
+     provisioned/<agent>/release.json, §8.3.1), flagged when it is not this release.
   3. Environment health: fabric socket perms, keychain reachability, clock skew vs
      server, transcript retention setting if readable (warns when cleanupPeriodDays
-     is shorter than the tailer's catch-up horizon).
---fix re-applies only FRAGMENT-DAMAGED/MISSING fragments via the §8 idempotent apply;
-  it never touches user bytes outside our markers.
+     is shorter than the tailer's catch-up horizon); `rm_runtime`, failing only when a
+     reward model crash-looped, its pinned download failed or its execution hash was refused
+     (16 §L6); the app's `GET /v1/doctor` also carries `reward_models` (the §7.3 object, or null).
+--fix re-applies only FRAGMENT-DAMAGED/MISSING fragments via the §8 idempotent apply,
+  and runs the §8.3.1 release reconcile first (a stale OK/USER-EDITED fragment is
+  brought to this release's bytes; `reprovisioned` names each); it never touches user
+  bytes outside our markers.
 Exit: 0 all green; 1 any FRAGMENT-DAMAGED/MISSING or health failure (CI-friendly);
   3 not enrolled.
 ```
@@ -1081,6 +1191,15 @@ Re-running apply with an unchanged desired fragment is a byte-for-byte no-op —
 is the idempotence contract, and CI asserts it (apply ∘ apply ≡ apply).
 ```
 
+#### 8.3.1 Release upgrades reach existing installs
+
+A release that changes a capture fragment's bytes (a new hook, a new `mark1.js`) must reach users who enabled an earlier one without asking them to re-run `mark1 enable`. `provision.Reconcile` (go/mark1d/adapters/provision/reconcile.go) is step 2(c) driven by what is already on disk:
+
+- **When:** every mark1d on-window start while at least one workspace is enabled — so the first start after `mark1 update` restarts the daemon — on `POST /v1/agents/{name}/resume` for that agent, and on `mark1 doctor --fix`. `mark1 enable` and the app's re-provision action already run the full §8.3 apply.
+- **Which fragments:** only an agent's capture fragment whose §8.2 manifest exists and whose classification is OK or USER-EDITED, re-applied at the `target_path` the manifest recorded (never a path re-derived from the daemon's own environment). The apply is non-forcing: a current fragment is not opened for write (2b); a stale one has only our payload replaced (2c), atomically, with the pre-image untouched.
+- **Never:** Mark 1 off (§7.6) or `MARK1_DISABLE=1` — nothing runs; a paused agent — skipped until resume; a reverted agent (no manifest) — nothing re-added; a fence the user edited (FRAGMENT-DAMAGED) — refused, M1E-7102, logged at WARN, left for `doctor --fix`; a fragment the user removed (MISSING) — not re-added. The base-URL and Copilot env pointers are not reconciled: re-pointing an agent at the proxy is `mark1 enable`'s eligibility decision.
+- **Record:** each successful apply or reconcile writes `provisioned/<agent>/release.json` (`{version, fragment_checksum, at}`, 0600) — the release whose fragment is on disk; revert deletes it with the manifest. mark1d logs every upgrade at INFO; `mark1 doctor` and `GET /v1/agents` (`provisioned.provisioned_by`) show it per agent.
+
 ### 8.4 Revert — and how `mark1 off` restores byte-equality
 
 ```
@@ -1139,6 +1258,8 @@ Normative. Later documents (04, 05, 11, 12) cite these codes; they do not invent
 | ingest | `M1E-2010` | an `AnchorVote` carrying a non-empty `signature` that does not verify under the device's live enrolled key (FR-VERIFY-004, D-EI); a batch whose only violations are of this kind | 422 | remainder once; named events quarantine | via status | fail-closed (a forged vote never lands) |
 | team | `M1E-2011` | team state conflict (`reason`: already_in_team, own_team, owner_of_team, team_full, owner_cannot_leave) — 15-teams | 409 | no | yes | fail-closed |
 | team | `M1E-2012` | invite or member not found (`reason`: invite_invalid, member_not_found) — 15-teams | 404 | no | yes | — |
+| evidence | `M1E-2013` | no E1 evidence held for the task (none uploaded, unbound, withdrawn, deleted, past 30 d, or the device's consent for the read's purpose is off) — 16 L10 | 404 | no | no | fail-closed (the judge falls back to E0) |
+| consent | `M1E-2014` | a register consent enable whose `judge_id` is absent or not the route's current key: the caller's copy describes another processor (`reason`: consent_copy_outdated) — §3.7b | 409 | no — update the app | yes | fail-closed (nothing written) |
 | policy | `M1E-3001` | bundle signature invalid | local | next poll | doctor | **fail-static** (keep last-known-good) |
 | policy | `M1E-3002` | bundle seq non-monotonic | local | next poll | doctor | fail-static |
 | policy | `M1E-3003` | transparency-log inclusion proof missing/invalid | local | next poll | doctor | fail-static |
@@ -1235,6 +1356,7 @@ Monotonic seq interacts with skipping: an edge that skipped section `cortex@v3` 
 - **MCP tools (§6):** additive schema evolution only; a renamed or re-typed field is a new tool name. Agents cache tool schemas per session, so in-place mutation is a lying contract.
 - **CLI `--json`:** additive keys only; removed keys require a major CLI version and a release note. Exit codes are frozen forever — MDM scripts key on them.
 - **Receipts:** never versioned away (§1.3); new receipt kinds are new `kind` values, and `rust/verifier` treats an unknown `kind` as opaque-but-chain-checked — the chain verifies even where the payload semantics are newer than the verifier.
+- **Desktop app (Mark1-GUI) vs a newer cloud:** a released app parses every response with its own zod schemas, so a cloud response never re-types, nulls or drops a field a released app requires. Held by `appapi/testdata/app-v0.1.14/` (v0.1.14's schemas, transcribed) and `releasedApp` in every appapi response test, plus `TestTVOReportParsesInTheReleasedApp`. What that bought in this release: a trend day with no verified outcome is absent rather than `tvo: null`; a session's `tokens_saved` is floored at 0 (v0.1.14 reads a count) and the signed savings.v3 net rides the new `tokens_saved_net`; a register consent enable without the key the app's copy describes is 409 (§3.7b).
 - **Hook payloads:** vendor-versioned, absorbed by `agent_maps` (§5 rule 1); an unabsorbable break is `Dropped{unsupported_agent_version}` plus a conformance-fixture update, never a guess.
 
 ---
