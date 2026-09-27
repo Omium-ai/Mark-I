@@ -1,0 +1,65 @@
+[
+  {
+    "key": "e1",
+    "subprocessor": "aws-s3",
+    "region": "us-east-1",
+    "max_tier": "E1",
+    "retention_days": 30
+  },
+  {
+    "key": "judge:grounded-rubric@2",
+    "subprocessor": "nebius",
+    "region": "global",
+    "max_tier": "E1",
+    "retention_days": 0
+  },
+  {
+    "key": "rm:mark1-rm-a@1",
+    "subprocessor": "baseten",
+    "region": "us",
+    "max_tier": "E1",
+    "retention_days": 0
+  },
+  {
+    "key": "mem:extract@1",
+    "subprocessor": "nebius",
+    "region": "global",
+    "max_tier": "E0",
+    "retention_days": 0
+  },
+  {
+    "key": "training",
+    "subprocessor": "aws-s3",
+    "region": "us-east-1",
+    "max_tier": "E0",
+    "retention_days": 400
+  },
+  {
+    "key": "training:compute",
+    "subprocessor": "nebius-ai-cloud",
+    "region": "eu-north1",
+    "max_tier": "E0",
+    "retention_days": 0
+  },
+  {
+    "key": "contribute_outcomes",
+    "subprocessor": "aws-s3",
+    "region": "us-east-1",
+    "max_tier": "contribution",
+    "retention_days": 365
+  },
+  {
+    "key": "contribute_outcomes:compute",
+    "subprocessor": "nebius-ai-cloud",
+    "region": "eu-north1",
+    "max_tier": "contribution",
+    "retention_days": 0
+  },
+  {
+    "key": "email",
+    "subprocessor": "customer.io",
+    "region": "us",
+    "max_tier": "account",
+    "retention_days": null
+  }
+]

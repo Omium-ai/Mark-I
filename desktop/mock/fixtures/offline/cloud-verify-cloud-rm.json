@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "judge_id": "rm:mark1-rm-a@1",
+  "subprocessor": "baseten",
+  "region": "us",
+  "max_tier": "E1",
+  "consented_at": null,
+  "consented_by": null
+}

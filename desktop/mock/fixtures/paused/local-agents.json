@@ -7,6 +7,7 @@
     "regime": "apikey",
     "provisioned": {
       "mechanism": "B",
+      "provisioned_by": "0.1.19",
       "files": [
         {
           "path": "/Users/dev/.claude/settings.json",
@@ -31,6 +32,7 @@
     "regime": "apikey",
     "provisioned": {
       "mechanism": "A/B",
+      "provisioned_by": "0.1.19",
       "files": [
         {
           "path": "/Users/dev/.codex/hooks.json",
@@ -79,6 +81,7 @@
     "regime": "apikey",
     "provisioned": {
       "mechanism": "A",
+      "provisioned_by": "0.1.19",
       "files": [
         {
           "path": "/Users/dev/.copilot/hooks/mark1.json",
@@ -100,6 +103,7 @@
     "regime": "apikey",
     "provisioned": {
       "mechanism": "A/B",
+      "provisioned_by": "0.1.19",
       "files": [],
       "notes": [
         "observe/gate only, no proxy"

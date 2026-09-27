@@ -1,8 +1,8 @@
 {
   "enabled": true,
-  "judge_id": "judge:grounded-rubric@1",
-  "subprocessor": "anthropic",
-  "region": "us",
+  "judge_id": "judge:grounded-rubric@2",
+  "subprocessor": "nebius",
+  "region": "global",
   "max_tier": "E1",
   "consented_at": "2026-09-10T12:00:00.000Z",
   "consented_by": "omium:anurag"

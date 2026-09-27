@@ -14,10 +14,24 @@
     "unattributed_tokens": 0
   },
   "tokens_saved": {
+    "label": "estimated",
+    "estimate": true,
+    "version": "savings.v3",
+    "total": 0,
+    "blocks": 0,
+    "block_count": 0,
+    "blocks_resolved": 0,
+    "debit": 0,
     "arrests": 0,
+    "arrest_count": 0,
     "re_exploration_avoided": 0,
     "routing": 0,
-    "total": 0
+    "certified": 0,
+    "by_cost_basis": {},
+    "restated": {
+      "tasks": 0,
+      "total": 0
+    }
   },
   "price_table_version": "pt_2026_09_01",
   "guarantee_grade": false,

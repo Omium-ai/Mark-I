@@ -14,6 +14,7 @@ export const LOCAL_ROUTES = [
   ['DELETE', '/v1/projects', 'local-projects-remove'],
   ['GET', '/v1/anchors', 'local-anchors'],
   ['POST', '/v1/anchors/consent', 'local-anchors-consent'],
+  ['POST', '/v1/anchors/probe', 'local-anchors-probe'],
   ['GET', '/v1/optins', 'local-optins'],
   ['PUT', '/v1/optins', 'local-optins-update'],
   ['POST', '/v1/pause', 'local-pause'],
@@ -55,6 +56,10 @@ export const CLOUD_ROUTES = [
   ['POST', '/api/v1/verify/labels', 'cloud-verify-labels'],
   ['GET', '/api/v1/verify/cloud-judge', 'cloud-verify-cloud-judge'],
   ['PUT', '/api/v1/verify/cloud-judge', 'cloud-verify-cloud-judge'],
+  ['GET', '/api/v1/verify/cloud-rm', 'cloud-verify-cloud-rm'],
+  ['PUT', '/api/v1/verify/cloud-rm', 'cloud-verify-cloud-rm'],
+  ['GET', '/api/v1/memory/extract-consent', 'cloud-memory-extract-consent'],
+  ['PUT', '/api/v1/memory/extract-consent', 'cloud-memory-extract-consent'],
   ['GET', '/api/v1/route/decisions', 'cloud-route-decisions'],
   ['GET', '/api/v1/route/bundle', 'cloud-route-bundle'],
   ['GET', '/api/v1/receipts/export', 'cloud-receipts-export'],
@@ -66,6 +71,10 @@ export const CLOUD_ROUTES = [
   // {id} carries a literal member (usr_2, a member in the team-* scenarios), as the memory actions do.
   ['DELETE', '/api/v1/team/members/usr_2', 'cloud-team-members-remove'],
   ['PUT', '/api/v1/team', 'cloud-team-update'],
+  // {id} carries the live invite of the team-owner scenario, as the member removal does.
+  ['DELETE', '/api/v1/team/invites/0191d000-0000-7000-8000-000000000001', 'cloud-team-invites-cancel'],
+  ['GET', '/api/v1/me/notifications', 'cloud-me-notifications'],
+  ['PUT', '/api/v1/me/notifications', 'cloud-me-notifications-update'],
   ['GET', '/api/v1/me', 'cloud-me'],
 ];
 
@@ -89,6 +98,9 @@ export function shiftDates(v, ms) {
   return v;
 }
 
+// routes whose success is 202, not 200: the probe answers before its runs land in GET /v1/anchors
+const ACCEPTED = [['local-anchors-probe', 202]];
+
 // A scenario dir with scenario.json holds only what differs from the one it `extends`; its `status` maps a fixture to a non-200 reply.
 export function scenarioMeta(scenario) {
   const p = path.join(HERE, 'fixtures', scenario, 'scenario.json');
@@ -97,7 +109,7 @@ export function scenarioMeta(scenario) {
 
 function readScenario(scenario) {
   const meta = scenarioMeta(scenario);
-  const base = meta.extends ? readScenario(meta.extends) : { fixtures: new Map(), status: new Map() };
+  const base = meta.extends ? readScenario(meta.extends) : { fixtures: new Map(), status: new Map(ACCEPTED) };
   const dir = path.join(HERE, 'fixtures', scenario);
   for (const f of fs.readdirSync(dir)) {
     if (f === 'scenario.json') continue;
@@ -116,8 +128,11 @@ export function loadScenario(scenario, now = Date.now()) {
 
 function drain(req) {
   return new Promise((resolve) => {
-    req.on('data', () => {});
-    req.on('end', resolve);
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+    });
+    req.on('end', () => resolve(body));
   });
 }
 
@@ -140,10 +155,41 @@ function matchRoute(routes, method, pathname) {
   return null;
 }
 
+// mark1d grants cloud_judge, cloud_rm or training only under the consent copy this release shows (X-Mark1-Consent-Copy: 2); an off never needs it
+export const CONSENT_COPY = '2';
+export function copyRefusal(headers, body) {
+  let put;
+  try {
+    put = JSON.parse(body || '{}');
+  } catch {
+    return null;
+  }
+  const c = put.consents ?? {};
+  if (!['cloud_judge', 'cloud_rm', 'training'].some((k) => c[k] === true) || headers['x-mark1-consent-copy'] === CONSENT_COPY) return null;
+  return {
+    error: {
+      code: 'M1E-2014',
+      message: 'this app shows older consent copy; update Mark 1 to turn it on',
+      reason: 'consent_copy_outdated',
+    },
+  };
+}
+
+export function mergeOptins(was, body) {
+  let put;
+  try {
+    put = JSON.parse(body || '{}');
+  } catch {
+    return was;
+  }
+  return { ...was, ...put, tests_by_project: { ...was.tests_by_project, ...put.tests_by_project }, consents: { ...was.consents, ...put.consents } };
+}
+
 export function startLocal(scenario, port, token) {
   const { fixtures, status } = loadScenario(scenario);
+  let optins = null;
   const server = http.createServer(async (req, res) => {
-    await drain(req);
+    const body = await drain(req);
     const url = new URL(req.url, 'http://localhost');
     if (req.headers.authorization !== `Bearer ${token}`) {
       return json(res, 401, { error: 'missing or invalid bearer token' });
@@ -165,8 +211,17 @@ export function startLocal(scenario, port, token) {
       req.on('close', () => clearTimeout(timer));
       return;
     }
-    const fixture = matchRoute(LOCAL_ROUTES, req.method, url.pathname);
+    let fixture = matchRoute(LOCAL_ROUTES, req.method, url.pathname);
     if (!fixture) return json(res, 404, { error: 'not found' });
+    if (fixture === 'local-optins-update') {
+      const refused = copyRefusal(req.headers, body);
+      if (refused) return json(res, 409, refused);
+      optins = mergeOptins(optins ?? fixtures.get('local-optins'), body);
+    }
+    // like mark1d, a PUT merges into the record and GET reads it back, so an app that re-reads after a write sees what it wrote
+    if ((fixture === 'local-optins' || fixture === 'local-optins-update') && optins) return json(res, 200, optins);
+    // consent-all shares the consent route and answers the project's rows, the GET shape
+    if (fixture === 'local-anchors-consent' && /"all_static"\s*:\s*true/.test(body)) fixture = 'local-anchors';
     return json(res, status.get(fixture) ?? 200, fixtures.get(fixture));
   });
   return listen(server, port);
@@ -179,14 +234,38 @@ function listen(server, port) {
   });
 }
 
+// controld refuses an enable that does not name the register key the app showed copy for (the fixture's judge_id)
+const CONSENT_ROWS = new Set(['cloud-verify-cloud-judge', 'cloud-verify-cloud-rm', 'cloud-memory-extract-consent']);
+
+export function consentRefusal(row, body) {
+  let put;
+  try {
+    put = JSON.parse(body || '{}');
+  } catch {
+    return null;
+  }
+  if (put.enabled !== true || put.judge_id === row.judge_id) return null;
+  return {
+    error: {
+      code: 'M1E-2014',
+      message: 'this app describes a different processor for this setting; update Mark 1 to turn it on',
+      reason: 'consent_copy_outdated',
+    },
+  };
+}
+
 export function startCloud(scenario, port) {
   const { fixtures, status } = loadScenario(scenario);
   const server = http.createServer(async (req, res) => {
-    await drain(req);
+    const body = await drain(req);
     if (!req.headers.authorization) return json(res, 401, { error: 'missing session bearer' });
     const url = new URL(req.url, 'http://localhost');
     const fixture = matchRoute(CLOUD_ROUTES, req.method, url.pathname);
     if (!fixture) return json(res, 404, { error: 'not found' });
+    if (req.method === 'PUT' && CONSENT_ROWS.has(fixture)) {
+      const refused = consentRefusal(fixtures.get(fixture), body);
+      if (refused) return json(res, 409, refused);
+    }
     if (NDJSON_FIXTURES.has(fixture)) return ndjson(res, fixtures.get(fixture));
     return json(res, status.get(fixture) ?? 200, fixtures.get(fixture));
   });

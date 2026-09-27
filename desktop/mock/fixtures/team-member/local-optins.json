@@ -9,7 +9,10 @@
     "e1": true,
     "cloud_judge": true,
     "training": true,
-    "team": true
+    "team": true,
+    "local_rm": false,
+    "cloud_rm": false,
+    "contribute_outcomes": false
   },
   "statusline": true
 }

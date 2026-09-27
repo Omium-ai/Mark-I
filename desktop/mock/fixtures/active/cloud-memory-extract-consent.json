@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "judge_id": "mem:extract@1",
+  "subprocessor": "nebius",
+  "region": "global",
+  "max_tier": "E0",
+  "consented_at": "2026-09-10T12:00:00.000Z",
+  "consented_by": "omium:anurag"
+}

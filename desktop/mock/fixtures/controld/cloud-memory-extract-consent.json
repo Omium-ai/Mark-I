@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "judge_id": "mem:extract@1",
+  "subprocessor": "nebius",
+  "region": "global",
+  "max_tier": "E0",
+  "consented_at": null,
+  "consented_by": null
+}

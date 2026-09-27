@@ -1,20 +1,20 @@
 {
   "honesty": {
-    "cost_basis": "usd",
+    "cost_basis": "quota",
     "coverage_band": {
       "coverage_lower": 0.98,
       "floor": 0.95,
       "observed_fraction": 0.98
     },
     "guarantee_grade": false,
-    "refusal": "M1E-5004 rollup missing for 1 day(s) in window; cost basis unresolved: no pinned model_prices row for usd (06 §8.4)",
+    "refusal": "M1E-5004 rollup missing for 1 day(s) in window; noise certificate is 'bootstrapping', not 'certified'; cost basis unresolved: shadow price S unconfirmed by tenant (D22)",
     "task_seg_version": "task_seg.v1"
   },
   "moments": [
     {
       "agent": "claudecode",
-      "at": "2026-09-19T23:24:44.170353064Z",
-      "event_id": "01a0bbfd-716a-7566-84cd-a55d64c8d514",
+      "at": "2026-09-26T18:26:16.857083553Z",
+      "event_id": "01a0def8-b6f9-7287-96ce-3fe839884f1e",
       "kind": "route",
       "route": {
         "action": "claude-haiku-4-5",
@@ -26,22 +26,22 @@
         "fidelity": "wire_enforced",
         "propensity": 0.97
       },
-      "session_id": "01a0bbfd-7169-7ecc-8869-d00c3b2dcc0b",
-      "task_id": "c34ae17a-6de0-40df-9151-22740c503f00"
+      "session_id": "01a0def8-b6f8-7f0a-ad36-85a0471344a0",
+      "task_id": "a33eec91-26d0-460d-975c-4784c311576a"
     },
     {
       "agent": "claudecode",
-      "at": "2026-09-19T23:23:44.170353064Z",
-      "event_id": "01a0bbfd-716a-756a-8d58-c93e8c98014e",
+      "at": "2026-09-26T18:25:16.857083553Z",
+      "event_id": "01a0def8-b6f9-729e-bc7a-29f564a660cc",
       "injection": {
         "artifact_count": 1,
-        "at": "2026-09-19T23:23:44.170353064Z",
+        "at": "2026-09-26T18:25:16.857083553Z",
         "channel": "mcp_pull",
-        "event_id": "01a0bbfd-716a-756a-8d58-c93e8c98014e",
+        "event_id": "01a0def8-b6f9-729e-bc7a-29f564a660cc",
         "tokens_used": 40
       },
       "kind": "injection",
-      "session_id": "01a0bbfd-7169-7ecc-8869-d00c3b2dcc0b",
+      "session_id": "01a0def8-b6f8-7f0a-ad36-85a0471344a0",
       "task_id": null
     },
     {
@@ -51,13 +51,13 @@
         "bundle_seq": 483,
         "tokens_saved_estimate": 900
       },
-      "at": "2026-09-19T23:22:44.170353064Z",
-      "event_id": "01a0bbfd-716a-757b-ab5b-3814d008cb36",
+      "at": "2026-09-26T18:24:16.857083553Z",
+      "event_id": "01a0def8-b6f9-72aa-a693-8ca42b1c8c88",
       "kind": "arrest",
-      "session_id": "01a0bbfd-7169-7ecc-8869-d00c3b2dcc0b",
-      "task_id": "c34ae17a-6de0-40df-9151-22740c503f00"
+      "session_id": "01a0def8-b6f8-7f0a-ad36-85a0471344a0",
+      "task_id": "a33eec91-26d0-460d-975c-4784c311576a"
     }
   ],
-  "next_since": "2026-09-19T23:24:44.170353064Z",
-  "since": "2026-09-18T23:25:44.174927667Z"
+  "next_since": "2026-09-26T18:26:16.857083553Z",
+  "since": "2026-09-25T18:27:16.883927965Z"
 }

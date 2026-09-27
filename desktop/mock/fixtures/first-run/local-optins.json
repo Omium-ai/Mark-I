@@ -6,10 +6,13 @@
     "/Users/dev/api-service": true
   },
   "consents": {
-    "e1": true,
-    "cloud_judge": true,
-    "training": true,
-    "team": false
+    "e1": false,
+    "cloud_judge": false,
+    "training": false,
+    "team": false,
+    "local_rm": false,
+    "cloud_rm": false,
+    "contribute_outcomes": false
   },
   "statusline": true
 }

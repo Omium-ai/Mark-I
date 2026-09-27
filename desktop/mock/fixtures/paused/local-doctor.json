@@ -9,6 +9,7 @@
       "regime": "apikey",
       "provisioned": {
         "mechanism": "B",
+        "provisioned_by": "0.1.19",
         "files": [
           {
             "path": "/Users/dev/.claude/settings.json",
@@ -33,6 +34,7 @@
       "regime": "apikey",
       "provisioned": {
         "mechanism": "A/B",
+        "provisioned_by": "0.1.19",
         "files": [
           {
             "path": "/Users/dev/.codex/hooks.json",
@@ -79,6 +81,7 @@
       "regime": "apikey",
       "provisioned": {
         "mechanism": "A",
+        "provisioned_by": "0.1.19",
         "files": [
           {
             "path": "/Users/dev/.copilot/hooks/mark1.json",
@@ -100,6 +103,7 @@
       "regime": "apikey",
       "provisioned": {
         "mechanism": "A/B",
+        "provisioned_by": "0.1.19",
         "files": [],
         "notes": [
           "observe/gate only, no proxy"
@@ -208,12 +212,13 @@
     {
       "name": "disk_hard_stop",
       "ok": true,
-      "detail": "spool below the 95 % hard stop (07 \u00a76)"
+      "detail": "spool below the 95 % hard stop (07 §6)"
     },
     {
       "name": "anchor_candidates",
       "ok": true,
       "detail": "daemon has published candidates"
     }
-  ]
+  ],
+  "reward_models": null
 }

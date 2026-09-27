@@ -93,9 +93,14 @@ one minted for another device key or another live tenant), `GET /v1/enroll`
 here is post-onboarding, so `GET` is enrolled; the not-enrolled shape is the
 `DELETE` fixture. Static fixtures do not flip state.
 
-Numbers are internally consistent: `tokens_saved.total` = the sum of its
-`arrests`/`re_exploration_avoided`/`routing` parts, and `tvo` = tokens ÷
-verified outcomes.
+Numbers are internally consistent: `tokens_saved` is `savings.v3` — `total`
+= `blocks` − `debit` (net vs plain Claude Code, negative in `below-floor`),
+`arrests` are forced retries avoided and stay outside `total`, `certified` is
+0 until certification, `by_cost_basis` splits `total` by the basis each
+decision was priced under (ADR-0013; `unknown` = an edge that predates the
+stamp, its totals summing to `total`), `restated` is the part of `total` that
+verdicts dated after a closed day moved — and `tvo` = tokens ÷ verified
+outcomes (`paused` carries a trend day with no verified outcome, `tvo: null`).
 
 Ids join across the two sides byte-for-byte: the live session is
 `0191c7a0-5b1e-7c2d-9e4f-0123456789a0` (ids are dashed UUID strings on every
@@ -168,6 +173,10 @@ the daemon's, not a sketch of §7.1:
 - Anchors carry `side_effect: static|test` (the FR-VERIFY-003 tier axis)
   and no `tier`; `last_run` is the newest anchor vote this daemon boot saw,
   `null` before one.
+- `POST /v1/anchors/probe` `{project}` (`local-anchors-probe`) answers `202
+  {project, anchors}` and runs the project's consented static anchors once
+  with no vote (08 §4.6); results land as `last_run`/`last_code` on
+  `GET /v1/anchors`. `server.mjs` `ACCEPTED` makes the mock answer 202 too.
 - `/v1/optins.consents` is the Step-4 record (`e1`, `cloud_judge`,
   `training`, `team`), all `false` until the user consents; `PUT` merges a partial
   object. `tests_by_project` is writable the same way.
@@ -220,20 +229,38 @@ that backend where the mock can and differ where the mock's static ids cannot:
   parsed by the GUI's contract test; the mock server does not serve them.
 - `GET /api/v1/team` members are the owner row, the active members and the
   live invites (`status: "invited"`, id `invite:<uuid>`), each `{id, name,
-  email, role, joined_at, last_active, status}` with `id` in `/me`'s
-  `user.id` format; `you: {role: "owner"|"member"}` is the caller's own role
+  email, role, joined_at, last_active, status, totals}` with `id` in `/me`'s
+  `user.id` format (`totals` = `{sessions, tasks_verified, tokens,
+  tokens_saved}` over 30 d, null on an invite; top-level `totals` =
+  `{window, team, unattributed}`, aggregates only, never a device or a
+  session); `you: {role: "owner"|"member"}` is the caller's own role
   and `invite_link` is `null` (the raw token is answered exactly once by
   `POST /team/invites`, whose hash is what `m1_team_invites` keeps for 7
   days). `PUT /api/v1/team` `{shared_memory}` answers `{shared_memory}`.
-  `POST /api/v1/team/invites` `{email?}` answers `{sent: false, invite_link:
+  `POST /api/v1/team/invites` `{email?}` answers `{sent, invite_link:
   "https://mark.omium.ai/join#<token>", invited_email, status: "invited",
-  expires_at}`; nothing is emailed. `POST /api/v1/team/invites/accept`
+  expires_at}`; `sent` is true only when an email was given and Customer.io
+  took it. `DELETE /api/v1/team/invites/{id}` (route literal the team-owner
+  invite's uuid) answers `{id: "invite:<uuid>", status: "cancelled"}`.
+  `GET /api/v1/me/notifications` answers `{weekly_digest, email}`; `PUT`
+  `{weekly_digest}` answers the same shape. `POST /api/v1/team/invites/accept`
   `{token}` (the raw token or the whole link) answers `{tenant_id, role:
   "member"}`; `POST /api/v1/team/leave` answers `{tenant_id}` (the personal
   tenant); `DELETE /api/v1/team/members/{id}` (route literal `usr_2`)
   answers `{id, status: "removed", revoked_devices}`. Memory artifact rows
   carry `mine` (the viewer owns it; only then may they share, pin or retire
   it).
+- `PUT /api/v1/verify/cloud-judge`, `/verify/cloud-rm` and
+  `/memory/extract-consent` take `{enabled, judge_id}`; an enable whose
+  `judge_id` is not the row's register key (`judge:grounded-rubric@2`,
+  `rm:mark1-rm-a@1`, `mem:extract@1`) answers 409 `{error: {code: "M1E-2014",
+  message, reason: "consent_copy_outdated"}}`, as controld does. A disable
+  needs no key.
+- `PUT /v1/optins` turning `cloud_judge`, `cloud_rm` or `training` on answers
+  the same 409 unless the request carries `X-Mark1-Consent-Copy: 2` (the copy
+  this release shows), as mark1d does. An off, and every other field, needs no
+  header. An accepted PUT merges into the scenario's optins for the life of
+  the server, so a later `GET /v1/optins` reads it back.
 
 TBD shapes (spec marks these unfrozen) are listed in `TBD.md`.
 

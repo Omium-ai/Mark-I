@@ -7,7 +7,13 @@
       "role": "owner",
       "joined_at": "2026-09-01T09:00:00.000Z",
       "status": "active",
-      "last_active": "2026-09-16T14:32:00.000Z"
+      "last_active": "2026-09-16T14:32:00.000Z",
+      "totals": {
+        "sessions": 41,
+        "tasks_verified": 28,
+        "tokens": 1840000,
+        "tokens_saved": 212000
+      }
     }
   ],
   "you": {
@@ -54,6 +60,24 @@
         "tvo": 13000
       }
     ]
+  },
+  "totals": {
+    "window": {
+      "from": "2026-08-18",
+      "to": "2026-09-16"
+    },
+    "team": {
+      "sessions": 41,
+      "tasks_verified": 28,
+      "tokens": 1840000,
+      "tokens_saved": 212000
+    },
+    "unattributed": {
+      "sessions": 0,
+      "tasks_verified": 0,
+      "tokens": 0,
+      "tokens_saved": 0
+    }
   },
   "fleet_status": null
 }

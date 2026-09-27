@@ -7,7 +7,13 @@
       "role": "owner",
       "joined_at": "2026-09-01T09:00:00.000Z",
       "status": "active",
-      "last_active": "2026-09-16T14:32:00.000Z"
+      "last_active": "2026-09-16T14:32:00.000Z",
+      "totals": {
+        "sessions": 41,
+        "tasks_verified": 28,
+        "tokens": 1840000,
+        "tokens_saved": 212000
+      }
     },
     {
       "id": "usr_2",
@@ -16,7 +22,13 @@
       "role": "member",
       "joined_at": "2026-09-05T09:00:00.000Z",
       "status": "active",
-      "last_active": "2026-09-16T14:02:00.000Z"
+      "last_active": "2026-09-16T14:02:00.000Z",
+      "totals": {
+        "sessions": 23,
+        "tasks_verified": 15,
+        "tokens": 960000,
+        "tokens_saved": 88000
+      }
     },
     {
       "id": "usr_3",
@@ -25,7 +37,13 @@
       "role": "member",
       "joined_at": "2026-09-08T09:00:00.000Z",
       "status": "active",
-      "last_active": "2026-09-15T18:00:00.000Z"
+      "last_active": "2026-09-15T18:00:00.000Z",
+      "totals": {
+        "sessions": 12,
+        "tasks_verified": 6,
+        "tokens": 410000,
+        "tokens_saved": -12000
+      }
     },
     {
       "id": "invite:0191d000-0000-7000-8000-000000000001",
@@ -34,7 +52,8 @@
       "role": "member",
       "joined_at": "2026-09-15T10:00:00.000Z",
       "status": "invited",
-      "last_active": null
+      "last_active": null,
+      "totals": null
     }
   ],
   "you": {
@@ -51,6 +70,24 @@
     },
     "cost_basis": "usd",
     "guarantee_grade": true
+  },
+  "totals": {
+    "window": {
+      "from": "2026-08-18",
+      "to": "2026-09-16"
+    },
+    "team": {
+      "sessions": 78,
+      "tasks_verified": 50,
+      "tokens": 3265000,
+      "tokens_saved": 291000
+    },
+    "unattributed": {
+      "sessions": 2,
+      "tasks_verified": 1,
+      "tokens": 55000,
+      "tokens_saved": 3000
+    }
   },
   "fleet_status": null
 }

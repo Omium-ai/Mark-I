@@ -3,7 +3,7 @@ import readline from 'node:readline';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LOCAL_ROUTES, CLOUD_ROUTES, FIXTURE_NOW, scenarioMeta, loadScenario } from './server.mjs';
+import { LOCAL_ROUTES, CLOUD_ROUTES, FIXTURE_NOW, scenarioMeta, loadScenario, consentRefusal, copyRefusal, mergeOptins } from './server.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // every dir but controld's goldens, overlays included
@@ -115,6 +115,28 @@ for (const scenario of SCENARIOS) {
   const meta = scenarioMeta(scenario);
   if (meta.extends && !SCENARIOS.includes(meta.extends)) fail(`${scenario}: extends unknown scenario "${meta.extends}"`);
   await run(scenario);
+}
+
+// consent rows: an enable must name the row's register key; a disable never needs one
+{
+  const row = { judge_id: 'judge:grounded-rubric@2' };
+  if (consentRefusal(row, '{"enabled":true}')?.error.reason !== 'consent_copy_outdated') fail('consent: a bare enable was not refused');
+  if (consentRefusal(row, '{"enabled":true,"judge_id":"judge:grounded-rubric@1"}') === null) fail('consent: an enable naming another key was not refused');
+  if (consentRefusal(row, '{"enabled":true,"judge_id":"judge:grounded-rubric@2"}') !== null) fail('consent: a keyed enable was refused');
+  if (consentRefusal(row, '{"enabled":false}') !== null) fail('consent: a disable was refused');
+}
+
+// daemon consents: an enable of cloud_judge, cloud_rm or training needs X-Mark1-Consent-Copy: 2; offs and other fields never do
+{
+  const copy = { 'x-mark1-consent-copy': '2' };
+  for (const k of ['cloud_judge', 'cloud_rm', 'training']) {
+    if (copyRefusal({}, JSON.stringify({ consents: { [k]: true } }))?.error.reason !== 'consent_copy_outdated') fail(`optins: a ${k} enable without the copy header was not refused`);
+    if (copyRefusal(copy, JSON.stringify({ consents: { [k]: true } })) !== null) fail(`optins: a ${k} enable under copy 2 was refused`);
+    if (copyRefusal({}, JSON.stringify({ consents: { [k]: false } })) !== null) fail(`optins: a ${k} off was refused`);
+  }
+  if (copyRefusal({}, JSON.stringify({ consents: { e1: true }, stop_gate: true })) !== null) fail('optins: an e1 enable was refused');
+  const merged = mergeOptins({ stop_gate: true, tests_by_project: { a: true }, consents: { e1: true, training: true } }, '{"consents":{"training":false}}');
+  if (JSON.stringify(merged) !== JSON.stringify({ stop_gate: true, tests_by_project: { a: true }, consents: { e1: true, training: false } })) fail(`optins: a partial PUT merged to ${JSON.stringify(merged)}`);
 }
 
 // the relative clock: a fixture date keeps its distance from "now" whatever day the mock runs

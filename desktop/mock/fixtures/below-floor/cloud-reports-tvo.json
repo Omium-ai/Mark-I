@@ -43,10 +43,30 @@
     "unattributed_tokens": 3000
   },
   "tokens_saved": {
+    "label": "estimated",
+    "estimate": true,
+    "version": "savings.v3",
+    "total": -4500,
+    "blocks": 2000,
+    "block_count": 3,
+    "blocks_resolved": 1,
+    "debit": 6500,
     "arrests": 42000,
-    "re_exploration_avoided": 18500,
-    "routing": 9500,
-    "total": 70000
+    "arrest_count": 5,
+    "re_exploration_avoided": 0,
+    "routing": 0,
+    "certified": 0,
+    "by_cost_basis": {
+      "usd": {
+        "total": -4500,
+        "block_count": 3,
+        "arrest_count": 5
+      }
+    },
+    "restated": {
+      "tasks": 1,
+      "total": -500
+    }
   },
   "price_table_version": "pt_2026_09_01",
   "guarantee_grade": false,
