@@ -20,6 +20,7 @@ from test_memory_pg import (
     DAY,
     SESSION_ROW,
     _artifact_row,
+    _consent_extract,
     _mk_cert,
     _mk_tenant,
     _outcomes,
@@ -144,12 +145,13 @@ async def _served(c, tenant, viewer=None) -> set[str]:
     return {a["artifact_id"] for a in resp.json()["artifacts"]}
 
 
-async def test_extract_stamps_the_enrolled_owner_and_never_merges_two_owners(conn):
-    tenant = await _mk_team(conn)
-    cert = await _mk_cert(conn, tenant)
+async def test_extract_stamps_the_enrolled_owner_and_never_merges_two_owners(admin_conn, conn):
+    tenant = await _mk_team(admin_conn)
+    await _consent_extract(admin_conn, tenant)
+    cert = await _mk_cert(admin_conn, tenant)
     d_owner, d_member = (
-        await _mk_device(conn, tenant, OWNER),
-        await _mk_device(conn, tenant, MEMBER),
+        await _mk_device(admin_conn, tenant, OWNER),
+        await _mk_device(admin_conn, tenant, MEMBER),
     )
     choke = MockChoke()
     events = [{**SESSION_ROW["events"][0], "digest": "d1"}]
@@ -194,12 +196,12 @@ async def test_extract_stamps_the_enrolled_owner_and_never_merges_two_owners(con
     }
 
 
-async def test_serving_predicate_in_a_team_tenant(pool, conn):
-    tenant = await _mk_team(conn)
-    cert = await _mk_cert(conn, tenant)
+async def test_serving_predicate_in_a_team_tenant(admin_conn, pool, conn):
+    tenant = await _mk_team(admin_conn)
+    cert = await _mk_cert(admin_conn, tenant)
     d_owner, d_member = (
-        await _mk_device(conn, tenant, OWNER),
-        await _mk_device(conn, tenant, MEMBER),
+        await _mk_device(admin_conn, tenant, OWNER),
+        await _mk_device(admin_conn, tenant, MEMBER),
     )
     mine_o = await _plant(conn, tenant, cert, d_owner, OWNER)
     legacy = await _plant(conn, tenant, cert, d_owner, None)
@@ -211,21 +213,21 @@ async def test_serving_predicate_in_a_team_tenant(pool, conn):
         # the member has not consented yet: nothing they share reaches the owner
         assert await _served(c, tenant, OWNER) == {mine_o, legacy}
         assert await _served(c, tenant, MEMBER) == {mine_m, shared_m}
-        await _consent(conn, tenant, d_member, True)
+        await _consent(admin_conn, tenant, d_member, True)
         assert await _served(c, tenant, OWNER) == {mine_o, legacy, shared_m}
-        await _consent(conn, tenant, d_member, False)
+        await _consent(admin_conn, tenant, d_member, False)
         assert await _served(c, tenant, OWNER) == {mine_o, legacy}
-        await _consent(conn, tenant, d_member, True)
-        async with conn.transaction():
-            await set_local_tenant(conn, tenant)
-            await conn.execute(
+        await _consent(admin_conn, tenant, d_member, True)
+        async with admin_conn.transaction():
+            await set_local_tenant(admin_conn, tenant)
+            await admin_conn.execute(
                 "UPDATE m1_tenants SET shared_memory = false WHERE id = $1", UUID(tenant)
             )
         assert await _served(c, tenant, OWNER) == {mine_o, legacy}
         assert await _served(c, tenant, "omium:stranger") == set()
-        async with conn.transaction():
-            await set_local_tenant(conn, tenant)
-            await conn.execute(
+        async with admin_conn.transaction():
+            await set_local_tenant(admin_conn, tenant)
+            await admin_conn.execute(
                 "UPDATE m1_tenants SET shared_memory = true WHERE id = $1", UUID(tenant)
             )
         resp = await c.get(
@@ -238,9 +240,9 @@ async def test_serving_predicate_in_a_team_tenant(pool, conn):
         }
         # a leaver's last token reads only their own artifacts, never what teammates share
         leaver = f"omium:leaver-{uuid4()}"
-        async with conn.transaction():
-            await set_local_tenant(conn, tenant)
-            await conn.execute(
+        async with admin_conn.transaction():
+            await set_local_tenant(admin_conn, tenant)
+            await admin_conn.execute(
                 "INSERT INTO m1_team_members (tenant_id, subject, role, left_at) "
                 "VALUES ($1, $2, 'member', now())",
                 UUID(tenant),
@@ -262,11 +264,33 @@ async def test_serving_predicate_in_a_team_tenant(pool, conn):
         assert {o["artifact_id"] for o in resp.json()["outcomes"]} == {mine_m, shared_m}
 
 
-async def test_non_team_tenant_serves_everything_to_any_viewer(pool, conn):
-    tenant = await _mk_team(conn, members=())
-    org = await _mk_tenant(conn)
-    cert, o_cert = await _mk_cert(conn, tenant), await _mk_cert(conn, org)
-    device, o_device = await _mk_device(conn, tenant, OWNER), await _mk_device(conn, org, "idp:a")
+async def test_team_consent_is_every_device_not_the_last_writer(admin_conn, pool, conn):
+    tenant = await _mk_team(admin_conn)
+    cert = await _mk_cert(admin_conn, tenant)
+    await _mk_device(admin_conn, tenant, OWNER)
+    laptop, desktop = (
+        await _mk_device(admin_conn, tenant, MEMBER),
+        await _mk_device(admin_conn, tenant, MEMBER),
+    )
+    shared = await _plant(conn, tenant, cert, laptop, MEMBER, scope="team")
+    async with client(pool, MockChoke()) as c:
+        await _consent(admin_conn, tenant, desktop, False)
+        await _consent(admin_conn, tenant, laptop, True)
+        assert shared not in await _served(c, tenant, OWNER)
+        await _consent(admin_conn, tenant, desktop, True)
+        assert shared in await _served(c, tenant, OWNER)
+        await _consent(admin_conn, tenant, laptop, False)
+        assert shared not in await _served(c, tenant, OWNER)
+
+
+async def test_non_team_tenant_serves_everything_to_any_viewer(admin_conn, pool, conn):
+    tenant = await _mk_team(admin_conn, members=())
+    org = await _mk_tenant(admin_conn)
+    cert, o_cert = await _mk_cert(admin_conn, tenant), await _mk_cert(admin_conn, org)
+    device, o_device = (
+        await _mk_device(admin_conn, tenant, OWNER),
+        await _mk_device(admin_conn, org, "idp:a"),
+    )
     ids = {
         await _plant(conn, tenant, cert, device, OWNER),
         await _plant(conn, tenant, cert, device, None),
@@ -288,12 +312,12 @@ async def test_non_team_tenant_serves_everything_to_any_viewer(pool, conn):
                 assert resp.status_code == 200, (action, resp.text)
 
 
-async def test_actions_are_owner_only_and_share_needs_consent(pool, conn):
-    tenant = await _mk_team(conn)
-    cert = await _mk_cert(conn, tenant)
+async def test_actions_are_owner_only_and_share_needs_consent(admin_conn, pool, conn):
+    tenant = await _mk_team(admin_conn)
+    cert = await _mk_cert(admin_conn, tenant)
     d_owner, d_member = (
-        await _mk_device(conn, tenant, OWNER),
-        await _mk_device(conn, tenant, MEMBER),
+        await _mk_device(admin_conn, tenant, OWNER),
+        await _mk_device(admin_conn, tenant, MEMBER),
     )
     of_owner = await _plant(conn, tenant, cert, d_owner, OWNER)
     legacy = await _plant(conn, tenant, cert, d_owner, None)
@@ -318,7 +342,7 @@ async def test_actions_are_owner_only_and_share_needs_consent(pool, conn):
             refused(await act(legacy, action, MEMBER), "not_owner")
         assert len(choke.appended) == n
         refused(await act(of_member, "share", MEMBER), "consent_required")
-        await _consent(conn, tenant, d_member, True)
+        await _consent(admin_conn, tenant, d_member, True)
         assert (await act(of_member, "share", MEMBER)).json() == {
             "artifact_id": of_member,
             "scope": "team",
@@ -331,12 +355,12 @@ async def test_actions_are_owner_only_and_share_needs_consent(pool, conn):
         assert (await act(uuid4(), "pin", MEMBER)).status_code == 404
 
 
-async def test_admission_counts_only_the_owners_evidence_in_a_team(conn):
-    tenant = await _mk_team(conn)
-    cert = await _mk_cert(conn, tenant)
+async def test_admission_counts_only_the_owners_evidence_in_a_team(admin_conn, conn):
+    tenant = await _mk_team(admin_conn)
+    cert = await _mk_cert(admin_conn, tenant)
     d_owner, d_member = (
-        await _mk_device(conn, tenant, OWNER),
-        await _mk_device(conn, tenant, MEMBER),
+        await _mk_device(admin_conn, tenant, OWNER),
+        await _mk_device(admin_conn, tenant, MEMBER),
     )
     a = extract.Artifact(
         id=extract.artifact_id(tenant, "pitfall", TRIGGER, "g"),

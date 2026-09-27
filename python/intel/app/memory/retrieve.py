@@ -23,11 +23,13 @@ INJECTABLE_KINDS = frozenset({"pitfall", "fix_pattern", "invariant"})
 # Doc 15 fragments over memory_artifacts: $1 is the tenant, $2 the viewer (NULL = unfiltered).
 # Once a tenant has had a member it stays per-person: a leaver's last token never reads tenant-wide.
 IS_TEAM = "EXISTS (SELECT 1 FROM m1_team_members WHERE tenant_id = $1 AND role = 'member')"
-# The newest consent row across a subject's approved devices in the tenant.
+# Team consent is per device: TRUE only when every approved device's latest row says team.
 LATEST_TEAM_CONSENT = (
-    "(SELECT c.team FROM m1_device_consents c JOIN m1_device_enrollments e "
+    "(SELECT bool_and(l.team) FROM (SELECT DISTINCT ON (c.device_id) c.team "
+    "FROM m1_device_consents c JOIN m1_device_enrollments e "
     "ON e.device_id = c.device_id AND e.tenant_id = c.tenant_id AND e.status = 'approved' "
-    "WHERE c.tenant_id = $1 AND e.oidc_subject = {subject} ORDER BY c.recorded_at DESC LIMIT 1)"
+    "WHERE c.tenant_id = $1 AND e.oidc_subject = {subject} "
+    "ORDER BY c.device_id, c.row_seq DESC) l)"
 )
 # NULL owner = the tenant owner's.
 OWNS = (

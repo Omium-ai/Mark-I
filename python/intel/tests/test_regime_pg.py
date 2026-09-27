@@ -6,13 +6,14 @@ Same DSN gating as test_policy_compiler_pg.py."""
 
 import asyncpg
 import pytest
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.policy_compiler import jobs
 from app.policy_compiler.cpvs import Regime
 from app.pricing import UnpinnedModel, load_table
 from app.regime import RegimeUnset, load_regime, set_regime
 from choke_mock import MockChoke
 from test_policy_compiler_pg import DSN, REQUIRE_STORES, _ctx, _drafts, _mk_tenant, _rows
+from tests.roles import service_pool
 
 pytestmark = [
     pytest.mark.integration,
@@ -28,7 +29,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN unset under M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"{DSN!r} unreachable under M1_REQUIRE_STORES=1: {exc!r}", pytrace=False)
@@ -39,8 +40,8 @@ async def pool():
         await p.close()
 
 
-async def test_set_and_load_both_bases_with_history(pool):
-    tenant = await _mk_tenant(pool)
+async def test_set_and_load_both_bases_with_history(admin, pool):
+    tenant = await _mk_tenant(admin)
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         with pytest.raises(RegimeUnset, match="no regime row"):
@@ -86,8 +87,8 @@ async def test_set_and_load_both_bases_with_history(pool):
         assert history[1]["set_at"] >= history[0]["set_at"]
 
 
-async def test_cross_basis_inputs_and_unpinned_models_are_refused(pool):
-    tenant = await _mk_tenant(pool)
+async def test_cross_basis_inputs_and_unpinned_models_are_refused(admin, pool):
+    tenant = await _mk_tenant(admin)
     bad = [
         dict(cost_basis="usd", v_default=1.0),  # usd without a pinned model
         dict(
@@ -120,8 +121,8 @@ async def test_cross_basis_inputs_and_unpinned_models_are_refused(pool):
         assert await conn.fetchval("SELECT count(*) FROM m1_tenant_regime_history") == 0
 
 
-async def test_history_is_append_only_and_delete_is_revoked(pool):
-    tenant = await _mk_tenant(pool)
+async def test_history_is_append_only_and_delete_is_revoked(admin, pool):
+    tenant = await _mk_tenant(admin)
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         await set_regime(
@@ -138,7 +139,7 @@ async def test_history_is_append_only_and_delete_is_revoked(pool):
         "DELETE FROM m1_tenant_regime_history",
         "TRUNCATE m1_tenant_regime_history",
     ):
-        async with pool.acquire() as conn, conn.transaction():
+        async with admin.acquire() as conn, conn.transaction():
             await set_local_tenant(conn, tenant)
             with pytest.raises(asyncpg.InsufficientPrivilegeError, match="append-only"):
                 await conn.execute(stmt)
@@ -158,8 +159,8 @@ async def test_history_is_append_only_and_delete_is_revoked(pool):
     }
 
 
-async def test_rls_hides_and_refuses_the_other_tenant(pool):
-    tenant, other = await _mk_tenant(pool), await _mk_tenant(pool)
+async def test_rls_hides_and_refuses_the_other_tenant(admin, pool):
+    tenant, other = await _mk_tenant(admin), await _mk_tenant(admin)
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         await set_regime(
@@ -189,13 +190,13 @@ async def test_rls_hides_and_refuses_the_other_tenant(pool):
         assert await conn.fetchval("SELECT count(*) FROM m1_tenant_regimes") == 0
 
 
-async def test_compile_prices_the_tenant_from_its_own_regime_row(pool, monkeypatch):
+async def test_compile_prices_the_tenant_from_its_own_regime_row(admin, pool, monkeypatch):
     """Positive control through the production mechanism: no injected Regime -- jobs.compile
     reads m1_075 under the tenant GUC, prices through app/pricing, and the draft carries the
     price-table digest. The ledger fixture is quota-stamped, so a quota regime compiles and a usd
     regime is refused as a basis mismatch (CON-014)."""
     monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
-    tenant = await _mk_tenant(pool)
+    tenant = await _mk_tenant(admin)
     choke = MockChoke()
     choke.templates[jobs.ATTEMPTS_TEMPLATE] = _rows()
     async with pool.acquire() as conn, conn.transaction():
@@ -229,9 +230,9 @@ async def test_compile_prices_the_tenant_from_its_own_regime_row(pool, monkeypat
     assert "knee[quota]" in draft["knee_note"] and "priced by" not in draft["knee_note"]
 
 
-async def test_usd_draft_carries_the_price_table_digest(pool, monkeypatch):
+async def test_usd_draft_carries_the_price_table_digest(admin, pool, monkeypatch):
     monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
-    tenant = await _mk_tenant(pool)
+    tenant = await _mk_tenant(admin)
     choke = MockChoke()
     choke.templates[jobs.ATTEMPTS_TEMPLATE] = [{**r, "cost_basis": "usd"} for r in _rows()]
     async with pool.acquire() as conn, conn.transaction():

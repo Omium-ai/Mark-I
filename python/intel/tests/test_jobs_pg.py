@@ -8,9 +8,10 @@ from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.jobs.registry import Job
 from app.jobs.runner import MAX_ATTEMPTS, run_many, run_one
+from tests.roles import service_pool
 
 DSN = os.environ.get("M1_TEST_PG_DSN", "")
 REQUIRE_STORES = os.environ.get("M1_REQUIRE_STORES", "0") == "1"
@@ -32,7 +33,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN unset under M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"{DSN!r} unreachable under M1_REQUIRE_STORES=1: {exc!r}", pytrace=False)
@@ -89,8 +90,8 @@ def _cascade(calls: list[str], failing: set[str] = frozenset()):
     return jobs, {j.name: target(j.name) for j in jobs}
 
 
-async def test_prerequisite_failure_skips_the_chain_but_not_independents(pool):
-    tenant = await _mk_tenant(pool)
+async def test_prerequisite_failure_skips_the_chain_but_not_independents(admin, pool):
+    tenant = await _mk_tenant(admin)
     calls: list[str] = []
     jobs, targets = _cascade(calls, failing={"memory.extract"})
     results = await run_many(pool, None, jobs, targets, tenant_id=tenant, now=NOW)
@@ -108,8 +109,8 @@ async def test_prerequisite_failure_skips_the_chain_but_not_independents(pool):
     assert (await _row(pool, tenant, "memory.extract"))["error"].startswith("RuntimeError")
 
 
-async def test_absent_prerequisite_row_skips_the_dependent(pool):
-    tenant = await _mk_tenant(pool)
+async def test_absent_prerequisite_row_skips_the_dependent(admin, pool):
+    tenant = await _mk_tenant(admin)
     calls: list[str] = []
     jobs, targets = _cascade(calls)
     admit = next(j for j in jobs if j.name == "memory.admit")
@@ -122,8 +123,8 @@ async def test_absent_prerequisite_row_skips_the_dependent(pool):
     ] == "prerequisite memory.extract is absent"
 
 
-async def test_ordering_and_idempotent_rerun(pool):
-    tenant = await _mk_tenant(pool)
+async def test_ordering_and_idempotent_rerun(admin, pool):
+    tenant = await _mk_tenant(admin)
     calls: list[str] = []
     jobs, targets = _cascade(calls)
     first = await run_many(pool, None, jobs, targets, tenant_id=tenant, now=NOW)
@@ -140,8 +141,8 @@ async def test_ordering_and_idempotent_rerun(pool):
     assert (admit["outcome"], admit["attempts"], admit["requested"]) == ("succeeded", 1, 2)
 
 
-async def test_retry_is_the_same_row_and_parks_at_max_attempts(pool):
-    tenant = await _mk_tenant(pool)
+async def test_retry_is_the_same_row_and_parks_at_max_attempts(admin, pool):
+    tenant = await _mk_tenant(admin)
     job = Job("flaky", "x:y", "nightly")
     remaining = {"fails": 1}
 
@@ -170,14 +171,14 @@ async def test_retry_is_the_same_row_and_parks_at_max_attempts(pool):
     assert (row["attempts"], row["requested"]) == (MAX_ATTEMPTS, MAX_ATTEMPTS + 1)
 
 
-async def test_rls_isolation_on_job_runs(pool):
+async def test_rls_isolation_on_job_runs(admin, pool):
     async with pool.acquire() as conn:
         bypass = await conn.fetchval(
             "SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname = current_user"
         )
     if bypass:
         pytest.fail("test role bypasses RLS — isolation not observable from here", pytrace=False)
-    tenant_a, tenant_b = await _mk_tenant(pool), await _mk_tenant(pool)
+    tenant_a, tenant_b = await _mk_tenant(admin), await _mk_tenant(admin)
     job = Job("solo", "x:y", "nightly")
 
     async def ok(ctx) -> None:
@@ -200,11 +201,11 @@ async def test_rls_isolation_on_job_runs(pool):
     assert (await _row(pool, tenant_a, "solo"))["outcome"] == "succeeded"
 
 
-async def test_job_key_receipt_records_success_with_null_receipt_id(pool):
+async def test_job_key_receipt_records_success_with_null_receipt_id(admin, pool):
     """tvo.rollup_verify returns the write's job_key, not a receipt UUID; job_runs.receipt_id is a
     uuid column, so the runner stores NULL and the row still reads succeeded — it must never crash
     the run and leave the row 'running' (prod 2026-09-19: every hourly rollup did exactly that)."""
-    tenant = await _mk_tenant(pool)
+    tenant = await _mk_tenant(admin)
     job = Job("tvo.rollup_verify", "x:y", "hourly")
 
     async def rollup(ctx) -> str:
@@ -224,8 +225,8 @@ async def test_job_key_receipt_records_success_with_null_receipt_id(pool):
 # m1_084: the directory the schedulers enumerate fills through the trigger the moment a
 # tenant is inserted (the request path's insert, under its own GUC), and `--tenant all`
 # reads it — FORCE RLS on m1_tenants admits one id per GUC, so nothing else could list them.
-async def test_tenant_directory_enumerates_every_active_tenant(pool):
-    a, b = await _mk_tenant(pool), await _mk_tenant(pool)
+async def test_tenant_directory_enumerates_every_active_tenant(admin, pool):
+    a, b = await _mk_tenant(admin), await _mk_tenant(admin)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT tenant_id::text AS t, status, kind FROM m1_tenant_directory"
@@ -234,7 +235,7 @@ async def test_tenant_directory_enumerates_every_active_tenant(pool):
         )
     assert {r["t"] for r in rows} == {a, b}
     assert {(r["status"], r["kind"]) for r in rows} == {("active", "org")}
-    async with pool.acquire() as conn, conn.transaction():
+    async with admin.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, b)
         await conn.execute("UPDATE m1_tenants SET status = 'suspended' WHERE id = $1", UUID(b))
     async with pool.acquire() as conn:

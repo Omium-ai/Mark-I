@@ -32,7 +32,11 @@ class JobContext:
 
 
 def window_for(cadence: str, now: datetime, day: date | None = None) -> datetime:
-    """Closed window: yesterday (or --day) for nightly, the previous full hour for hourly."""
+    """Closed window: yesterday (or --day) for nightly, the previous full hour for hourly, the
+    previous Monday-to-Sunday week (or the one holding --day) for weekly."""
+    if cadence == "weekly":
+        d = day or (now.astimezone(UTC).date() - timedelta(days=7))
+        return datetime.combine(d - timedelta(days=d.weekday()), datetime.min.time(), UTC)
     if cadence == "hourly":
         return now.astimezone(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
     return datetime.combine(

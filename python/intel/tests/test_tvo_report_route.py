@@ -29,6 +29,7 @@ GROUNDED = next(r for r in FIXTURE["regimes"] if r["name"] == "grounded_rubric_a
 POP = FIXTURE["population"]
 
 BEARER = "op-token-tenant-a"
+Q = {"tenant_id": "ten-a", "cost_basis": "usd"}
 PRICE = ModelPrice("prices-v3", 3e-6, 15e-6, 3.75e-6, 0.3e-6)
 
 # Five single-attempt tasks reproducing the Paper I grounded-rubric operating point from
@@ -97,7 +98,7 @@ def choke_with(coverage_rows, rows=PAPER1_ROWS) -> MockChoke:
 async def test_golden_paper1_grounded_rubric_guarantee_grade():
     app = build_app(choke_with(GOOD_COVERAGE))
     async with client_for(app) as client:
-        resp = await client.get("/v1/reports/tvo", params={"tenant_id": "ten-a"})
+        resp = await client.get("/v1/reports/tvo", params=Q)
     assert resp.status_code == 200
     body = resp.json()
 
@@ -123,7 +124,7 @@ async def test_golden_paper1_grounded_rubric_guarantee_grade():
 async def test_m1e_5004_refusal_in_wire_shape():
     app = build_app(choke_with(LOW_COVERAGE))
     async with client_for(app) as client:
-        resp = await client.get("/v1/reports/tvo", params={"tenant_id": "ten-a"})
+        resp = await client.get("/v1/reports/tvo", params=Q)
     assert resp.status_code == 200  # 08 §9: M1E-5004 is a 200-body refusal, CLI exit 4
     body = resp.json()
     assert body["guarantee_grade"] is False
@@ -135,7 +136,7 @@ async def test_m1e_5004_refusal_in_wire_shape():
 async def test_uncertified_cert_downgrades_and_states_status():
     app = build_app(choke_with(GOOD_COVERAGE), cert=NoiseCertificate("bootstrapping"))
     async with client_for(app) as client:
-        resp = await client.get("/v1/reports/tvo", params={"tenant_id": "ten-a"})
+        resp = await client.get("/v1/reports/tvo", params=Q)
     body = resp.json()
     assert body["guarantee_grade"] is False
     assert "bootstrapping" in body["refusal"]  # §5.4: the status string appears verbatim
@@ -145,9 +146,7 @@ async def test_uncertified_cert_downgrades_and_states_status():
 async def test_bad_window_is_m1e_2001():
     app = build_app(choke_with(GOOD_COVERAGE))
     async with client_for(app) as client:
-        resp = await client.get(
-            "/v1/reports/tvo", params={"tenant_id": "ten-a", "window": "banana"}
-        )
+        resp = await client.get("/v1/reports/tvo", params={**Q, "window": "banana"})
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "M1E-2001"
 
@@ -155,7 +154,7 @@ async def test_bad_window_is_m1e_2001():
 async def test_empty_window_is_m1e_2001():
     app = build_app(choke_with(GOOD_COVERAGE, rows=[]))
     async with client_for(app) as client:
-        resp = await client.get("/v1/reports/tvo", params={"tenant_id": "ten-a"})
+        resp = await client.get("/v1/reports/tvo", params=Q)
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "M1E-2001"
 
@@ -166,7 +165,7 @@ async def test_unmeasurable_window_is_m1e_2001_not_500():
     rows = [dict(r, verdict_stage="provisional") for r in PAPER1_ROWS]
     app = build_app(choke_with(GOOD_COVERAGE, rows=rows))
     async with client_for(app) as client:
-        resp = await client.get("/v1/reports/tvo", params={"tenant_id": "ten-a"})
+        resp = await client.get("/v1/reports/tvo", params=Q)
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "M1E-2001"
     assert "unmeasurable" in resp.json()["error"]["message"]
@@ -177,7 +176,7 @@ async def test_choke_outage_surfaces_as_retryable_503():
     choke.fail_with = (503, "M1E-9500", "clickhouse unavailable")
     app = build_app(choke)
     async with client_for(app) as client:
-        resp = await client.get("/v1/reports/tvo", params={"tenant_id": "ten-a"})
+        resp = await client.get("/v1/reports/tvo", params=Q)
     assert resp.status_code == 503
     assert resp.headers["Retry-After"] == "5"
     assert resp.json()["error"]["code"] == "M1E-9500"
@@ -188,6 +187,6 @@ async def test_missing_bearer_fails_closed_as_403():
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://intel"
     ) as client:  # no Authorization header at all
-        resp = await client.get("/v1/reports/tvo", params={"tenant_id": "ten-a"})
+        resp = await client.get("/v1/reports/tvo", params=Q)
     assert resp.status_code == 403
     assert resp.json()["error"]["code"] == "M1E-1001"

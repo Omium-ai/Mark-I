@@ -1,7 +1,9 @@
 """pydantic-settings config (06 §1.1): DSN as @property with sslmode=require, intel_app
 role only."""
 
-from pydantic import SecretStr
+from typing import Literal
+
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +30,27 @@ class Settings(BaseSettings):
     # nothing and every nightly export failed in prod with "required".
     corpus_root_uri: str | None = None
     tenant_hmac_pepper: SecretStr | None = None
+    # rm.contributions (16 L8): the ingest bucket (read) and the RM training root (write)
+    contributions_root_uri: str | None = None
+    rm_root_uri: str | None = None
+    # SSE-KMS key every rm/contributions/* PutObject must name; required when rm_root_uri is s3://
+    rm_contributions_kms_key_arn: str | None = None
+    # SM mark1-training-policy; empty ⇒ every closed-provider row exports eval-only
+    authorized_training_providers: str = ""
+    # 16 §L1: memory.extract's model path (raw name, shared with the adjudicator) and its caps
+    llm_router_url: str = Field(default="", validation_alias="LLM_ROUTER_URL")
+    memory_max_sessions_per_day: int = 30  # per tenant per UTC day, ledgered (m1_101)
+    memory_max_sessions_per_run: int = 30  # the one-run bound on top of it
+    memory_max_input_tokens: int = 20_000
+    # 16-release L3: Customer.io region the register names; else boot refusal (controld R1 same var)
+    customerio_region: Literal["us", "eu"] = Field(
+        default="us", validation_alias="CUSTOMERIO_REGION"
+    )
+
+    @field_validator("customerio_region", mode="before")
+    @classmethod
+    def _region_default(cls, v: object) -> object:
+        return v or "us"
 
     @property
     def pg_dsn_app(self) -> str:

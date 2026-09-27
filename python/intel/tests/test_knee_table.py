@@ -94,6 +94,7 @@ def test_knee_table_usd_and_quota_golden():
     # Wire shape = 07 knee-table verbatim; absent p_lcb is absent, not null (D-Z).
     assert usd.wire() == {
         "cost_basis": "usd",
+        "basis": "certified",
         "rows": [
             {"n": 1, "c_n": pytest.approx(0.0155), "p_lcb": pytest.approx(P_LCB_1)},
             {"n": 2, "c_n": pytest.approx(0.012), "p_lcb": pytest.approx(P_LCB_2)},

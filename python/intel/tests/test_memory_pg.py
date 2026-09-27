@@ -13,11 +13,12 @@ from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.memory import admit, extract
 from app.tvo.reader import QuerychokeReader
 from choke_mock import MockChoke
 from mark1_receipts import ReceiptAppendError, append_server_record
+from tests.roles import service_pool
 
 DSN = os.environ.get("M1_TEST_PG_DSN", "")
 REQUIRE_STORES = os.environ.get("M1_REQUIRE_STORES", "0") == "1"
@@ -44,7 +45,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN is unset and M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"M1_REQUIRE_STORES=1 and {DSN!r} is unreachable: {exc!r}", pytrace=False)
@@ -75,6 +76,20 @@ async def _mk_tenant(conn) -> str:
             "INSERT INTO m1_tenants (id, org_id, name) VALUES ($1, $2, $3)", tenant, org, tag
         )
     return str(tenant)
+
+
+async def _consent_extract(conn, tenant: str, **over) -> None:
+    """The mem:extract@1 row controld's "Learn from my sessions" switch writes (m1_092)."""
+    row = {"subprocessor": "nebius", "region": "global", **over}
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant)
+        await conn.execute(
+            "INSERT INTO m1_cloud_judge_consents (tenant_id, judge_id, subprocessor, region, "
+            "max_tier, consented_by) VALUES ($1, 'mem:extract@1', $2, $3, 'E0', 'test')",
+            UUID(tenant),
+            row["subprocessor"],
+            row["region"],
+        )
 
 
 async def _mk_cert(conn, tenant: str, *, expired: bool = False, status: str = "certified") -> str:
@@ -203,11 +218,15 @@ async def test_artifact_kinds_equal_db_enum(conn):
     assert {r["enumlabel"] for r in rows} == extract.KINDS
 
 
-async def test_extraction_refuses_uncertified_session_at_the_live_cert(conn):
-    tenant = await _mk_tenant(conn)
-    live, expired = await _mk_cert(conn, tenant), await _mk_cert(conn, tenant, expired=True)
-    boot = await _mk_cert(conn, tenant, status="bootstrapping")
-    device = await _mk_device(conn, tenant)
+async def test_extraction_refuses_uncertified_session_at_the_live_cert(admin_conn, conn):
+    tenant = await _mk_tenant(admin_conn)
+    await _consent_extract(admin_conn, tenant)
+    live, expired = (
+        await _mk_cert(admin_conn, tenant),
+        await _mk_cert(admin_conn, tenant, expired=True),
+    )
+    boot = await _mk_cert(admin_conn, tenant, status="bootstrapping")
+    device = await _mk_device(admin_conn, tenant)
     choke = MockChoke()
 
     def row(task, stage, cert):
@@ -280,9 +299,45 @@ async def test_extraction_refuses_uncertified_session_at_the_live_cert(conn):
     assert rerun.inserted == 0
 
 
-async def test_admission_below_lcb_refused_at_the_db(conn):
-    tenant = await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
+async def test_extraction_reads_nothing_without_a_live_mem_extract_consent(admin_conn, conn):
+    tenant = await _mk_tenant(admin_conn)
+    choke = MockChoke()
+
+    class Batch:
+        async def run(self, requests):
+            raise AssertionError("an unconsented tenant reached the router")
+
+    async def extract_once() -> extract.ExtractReport:
+        async with choke.client() as http:
+            return await extract.run_extract(
+                QuerychokeReader(http, "http://choke"),
+                conn,
+                Batch(),
+                tenant_id=tenant,
+                day=DAY,
+                bearer=BEARER,
+            )
+
+    assert await extract_once() == extract.ExtractReport(0, 0, 0, 0, 0, 0)
+    await _consent_extract(admin_conn, tenant, subprocessor="anthropic", region="us")
+    assert await extract_once() == extract.ExtractReport(0, 0, 0, 0, 0, 0)
+    async with admin_conn.transaction():
+        await set_local_tenant(admin_conn, tenant)
+        await admin_conn.execute(
+            "UPDATE m1_cloud_judge_consents SET revoked_at = now(), revoked_reason = 'settings' "
+            "WHERE tenant_id = $1",
+            UUID(tenant),
+        )
+    await _consent_extract(admin_conn, tenant)
+    assert await extract.extraction_consented(conn, tenant)
+    assert await conn.fetchval(
+        "SELECT has_table_privilege('intel_app', 'm1_cloud_judge_consents', 'SELECT')"
+    ), "m1_092's grant: intel reads the consent as intel_app in prod"
+
+
+async def test_admission_below_lcb_refused_at_the_db(admin_conn, conn):
+    tenant = await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
     a = await _mk_artifact(conn, tenant, cert, device)
     choke = MockChoke()
     with pytest.raises(asyncpg.CheckViolationError) as ei:
@@ -304,9 +359,9 @@ async def test_admission_below_lcb_refused_at_the_db(conn):
     assert [x[1] for x in _appended(choke, tenant)] == [a.id]
 
 
-async def test_admission_above_lcb_admitted_with_receipt(conn):
-    tenant = await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
+async def test_admission_above_lcb_admitted_with_receipt(admin_conn, conn):
+    tenant = await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
     first, second = (
         await _mk_artifact(conn, tenant, cert, device),
         await _mk_artifact(conn, tenant, cert, device),
@@ -359,10 +414,13 @@ async def test_admission_above_lcb_admitted_with_receipt(conn):
     assert len(choke.appended) == 2
 
 
-async def test_admission_under_expired_cert_refused_by_trigger(conn):
-    tenant = await _mk_tenant(conn)
-    live, expired = await _mk_cert(conn, tenant), await _mk_cert(conn, tenant, expired=True)
-    a = await _mk_artifact(conn, tenant, live, await _mk_device(conn, tenant))
+async def test_admission_under_expired_cert_refused_by_trigger(admin_conn, conn):
+    tenant = await _mk_tenant(admin_conn)
+    live, expired = (
+        await _mk_cert(admin_conn, tenant),
+        await _mk_cert(admin_conn, tenant, expired=True),
+    )
+    a = await _mk_artifact(conn, tenant, live, await _mk_device(admin_conn, tenant))
     with pytest.raises(asyncpg.CheckViolationError, match="not currently certified"):
         await admit.admit_artifact(
             conn,
@@ -378,11 +436,11 @@ async def test_admission_under_expired_cert_refused_by_trigger(conn):
     assert (await _artifact_row(conn, tenant, a.id))["receipt_id"] is None
 
 
-async def test_unreceipted_admission_never_flips(conn):
+async def test_unreceipted_admission_never_flips(admin_conn, conn):
     """controld answers 500 (or refuses the credential): the flip is not attempted, the
     transaction rolls back, and the artifact stays exactly where it was (fail-closed)."""
-    tenant = await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
+    tenant = await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
     a = await _mk_artifact(conn, tenant, cert, device)
     choke = MockChoke()
     for failure, code in (
@@ -420,10 +478,13 @@ async def test_unreceipted_admission_never_flips(conn):
     assert (await _artifact_row(conn, tenant, a.id))["state"] == "admitted"
 
 
-async def test_revoked_device_artifacts_are_not_admitted(conn):
-    tenant = await _mk_tenant(conn)
-    cert = await _mk_cert(conn, tenant)
-    good, revoked = await _mk_device(conn, tenant), await _mk_device(conn, tenant, revoked=True)
+async def test_revoked_device_artifacts_are_not_admitted(admin_conn, conn):
+    tenant = await _mk_tenant(admin_conn)
+    cert = await _mk_cert(admin_conn, tenant)
+    good, revoked = (
+        await _mk_device(admin_conn, tenant),
+        await _mk_device(admin_conn, tenant, revoked=True),
+    )
     tainted, clean = (
         await _mk_artifact(conn, tenant, cert, revoked),
         await _mk_artifact(conn, tenant, cert, good),
@@ -450,9 +511,9 @@ async def test_revoked_device_artifacts_are_not_admitted(conn):
     assert json.loads(next(iter(choke.receipts.values()))["payload"])["subject_id"] == str(clean.id)
 
 
-async def test_hold_and_retire_never_receipt(conn):
-    tenant = await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
+async def test_hold_and_retire_never_receipt(admin_conn, conn):
+    tenant = await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
     a = await _mk_artifact(conn, tenant, cert, device)
     choke = MockChoke()
     choke.templates[admit.OUTCOME_TEMPLATE] = lambda params: (
@@ -473,13 +534,13 @@ async def test_hold_and_retire_never_receipt(conn):
     assert choke.appended == []
 
 
-async def test_certified_outcomes_reads_controld_fixture_rows(conn):
+async def test_certified_outcomes_reads_controld_fixture_rows(admin_conn, conn):
     """The `artifact_outcomes` wire, both ways: controld's fixture rows (aliases locked on the
     Go side) go through certified_outcomes — the certified row under a live cert becomes the
     ADMIT-LCB sample, the row with no stage-final verdict never does (§5.4) — and the request
     carries exactly the half-open window and artifact the template takes."""
-    tenant = await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
+    tenant = await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
     certified, uncertified = OUTCOME_ROWS
     assert (certified["verdict_stage"], uncertified["verdict_stage"]) == ("certified", "")
     rows = [

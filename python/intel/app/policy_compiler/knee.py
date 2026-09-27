@@ -115,6 +115,7 @@ class KneeTable(BaseModel):
     cost_basis: Basis
     rows: tuple[KneeRow, ...]
     v_default: float
+    basis: Literal["certified"] = "certified"  # ADR-0013: Wilson LCBs over the certified set
     # ── publication metadata, never on the wire ──
     task_class: str
     certified_attempts: int
@@ -126,10 +127,11 @@ class KneeTable(BaseModel):
     note: str
 
     def wire(self) -> dict:
-        """Exactly 07's `knee-table` map. An absent `p_lcb` is ABSENT, never null — the
-        CDDL says `? p_lcb: float` and both decoders reject a null there."""
+        """Exactly 07's `knee-table` map, with ADR-0013's `basis`. An absent `p_lcb` is ABSENT,
+        never null — the CDDL says `? p_lcb: float` and both decoders reject a null there."""
         return {
             "cost_basis": self.cost_basis,
+            "basis": self.basis,
             "rows": [r.model_dump(exclude_none=True) for r in self.rows],
             "v_default": self.v_default,
         }

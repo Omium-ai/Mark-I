@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.jobs.runner import JobContext
 from app.policy_compiler import jobs
 from app.policy_compiler.compile import (
@@ -30,6 +30,7 @@ from app.regime import RegimeUnset
 from app.tvo.reader import QuerychokeError
 from choke_mock import MockChoke
 from test_policy_compiler import REGIME, attempts
+from tests.roles import service_pool
 
 DSN = os.environ.get("M1_TEST_PG_DSN", "")
 REQUIRE_STORES = os.environ.get("M1_REQUIRE_STORES", "0") == "1"
@@ -55,7 +56,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN unset under M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"{DSN!r} unreachable under M1_REQUIRE_STORES=1: {exc!r}", pytrace=False)
@@ -110,9 +111,9 @@ def _ctx(pool, tenant) -> JobContext:
     return JobContext(pool=pool, settings=_Settings(), tenant_id=tenant, window_start=WINDOW)
 
 
-async def test_job_writes_one_pending_draft_per_window(pool, monkeypatch):
+async def test_job_writes_one_pending_draft_per_window(admin, pool, monkeypatch):
     monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
-    tenant = await _mk_tenant(pool)
+    tenant = await _mk_tenant(admin)
     choke = MockChoke()
     choke.templates[jobs.ATTEMPTS_TEMPLATE] = _rows()
     async with choke.client() as http:
@@ -131,9 +132,9 @@ async def test_job_writes_one_pending_draft_per_window(pool, monkeypatch):
     assert draft["max_age"].days == 7 and draft["refusal_reason"] is None
 
 
-async def test_violated_knee_gate_is_recorded_refused_and_parks_the_job(pool, monkeypatch):
+async def test_violated_knee_gate_is_recorded_refused_and_parks_the_job(admin, pool, monkeypatch):
     monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
-    tenant = await _mk_tenant(pool)
+    tenant = await _mk_tenant(admin)
     choke = MockChoke()
     choke.templates[jobs.ATTEMPTS_TEMPLATE] = _rows()
     bad = Regime(cost_basis="quota", v_default=10.0, window_limit_tokens=100_000)
@@ -145,9 +146,9 @@ async def test_violated_knee_gate_is_recorded_refused_and_parks_the_job(pool, mo
     assert draft["refusal_reason"].startswith("knee sanity gate (06 §10.3)")
 
 
-async def test_job_refusals_before_any_draft(pool, monkeypatch):
+async def test_job_refusals_before_any_draft(admin, pool, monkeypatch):
     monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
-    tenant = await _mk_tenant(pool)
+    tenant = await _mk_tenant(admin)
     choke = MockChoke()
     async with choke.client() as http:
         # The template is not in controld's closed registry yet: M1E-2008, fail-closed.
@@ -202,8 +203,8 @@ async def _publish_as_controld(conn, tenant: str, channel: str, window: datetime
     return seq
 
 
-async def test_carry_forward_reads_the_last_published_draft_and_rls_hides_it(pool):
-    tenant, other = await _mk_tenant(pool), await _mk_tenant(pool)
+async def test_carry_forward_reads_the_last_published_draft_and_rls_hides_it(admin, pool):
+    tenant, other = await _mk_tenant(admin), await _mk_tenant(admin)
     first = compile_sections(attempts(), REGIME)
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
@@ -212,13 +213,17 @@ async def test_carry_forward_reads_the_last_published_draft_and_rls_hides_it(poo
         assert not await write_draft(conn, tenant, "canary", WINDOW, first)  # ON CONFLICT
         # Pending drafts are not "previous": only a publication is carried forward.
         assert await previous_sections(conn, tenant, "canary") is None
+    async with admin.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant)
         await conn.execute(
             "INSERT INTO bundle_channel_heads (tenant_id, channel) VALUES ($1, 'canary') "
             "ON CONFLICT DO NOTHING",
             UUID(tenant),
         )
         seq = await _publish_as_controld(conn, tenant, "canary", WINDOW)
-        assert seq == 1
+    assert seq == 1
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant)
         assert await previous_sections(conn, tenant, "canary") == first.sections
     # The state-evidence CHECK: a refusal without a reason cannot be stored (own tx: it aborts).
     async with pool.acquire() as conn, conn.transaction():
@@ -242,12 +247,12 @@ async def test_carry_forward_reads_the_last_published_draft_and_rls_hides_it(poo
     assert len(await _drafts(pool, tenant)) == 1
 
 
-async def test_identifiable_spectral_run_reaches_the_compiled_draft(pool, monkeypatch):
+async def test_identifiable_spectral_run_reaches_the_compiled_draft(admin, pool, monkeypatch):
     """m1_087: intel_app can read the adjudicator's spectral_runs row, and jobs.compile turns
     an identifiable one into the draft's verify section (06 §4), not the zero-verifier default."""
     monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
-    tenant = await _mk_tenant(pool)
-    async with pool.acquire() as conn, conn.transaction():
+    tenant = await _mk_tenant(admin)
+    async with admin.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         await conn.execute(
             "INSERT INTO spectral_runs (tenant_id, window_start, window_days, n_tasks, passed, "
@@ -284,11 +289,11 @@ async def test_identifiable_spectral_run_reaches_the_compiled_draft(pool, monkey
     assert "verify: spectral run" in draft["knee_note"] and "identifiable" in draft["knee_note"]
 
 
-async def test_no_spectral_run_carries_the_stable_heads_verify_bytes(pool, monkeypatch):
+async def test_no_spectral_run_carries_the_stable_heads_verify_bytes(admin, pool, monkeypatch):
     """No spectral_runs row at all: verify carries the `stable` head _mk_tenant bootstrapped,
     never the zero-verifier default (the bug this whole change fixes)."""
     monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "intel-svc")
-    tenant = await _mk_tenant(pool)
+    tenant = await _mk_tenant(admin)
     choke = MockChoke()
     choke.templates[jobs.ATTEMPTS_TEMPLATE] = _rows()
     async with choke.client() as http:

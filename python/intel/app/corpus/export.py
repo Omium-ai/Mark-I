@@ -132,7 +132,7 @@ async def training_consented(conn: asyncpg.Connection, tenant_id: str) -> bool:
     ok = await conn.fetchval(
         "SELECT bool_and(training) FROM (SELECT DISTINCT ON (device_id) training"
         " FROM m1_device_consents WHERE tenant_id = $1"
-        " ORDER BY device_id, recorded_at DESC) d",
+        " ORDER BY device_id, row_seq DESC) d",
         uuid.UUID(tenant_id),
     )
     return ok is True

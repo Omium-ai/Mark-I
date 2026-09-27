@@ -11,11 +11,11 @@ from typing import Any
 
 import asyncpg
 import httpx
-from anthropic import AsyncAnthropic
 from mark1_receipts import append_server_record
 
+from app.llm import RouterClient
 from app.memory.admit import ReceiptAppend, run_admit
-from app.memory.extract import AnthropicBatchRunner, BatchRunner, run_extract
+from app.memory.extract import BatchRunner, RouterRunner, run_extract
 from app.memory.retrieve import embed_missing
 from app.tvo.reader import QuerychokeReader
 from app.tvo.rollup import window_close
@@ -51,21 +51,24 @@ def receipt_append(http: httpx.AsyncClient, base_url: str, bearer: str) -> Recei
     return partial(append_server_record, http, base_url, bearer)
 
 
+def router_runner(http: httpx.AsyncClient, url: str) -> BatchRunner | None:
+    return RouterRunner(RouterClient(http, url)) if url else None
+
+
 async def extract(ctx: Any) -> str | None:
     """Scheduler entry (registry `memory.extract`): ctx carries pool, settings, tenant_id, day."""
-    timeout = ctx.settings.http_timeout_s
-    async with (
-        ctx.pool.acquire() as conn,
-        httpx.AsyncClient(timeout=timeout) as http,
-        AsyncAnthropic() as anthropic,
-    ):
+    s = ctx.settings
+    async with ctx.pool.acquire() as conn, httpx.AsyncClient(timeout=s.http_timeout_s) as http:
         await run_extract(
-            QuerychokeReader(http, ctx.settings.querychoke_base_url, tenant_id=ctx.tenant_id),
+            QuerychokeReader(http, s.querychoke_base_url, tenant_id=ctx.tenant_id),
             conn,
-            AnthropicBatchRunner(anthropic),
+            router_runner(http, s.llm_router_url),
             tenant_id=ctx.tenant_id,
             day=ctx.day,
             bearer=bearer_from_env(),
+            max_sessions=s.memory_max_sessions_per_run,
+            max_sessions_per_day=s.memory_max_sessions_per_day,
+            max_input_tokens=s.memory_max_input_tokens,
         )
     return None
 
@@ -92,7 +95,7 @@ async def admit(ctx: Any) -> str | None:
 async def run_nightly(
     reader: QuerychokeReader,
     conn: asyncpg.Connection,
-    batch: BatchRunner,
+    batch: BatchRunner | None,
     append: ReceiptAppend,
     *,
     tenant_id: str,
@@ -132,11 +135,11 @@ def main(argv: list[str] | None = None) -> int:
     async def _run() -> dict[str, Any]:
         conn = await asyncpg.connect(dsn)
         try:
-            async with httpx.AsyncClient(timeout=30.0) as http, AsyncAnthropic() as anthropic:
+            async with httpx.AsyncClient(timeout=30.0) as http:
                 return await run_nightly(
                     QuerychokeReader(http, args.base_url, tenant_id=args.tenant_id),
                     conn,
-                    AnthropicBatchRunner(anthropic),
+                    router_runner(http, os.environ.get("LLM_ROUTER_URL", "")),
                     receipt_append(http, args.base_url, bearer),
                     tenant_id=args.tenant_id,
                     day=args.day,

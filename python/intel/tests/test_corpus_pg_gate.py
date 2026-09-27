@@ -13,10 +13,11 @@ import asyncpg
 import pytest
 from app.corpus import export as ex
 from app.corpus import jobs
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.tvo.reader import QuerychokeError
 from choke_mock import MockChoke
 from mark1_receipts import ReceiptAppendError
+from tests.roles import service_pool
 
 DSN = os.environ.get("M1_TEST_PG_DSN", "")
 REQUIRE_STORES = os.environ.get("M1_REQUIRE_STORES", "0") == "1"
@@ -38,7 +39,7 @@ async def pool():
             pytrace=False,
         )
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"M1_REQUIRE_STORES=1 and {DSN!r} is unreachable: {exc!r}", pytrace=False)
@@ -120,20 +121,22 @@ async def _admit(conn, tenant: str, digest: bytes, cert: UUID) -> None:
     )
 
 
-async def test_trigger_refuses_uncertified_warrant(pool):
-    tenant = await _mk_tenant(pool)
+async def test_trigger_refuses_uncertified_warrant(admin, pool):
+    tenant = await _mk_tenant(admin)
     now = datetime.now(UTC)
-    async with pool.acquire() as conn, conn.transaction():
+    async with admin.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         cert = await _mk_cert(
             conn, tenant, status="bootstrapping", issued=now, expires=now + timedelta(days=1)
         )
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant)
         with pytest.raises(asyncpg.CheckViolationError, match="not currently certified"):
             await _admit(conn, tenant, random.randbytes(32), cert)
 
 
-async def test_load_gate_admits_fresh_and_withholds_expired(pool, tmp_path):
-    tenant = await _mk_tenant(pool)
+async def test_load_gate_admits_fresh_and_withholds_expired(admin, pool, tmp_path):
+    tenant = await _mk_tenant(admin)
     now = datetime.now(UTC)
     root = ex.tenant_root(bytes(range(32)), tenant)
     fresh_task, stale_task = (str(uuid4()), str(uuid4())), (str(uuid4()), str(uuid4()))
@@ -141,7 +144,7 @@ async def test_load_gate_admits_fresh_and_withholds_expired(pool, tmp_path):
         ex.task_digest(root, *fresh_task),
         ex.task_digest(root, *stale_task),
     )
-    async with pool.acquire() as conn, conn.transaction():
+    async with admin.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         fresh = await _mk_cert(
             conn, tenant, status="certified", issued=now, expires=now + timedelta(days=1)
@@ -153,6 +156,8 @@ async def test_load_gate_admits_fresh_and_withholds_expired(pool, tmp_path):
             issued=now - timedelta(days=2),
             expires=now - timedelta(days=1),
         )
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant)
         await _admit(conn, tenant, fresh_digest, fresh)
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
@@ -163,7 +168,7 @@ async def test_load_gate_admits_fresh_and_withholds_expired(pool, tmp_path):
         admitted, certs = await ex.load_gate(conn, tenant)
     assert admitted == {fresh_digest} and certs == {str(fresh): 0.7}
     async with pool.acquire() as conn, conn.transaction():  # a foreign tenant sees nothing
-        await set_local_tenant(conn, await _mk_tenant(pool))
+        await set_local_tenant(conn, await _mk_tenant(admin))
         assert await ex.load_gate(conn, tenant) == (set(), {})
 
     def cand(task: tuple[str, str], cert: UUID) -> dict:
@@ -202,21 +207,23 @@ async def test_load_gate_admits_fresh_and_withholds_expired(pool, tmp_path):
     assert r.receipt_fields["excluded"] == {"uncertified": 1}
 
 
-async def test_export_job_plumbing(pool, tmp_path, monkeypatch):
+async def test_export_job_plumbing(admin, pool, tmp_path, monkeypatch):
     """app.corpus.jobs:export — root refusal, choke refusal (M1E-2008, nothing written), a
     controld receipt refusal (objects written, no manifest: an unreferenced export_id), then one
     gated row through the mock template to the receipted pair on disk."""
     monkeypatch.delenv("INTEL_QUERYCHOKE_TOKEN", raising=False)
-    tenant = await _mk_tenant(pool)
-    await _consent(pool, tenant, training=True)
+    tenant = await _mk_tenant(admin)
+    await _consent(admin, tenant, training=True)
     now = datetime.now(UTC)
     pepper = bytes(range(32))
     session, task = str(uuid4()), str(uuid4())
-    async with pool.acquire() as conn, conn.transaction():
+    async with admin.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         cert = await _mk_cert(
             conn, tenant, status="certified", issued=now, expires=now + timedelta(days=1)
         )
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant)
         await _admit(
             conn, tenant, ex.task_digest(ex.tenant_root(pepper, tenant), session, task), cert
         )
@@ -299,13 +306,13 @@ async def test_export_job_plumbing(pool, tmp_path, monkeypatch):
     assert json.loads((pair / "manifest.json").read_text())["dataset_id"] == export_id
 
 
-async def test_export_needs_every_devices_training_consent(pool, tmp_path, monkeypatch):
+async def test_export_needs_every_devices_training_consent(admin, pool, tmp_path, monkeypatch):
     """The Step-4 training opt-in (m1_082): no row, or any device whose latest row revokes,
     skips the tenant before the choke is asked and before a byte or receipt exists; every
     device consenting (latest row wins) runs the job; a foreign tenant's rows count for
     nothing under RLS."""
     monkeypatch.setenv("INTEL_QUERYCHOKE_TOKEN", "svc")
-    tenant = await _mk_tenant(pool)
+    tenant = await _mk_tenant(admin)
     ctx = SimpleNamespace(
         pool=pool,
         settings=SimpleNamespace(
@@ -329,21 +336,21 @@ async def test_export_needs_every_devices_training_consent(pool, tmp_path, monke
     assert await jobs.export(ctx, http=choke.client()) is None
     assert choke.requests == [] and not (tmp_path / "t").exists()
 
-    other = await _mk_tenant(pool)
-    await _consent(pool, other, training=True)
+    other = await _mk_tenant(admin)
+    await _consent(admin, other, training=True)
     assert await consented() is False  # another tenant's consent is invisible
 
-    a = await _consent(pool, tenant, training=True)
+    a = await _consent(admin, tenant, training=True)
     assert await consented() is True
-    b = await _consent(pool, tenant, training=False)
+    b = await _consent(admin, tenant, training=False)
     assert await consented() is False
     assert await jobs.export(ctx, http=choke.client()) is None
     assert choke.requests == []
-    await _consent(pool, tenant, training=True, device=b)  # b's latest row wins
+    await _consent(admin, tenant, training=True, device=b)  # b's latest row wins
     assert await consented() is True
-    await _consent(pool, tenant, training=False, device=a)  # a revokes
+    await _consent(admin, tenant, training=False, device=a)  # a revokes
     assert await consented() is False
-    await _consent(pool, tenant, training=True, device=a)
+    await _consent(admin, tenant, training=True, device=a)
     assert await consented() is True
     assert await jobs.export(ctx, http=choke.client()) is not None
     assert choke.requests[-1][0] == jobs.CANDIDATES_TEMPLATE

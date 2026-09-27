@@ -133,9 +133,9 @@ async def tvo_report_route(
     cert_provider: Annotated[CertProvider, Depends(get_cert_provider)],
     price: Annotated[ModelPrice | None, Depends(get_price_row)],
     shadow: Annotated[tuple[float | None, bool], Depends(get_shadow_price)],
+    cost_basis: str,
     window: str = "30d",
     cohort: str = "all",
-    cost_basis: str = "usd",
 ) -> JSONResponse:
     m = _WINDOW_RE.match(window)
     if m is None:

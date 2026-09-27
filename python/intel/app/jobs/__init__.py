@@ -11,4 +11,6 @@ JOBS: tuple[Job, ...] = (
     ),
     Job("ope.score", "app.ope.jobs:score", "nightly"),
     Job("corpus.export", "app.corpus.jobs:export", "nightly"),
+    Job("rm.contributions", "app.corpus.contributions:export", "nightly"),
+    Job("digest.weekly", "app.digest.weekly:weekly", "weekly"),
 )

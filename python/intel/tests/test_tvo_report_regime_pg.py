@@ -5,9 +5,8 @@ overridden: get_regime -> load_regime -> price_for is the production path."""
 
 import json
 
-import asyncpg
 import pytest
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.pricing import TABLE_PATH, load_table
 from app.regime import set_regime
 from app.tvo.routes import get_pool
@@ -15,6 +14,7 @@ from fastapi import FastAPI
 from test_policy_compiler_pg import DSN, REQUIRE_STORES, _mk_tenant
 from test_tvo_report_route import CERTIFIED, GOOD_COVERAGE, choke_with, client_for
 from test_tvo_report_route import build_app as _build_app
+from tests.roles import service_pool
 
 pytestmark = [
     pytest.mark.integration,
@@ -30,7 +30,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN unset under M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"{DSN!r} unreachable under M1_REQUIRE_STORES=1: {exc!r}", pytrace=False)
@@ -66,9 +66,9 @@ async def _set(pg, tenant: str, **kwargs) -> None:
 
 
 async def test_guarantee_grade_needs_a_regime_row_priced_from_the_pinned_table(
-    pool, tmp_path, monkeypatch
+    admin, pool, tmp_path, monkeypatch
 ):
-    tenant = await _mk_tenant(pool)
+    tenant = await _mk_tenant(admin)
     app = build_app(pool)
 
     # Negative 1: no regime row -> the usd basis is unresolved, the number still renders.
@@ -107,8 +107,8 @@ async def test_guarantee_grade_needs_a_regime_row_priced_from_the_pinned_table(
     assert body["guarantee_grade"] is False and "no pinned model_prices row" in body["refusal"]
 
 
-async def test_quota_regime_confirms_s_and_carries_no_price_pin(pool):
-    tenant = await _mk_tenant(pool)
+async def test_quota_regime_confirms_s_and_carries_no_price_pin(admin, pool):
+    tenant = await _mk_tenant(admin)
     app = build_app(pool)
     await _set(
         pool, tenant, cost_basis="quota", window_limit_tokens=100_000, shadow_price_usd=150.0

@@ -33,8 +33,9 @@ def test_export_is_independent_of_compile():
 
 
 def test_registry_cadences_and_edges_are_well_formed():
-    assert {j.cadence for j in JOBS} == {"nightly", "hourly"}
+    assert {j.cadence for j in JOBS} == {"nightly", "hourly", "weekly"}
     assert {j.name for j in JOBS if j.cadence == "hourly"} == {"tvo.rollup_verify"}
+    assert {j.name for j in JOBS if j.cadence == "weekly"} == {"digest.weekly"}
     order(JOBS)  # no cycle, every runs_after resolves to a registered name
 
 
@@ -61,7 +62,7 @@ def test_validation_rejects_bad_graphs():
     with pytest.raises(RegistryError, match="duplicate"):
         validate([Job("a", "app.jobs.registry:order", "nightly")] * 2)
     with pytest.raises(RegistryError, match="cadence"):
-        validate([Job("a", "app.jobs.registry:order", "weekly")])
+        validate([Job("a", "app.jobs.registry:order", "monthly")])
     assert validate([Job("a", "app.jobs.registry:order", "nightly")])["a"] is order
 
 
@@ -70,3 +71,9 @@ def test_window_for():
     assert window_for("nightly", now) == datetime(2026, 9, 15, tzinfo=UTC)
     assert window_for("nightly", now, date(2026, 9, 1)) == datetime(2026, 9, 1, tzinfo=UTC)
     assert window_for("hourly", now) == datetime(2026, 9, 16, 2, tzinfo=UTC)
+    # 2026-09-16 is a Wednesday: the closed week is Mon 7 .. Sun 13
+    assert window_for("weekly", now) == datetime(2026, 9, 7, tzinfo=UTC)
+    assert window_for("weekly", datetime(2026, 9, 21, 9, tzinfo=UTC)) == datetime(
+        2026, 9, 14, tzinfo=UTC
+    )
+    assert window_for("weekly", now, date(2026, 9, 20)) == datetime(2026, 9, 14, tzinfo=UTC)

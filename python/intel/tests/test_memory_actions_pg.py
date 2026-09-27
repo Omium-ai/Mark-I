@@ -6,10 +6,9 @@ import os
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-import asyncpg
 import httpx
 import pytest
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.memory import admit, retrieve
 from app.memory.routes import get_append, get_pool, router
 from app.tvo.reader import QuerychokeReader
@@ -27,6 +26,7 @@ from test_memory_pg import (
     _outcomes,
     fake_append,
 )
+from tests.roles import service_pool
 
 DSN = os.environ.get("M1_TEST_PG_DSN", "")
 REQUIRE_STORES = os.environ.get("M1_REQUIRE_STORES", "0") == "1"
@@ -48,7 +48,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN is unset and M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"M1_REQUIRE_STORES=1 and {DSN!r} is unreachable: {exc!r}", pytrace=False)
@@ -101,9 +101,9 @@ async def _flags(conn, tenant, artifact_id):
         )
 
 
-async def test_retire_is_receipted_then_flipped_and_idempotent(pool, conn):
-    tenant = await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
+async def test_retire_is_receipted_then_flipped_and_idempotent(admin_conn, pool, conn):
+    tenant = await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
     a = await _mk_artifact(conn, tenant, cert, device)
     choke = MockChoke()
     await _admit(conn, choke, tenant, a, cert)
@@ -139,9 +139,9 @@ async def test_retire_is_receipted_then_flipped_and_idempotent(pool, conn):
         assert await retrieve.admitted(conn, tenant) == []
 
 
-async def test_unreceipted_retire_never_flips(conn):
-    tenant = await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
+async def test_unreceipted_retire_never_flips(admin_conn, conn):
+    tenant = await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
     a = await _mk_artifact(conn, tenant, cert, device)
     choke = MockChoke()
     choke.append_fail_with = (500, "M1E-9500", "chain append failed")
@@ -153,9 +153,9 @@ async def test_unreceipted_retire_never_flips(conn):
     assert (row["state"], row["receipt_id"]) == ("extracted", None)
 
 
-async def test_cross_tenant_ids_read_as_404_and_bad_input_as_400(pool, conn):
-    tenant, other = await _mk_tenant(conn), await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
+async def test_cross_tenant_ids_read_as_404_and_bad_input_as_400(admin_conn, pool, conn):
+    tenant, other = await _mk_tenant(admin_conn), await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
     a = await _mk_artifact(conn, tenant, cert, device)
     choke = MockChoke()
     async with client(pool, choke) as c:
@@ -189,9 +189,9 @@ async def test_cross_tenant_ids_read_as_404_and_bad_input_as_400(pool, conn):
         assert resp.status_code == 403
 
 
-async def test_pin_share_flip_and_are_served_to_the_app(pool, conn):
-    tenant = await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
+async def test_pin_share_flip_and_are_served_to_the_app(admin_conn, pool, conn):
+    tenant = await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
     a = await _mk_artifact(conn, tenant, cert, device)
     choke = MockChoke()
     await _admit(conn, choke, tenant, a, cert)
@@ -212,9 +212,9 @@ async def test_pin_share_flip_and_are_served_to_the_app(pool, conn):
     assert choke.appended[1:] == []
 
 
-async def test_pinned_artifact_survives_the_lcb_retire_branch(conn):
-    tenant = await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
+async def test_pinned_artifact_survives_the_lcb_retire_branch(admin_conn, conn):
+    tenant = await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
     pinned, loose = (
         await _mk_artifact(conn, tenant, cert, device),
         await _mk_artifact(conn, tenant, cert, device),
@@ -240,10 +240,10 @@ async def test_pinned_artifact_survives_the_lcb_retire_branch(conn):
     assert (await _artifact_row(conn, tenant, loose.id))["state"] == "retired"
 
 
-async def test_outcomes_are_per_artifact_lcb_evidence_in_tenant(pool, conn):
-    tenant, other = await _mk_tenant(conn), await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
-    o_cert, o_device = await _mk_cert(conn, other), await _mk_device(conn, other)
+async def test_outcomes_are_per_artifact_lcb_evidence_in_tenant(admin_conn, pool, conn):
+    tenant, other = await _mk_tenant(admin_conn), await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
+    o_cert, o_device = await _mk_cert(admin_conn, other), await _mk_device(admin_conn, other)
     a = await _mk_artifact(conn, tenant, cert, device)
     await _mk_artifact(conn, tenant, cert, device)
     o = await _mk_artifact(conn, other, o_cert, o_device)

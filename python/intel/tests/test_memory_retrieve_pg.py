@@ -5,12 +5,12 @@ import os
 from decimal import Decimal
 from uuid import uuid4
 
-import asyncpg
 import pytest
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.memory import admit, extract, retrieve
 from test_memory_pg import _mk_cert, _mk_device, _mk_tenant, fake_append
 from test_memory_retrieve import FAR, NEAR, PLANTED
+from tests.roles import service_pool
 
 DSN = os.environ.get("M1_TEST_PG_DSN", "")
 REQUIRE_STORES = os.environ.get("M1_REQUIRE_STORES", "0") == "1"
@@ -26,16 +26,16 @@ async def conn():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN is unset and M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        c = await asyncpg.connect(dsn=DSN)
+        p = await service_pool(min_size=1, max_size=1)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"M1_REQUIRE_STORES=1 and {DSN!r} is unreachable: {exc!r}", pytrace=False)
         pytest.skip(f"Postgres unreachable: {exc!r}")
-    await _tenant_guc_reset(c)
     try:
-        yield c
+        async with p.acquire() as c:
+            yield c
     finally:
-        await c.close()
+        await p.close()
 
 
 async def _plant(conn, tenant, cert, device, kind, trigger, *, admitted=True, lcb="0.25"):
@@ -69,10 +69,10 @@ async def _plant(conn, tenant, cert, device, kind, trigger, *, admitted=True, lc
     return str(a.id)
 
 
-async def test_admitted_serves_only_the_injectable_allowlist_in_tenant(conn):
-    tenant, other = await _mk_tenant(conn), await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
-    o_cert, o_device = await _mk_cert(conn, other), await _mk_device(conn, other)
+async def test_admitted_serves_only_the_injectable_allowlist_in_tenant(admin_conn, conn):
+    tenant, other = await _mk_tenant(admin_conn), await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
+    o_cert, o_device = await _mk_cert(admin_conn, other), await _mk_device(admin_conn, other)
     low = await _plant(conn, tenant, cert, device, "pitfall", PLANTED, lcb="0.10")
     high = await _plant(conn, tenant, cert, device, "fix_pattern", "when tests flake", lcb="0.90")
     await _plant(conn, tenant, cert, device, "preference", "prefer haiku for lint")
@@ -88,9 +88,9 @@ async def test_admitted_serves_only_the_injectable_allowlist_in_tenant(conn):
     assert [r["artifact_id"] for r in await retrieve.admitted(conn, other)] != [high, low]
 
 
-async def test_embed_missing_stamps_pitfalls_once(conn):
-    tenant = await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
+async def test_embed_missing_stamps_pitfalls_once(admin_conn, conn):
+    tenant = await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
     pid = await _plant(conn, tenant, cert, device, "pitfall", PLANTED)
     await _plant(conn, tenant, cert, device, "pitfall", "   ")
     await _plant(conn, tenant, cert, device, "fix_pattern", "not a pitfall")
@@ -105,10 +105,10 @@ async def test_embed_missing_stamps_pitfalls_once(conn):
     assert [(str(r["id"]), r["d"]) for r in stamped] == [(pid, retrieve.DIM)]
 
 
-async def test_planted_neighbor_recovered_within_d29_over_the_hnsw_column(conn):
-    tenant, other = await _mk_tenant(conn), await _mk_tenant(conn)
-    cert, device = await _mk_cert(conn, tenant), await _mk_device(conn, tenant)
-    o_cert, o_device = await _mk_cert(conn, other), await _mk_device(conn, other)
+async def test_planted_neighbor_recovered_within_d29_over_the_hnsw_column(admin_conn, conn):
+    tenant, other = await _mk_tenant(admin_conn), await _mk_tenant(admin_conn)
+    cert, device = await _mk_cert(admin_conn, tenant), await _mk_device(admin_conn, tenant)
+    o_cert, o_device = await _mk_cert(admin_conn, other), await _mk_device(admin_conn, other)
     planted = await _plant(conn, tenant, cert, device, "pitfall", PLANTED)
     far = await _plant(conn, tenant, cert, device, "pitfall", FAR)
     await _plant(conn, tenant, cert, device, "pitfall", NEAR, admitted=False)

@@ -118,6 +118,7 @@ class KneeRow(_Strict):
 
 class KneeTable(_Strict):
     cost_basis: Literal["usd", "quota"]
+    basis: Literal["prior", "anchor_grounded", "certified"] | None = None  # ADR-0013
     rows: tuple[KneeRow, ...] = Field(min_length=1)
     v_default: float = Field(ge=0.0)
 
@@ -326,12 +327,12 @@ _TOOL_KIND: dict[str, str] = {
     "tsc": "typecheck",
 }
 
-# likelihoods.py KIND_TO_GROUP: syntactic ∪ tests is one clique (06 §4.1)
+# likelihoods.py KIND_TO_GROUP: tests are their own clique (16 §Independence rules)
 _KIND_GROUP: dict[str, str] = {
     "lint": "syntactic",
     "typecheck": "syntactic",
     "compile": "syntactic",
-    "test": "syntactic",
+    "test": "tests",
     "judge": "judges",
     "rm": "rms",
     "consistency": "consistency",
@@ -353,13 +354,11 @@ _BOOTSTRAP_PRIORS = (0.55, 0.30, 0.10, 0.05)
 _RE_MASS = _BOOTSTRAP_PRIORS[2] + _BOOTSTRAP_PRIORS[3]
 
 
+# judge:/rm: keys carry ':' forbidden in verifier-id; fuse cloud-side, never wired to edge (16 §L6).
+NON_WIRE_PREFIXES = ("judge:", "rm:")
+
+
 def _kind_for(verifier_id: str) -> str:
-    # judge:/rm: keys carry a ':' the bundle verifier-id production forbids: refuse
-    if verifier_id.startswith(("judge:", "rm:")):
-        raise VerifyBasisError(
-            f"verifier {verifier_id!r}: judge/rm ids are not a wire verifier-id (07) — refused, "
-            "never fabricated onto the bundle"
-        )
     kind = _TOOL_KIND.get(verifier_id.split("@", 1)[0])
     if kind is None:
         raise VerifyBasisError(f"verifier {verifier_id!r}: no kind (not a recognized anchor tool)")
@@ -385,7 +384,11 @@ def _verify_from_spectral(run: SpectralRun) -> tuple[VerifySection, str]:
     verifiers: list[VerifierModel] = []
     anchors: list[AnchorEnable] = []
     groups: dict[str, list[str]] = {}
+    dropped = 0
     for verifier_id, rows in sorted(run.confusion.items()):
+        if verifier_id.startswith(NON_WIRE_PREFIXES):
+            dropped += 1
+            continue
         kind = _kind_for(verifier_id)
         satisfied = _normalized(tuple(rows[0]), f"{verifier_id}: satisfied row")
         violated = _normalized(tuple(rows[1]), f"{verifier_id}: violated row")
@@ -405,7 +408,8 @@ def _verify_from_spectral(run: SpectralRun) -> tuple[VerifySection, str]:
         ),
         quarantine=(),  # spectral.estimate already drops tampered votes before fitting (06 §2.4)
     )
-    return section, f"verify: spectral run {run.window_start} (identifiable)"
+    fused_cloud = f"; {dropped} judge/rm ids fuse cloud-side" if dropped else ""
+    return section, f"verify: spectral run {run.window_start} (identifiable{fused_cloud})"
 
 
 def _verify_from_stable(stable_cbor: bytes | None, stable_seq: int | None) -> tuple[bytes, str]:

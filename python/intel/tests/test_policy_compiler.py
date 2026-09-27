@@ -241,8 +241,7 @@ def test_identifiable_spectral_run_becomes_the_verify_section():
     vi = pc.VerifyInputs(spectral_run=run, stable_verify_cbor=None, stable_seq=None)
     out = pc.compile_sections(attempts(), REGIME, verify_inputs=vi)
     # Priors: R/E keep the bootstrap mass (0.10, 0.05); S/V rescale into the remaining 0.85.
-    # syntactic∪tests is one clique by construction (07 normative): every anchor kind, whatever
-    # its sub-kind, lands in the same "syntactic" group.
+    # Tests are their own clique (16 §Independence rules); lint and typecheck share "syntactic".
     expected = pc.VerifySection(
         anchors=(
             pc.AnchorEnable(catalog_id="pytest", enabled=True),
@@ -280,9 +279,8 @@ def test_identifiable_spectral_run_becomes_the_verify_section():
         ),
         priors=(0.51, 0.34, 0.10, 0.05),
         correlation_groups=(
-            pc.CorrelationGroup(
-                group_id="syntactic", members=("pytest@cat-1", "ruff@cat-1", "tsc@cat-1")
-            ),
+            pc.CorrelationGroup(group_id="syntactic", members=("ruff@cat-1", "tsc@cat-1")),
+            pc.CorrelationGroup(group_id="tests", members=("pytest@cat-1",)),
         ),
         quarantine=(),
     )
@@ -294,25 +292,29 @@ def test_identifiable_spectral_run_becomes_the_verify_section():
     assert pc.VerifySection.model_validate(expected.model_dump()) == expected
 
 
-def test_verify_refuses_judge_and_rm_ids_the_wire_cannot_carry():
+def test_compiler_drops_non_wire_ids():
     """The registry's judge:/rm: keys carry a ':' the bundle's verifier-id production forbids
-    (07 CDDL; go/mark1d's isVerifierID agrees) -- there is no wire-legal way to author them, so
-    the compiler refuses rather than emit a section no edge could decode."""
-    for verifier_id in ("judge:grounded-rubric@1", "rm:qwen3-4b@1"):
+    (07 CDDL; go/mark1d's isVerifierID agrees). Their votes fuse cloud-side, so the edge section
+    simply never lists them (16 §L6): the night identifiability first passes WITH an RM and a
+    judge in the ensemble compiles the anchors' section, it does not fail the compile. The cloud
+    judge's per-tier columns (@2 and @2/E0, 16 §L7) are among them: the edge never fuses @2."""
+    ruff = ((0.8, 0.1, 0.1), (0.5, 0.4, 0.1))
+    law = ((0.8, 0.1, 0.1), (0.2, 0.7, 0.1))
+
+    def compiled(confusion):
         run = pc.SpectralRun(
-            window_start=WINDOW_START,
-            passed=True,
-            confusion={verifier_id: ((0.8, 0.1, 0.1), (0.2, 0.7, 0.1))},
-            prior=(0.6, 0.4),
+            window_start=WINDOW_START, passed=True, confusion=confusion, prior=(0.6, 0.4)
         )
-        with pytest.raises(pc.VerifyBasisError, match="wire verifier-id"):
-            pc.compile_sections(
-                attempts(),
-                REGIME,
-                verify_inputs=pc.VerifyInputs(
-                    spectral_run=run, stable_verify_cbor=None, stable_seq=None
-                ),
-            )
+        vi = pc.VerifyInputs(spectral_run=run, stable_verify_cbor=None, stable_seq=None)
+        return pc.compile_sections(attempts(), REGIME, verify_inputs=vi)
+
+    alone = compiled({"ruff@cat-1": ruff})
+    cloud = ("judge:grounded-rubric@1", "judge:grounded-rubric@2", "judge:grounded-rubric@2/E0")
+    mixed = compiled({"ruff@cat-1": ruff, "rm:mark1-rm-a@1": law, **dict.fromkeys(cloud, law)})
+    assert mixed.sections["verify"] == alone.sections["verify"]
+    assert "4 judge/rm ids fuse cloud-side" in mixed.note and "fuse" not in alone.note
+    with pytest.raises(pc.VerifyBasisError, match="no kind"):
+        compiled({"ruff@cat-1": ruff, "mystery@cat-1": law})
 
 
 def test_non_identifiable_run_carries_the_stable_heads_verify_bytes_unchanged():
@@ -478,6 +480,8 @@ CORTEX_RANKER_OK = {
         ("ladders.0.rungs.0.model_id", "haiku'"),
         ("ladders.0.rungs", []),
         ("knee.cost_basis", "tokens"),
+        ("knee.basis", "unknown"),
+        ("knee.basis", "fitted"),
         ("knee.rows", []),
         ("knee.rows.0.p_lcb", 1.5),
         ("knee.rows.0.c_n", -1.0),

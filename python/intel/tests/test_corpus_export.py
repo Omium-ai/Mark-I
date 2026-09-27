@@ -253,7 +253,8 @@ def test_kto_rows_match_trainer_field_set(tmp_path):
         )
     assert set(manifest) == MANIFEST_FIELDS
     if TRAINER_ROWS.exists():
-        assert _ast_fields(TRAINER_ROWS / "rows.py", "KtoRow") == KTO_ROW_FIELDS
+        rm_assembler_only = {"weight", "group_id"}
+        assert _ast_fields(TRAINER_ROWS / "rows.py", "KtoRow") - rm_assembler_only == KTO_ROW_FIELDS
         assert _ast_fields(TRAINER_ROWS / "rows.py", "CompletionRef") == set(
             ex.COMPLETION_REF_FIELDS
         )
