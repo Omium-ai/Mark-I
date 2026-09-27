@@ -266,7 +266,7 @@ func TestIntegrationLandNeverOverwritesALandedBatch(t *testing.T) {
 	// Positive control for everything that follows: the object is really
 	// there and really readable. A suite that only ever asserts refusals
 	// cannot tell "correctly refused" from "never wrote anything".
-	body, _, err := c.Get(ctx, key)
+	body, _, _, err := c.Get(ctx, key)
 	if err != nil {
 		t.Fatalf("Get after Land: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestIntegrationLandNeverOverwritesALandedBatch(t *testing.T) {
 	// THE invariant. The landed object IS the replay log; if a second Land
 	// under the same key can replace its bytes, every downstream rebuild is
 	// reading a batch nobody acked and the original is gone with no trace.
-	body, _, err = c.Get(ctx, key)
+	body, _, _, err = c.Get(ctx, key)
 	if err != nil {
 		t.Fatalf("Get after the colliding Land: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestIntegrationDeviceStampRoundTrips(t *testing.T) {
 		key    string
 		device uuid.UUID
 	}{{keyA, devA}, {keyB, devB}} {
-		body, got, err := c.Get(ctx, l.key)
+		body, got, landed, err := c.Get(ctx, l.key)
 		if err != nil {
 			t.Fatalf("Get %s: %v", l.key, err)
 		}
@@ -376,6 +376,9 @@ func TestIntegrationDeviceStampRoundTrips(t *testing.T) {
 		}
 		if want := "stamped:" + l.device.String(); string(body) != want {
 			t.Fatalf("body/stamp pairing crossed: %q with %s", body, got)
+		}
+		if landed.IsZero() || time.Since(landed) > 10*time.Minute || time.Until(landed) > time.Minute {
+			t.Fatalf("LastModified %v is not the landing moment: replay's received_at reads it (ADR-0013)", landed)
 		}
 	}
 }
@@ -430,7 +433,7 @@ func TestIntegrationCrossTenantPrefixReadDenied(t *testing.T) {
 		key  string
 		body []byte
 	}{{keyA, bodyA}, {keyB, bodyB}} {
-		got, _, err := c.Get(ctx, l.key)
+		got, _, _, err := c.Get(ctx, l.key)
 		if err != nil {
 			t.Fatalf("owner Get %s: %v — the denial below would be vacuous", l.key, err)
 		}
@@ -471,7 +474,7 @@ func TestIntegrationCrossTenantPrefixReadDenied(t *testing.T) {
 	assertForbidden(t, err, "cross-tenant PUT into t/"+tenantB.String())
 
 	// B's batch is byte-identical after the intrusion attempts.
-	after, _, err := c.Get(ctx, keyB)
+	after, _, _, err := c.Get(ctx, keyB)
 	if err != nil || !bytes.Equal(after, bodyB) {
 		t.Fatalf("tenant B's landed batch changed under a foreign principal: %q (err %v)", after, err)
 	}

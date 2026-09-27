@@ -29,6 +29,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -132,16 +133,23 @@ func setupCH(t *testing.T) (*chconn.Conn, driver.Conn, string) {
 		_ = bootstrap.Close()
 	})
 
-	// The real DDL, database name rewritten for scratch isolation.
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "migrations", "m1_ch_001_events.sql"))
-	if err != nil {
-		t.Fatal(err)
+	// The real DDL, every m1_ch_*.sql in order, database name rewritten for scratch isolation.
+	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "..", "migrations", "m1_ch_*.sql"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("ClickHouse migrations not found: %v", err)
 	}
-	for _, stmt := range splitCHStatements(string(raw)) {
-		stmt = strings.ReplaceAll(stmt, "mark1.", scratch+".")
-		stmt = strings.ReplaceAll(stmt, "EXISTS mark1", "EXISTS "+scratch)
-		if err := bootstrap.Exec(ctx, stmt); err != nil {
-			t.Fatalf("m1_ch_001 statement failed: %v\n%s", err, stmt)
+	sort.Strings(files)
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, stmt := range splitCHStatements(string(raw)) {
+			stmt = strings.ReplaceAll(stmt, "mark1.", scratch+".")
+			stmt = strings.ReplaceAll(stmt, "EXISTS mark1", "EXISTS "+scratch)
+			if err := bootstrap.Exec(ctx, stmt); err != nil {
+				t.Fatalf("%s statement failed: %v\n%s", filepath.Base(f), err, stmt)
+			}
 		}
 	}
 

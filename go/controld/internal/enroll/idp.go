@@ -100,22 +100,36 @@ func (i *tenantIdP) keySet() (oidc.KeySet, error) {
 // the classic key-confusion attack.
 var idpSigningAlgs = []string{oidc.RS256, oidc.PS256, oidc.ES256, oidc.ES384, oidc.EdDSA}
 
+// approver is who approved an enrollment: the subject stored on the grant, and the email only as far as the issuer vouches for it.
+type approver struct {
+	subject       string
+	email         string
+	emailVerified bool
+}
+
 // verifyIDToken validates iss, aud (client_id), exp and signature against the
 // pinned JWKS (05 §3.2) and returns the approving IdP subject — the
-// `approved_by` half of the two-identity split.
-func (i *tenantIdP) verifyIDToken(ctx context.Context, rawIDToken string) (string, error) {
+// `approved_by` half of the two-identity split — with its email claims (an undecodable pair reads as unverified).
+func (i *tenantIdP) verifyIDToken(ctx context.Context, rawIDToken string) (approver, error) {
 	ks, err := i.keySet()
 	if err != nil {
-		return "", err
+		return approver{}, err
 	}
 	v := oidc.NewVerifier(i.issuer, ks, &oidc.Config{
 		ClientID: i.clientID, SupportedSigningAlgs: idpSigningAlgs,
 	})
 	tok, err := v.Verify(ctx, rawIDToken)
 	if err != nil {
-		return "", fmt.Errorf("enroll: ID token rejected: %w", err)
+		return approver{}, fmt.Errorf("enroll: ID token rejected: %w", err)
 	}
-	return tok.Subject, nil
+	var c struct {
+		Email    string `json:"email"`
+		Verified bool   `json:"email_verified"`
+	}
+	if tok.Claims(&c) != nil {
+		c.Email, c.Verified = "", false
+	}
+	return approver{subject: tok.Subject, email: c.Email, emailVerified: c.Verified}, nil
 }
 
 // operatorTenantClaim is the claim binding an operator token to the ONE

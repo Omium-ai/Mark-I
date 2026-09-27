@@ -289,6 +289,12 @@ func TestIntelReadTemplatesServeTheirConsumers(t *testing.T) {
 			"JSONExtractBool(e.payload, 'integrity', 'tamper') AS tamper",
 			"WHERE e.event_type != 'VerdictEvent'",
 			"event_type IN ('AnchorVote', 'JudgeVote', 'RmScore', 'ConsistencyVote', 'VerdictEvent')",
+			"JSONExtractString(e.payload, 'calibration_version') AS calibration_version", // RmScore folds through its calibration (16 §L6)
+			"JSONExtractString(e.payload, 'execution_hash') AS execution_hash",           // a client-side RmScore votes only under its sealed rm-exec/v1 hash (16 §L6)
+			"JSONExtractString(e.payload, 'tier_used') AS tier_used",                     // an E0 judge is group syntactic
+			"JSONExtractString(e.payload, 'trigger') AS vote_trigger",
+			"argMaxIf(verdict, (session_epoch, seq), verdict_stage IN ('certified', 'revised')) OVER (PARTITION BY task_id) AS task_verdict", // promotion pairs: the certified ledger, never a provisional verdict
+			"argMaxIf(noise_cert_id, (session_epoch, seq), verdict_stage IN ('certified', 'revised')) OVER (PARTITION BY task_id) AS task_noise_cert_id",
 			closedWindow,
 		}},
 		"evidence_excerpts": {params: Params{"from": "2026-08-10", "to": "2026-08-10", "task_id": uuid.New()}, terms: []string{

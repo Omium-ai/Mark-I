@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/mail"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/server"
@@ -39,6 +40,10 @@ type Deps struct {
 	TeamMaxMembers int
 	// RevokeSubject is enroll.Module.RevokeSubjectDevices: DELETE /team/members/{id} revokes the removed member's devices; nil refuses the route.
 	RevokeSubject func(ctx context.Context, tenant uuid.UUID, subject, by string) (int, error)
+	// Mail sends one transactional email (mail.CustomerIO.Send); nil ⇒ nothing is emailed and invites answer sent:false.
+	Mail func(context.Context, mail.Message) (string, error)
+	// EmailPostal is EMAIL_POSTAL_ADDRESS, the footer of every email controld sends.
+	EmailPostal string
 }
 
 type Module struct {
@@ -63,15 +68,20 @@ func (m *Module) Ready(ctx context.Context) error {
 }
 
 func (m *Module) RegisterRoutes(mux *http.ServeMux) {
-	chain := server.Chain(m.deps.Verifier, m.deps.ObsCfg, nil)
+	verified := server.Chain(m.deps.Verifier, m.deps.ObsCfg, nil)
+	chain := func(h http.Handler) http.Handler { return verified(m.participant(h)) }
 	mux.Handle("GET /api/v1/sessions", chain(http.HandlerFunc(m.handleSessions)))
 	mux.Handle("GET /api/v1/sessions/{id}", chain(http.HandlerFunc(m.handleSessionDetail)))
 	mux.Handle("GET /api/v1/moments", chain(http.HandlerFunc(m.handleMoments)))
 	mux.Handle("GET /api/v1/verify/certificates", chain(http.HandlerFunc(m.handleCertificates)))
 	mux.Handle("GET /api/v1/verify/labels", chain(http.HandlerFunc(m.handleLabels)))
 	mux.Handle("POST /api/v1/verify/labels", chain(http.HandlerFunc(m.handleLabel)))
-	mux.Handle("GET /api/v1/verify/cloud-judge", chain(http.HandlerFunc(m.handleCloudJudge)))
-	mux.Handle("PUT /api/v1/verify/cloud-judge", chain(http.HandlerFunc(m.handleCloudJudgeUpdate)))
+	mux.Handle("GET /api/v1/verify/cloud-judge", chain(m.consentGet(cloudJudgeConsent)))
+	mux.Handle("PUT /api/v1/verify/cloud-judge", chain(m.consentPut(cloudJudgeConsent)))
+	mux.Handle("GET /api/v1/verify/cloud-rm", chain(m.consentGet(cloudRMConsent)))
+	mux.Handle("PUT /api/v1/verify/cloud-rm", chain(m.consentPut(cloudRMConsent)))
+	mux.Handle("GET /api/v1/memory/extract-consent", chain(m.consentGet(memoryExtractConsent)))
+	mux.Handle("PUT /api/v1/memory/extract-consent", chain(m.consentPut(memoryExtractConsent)))
 	mux.Handle("GET /api/v1/route/decisions", chain(http.HandlerFunc(m.handleRouteDecisions)))
 	mux.Handle("GET /api/v1/route/bundle", chain(http.HandlerFunc(m.handleRouteBundle)))
 	mux.Handle("GET /api/v1/me", chain(http.HandlerFunc(m.handleMe)))
@@ -82,6 +92,13 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/team/invites/accept", chain(http.HandlerFunc(m.handleTeamAccept)))
 	mux.Handle("POST /api/v1/team/leave", chain(http.HandlerFunc(m.handleTeamLeave)))
 	mux.Handle("DELETE /api/v1/team/members/{id}", chain(http.HandlerFunc(m.handleTeamRemove)))
+	mux.Handle("DELETE /api/v1/team/invites/{id}", chain(http.HandlerFunc(m.handleTeamCancelInvite)))
+	mux.Handle("GET /api/v1/me/notifications", chain(http.HandlerFunc(m.handleNotifications)))
+	mux.Handle("PUT /api/v1/me/notifications", chain(http.HandlerFunc(m.handleNotificationsUpdate)))
+	// public: the token in the path is the credential (a digest's List-Unsubscribe link); no bearer, no auth chain
+	public := m.deps.ObsCfg.HTTPMiddleware(nil) // labelled by pattern, never the token
+	mux.Handle("GET /api/v1/unsubscribe/{token}", public(http.HandlerFunc(m.handleUnsubscribePage)))
+	mux.Handle("POST /api/v1/unsubscribe/{token}", public(http.HandlerFunc(m.handleUnsubscribe)))
 }
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {

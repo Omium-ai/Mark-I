@@ -150,8 +150,8 @@ func TestIntegrationReportGuaranteeGradeFromTenantRegimeRow(t *testing.T) {
 		t.Fatalf("tenant A usd regime: %v", a)
 	}
 	b := get(tenantB, "auto")
-	if b["guarantee_grade"] != false || b["refusal"] != "cost basis unresolved: no pinned model_prices row for usd (06 §8.4)" {
-		t.Fatalf("tenant B without a row resolved a basis: %v", b)
+	if b["guarantee_grade"] != false || b["cost_basis"] != "quota" || b["refusal"] != "cost basis unresolved: shadow price S unconfirmed by tenant (D22)" {
+		t.Fatalf("tenant B without a row must resolve like the bootstrap (quota, ADR-0013) and stay unresolved: %v", b)
 	}
 	if _, ok := b["price_table_version"]; ok {
 		t.Fatalf("tenant B stamped a price table: %v", b)

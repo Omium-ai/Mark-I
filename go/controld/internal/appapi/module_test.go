@@ -113,6 +113,7 @@ func (r *rig) ok(path, token, schema string) map[string]any {
 		r.t.Fatalf("GET %s: %d %s", path, w.Code, w.Body.String())
 	}
 	r.schemas.Validate(schema, w.Body.Bytes())
+	releasedApp(r.t, schema, w.Body.Bytes())
 	var out map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		r.t.Fatal(err)

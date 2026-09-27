@@ -130,10 +130,10 @@ func TestTVOReportGuaranteeGradeFromRegime(t *testing.T) {
 		t.Fatalf("quota asked of a usd tenant: %v", body)
 	}
 
-	// Negative: no regime row at all — auto falls to usd, unresolved.
+	// Negative: no regime row at all — auto resolves exactly as the bootstrap bundle does (quota, ADR-0013), unresolved.
 	delete(regimes.rows, tenant)
 	body = report(t, mux, bearer, "&cost_basis=auto")
-	if body["guarantee_grade"] != false || body["cost_basis"] != "usd" || body["refusal"] != "cost basis unresolved: no pinned model_prices row for usd (06 §8.4)" {
+	if body["guarantee_grade"] != false || body["cost_basis"] != Resolve(nil).CostBasis || body["cost_basis"] != "quota" || body["refusal"] != "cost basis unresolved: shadow price S unconfirmed by tenant (D22)" {
 		t.Fatalf("no regime: %v", body)
 	}
 

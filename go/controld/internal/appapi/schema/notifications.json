@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/notifications.json",
+  "title": "GET/PUT /api/v1/me/notifications",
+  "description": "The signed-in person's email preferences in the tenant they work in (m1_091). weekly_digest is the opt-in weekly savings email, false until turned on; PUT takes {weekly_digest} and answers this shape. email is where it goes (the sign-in's address). Every email carries a one-click unsubscribe link (public GET/POST /api/v1/unsubscribe/{token}).",
+  "type": "object",
+  "required": ["weekly_digest", "email"],
+  "additionalProperties": false,
+  "properties": {
+    "weekly_digest": { "type": "boolean" },
+    "email": { "type": ["string", "null"] }
+  }
+}

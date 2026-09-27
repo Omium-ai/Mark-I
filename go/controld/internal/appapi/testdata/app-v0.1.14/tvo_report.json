@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/app-v0.1.14/tvo_report.json",
+  "description": "Mark1-GUI v0.1.14 TvoReport + TrendPoint: trend[].tvo is z.number(), never null.",
+  "type": "object",
+  "required": ["tvo", "trend", "coverage_band", "cost_basis", "task_seg_version", "waste", "guarantee_grade"],
+  "properties": {
+    "tvo": { "type": ["number", "null"] },
+    "trend": { "type": "array", "items": { "$ref": "#/$defs/trend_point" } },
+    "coverage_band": { "type": "object", "required": ["observed_fraction", "floor"], "properties": { "observed_fraction": { "type": "number" }, "floor": { "type": "number" } } },
+    "cost_basis": { "type": "string", "enum": ["usd", "quota"] },
+    "task_seg_version": { "type": "string" },
+    "waste": { "type": "object", "properties": { "retry_loop_tokens": { "type": "number" }, "re_exploration_tokens": { "type": "number" }, "over_model_tokens": { "type": "number" } } },
+    "tokens_saved": {
+      "type": "object",
+      "required": ["arrests", "re_exploration_avoided", "routing", "total"],
+      "properties": {
+        "arrests": { "type": "number" }, "blocks": { "type": "number" }, "re_exploration_avoided": { "type": "number" }, "routing": { "type": "number" },
+        "total": { "type": "number" }, "arrest_count": { "type": "number" }, "block_count": { "type": "number" }, "estimate": { "type": "boolean" }
+      }
+    },
+    "price_table_version": { "type": ["string", "null"] },
+    "guarantee_grade": { "type": "boolean" },
+    "refusal": { "type": ["string", "object", "null"] }
+  },
+  "$defs": {
+    "trend_point": { "type": "object", "required": ["day", "tvo"], "properties": { "day": { "type": "string" }, "tvo": { "type": "number" } } }
+  }
+}

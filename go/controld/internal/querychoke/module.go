@@ -269,7 +269,7 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "M1E-2001", "cohort: only \"all\" is supported")
 		return
 	}
-	// 08 §3.3 / 06 §8.4: `auto` is the tenant's m1_075 basis (v1 has one cohort per tenant); an explicit basis the regime does not carry is stamped as asked and issues indicative, as routes.py does.
+	// 08 §3.3 / 06 §8.4: `auto` is Resolve's basis — the tenant's m1_075 row, else quota, the bootstrap bundle's own rule (ADR-0013); an explicit basis the regime does not carry is stamped as asked and issues indicative, as routes.py does.
 	requestedBasis := r.URL.Query().Get("cost_basis")
 	switch requestedBasis {
 	case "", "auto", costBasisUSD, costBasisQuota:
@@ -284,10 +284,7 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	}
 	costBasis := requestedBasis
 	if costBasis == "" || costBasis == "auto" {
-		costBasis = costBasisUSD
-		if reg != nil {
-			costBasis = reg.CostBasis
-		}
+		costBasis = Resolve(reg).CostBasis
 	}
 	pricePinned := reg != nil && reg.CostBasis == costBasisUSD && modelPrices.pinned[reg.PriceModelID]
 	shadowConfirmed := reg != nil && reg.CostBasis == costBasisQuota
@@ -374,7 +371,7 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	// from the same numbers. Read first: its per-day billing counts also say
 	// which days had anything to roll up.
 	var droppedBilling, billingIngested uint64
-	billingByDay := map[string]uint64{}
+	billingByDay, droppedByDay := map[string]uint64{}, map[string]uint64{}
 	if shedTpl, err := m.reg.Lookup("dropped_by_tenant_day"); err != nil {
 		writeErr(w, http.StatusInternalServerError, "M1E-9500", "registry miswired")
 		return
@@ -388,13 +385,17 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 			droppedBilling += asU64(row["dropped_billing"])
 			billingIngested += asU64(row["events_billing_ingested"])
 			billingByDay[asStr(row["day"])] += asU64(row["events_billing_ingested"])
+			droppedByDay[asStr(row["day"])] += asU64(row["dropped_billing"])
 		}
 	}
+
+	// The closed days are graded on their own (I2): today's live day keeps the whole window indicative, never the days the rollup already closed.
+	closedTokens, closedVerified := tokensTotal, verified
+	closedObserved, closedBypass, closedDisabled := observed, bypass, disabled
 
 	// Open days (live.go) fold in beside the closed rows; a quiet open day is no day.
 	now := time.Now().UTC()
 	var liveDays []string
-	// ponytail: a member's report folds the window once, so its trend is empty; a day-grained per-device read fills it when members need the chart.
 	if viewer.Team {
 		lt, ok := m.liveSpan(w, r, tid, from, to)
 		if !ok {
@@ -402,6 +403,14 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 		}
 		tokensTotal, verified, retryLoop = lt.tokens, lt.verified, lt.retryLoop
 		observed, bypass, disabled, segVersion = lt.observed, lt.bypass, lt.disabled, lt.segVersion
+		days, ok := m.liveDays(w, r, tid, from, to)
+		if !ok {
+			return
+		}
+		for day, t := range days {
+			daysSeen[day] = true
+			perDayTokens[day], perDayVerified[day] = t.tokens, t.verified
+		}
 	}
 	for d := from; !d.After(to) && !viewer.Team; d = d.AddDate(0, 0, 1) {
 		day := d.Format(time.DateOnly)
@@ -441,10 +450,10 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		trend = append(trend, map[string]any{
-			"day": day,
-			"tvo": ratio(float64(perDayTokens[day]), float64(perDayVerified[day])),
-		})
+		if perDayVerified[day] == 0 {
+			continue // absent, not zero and not null: a day with no verified outcome has no TVO, and clients before v0.2 parse trend[].tvo as a number
+		}
+		trend = append(trend, map[string]any{"day": day, "tvo": tvoOf(perDayTokens[day], perDayVerified[day])})
 	}
 	covFraction, covLower := coverageBand(observed, bypass, disabled, droppedBilling, billingIngested)
 
@@ -464,8 +473,8 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// tokens_saved: the verify plane's own decisions over the window (savings.v1), an ESTIMATE from the edge (policy.proto GuardDecision.tokens_saved_estimate); re-exploration and routing have no witness at v1 and say 0.
-	var savedArrests, savedBlocks, nBlocks, nArrests uint64
+	// tokens_saved (savings.v3, doc 16 ruling 4, ADR-0013): the net estimate against plain Claude Code, folded per task by foldSavings under the report's basis; re-exploration and routing have no witness yet and say 0.
+	var sv savings
 	if savTpl, err := m.reg.Lookup("savings"); err != nil {
 		writeErr(w, http.StatusInternalServerError, "M1E-9500", "registry miswired")
 		return
@@ -475,15 +484,7 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	} else if savRows, ok := m.run(w, r, savQ); !ok {
 		return
 	} else {
-		for _, row := range savRows.Rows {
-			switch asStr(row["reason"]) {
-			case "knee_arrest", "block_cap": // the savings template groups by reason: both rows sum into arrests
-				savedArrests += asU64(row["tokens_saved"])
-				nArrests += asU64(row["decisions"])
-			case "stop_gate_block":
-				savedBlocks, nBlocks = asU64(row["tokens_saved"]), asU64(row["decisions"])
-			}
-		}
+		sv = foldSavings(savRows.Rows, costBasis, now)
 	}
 
 	// Every refusal is STATED, none silently absorbed (06 §8.5; report.py's
@@ -504,8 +505,27 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 	}
 	refusals = append(refusals, guaranteeRefusals(covLower, verified, certified, costBasis, pricePinned, shadowConfirmed)...)
 
+	var closed map[string]any
+	if !viewer.Team {
+		closedDropped, closedBilling := droppedBilling, billingIngested
+		for _, day := range liveDays {
+			closedDropped -= min(droppedByDay[day], closedDropped)
+			closedBilling -= min(billingByDay[day], closedBilling)
+		}
+		_, closedLower := coverageBand(closedObserved, closedBypass, closedDisabled, closedDropped, closedBilling)
+		var closedRefusals []string
+		if len(missingDays) > 0 {
+			closedRefusals = append(closedRefusals, fmt.Sprintf("M1E-5004 rollup missing for %d day(s) in window", len(missingDays)))
+		}
+		closedRefusals = append(closedRefusals, guaranteeRefusals(closedLower, closedVerified, certified, costBasis, pricePinned, shadowConfirmed)...)
+		closed = map[string]any{"tvo": tvoOf(closedTokens, closedVerified), "days": len(newest), "guarantee_grade": len(closedRefusals) == 0}
+		if len(closedRefusals) > 0 {
+			closed["refusal"] = strings.Join(closedRefusals, "; ")
+		}
+	}
+
 	resp := map[string]any{
-		"tvo":   ratio(float64(tokensTotal), float64(verified)),
+		"tvo":   tvoOf(tokensTotal, verified),
 		"trend": trend,
 		"coverage_band": map[string]any{
 			"observed_fraction": covFraction,
@@ -520,10 +540,10 @@ func (m *Module) handleTVOReport(w http.ResponseWriter, r *http.Request) {
 			"over_model_tokens":     overModel,
 		},
 		"guarantee_grade": len(refusals) == 0,
-		"tokens_saved": map[string]any{
-			"arrests": savedArrests, "blocks": savedBlocks, "re_exploration_avoided": uint64(0), "routing": uint64(0),
-			"total": savedArrests + savedBlocks, "arrest_count": nArrests, "block_count": nBlocks, "estimate": true,
-		},
+		"tokens_saved":    sv.body(),
+	}
+	if closed != nil {
+		resp["closed"] = closed
 	}
 	if costBasis == costBasisUSD && pricePinned {
 		resp["price_table_version"] = modelPrices.version // 08 §3.3: usd only, the table the figures were priced under
@@ -789,6 +809,14 @@ func asDay(v any) string {
 		return t.UTC().Format(time.DateOnly)
 	}
 	return fmt.Sprint(v)
+}
+
+// tvoOf is tokens per verified outcome, null with no verified outcome: 0 would read as a perfect score.
+func tvoOf(tokens, verified uint64) any {
+	if verified == 0 {
+		return nil
+	}
+	return float64(tokens) / float64(verified)
 }
 
 func ratio(num, den float64) float64 {

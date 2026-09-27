@@ -193,11 +193,14 @@ func TestTVOReportIsPerPersonInATeam(t *testing.T) {
 			t.Fatalf("%s ran unnarrowed for a team member: %v", q.Template().Name(), q.Bind())
 		}
 	}
-	if names["tvo_report"] != 0 || names["tvo_task_window"] != 1 || names["coverage_band"] != 1 {
+	if names["tvo_report"] != 0 || names["tvo_task_window"] != 1 || names["coverage_band"] != 1 || names["tvo_task_day"] != 1 {
 		t.Fatalf("a member's report reads the ledger once over the window, never the tenant rollup: %v", names)
 	}
 	var body map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if _, ok := body["closed"]; ok {
+		t.Fatalf("a member's report has no closed rollup days to grade: %v", body)
+	}
 	if body["guarantee_grade"] != false || !strings.Contains(body["refusal"].(string), "per-person report") {
 		t.Fatalf("a per-person report is labelled live, never guarantee grade: %v", body)
 	}
@@ -206,5 +209,40 @@ func TestTVOReportIsPerPersonInATeam(t *testing.T) {
 	}
 	if w := do(mux, "POST", "/api/v1/query", bearer, `{"template":"app_sessions","params":{"from":"2026-09-01","to":"2026-09-02","device_ids":["`+uuid.NewString()+`"]}}`); w.Code != http.StatusOK || run.seen[len(run.seen)-1].Bind()[deviceParam] != "['"+device.String()+"']" {
 		t.Fatalf("a member naming a teammate's device must read only their own: %d %v", w.Code, run.seen[len(run.seen)-1].Bind())
+	}
+}
+
+// A member's trend is folded per day from tvo_task_day (doc 16 L3): a day of work with no verified outcome has no point, never 0 and never null.
+func TestTVOReportTeamTrendIsPerDay(t *testing.T) {
+	reg, _ := LoadTemplates()
+	now := time.Now().UTC()
+	att := func(day time.Time, task string, tokens uint64, word string, pS float64) map[string]any {
+		return map[string]any{
+			"day": day, "task_id": task, "attempt_n": uint64(1), "gen_tokens": tokens, "verifier_tokens": uint64(0),
+			"fused_verdict": word, "verdict_stage": "revised", "task_seg_version": "task_seg.v1",
+			"p_satisfied": pS, "p_violated": 1 - pS, "p_refused": 0.0, "p_error": 0.0,
+		}
+	}
+	run := &fakeRunner{rows: &Rows{}, byTemplate: map[string]*Rows{"tvo_task_day": {Rows: []map[string]any{
+		att(now.AddDate(0, 0, -2), "a", 300, "satisfied", 0.9),
+		att(now.AddDate(0, 0, -2), "b", 100, "refused", 0.7),
+		att(now.AddDate(0, 0, -1), "c", 500, "violated", 0.1),
+	}}}}
+	device := uuid.New()
+	m := New(Deps{Registry: reg, Runner: run, Verifier: auth.NewHMACVerifier([]byte(testHMACKey), auth.StaticRevocations{}), ObsCfg: obs.Config{ServiceName: "test"}, Viewers: &fakeViewers{v: Viewer{Team: true, Devices: []uuid.UUID{device}}}})
+	mux := http.NewServeMux()
+	m.RegisterRoutes(mux)
+	w := do(mux, "GET", "/api/v1/reports/tvo?window=7d", auth.Mint([]byte(testHMACKey), uuid.New(), device, time.Hour), "")
+	var body struct {
+		Trend []struct {
+			Day string   `json:"day"`
+			TVO *float64 `json:"tvo"`
+		} `json:"trend"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if len(body.Trend) != 1 || body.Trend[0].TVO == nil || *body.Trend[0].TVO != 200 {
+		t.Fatalf("per-day trend: %s", w.Body.String())
 	}
 }

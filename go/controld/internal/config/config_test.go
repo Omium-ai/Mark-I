@@ -262,3 +262,32 @@ func TestOmiumUserAnchorBothOrNeither(t *testing.T) {
 		t.Fatalf("anchor pair lost: %+v %v", c, err)
 	}
 }
+
+func TestMailDefaultsAndRegion(t *testing.T) {
+	setRequired(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CustomerIOKey != "" || c.CustomerIORegion != "us" || c.EmailFrom != "noreply@mail.omium.ai" || c.EmailPostal != "" {
+		t.Fatalf("mail defaults: %+v", c)
+	}
+	t.Setenv("CUSTOMERIO_REGION", "apac")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CUSTOMERIO_REGION") {
+		t.Fatalf("want refusal naming CUSTOMERIO_REGION, got %v", err)
+	}
+}
+
+// The E1 read credential is its own secret: equal to the shared service token it would hand E1 to intel.
+func TestEvidenceReadTokenMustDifferFromTheServiceToken(t *testing.T) {
+	setRequired(t)
+	t.Setenv("INTEL_SERVICE_TOKEN", "shared")
+	t.Setenv("EVIDENCE_READ_TOKEN", "shared")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "EVIDENCE_READ_TOKEN") {
+		t.Fatalf("want R1 refusal naming EVIDENCE_READ_TOKEN, got %v", err)
+	}
+	t.Setenv("EVIDENCE_READ_TOKEN", "own")
+	if c, err := Load(); err != nil || c.EvidenceReadToken != "own" {
+		t.Fatalf("distinct token: %+v %v", c.EvidenceReadToken, err)
+	}
+}

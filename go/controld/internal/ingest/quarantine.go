@@ -127,8 +127,55 @@ func (j *QuarantineSweep) RunOnce(ctx context.Context) error {
 			sweepOutcomes.WithLabelValues("error").Inc()
 			log.Printf("ingest: quarantine sweep for tenant %s failed: %v", id, err)
 		}
+		if _, err := j.SweepContributions(ctx, id); err != nil {
+			log.Printf("ingest: contribution sweep for tenant %s failed: %v", id, err)
+		}
+		if _, err := j.SweepEvidence(ctx, id); err != nil {
+			log.Printf("ingest: evidence sweep for tenant %s failed: %v", id, err)
+		}
 	}
 	return nil
+}
+
+// SweepContributions deletes the landing object of every withdrawn contribution (16 L8), first withdrawing any row whose device's latest consent is off (an upload racing its withdrawal).
+func (j *QuarantineSweep) SweepContributions(ctx context.Context, id uuid.UUID) (int, error) {
+	tenant, err := querychoke.FromClaims(auth.Claims{TenantID: id})
+	if err != nil {
+		return 0, err
+	}
+	var keys []string
+	err = j.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			UPDATE m1_outcome_contributions c SET withdrawn_at = now()
+			 WHERE withdrawn_at IS NULL AND NOT coalesce((SELECT d.contribute_outcomes FROM m1_device_consents d
+			   WHERE d.device_id = c.device_id ORDER BY d.row_seq DESC LIMIT 1), false)`); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `SELECT DISTINCT object_key FROM m1_outcome_contributions WHERE withdrawn_at IS NOT NULL AND deleted_at IS NULL`)
+		if err != nil {
+			return err
+		}
+		keys, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	deleted := 0
+	for _, key := range keys {
+		if err := j.store.Delete(ctx, key); err != nil {
+			log.Printf("ingest: contribution sweep: %s not deleted, next sweep retries: %v", key, err)
+			continue
+		}
+		if err := j.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE m1_outcome_contributions SET deleted_at = $2 WHERE object_key = $1 AND deleted_at IS NULL`, key, j.now().UTC())
+			return err
+		}); err != nil {
+			return deleted, err
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 type expiredTombstone struct {

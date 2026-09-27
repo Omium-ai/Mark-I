@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/app-v0.1.14/route_bundle.json",
+  "description": "Mark1-GUI v0.1.14 RouteBundle's wireBundle arm.",
+  "type": "object",
+  "required": ["channel", "seq", "issued_at", "signing_key_id", "ladders", "knee", "epsilon", "exploration_opt_in", "price_table_version", "cpvs"],
+  "properties": {
+    "channel": { "type": "string" }, "seq": { "type": "number" }, "issued_at": { "type": "string" }, "signing_key_id": { "type": "string" },
+    "ladders": { "type": "array", "items": { "type": "object", "required": ["ladder_id", "rungs"], "properties": { "ladder_id": { "type": "string" },
+      "rungs": { "type": "array", "items": { "type": "object", "required": ["model_id", "keep_prefix"], "properties": { "model_id": { "type": "string" }, "keep_prefix": { "type": "boolean" } } } } } } },
+    "knee": { "type": "object", "required": ["cost_basis", "v_default", "rows"], "properties": {
+      "cost_basis": { "type": "string", "enum": ["usd", "quota"] }, "v_default": { "type": "number" },
+      "rows": { "type": "array", "items": { "type": "object", "required": ["n", "c_n"], "properties": { "n": { "type": "number" }, "c_n": { "type": "number" }, "p_lcb": { "type": ["number", "null"] } } } } } },
+    "epsilon": { "type": "number" }, "exploration_opt_in": { "type": "boolean" }, "price_table_version": { "type": ["string", "null"] },
+    "cpvs": { "type": "array", "items": { "type": "object", "required": ["task_class", "model_id", "p_pass", "tokens_est"], "properties": {
+      "task_class": { "type": "string" }, "model_id": { "type": "string" }, "p_pass": { "type": "number" }, "tokens_est": { "type": "number" } } } }
+  }
+}

@@ -41,8 +41,9 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeObject struct {
-	body   []byte
-	device uuid.UUID
+	body     []byte
+	device   uuid.UUID
+	landedAt time.Time
 }
 
 type fakeStore struct {
@@ -67,7 +68,7 @@ func (f *fakeStore) Land(_ context.Context, key string, body []byte, _, device u
 		}
 		return s3land.Divergent, nil
 	}
-	f.objects[key] = fakeObject{body: append([]byte(nil), body...), device: device}
+	f.objects[key] = fakeObject{body: append([]byte(nil), body...), device: device, landedAt: time.Now().UTC()}
 	return s3land.Landed, nil
 }
 
@@ -118,11 +119,11 @@ func (f *fakeStore) List(_ context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
-func (f *fakeStore) Get(_ context.Context, key string) ([]byte, uuid.UUID, error) {
+func (f *fakeStore) Get(_ context.Context, key string) ([]byte, uuid.UUID, time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	o := f.objects[key]
-	return o.body, o.device, nil
+	return o.body, o.device, o.landedAt, nil
 }
 
 func (f *fakeStore) keys() []string {
@@ -207,6 +208,8 @@ var testKey = []byte("c4-test-hmac-key")
 
 const testServiceToken = "intel-service-token-test"
 
+const testEvidenceToken = "adjudicator-evidence-token-test"
+
 type harness struct {
 	mux      *http.ServeMux
 	store    *fakeStore
@@ -261,6 +264,7 @@ func newHarnessFull(t *testing.T, reg registry.Registry, dk DeviceKeys) *harness
 		PoolSize: 4,
 
 		IntelServiceToken: testServiceToken,
+		EvidenceToken:     testEvidenceToken,
 		DeviceKeys:        dk,
 		DB:                h.tomb,
 	})
@@ -462,7 +466,7 @@ func TestCleanBatchLandsAcksProjects(t *testing.T) {
 		t.Fatalf("expected one ingest-prefix landing, got %v", keys)
 	}
 	// The landed object is byte-identical to the request body (05 §2.1 stage 8).
-	body, device, _ := h.store.Get(context.Background(), keys[0])
+	body, device, _, _ := h.store.Get(context.Background(), keys[0])
 	if !bytes.Equal(body, encodeBatch(t, b)) {
 		t.Fatal("landed object is not byte-identical to the received body")
 	}
@@ -1023,7 +1027,7 @@ func TestScannerHitQuarantinesWholeBatchNeverStrips(t *testing.T) {
 		t.Fatalf("flagged batch must land under the quarantine prefix: %v", keys)
 	}
 	// Never silently strip: the quarantine object is byte-identical.
-	landed, _, _ := h.store.Get(context.Background(), keys[0])
+	landed, _, _, _ := h.store.Get(context.Background(), keys[0])
 	if !bytes.Equal(landed, body) {
 		t.Fatal("quarantined object was modified — fail-closed means hold, not strip (05 §2.3)")
 	}
@@ -1573,6 +1577,13 @@ func TestReplayFromS3AloneReconstructsAckedEvents(t *testing.T) {
 				id, len(rebuilt), len(live))
 		}
 		for i := range want {
+			if chproj.Columns[i] == "received_at" {
+				// ADR-0013 §10: replay reads the landing object's S3 LastModified, the receipt to the second (the real store truncates it), never the replay's own clock.
+				if d := want[i].(time.Time).Sub(got[i].(time.Time)); d > 2*time.Second || d < -2*time.Second {
+					t.Fatalf("event %s: rebuilt received_at %v is not the live receipt %v", id, got[i], want[i])
+				}
+				continue
+			}
 			if !reflect.DeepEqual(want[i], got[i]) {
 				t.Fatalf("event %s: rebuilt column %q disagrees with the acked projection: live %#v, rebuilt %#v",
 					id, chproj.Columns[i], want[i], got[i])

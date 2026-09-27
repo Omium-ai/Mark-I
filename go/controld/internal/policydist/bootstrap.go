@@ -10,9 +10,8 @@ import (
 	"io/fs"
 	"sort"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 )
@@ -50,14 +49,14 @@ const (
 //go:embed maps/*.json
 var shimMaps embed.FS
 
-// bootstrapRegime is the m1_tenant_regimes row that picks the basis; absent ⇒ quota (a subscription is the default regime) at unit value.
+// bootstrapRegime is the tenant's resolved regime (querychoke.Resolve: its m1_075 row, else quota at unit value).
 type bootstrapRegime struct {
 	CostBasis string
 	VDefault  float64
 }
 
 func kneeTable(r bootstrapRegime) KneeTable {
-	t := KneeTable{CostBasis: r.CostBasis, VDefault: r.VDefault}
+	t := KneeTable{CostBasis: r.CostBasis, Basis: "prior", VDefault: r.VDefault}
 	cN := kneeRho * kneeP1 * r.VDefault
 	p := kneeP1
 	for n := 1; n <= kneeRows; n++ {
@@ -74,7 +73,7 @@ func BootstrapSections(r bootstrapRegime) ([]byte, error) {
 		return nil, fmt.Errorf("policydist: bootstrap cost_basis %q is not usd|quota", r.CostBasis)
 	}
 	verifiers := make([]VerifierModel, 0, len(bootstrapAnchors))
-	members := make([]string, 0, len(bootstrapAnchors))
+	groups := map[string][]string{}
 	for _, a := range bootstrapAnchors {
 		rows := syntacticRows
 		if a.kind == "compile" || a.kind == "test" {
@@ -82,7 +81,11 @@ func BootstrapSections(r bootstrapRegime) ([]byte, error) {
 		}
 		id := a.tool + "@cat-1"
 		verifiers = append(verifiers, VerifierModel{VerifierID: id, Confusion: rows})
-		members = append(members, id)
+		group := "syntactic"
+		if a.kind == "test" {
+			group = "tests"
+		}
+		groups[group] = append(groups[group], id)
 	}
 	agents, err := shimAgentMaps()
 	if err != nil {
@@ -93,8 +96,8 @@ func BootstrapSections(r bootstrapRegime) ([]byte, error) {
 			Anchors:   []AnchorEnable{},
 			Verifiers: verifiers,
 			Priors:    bootstrapPriors,
-			// 06 §4.1: syntactic ∪ tests is ONE clique — a linter and a test failing on the same diff is one observation.
-			CorrelationGroups: []CorrelationGroup{{GroupID: "syntactic", Members: members}},
+			// 16 §Independence rules: tests are their own clique, as likelihoods.py KIND_TO_GROUP.
+			CorrelationGroups: []CorrelationGroup{{GroupID: "syntactic", Members: groups["syntactic"]}, {GroupID: "tests", Members: groups["tests"]}},
 			Quarantine:        []string{},
 		},
 		Route:     RouteSection{CPVS: []CPVSRow{}, Ladders: []Ladder{}, Knee: kneeTable(r)},
@@ -172,16 +175,8 @@ func shimAgentMaps() ([]AgentMap, error) {
 }
 
 func (s *Store) regime(ctx context.Context, tenant querychoke.TenantID) (bootstrapRegime, error) {
-	r := bootstrapRegime{CostBasis: "quota", VDefault: 1}
-	err := s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `SELECT cost_basis, v_default::float8 FROM m1_tenant_regimes WHERE tenant_id = $1`, tenant.UUID()).
-			Scan(&r.CostBasis, &r.VDefault)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		return err
-	})
-	return r, err
+	r, err := querychoke.ResolvedRegime(ctx, querychoke.PGRegimes{DB: s.db}, tenant)
+	return bootstrapRegime{CostBasis: r.CostBasis, VDefault: r.VDefault}, err
 }
 
 // Bootstrap publishes the tenant's bootstrap bundle as `stable` seq 1, idempotently: a tenant that already has a head keeps it (published=false, no error).
@@ -203,3 +198,65 @@ func (m *Module) Bootstrap(ctx context.Context, tenant querychoke.TenantID) (Pub
 	}
 	return p, true, nil
 }
+
+// ReconcileKneeBasis is ADR-0013's idempotent resync, run on every rollout sweep and whenever a poll changes the fleet's word: a stable head still at the pre-ADR-0013 bootstrap (seq 1, producer basis never recorded) is re-issued as the current bootstrap, and any head whose route.knee.basis disagrees with what every device of the tenant decodes is republished with the key added or withheld. Each is a normal publication at head+1 (seq, prev_hash, transparency log, receipt); seq 1 is never rewritten. It returns how many bundles it published.
+func (m *Module) ReconcileKneeBasis(ctx context.Context, tenant querychoke.TenantID) (int, error) {
+	mu, _ := m.resync.LoadOrStore(tenant.UUID(), &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
+	heads, err := m.store.heads(ctx, tenant)
+	if err != nil {
+		return 0, err
+	}
+	capable, err := m.store.KneeBasisCapable(ctx, tenant)
+	if err != nil {
+		return 0, err
+	}
+	published := 0
+	last, _ := m.kneeAdded.Load(tenant.UUID())
+	addHeld := last != nil && time.Since(last.(time.Time)) < kneeAddEvery
+	added := false
+	for _, h := range heads {
+		d := Draft{Channel: h.Channel, MaxAge: h.MaxAge, KneeBasis: h.Intended}
+		switch want := ""; {
+		case h.Channel == BootstrapChannel && h.Seq == 1 && h.IntendedUnknown:
+			r, err := m.store.regime(ctx, tenant)
+			if err != nil {
+				return published, err
+			}
+			if d.SectionsCBOR, err = BootstrapSections(r); err != nil {
+				return published, err
+			}
+			d.MaxAge, d.KneeBasis = BootstrapMaxAge, ""
+		case h.Intended == "":
+			continue
+		default:
+			if capable {
+				want = h.Intended
+			}
+			if h.KneeBasis == want || (want != "" && addHeld) {
+				continue
+			}
+			added = added || want != ""
+			b, err := Unmarshal(h.Body)
+			if err != nil {
+				return published, err
+			}
+			if d.SectionsCBOR, err = canonEnc.Marshal(b.Sections); err != nil {
+				return published, err
+			}
+		}
+		if _, err := m.Publish(ctx, tenant, d); err != nil {
+			return published, fmt.Errorf("policydist: knee-basis resync of %s seq %d: %w", h.Channel, h.Seq, err)
+		}
+		published++
+	}
+	if added {
+		m.kneeAdded.Store(tenant.UUID(), time.Now())
+	}
+	return published, nil
+}
+
+// kneeAddEvery bounds how often a tenant's heads get route.knee.basis added back: withholding is immediate (a device that cannot decode the key is never served it), adding waits, so a device alternating its X-Mark1-Bundle-Features republishes at most two bundles per head per window, not two per poll.
+// ponytail: per-process memo, so each controld replica allows its own add per window; move it to a column on bundle_channel_heads if replicas multiply.
+const kneeAddEvery = time.Hour

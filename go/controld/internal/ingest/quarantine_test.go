@@ -87,8 +87,8 @@ func (s *refusingDeleteStore) Probe(context.Context, string, []byte) (s3land.Out
 }
 func (s *refusingDeleteStore) Ready(context.Context) error                    { return nil }
 func (s *refusingDeleteStore) List(context.Context, string) ([]string, error) { return nil, nil }
-func (s *refusingDeleteStore) Get(context.Context, string) ([]byte, uuid.UUID, error) {
-	return nil, uuid.Nil, nil
+func (s *refusingDeleteStore) Get(context.Context, string) ([]byte, uuid.UUID, time.Time, error) {
+	return nil, uuid.Nil, time.Time{}, nil
 }
 func (s *refusingDeleteStore) Delete(context.Context, string) error {
 	s.deletes++

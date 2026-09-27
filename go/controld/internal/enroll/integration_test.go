@@ -100,7 +100,7 @@ type mockIdP struct {
 
 	mu    sync.Mutex
 	seq   int
-	state map[string]string // idp device_code → pending | approved:<sub> | denied | expired
+	state map[string]string // idp device_code → pending | approved:<sub>[|<email>|<email_verified>] | denied | expired
 }
 
 func newMockIdP(t *testing.T) *mockIdP {
@@ -152,17 +152,23 @@ func newMockIdP(t *testing.T) *mockIdP {
 	return m
 }
 
-func (m *mockIdP) signJWT(sub, aud string) string {
+func (m *mockIdP) signJWT(approved, aud string) string {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: m.key},
 		(&jose.SignerOptions{}).WithType("JWT"))
 	if err != nil {
 		panic(err)
 	}
 	now := time.Now()
-	payload, _ := json.Marshal(map[string]any{
+	sub, email, withEmail := strings.Cut(approved, "|")
+	claims := map[string]any{
 		"iss": m.srv.URL, "sub": sub, "aud": aud,
 		"iat": now.Unix(), "exp": now.Add(time.Hour).Unix(),
-	})
+	}
+	if withEmail {
+		email, verified, _ := strings.Cut(email, "|")
+		claims["email"], claims["email_verified"] = email, verified == "true"
+	}
+	payload, _ := json.Marshal(claims)
 	jws, err := signer.Sign(payload)
 	if err != nil {
 		panic(err)
@@ -253,7 +259,7 @@ func setup(t *testing.T) *harness {
 	if _, err := bootstrap.Exec(ctx, `SELECT pg_advisory_lock(7231060)`); err != nil {
 		t.Fatal(err)
 	}
-	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "migrations", "m1_0*.sql"))
+	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "migrations", "m1_[0-9]*.sql"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("migrations not found: %v (%d)", err, len(files))
 	}
@@ -361,17 +367,27 @@ func setup(t *testing.T) *harness {
 // userToken mints the platform's Mark 1 user token shape: ES256, iss api.omium.ai, aud mark1, 1 h.
 func (h *harness) userToken(sub string, tenant uuid.UUID, roles ...string) string {
 	h.t.Helper()
+	return h.userTokenWith(sub, tenant, map[string]any{"email": sub + "@example.com", "rol": roles})
+}
+
+// userTokenWith is userToken with the claims beyond iss/aud/sub/tenant_id/iat/exp/jti given (email, email_verified, rol).
+func (h *harness) userTokenWith(sub string, tenant uuid.UUID, extra map[string]any) string {
+	h.t.Helper()
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: h.userKey},
 		(&jose.SignerOptions{}).WithType("JWT"))
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	now := time.Now()
-	payload, _ := json.Marshal(map[string]any{
-		"iss": omiumIssuer, "aud": "mark1", "sub": sub, "email": sub + "@example.com",
-		"tenant_id": tenant.String(), "rol": roles,
-		"iat": now.Unix(), "exp": now.Add(time.Hour).Unix(), "jti": uuid.NewString(),
-	})
+	claims := map[string]any{
+		"iss": omiumIssuer, "aud": "mark1", "sub": sub,
+		"tenant_id": tenant.String(),
+		"iat":       now.Unix(), "exp": now.Add(time.Hour).Unix(), "jti": uuid.NewString(),
+	}
+	for k, v := range extra {
+		claims[k] = v
+	}
+	payload, _ := json.Marshal(claims)
 	jws, err := signer.Sign(payload)
 	if err != nil {
 		h.t.Fatal(err)
@@ -1432,5 +1448,77 @@ func TestIntegrationTeamSwitchReenrollsSameKey(t *testing.T) {
 	err = h.admin.QueryRow(ctx, `INSERT INTO m1_device_keys (tenant_id, device_id, key_id, public_key) SELECT tenant_id, device_id, key_id, public_key FROM m1_device_keys WHERE tenant_id = $1 LIMIT 1 RETURNING key_id`, team).Scan(&dup)
 	if sqlState(err) != "23505" {
 		t.Fatalf("a key twice in ONE tenant must still be refused: %v", err)
+	}
+}
+
+// TestIntegrationDogfoodDefaultReachesStaffOnly (16 L8, M2): a DOGFOOD_TENANTS ACTIVE body carries contribute_outcomes_default and its omium_staff reason only for staff (verified @omium.ai or STAFF_SUBJECTS) on both approval paths; non-staff or unverified gets neither field.
+func TestIntegrationDogfoodDefaultReachesStaffOnly(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	team := uuid.New()
+	d := h.deps
+	d.DogfoodTenants, d.StaffSubjects = []uuid.UUID{team, h.tenantA}, []string{"omium:u-dave"}
+	h.mod = enroll.New(d)
+	mux := http.NewServeMux()
+	h.mod.RegisterRoutes(mux)
+	h.api = httptest.NewServer(mux)
+	t.Cleanup(h.api.Close)
+
+	defaulted := func(body map[string]any) bool {
+		t.Helper()
+		on, _ := body["contribute_outcomes_default"].(bool)
+		reason, hasReason := body["contribute_outcomes_default_reason"]
+		if on != hasReason || (hasReason && reason != "omium_staff") {
+			t.Fatalf("the flag and its reason travel together: %v %v", body["contribute_outcomes_default"], reason)
+		}
+		return on
+	}
+	approve := func(sub string, own uuid.UUID, claims map[string]any) map[string]any {
+		t.Helper()
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, body := h.post("/api/v1/enroll/device/approve", map[string]any{
+			"client": "mark1-desktop", "client_version": "0.1.0",
+			"device_pubkey": "ed25519:" + base64.StdEncoding.EncodeToString(pub),
+			"platform":      "linux-x86_64", "hostname_hash": "hmac-sha256:" + strings.Repeat("cd", 32),
+		}, map[string]string{"Authorization": "Bearer " + h.userTokenWith(sub, own, claims)})
+		if st != http.StatusOK || body["tenant_id"] != team.String() {
+			t.Fatalf("approve %s: %d %v", sub, st, body)
+		}
+		return body
+	}
+	if !defaulted(approve("u-alice", team, map[string]any{"email": "alice@omium.ai", "email_verified": true, "rol": []string{"tenant_admin"}})) {
+		t.Fatal("staff with a verified @omium.ai email got no default")
+	}
+	for _, sub := range []string{"u-bob", "u-carol", "u-dave"} {
+		if _, err := h.admin.Exec(ctx, `INSERT INTO m1_team_members (tenant_id, subject, role) VALUES ($1, $2, 'member')`, team, "omium:"+sub); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for sub, c := range map[string]struct {
+		claims map[string]any
+		want   bool
+	}{
+		"u-bob":   {map[string]any{"email": "bob@gmail.com", "email_verified": true}, false},
+		"u-carol": {map[string]any{"email": "carol@omium.ai"}, false},
+		"u-dave":  {map[string]any{"email": "dave@gmail.com", "email_verified": true}, true},
+	} {
+		if got := defaulted(approve(sub, uuid.New(), c.claims)); got != c.want {
+			t.Errorf("%s in the dogfood team: default = %v, want %v", sub, got, c.want)
+		}
+	}
+
+	for approved, want := range map[string]bool{"idp-staff|ops@omium.ai|true": true, "idp-guest|guest@example.com|true": false, "idp-unverified|ops2@omium.ai|false": false} {
+		_, code := h.startEnrollment()
+		h.idp.setLatest("approved:" + approved)
+		st, body := h.poll(code)
+		if st != http.StatusOK {
+			t.Fatalf("poll %s: %d %v", approved, st, body)
+		}
+		if got := defaulted(body); got != want {
+			t.Errorf("IdP approval %s: default = %v, want %v", approved, got, want)
+		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,9 +42,17 @@ func TestBootstrapSectionsAreHonestPriors(t *testing.T) {
 	if s.Verify.Priors != bootstrapPriors {
 		t.Fatalf("priors %v, want 06 §3.2's %v", s.Verify.Priors, bootstrapPriors)
 	}
-	if len(s.Verify.CorrelationGroups) != 1 || s.Verify.CorrelationGroups[0].GroupID != "syntactic" ||
-		len(s.Verify.CorrelationGroups[0].Members) != len(ids) {
-		t.Fatalf("06 §4.1: syntactic ∪ tests is ONE clique over every anchor; got %+v", s.Verify.CorrelationGroups)
+	want := map[string][]string{
+		"syntactic": {"cargo-check@cat-1", "eslint@cat-1", "go-vet@cat-1", "ruff@cat-1", "tsc@cat-1"},
+		"tests":     {"cargo-test@cat-1", "go-test@cat-1", "npm-test@cat-1", "pytest@cat-1"},
+	}
+	if len(s.Verify.CorrelationGroups) != len(want) {
+		t.Fatalf("16 §Independence rules: syntactic and tests are two cliques; got %+v", s.Verify.CorrelationGroups)
+	}
+	for _, g := range s.Verify.CorrelationGroups {
+		if !slices.Equal(g.Members, want[g.GroupID]) {
+			t.Fatalf("group %q = %v, want %v", g.GroupID, g.Members, want[g.GroupID])
+		}
 	}
 	if len(s.Verify.Anchors) != 0 || len(s.Verify.Quarantine) != 0 || len(s.Route.CPVS) != 0 || len(s.Route.Ladders) != 0 {
 		t.Fatal("nothing is enabled, quarantined, priced or laddered by a bootstrap")
@@ -80,7 +89,7 @@ func TestBootstrapKneeStopsAtThreeUnderEitherBasis(t *testing.T) {
 		v     float64
 	}{{"quota", 1}, {"usd", 25}} {
 		k := bootstrapFor(t, tc.basis, tc.v).Route.Knee
-		if k.CostBasis != tc.basis || k.VDefault != tc.v || len(k.Rows) != kneeRows {
+		if k.CostBasis != tc.basis || k.Basis != "prior" || k.VDefault != tc.v || len(k.Rows) != kneeRows {
 			t.Fatalf("%s: knee %+v", tc.basis, k)
 		}
 		for i, r := range k.Rows {

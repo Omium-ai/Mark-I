@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 )
@@ -38,7 +39,9 @@ const Table = "m1p_events"
 // server ingest wins), payload_json_close_reason (MATERIALIZED), cost_usd and
 // task_seg_version (stamped by later pipeline rows, not C4), inclusion_path
 // (arrives with checkpoints). cost_basis is "" from the row builders and
-// stamped per tenant by Stamper on the insert path.
+// stamped per tenant by Stamper on the insert path. received_at (m1_ch_003) is
+// the receipt time RowsFromBatch is handed: the request's on live ingest, the
+// landing object's on replay, so a replay reproduces it (ADR-0013 §10).
 var Columns = []string{
 	"tenant_id", "occurred_at", "session_id", "event_id", "seq", "session_epoch",
 	"device_id", "task_id",
@@ -48,7 +51,7 @@ var Columns = []string{
 	"propensity", "fidelity", "bundle_seq",
 	"checkpoint_seq", "coverage_kind", "coverage_duration_ms",
 	"dropped_reason", "dropped_durability_class", "dropped_quantity",
-	"payload", "cost_basis", "task_seg_version",
+	"payload", "cost_basis", "task_seg_version", "received_at",
 }
 
 var (
@@ -129,10 +132,10 @@ func RowsFromBatch(b *m1pv1.Batch, tenant, device uuid.UUID, receivedAt time.Tim
 		if a := ev.GetCoverageTransition().GetAgent(); a != "" {
 			agent = a // an agent-scoped window (unsupported_agent_version, agent_pause) has no session; the body names the agent
 		}
-		rows = append(rows, eventRow(ev, tenant, device, agent, fallbackAt))
+		rows = append(rows, eventRow(ev, tenant, device, agent, fallbackAt, receivedAt))
 	}
 	for i, d := range b.GetDropped() {
-		rows = append(rows, droppedRow(d, i, batchID, tenant, device, sessionID, agentOf(sessionID), fallbackAt))
+		rows = append(rows, droppedRow(d, i, batchID, tenant, device, sessionID, agentOf(sessionID), fallbackAt, receivedAt))
 	}
 	return rows
 }
@@ -150,7 +153,7 @@ func sessionAgents(b *m1pv1.Batch) map[uuid.UUID]string {
 	return agents
 }
 
-func eventRow(ev *m1pv1.Event, tenant, device uuid.UUID, agent string, fallbackAt time.Time) []any {
+func eventRow(ev *m1pv1.Event, tenant, device uuid.UUID, agent string, fallbackAt, receivedAt time.Time) []any {
 	occurred := fallbackAt
 	if ts := ev.GetOccurredAt(); ts != nil {
 		occurred = ts.AsTime()
@@ -175,7 +178,7 @@ func eventRow(ev *m1pv1.Event, tenant, device uuid.UUID, agent string, fallbackA
 		float64(0), "", uint64(0),
 		uint64(0), "", uint64(0),
 		"", "", uint64(0),
-		payloadJSON(ev), "", "",
+		payloadJSON(ev), "", "", receivedAt,
 	}
 
 	switch body := ev.GetBody().(type) {
@@ -204,6 +207,8 @@ func eventRow(ev *m1pv1.Event, tenant, device uuid.UUID, agent string, fallbackA
 		row[24] = r.GetPropensity()
 		row[25] = enumSuffix(r.GetFidelity().String(), "ROUTE_FIDELITY_")
 		row[26] = r.GetBundleSeq()
+	case *m1pv1.Event_GuardDecision:
+		row[26] = body.GuardDecision.GetBundleSeq() // the interventions read's bundle_seq (ADR-0012)
 	case *m1pv1.Event_AnchorVote:
 		// No typed columns: the full vote (signature included) already rides
 		// in `payload` (payloadJSON below). This counter is the aggregate view.
@@ -218,8 +223,21 @@ func eventRow(ev *m1pv1.Event, tenant, device uuid.UUID, agent string, fallbackA
 		c := body.CoverageTransition
 		row[28] = enumSuffix(c.GetKind().String(), "COVERAGE_KIND_")
 		row[29] = c.GetDurationMs()
+	case *m1pv1.Event_OutcomeContribution:
+		row[33] = contributionIndexJSON(body.OutcomeContribution)
 	}
 	return row
+}
+
+// contributionIndexJSON is the one m1p_events row a contribution gets: labels, generator and receipt, never the task text or the diff (16 L8).
+func contributionIndexJSON(c *m1pv1.OutcomeContribution) string {
+	idx := proto.CloneOf(c)
+	idx.IntentTextRedacted, idx.DiffRedacted = "", ""
+	b, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(idx)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 // droppedRow: a Dropped{} entry becomes an event_type='Dropped' row (07 §MV:
@@ -227,7 +245,7 @@ func eventRow(ev *m1pv1.Event, tenant, device uuid.UUID, agent string, fallbackA
 // no event_id of its own, so one is DERIVED deterministically from
 // (batch_id, index) — a replayed batch re-derives the same id and the
 // ReplacingMergeTree collapses it instead of double-counting the loss ledger.
-func droppedRow(d *m1pv1.Dropped, idx int, batchID, tenant, device, session uuid.UUID, agent string, at time.Time) []any {
+func droppedRow(d *m1pv1.Dropped, idx int, batchID, tenant, device, session uuid.UUID, agent string, at, receivedAt time.Time) []any {
 	eventID := uuid.NewSHA1(batchID, []byte("dropped/"+itoa(idx)))
 	reason := enumSuffix(d.GetReason().String(), "DROP_REASON_")
 	return []any{
@@ -239,7 +257,7 @@ func droppedRow(d *m1pv1.Dropped, idx int, batchID, tenant, device, session uuid
 		float64(0), "", uint64(0),
 		uint64(0), "", uint64(0),
 		reason, enumSuffix(d.GetDurabilityClass().String(), "DURABILITY_CLASS_"), d.GetQuantity(),
-		"{}", "", "",
+		"{}", "", "", receivedAt,
 	}
 }
 
@@ -291,7 +309,7 @@ func securityRow(tenant, device, batchID uuid.UUID, reason, code, detail string,
 		float64(0), "", uint64(0),
 		uint64(0), "", uint64(0),
 		"", "", uint64(0),
-		string(payload), "", "",
+		string(payload), "", "", at,
 	}
 }
 

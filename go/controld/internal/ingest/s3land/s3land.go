@@ -65,14 +65,20 @@ type Store interface {
 	// List returns the keys under prefix, lexicographic — which for the key
 	// scheme below approximates chronological replay order by design (05 §2.5).
 	List(ctx context.Context, prefix string) ([]string, error)
-	// Get fetches a landed object + its device stamp for replay.
-	Get(ctx context.Context, key string) ([]byte, uuid.UUID, error)
+	// Get fetches a landed object, its device stamp and when it landed (the replay log is written once, at receipt: replay's received_at, ADR-0013).
+	Get(ctx context.Context, key string) ([]byte, uuid.UUID, time.Time, error)
 	// Delete removes key; a missing key is not an error (the sweep receipts what it observed, 07 §S3 layout).
 	Delete(ctx context.Context, key string) error
 }
 
 // quarantineTag is what 09's lifecycle rule filters on: prefixes cannot wildcard the tenant segment, the tag can.
 const quarantineTag = "class=quarantine"
+
+// contributionTag carries the 12-month contribution expiry (09 lifecycle rule "contribution-ttl").
+const contributionTag = "class=contribution"
+
+// evidenceTag carries the 32 d E1 backstop expiry (09 lifecycle rule "evidence-ttl"); the sweep deletes at 30 d, receipted.
+const evidenceTag = "class=evidence"
 
 // batchTime is the uuidv7 batch_id's embedded millisecond timestamp — the
 // batch's own creation time, validated as v7 at stage 1 before any key exists.
@@ -110,6 +116,28 @@ func QuarantineKey(tenant uuid.UUID, batchID uuid.UUID) string {
 // IngestPrefix is the replay lister's entry point for a tenant + day (05 §2.5).
 func IngestPrefix(tenant uuid.UUID, day time.Time) string {
 	return fmt.Sprintf("t/%s/ingest/v1/dt=%s/", tenant, day.UTC().Format("2006-01-02"))
+}
+
+// ContributionKey lands a consented OutcomeContribution batch (16 L8) outside the replay log's own prefix, so withdrawal can delete it; same batch_id purity as IngestKey.
+func ContributionKey(tenant uuid.UUID, batchID uuid.UUID) string {
+	t := batchTime(batchID)
+	return fmt.Sprintf("t/%s/contributions/v1/dt=%s/hh=%02d/%s.m1p.zst",
+		tenant, t.Format("2006-01-02"), t.Hour(), batchID)
+}
+
+// ContributionPrefix is replay's second lister for a tenant + day.
+func ContributionPrefix(tenant uuid.UUID, day time.Time) string {
+	return fmt.Sprintf("t/%s/contributions/v1/dt=%s/", tenant, day.UTC().Format("2006-01-02"))
+}
+
+// EvidenceKey lands a task's E1 part (08 §2.1) under the tenant's evidence prefix; one part per task makes the key a pure function of (tenant, task).
+func EvidenceKey(tenant, task uuid.UUID) string {
+	return fmt.Sprintf("t/%s/evidence/v1/%s.e1", tenant, task)
+}
+
+// EvidenceQuarantineKey is a flagged E1 part's twin: the quarantine prefix, so the 30 d sweep and the lifecycle backstop own it.
+func EvidenceQuarantineKey(tenant, task uuid.UUID, at time.Time) string {
+	return fmt.Sprintf("t/%s/quarantine/v1/dt=%s/e1-%s.bin", tenant, at.UTC().Format("2006-01-02"), task)
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +294,12 @@ func (c *Client) Land(ctx context.Context, key string, body []byte, tenant, devi
 	if strings.Contains(key, "/quarantine/v1/") {
 		in.Tagging = aws.String(quarantineTag)
 	}
+	if strings.Contains(key, "/contributions/v1/") {
+		in.Tagging = aws.String(contributionTag)
+	}
+	if strings.Contains(key, "/evidence/v1/") {
+		in.Tagging = aws.String(evidenceTag)
+	}
 	if !c.opt.DisableSSEKMS {
 		in.ServerSideEncryption = s3types.ServerSideEncryptionAwsKms
 		in.SSEKMSKeyId = aws.String(kmsKey)
@@ -317,7 +351,7 @@ func (c *Client) compareLanded(ctx context.Context, key, shaB64 string) (Outcome
 	if existing == "" {
 		// Object landed without a stored checksum (shouldn't happen for our
 		// own PUTs; possible for MinIO) — fall back to GET + hash.
-		body, _, err := c.Get(ctx, key)
+		body, _, _, err := c.Get(ctx, key)
 		if err != nil {
 			return 0, err
 		}
@@ -370,22 +404,22 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-func (c *Client) Get(ctx context.Context, key string) ([]byte, uuid.UUID, error) {
+func (c *Client) Get(ctx context.Context, key string) ([]byte, uuid.UUID, time.Time, error) {
 	out, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(c.opt.Bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return nil, uuid.Nil, fmt.Errorf("s3land: get %s: %w", key, err)
+		return nil, uuid.Nil, time.Time{}, fmt.Errorf("s3land: get %s: %w", key, err)
 	}
 	defer func() { _ = out.Body.Close() }()
 	body, err := io.ReadAll(out.Body)
 	if err != nil {
-		return nil, uuid.Nil, fmt.Errorf("s3land: get %s: %w", key, err)
+		return nil, uuid.Nil, time.Time{}, fmt.Errorf("s3land: get %s: %w", key, err)
 	}
 	device := uuid.Nil
 	if d, perr := uuid.Parse(out.Metadata["m1-device-id"]); perr == nil {
 		device = d
 	}
-	return body, device, nil
+	return body, device, aws.ToTime(out.LastModified).UTC(), nil
 }

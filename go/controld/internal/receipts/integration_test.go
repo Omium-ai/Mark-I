@@ -126,7 +126,7 @@ func setup(t *testing.T) *harness {
 	if _, err := bootstrap.Exec(ctx, `SELECT pg_advisory_lock(7231060)`); err != nil {
 		t.Fatal(err)
 	}
-	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "migrations", "m1_0*.sql"))
+	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "migrations", "m1_[0-9]*.sql"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("migrations not found: %v (%d)", err, len(files))
 	}

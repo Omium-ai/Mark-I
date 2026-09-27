@@ -89,7 +89,7 @@ func (m *Module) handleLabel(w http.ResponseWriter, r *http.Request) {
 	var setID uuid.UUID
 	err = m.deps.PG.WithTenant(r.Context(), tid, func(tx pgx.Tx) error {
 		// The tenant's open set for this agent (gold labels do not transfer across hook vocabularies, m1_021); created on the first label.
-		err := tx.QueryRow(r.Context(), `SELECT id FROM gold_sets WHERE tenant_id = $1 AND agent = $2 AND frozen_at IS NULL ORDER BY created_at DESC LIMIT 1`, tid.UUID(), agent).Scan(&setID)
+		err := tx.QueryRow(r.Context(), `SELECT id FROM gold_sets WHERE tenant_id = $1 AND agent = $2 AND frozen_at IS NULL ORDER BY row_seq DESC LIMIT 1`, tid.UUID(), agent).Scan(&setID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			err = tx.QueryRow(r.Context(), `INSERT INTO gold_sets (tenant_id, agent) VALUES ($1, $2) RETURNING id`, tid.UUID(), agent).Scan(&setID)
 		}
@@ -99,7 +99,7 @@ func (m *Module) handleLabel(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(r.Context(), `INSERT INTO gold_set_members (gold_set_id, tenant_id, task_digest, true_label, label_source, labeled_by_device)
 			VALUES ($1, $2, $3, $4::verdict, 'human', $5)
 			ON CONFLICT (gold_set_id, task_digest) DO UPDATE
-			   SET true_label = EXCLUDED.true_label, label_source = 'human', labeled_by_device = EXCLUDED.labeled_by_device, labeled_at = now()`,
+			   SET true_label = EXCLUDED.true_label, label_source = 'human', labeled_by_device = EXCLUDED.labeled_by_device, labeled_at = now(), row_seq = DEFAULT`,
 			setID, tid.UUID(), digest, wire.Label, device)
 		return err
 	})
@@ -139,7 +139,7 @@ func (m *Module) labelProgress(w http.ResponseWriter, r *http.Request, tid query
 		}
 		// The latest frozen snapshot is what a certificate cites (adjudicator nightly.py certs_recompute).
 		return tx.QueryRow(r.Context(), `SELECT coalesce((SELECT count(*) FROM gold_set_members g WHERE g.gold_set_id = s.id), 0)
-			FROM gold_sets s WHERE s.tenant_id = $1 AND s.frozen_at IS NOT NULL ORDER BY s.frozen_at DESC LIMIT 1`, tid.UUID()).Scan(&frozenN)
+			FROM gold_sets s WHERE s.tenant_id = $1 AND s.frozen_at IS NOT NULL ORDER BY s.row_seq DESC LIMIT 1`, tid.UUID()).Scan(&frozenN)
 	})
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		writeErr(w, http.StatusInternalServerError, "M1E-9500", "label progress lookup failed")

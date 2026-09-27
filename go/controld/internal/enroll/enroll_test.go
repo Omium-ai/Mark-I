@@ -3,6 +3,8 @@ package enroll
 import (
 	"context"
 	"errors"
+	"os"
+	"regexp"
 	"testing"
 	"time"
 
@@ -220,5 +222,46 @@ func TestRevocationCacheInvalidate(t *testing.T) {
 	c.Invalidate(device)
 	if rev, _ := c.IsRevoked(context.Background(), tenant, device); !rev {
 		t.Fatal("invalidate did not force a re-fetch")
+	}
+}
+
+// 16 L8: the dogfood default reaches Omium staff in Omium's own tenants only, as the flag plus the reason the edge requires; a refresh body carries neither.
+func TestDogfoodDefaultReachesStaffOnly(t *testing.T) {
+	ours, customer := uuid.New(), uuid.New()
+	m := New(Deps{DogfoodTenants: []uuid.UUID{ours}, StaffSubjects: []string{"omium:u-listed"}})
+	for name, c := range map[string]struct {
+		tenant uuid.UUID
+		who    approver
+		want   bool
+	}{
+		"staff, verified @omium.ai":           {ours, approver{"omium:u-a", "Anurag@Omium.ai", true}, true},
+		"staff, STAFF_SUBJECTS entry":         {ours, approver{"omium:u-listed", "dev@gmail.com", false}, true},
+		"invited non-staff teammate":          {ours, approver{"omium:u-b", "bob@gmail.com", true}, false},
+		"@omium.ai but unverified":            {ours, approver{"omium:u-c", "carol@omium.ai", false}, false},
+		"subdomain lookalike":                 {ours, approver{"omium:u-d", "d@evil.omium.ai", true}, false},
+		"suffix lookalike":                    {ours, approver{"omium:u-e", "e@omium.ai.evil.com", true}, false},
+		"two @":                               {ours, approver{"omium:u-f", "f@x@omium.ai", true}, false},
+		"no local part":                       {ours, approver{"omium:u-g", "@omium.ai", true}, false},
+		"staff in a customer tenant":          {customer, approver{"omium:u-a", "anurag@omium.ai", true}, false},
+		"listed subject in a customer tenant": {customer, approver{"omium:u-listed", "", false}, false},
+	} {
+		body := map[string]any{}
+		m.addTenantRoot(body, c.tenant)
+		if _, ok := body["contribute_outcomes_default"]; ok {
+			t.Fatalf("%s: the refresh-shared part of the body carries the default", name)
+		}
+		m.addStaffDefault(body, c.tenant, c.who)
+		got, _ := body["contribute_outcomes_default"].(bool)
+		reason, hasReason := body["contribute_outcomes_default_reason"]
+		if got != c.want || hasReason != c.want || (c.want && reason != staffDefaultReason) {
+			t.Errorf("%s: default=%v reason=%v, want default=%v", name, body["contribute_outcomes_default"], reason, c.want)
+		}
+	}
+	src, err := os.ReadFile("../../../mark1d/internal/contrib/contrib.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := regexp.MustCompile(`const StaffDefaultReason = "([^"]+)"`).FindSubmatch(src); m == nil || string(m[1]) != staffDefaultReason {
+		t.Fatalf("edge contrib.StaffDefaultReason %q is not controld's %q: the edge would ignore the default", m, staffDefaultReason)
 	}
 }

@@ -23,7 +23,9 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -203,12 +205,12 @@ func (m *Module) handlePoll(w http.ResponseWriter, r *http.Request) {
 	// exp, signature against the PINNED JWKS. An unverifiable "approval" is a
 	// server-side trust failure, not a user denial, and must not consume the
 	// grant: 503, retryable.
-	subject, err := idp.verifyIDToken(r.Context(), rawIDToken)
+	who, err := idp.verifyIDToken(r.Context(), rawIDToken)
 	if err != nil {
 		m.serverErr(w, "poll: ID token validation", err)
 		return
 	}
-	device, token, expiresIn, err := m.approveEnrollment(r.Context(), tenant, codeHash, platform, hostnameHMAC, subject)
+	device, token, expiresIn, err := m.approveEnrollment(r.Context(), tenant, codeHash, platform, hostnameHMAC, who.subject)
 	if errors.Is(err, errCodeConsumed) {
 		writeErr(w, http.StatusBadRequest, "M1E-1004", "unknown or expired device_code")
 		return
@@ -241,6 +243,7 @@ func (m *Module) handlePoll(w http.ResponseWriter, r *http.Request) {
 		"key_manifest_uri": "/.well-known/mark1-keys",
 	}
 	m.addTenantRoot(body, tenant)
+	m.addStaffDefault(body, tenant, who)
 	writeJSON(w, http.StatusOK, body)
 }
 
@@ -253,6 +256,19 @@ func (m *Module) addTenantRoot(body map[string]any, tenant uuid.UUID) {
 		if keys := m.bundleKeys(); len(keys) > 0 {
 			body["bundle_section_keys"] = keys
 		}
+	}
+}
+
+// staffDefaultReason is the edge's contrib.StaffDefaultReason: without it beside the flag the edge ignores the default.
+const staffDefaultReason = "omium_staff"
+
+// addStaffDefault is 16 L8's dogfood default on an ACTIVE body: only for a DOGFOOD_TENANTS tenant with a staff approver (a STAFF_SUBJECTS entry, or a verified @omium.ai email); an invited non-staff teammate gets neither field.
+func (m *Module) addStaffDefault(body map[string]any, tenant uuid.UUID, who approver) {
+	local, domain, ok := strings.Cut(strings.ToLower(who.email), "@")
+	staff := slices.Contains(m.staff, who.subject) || (who.emailVerified && ok && local != "" && domain == "omium.ai")
+	if slices.Contains(m.dogfood, tenant) && staff {
+		body["contribute_outcomes_default"] = true
+		body["contribute_outcomes_default_reason"] = staffDefaultReason
 	}
 }
 
@@ -361,6 +377,7 @@ func (m *Module) handleApprove(w http.ResponseWriter, r *http.Request) {
 		"key_manifest_uri": "/.well-known/mark1-keys",
 	}
 	m.addTenantRoot(body, tenant)
+	m.addStaffDefault(body, tenant, approver{subject: subject, email: claims.Email, emailVerified: claims.EmailVerified})
 	writeJSON(w, http.StatusOK, body)
 }
 

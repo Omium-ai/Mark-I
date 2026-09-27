@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/appapi/schemacheck"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/policydist"
 )
 
 type schemaSet = schemacheck.Set
@@ -119,5 +121,23 @@ func TestReceiptsExportLineSchema(t *testing.T) {
 		if len(errs) == 0 {
 			t.Errorf("%s: validator passed %s", name, bad)
 		}
+	}
+}
+
+// ADR-0013: the route bundle's knee states the bundle's own basis, "unknown" when the bundle predates route.knee.basis, and both shapes satisfy route_bundle.json.
+func TestRouteBundleKneeBasis(t *testing.T) {
+	s := loadSchemas(t)
+	for basis, want := range map[string]string{"": "unknown", "prior": "prior", "certified": "certified", "anchor_grounded": "anchor_grounded"} {
+		b := &policydist.Bundle{MaxAge: 900}
+		b.Sections.Route.Knee = policydist.KneeTable{CostBasis: "quota", Basis: basis, VDefault: 1, Rows: []policydist.KneeRow{{N: 1, CN: 0.2}}}
+		sum := summarize(b, "stable", 3, "ed25519:0011223344556677", time.Unix(1_790_000_000, 0), nil)
+		if sum.Knee.Basis != want {
+			t.Fatalf("basis %q: summary says %q, want %q", basis, sum.Knee.Basis, want)
+		}
+		raw, err := json.Marshal(sum)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Validate("route_bundle.json", raw)
 	}
 }

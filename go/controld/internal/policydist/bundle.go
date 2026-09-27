@@ -200,7 +200,8 @@ type Rung struct {
 }
 
 type KneeTable struct {
-	CostBasis string    `cbor:"cost_basis"` // "usd" | "quota"
+	CostBasis string    `cbor:"cost_basis"`      // "usd" | "quota"
+	Basis     string    `cbor:"basis,omitempty"` // ADR-0013: "prior" | "anchor_grounded" | "certified"; absent on a bundle that predates it
 	Rows      []KneeRow `cbor:"rows"`
 	VDefault  float64   `cbor:"v_default"`
 }
@@ -285,11 +286,12 @@ var (
 
 const jsonPointerMaxLen = 1024
 
-// cortexChannels and costBases are 07's closed enums. Closed means closed: a
+// cortexChannels, costBases and kneeBases are 07's closed enums. Closed means closed: a
 // value outside the set is a decode failure, not a value to ignore.
 var (
 	cortexChannels = map[string]bool{"session_start": true, "prompt_submit": true, "before_model": true}
 	costBases      = map[string]bool{"usd": true, "quota": true}
+	kneeBases      = map[string]bool{"prior": true, "anchor_grounded": true, "certified": true}
 	rankerStages   = map[string]bool{"probation": true, "shadow": true, "active": true}
 )
 
@@ -512,6 +514,9 @@ func validateRoute(r RouteSection) error {
 	}
 	if !costBases[r.Knee.CostBasis] {
 		return reject("M1E-3005", "knee.cost_basis = %q is not the closed enum \"usd\"|\"quota\"", r.Knee.CostBasis)
+	}
+	if r.Knee.Basis != "" && !kneeBases[r.Knee.Basis] {
+		return reject("M1E-3001", "knee.basis = %q is not the closed enum prior|anchor_grounded|certified (ADR-0013)", r.Knee.Basis)
 	}
 	if len(r.Knee.Rows) == 0 {
 		return reject("M1E-3001", "knee.rows is empty ([+ ...] is one-or-more); a knee table with no rows stops nothing")

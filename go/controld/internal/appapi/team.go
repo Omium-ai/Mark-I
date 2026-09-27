@@ -9,9 +9,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
+	netmail "net/mail"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/mail"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/teams"
 )
@@ -129,6 +132,7 @@ type member struct {
 	JoinedAt   string  `json:"joined_at"`
 	LastActive *string `json:"last_active"`
 	Status     string  `json:"status"`
+	Totals     *totals `json:"totals"`
 }
 
 // who is the principal a row records: the user token's subject, else the device.
@@ -166,6 +170,7 @@ var (
 	errOwnerOfTeam      = teamErr{http.StatusConflict, "M1E-2011", "owner_of_team", "you own a team with members; remove them before joining another team"}
 	errOwnerCannotLeave = teamErr{http.StatusConflict, "M1E-2011", "owner_cannot_leave", "the owner cannot leave their own team"}
 	errMemberNotFound   = teamErr{http.StatusNotFound, "M1E-2012", "member_not_found", "no such member in this team"}
+	errInviteRate       = teamErr{http.StatusTooManyRequests, "M1E-9001", "invite_rate_limited", "too many invites today; try again tomorrow"}
 )
 
 func writeTeamErr(w http.ResponseWriter, err error, fallback string) {
@@ -194,11 +199,22 @@ func subjectOf(ctx context.Context, tx pgx.Tx, c auth.Claims) (string, error) {
 		return teams.Subject(c.Subject), nil
 	}
 	var s string
-	err := tx.QueryRow(ctx, `SELECT oidc_subject FROM m1_device_enrollments WHERE device_id = $1 AND oidc_subject IS NOT NULL AND status = 'approved' ORDER BY started_at DESC LIMIT 1`, c.DeviceID).Scan(&s)
+	err := tx.QueryRow(ctx, `SELECT oidc_subject FROM m1_device_enrollments WHERE device_id = $1 AND oidc_subject IS NOT NULL AND status = 'approved' ORDER BY row_seq DESC LIMIT 1`, c.DeviceID).Scan(&s)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
 	return s, err
+}
+
+// participant is teams.Participant with the team error shape.
+func (m *Module) participant(next http.Handler) http.Handler {
+	return teams.Participant(m.deps.PG, func(w http.ResponseWriter, err error) {
+		if errors.Is(err, teams.ErrNotMember) {
+			writeTeamErr(w, errNotMember, "")
+			return
+		}
+		writeTeamErr(w, err, "team membership lookup failed")
+	})(next)
 }
 
 // ownerOfTeam gates tenant-wide settings: in a team only the owner, signed in as a person, may change them; a solo tenant is unchanged.
@@ -262,6 +278,7 @@ func (m *Module) handleTeam(w http.ResponseWriter, r *http.Request) {
 	var shared bool
 	role := "member"
 	members := []member{}
+	var owners map[string]string
 	err := m.deps.PG.WithTenant(ctx, tid, func(tx pgx.Tx) error {
 		var owner *string
 		if err := tx.QueryRow(ctx, `SELECT owner_subject, shared_memory FROM m1_tenants WHERE id = $1`, tid.UUID()).Scan(&owner, &shared); err != nil {
@@ -308,6 +325,9 @@ func (m *Module) handleTeam(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Err(); err != nil {
 			return err
 		}
+		if owners, err = deviceOwners(ctx, tx, tid.UUID()); err != nil {
+			return err
+		}
 		invites, err := tx.Query(ctx, `SELECT id, invited_email, created_at FROM m1_team_invites WHERE tenant_id = $1 AND accepted_at IS NULL AND expires_at > now() ORDER BY created_at, id`, tid.UUID())
 		if err != nil {
 			return err
@@ -330,10 +350,96 @@ func (m *Module) handleTeam(w http.ResponseWriter, r *http.Request) {
 	}
 	var tvo any
 	from, to, _ := parseWindow("")
-	if full, rec := m.tvoReport(r.WithContext(querychoke.TenantWide(r.Context())), from, to); rec.code == http.StatusOK && full != nil {
+	wide := r.WithContext(querychoke.TenantWide(r.Context()))
+	if full, rec := m.tvoReport(wide, from, to); rec.code == http.StatusOK && full != nil {
 		tvo = pick(full, "tvo", "coverage_band", "cost_basis", "guarantee_grade", "refusal", "trend")
 	}
-	writeJSON(w, map[string]any{"members": members, "you": map[string]string{"role": role}, "max_members": m.maxMembers(), "invite_link": nil, "shared_memory": shared, "tvo": tvo, "fleet_status": nil})
+	var sums any
+	if byDevice, err := m.deviceTotals(wide.Context(), tid, from, to); err != nil {
+		slog.Error("appapi: team totals", "err", err)
+	} else {
+		sums = foldTotals(members, owners, byDevice, from, to)
+	}
+	writeJSON(w, map[string]any{"members": members, "you": map[string]string{"role": role}, "max_members": m.maxMembers(), "invite_link": nil, "shared_memory": shared, "tvo": tvo, "totals": sums, "fleet_status": nil})
+}
+
+// totals is one person's (or the team's) aggregate over the window; never a session or a device.
+type totals struct {
+	Sessions      int64 `json:"sessions"`
+	TasksVerified int64 `json:"tasks_verified"`
+	Tokens        int64 `json:"tokens"`
+	TokensSaved   int64 `json:"tokens_saved"`
+}
+
+func (t *totals) add(o totals) {
+	t.Sessions += o.Sessions
+	t.TasksVerified += o.TasksVerified
+	t.Tokens += o.Tokens
+	t.TokensSaved += o.TokensSaved
+}
+
+// deviceOwners maps each device of this tenant to the subject of its latest enrollment (revoked kept: a removed laptop's history stays its owner's).
+func deviceOwners(ctx context.Context, tx pgx.Tx, tenant uuid.UUID) (map[string]string, error) {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT ON (device_id) device_id::text, oidc_subject FROM m1_device_enrollments
+		WHERE tenant_id = $1 AND device_id IS NOT NULL AND oidc_subject IS NOT NULL AND status IN ('approved', 'revoked')
+		ORDER BY device_id, row_seq DESC`, tenant)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for rows.Next() {
+		var device, subject string
+		if err := rows.Scan(&device, &subject); err != nil {
+			return nil, err
+		}
+		out[device] = subject
+	}
+	return out, rows.Err()
+}
+
+// deviceTotals runs team_device_totals.v2 tenant-wide (ctx must carry TenantWide: the viewer filter refuses a deviceless template).
+func (m *Module) deviceTotals(ctx context.Context, tid querychoke.TenantID, from, to time.Time) (map[string]totals, error) {
+	tpl, err := m.deps.Registry.Lookup("team_device_totals")
+	if err != nil {
+		return nil, err
+	}
+	q, err := querychoke.Build(tid, tpl, querychoke.Params{"from": from, "to": to})
+	if err != nil {
+		return nil, err
+	}
+	rows, err := m.deps.Runner.Run(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]totals{}
+	for _, row := range rows.Rows {
+		out[asStr(row["device_id"])] = totals{
+			Sessions: asI64(row["sessions"]), TasksVerified: asI64(row["tasks_verified"]),
+			Tokens: asI64(row["tokens"]), TokensSaved: asI64(row["tokens_saved"]),
+		}
+	}
+	return out, nil
+}
+
+// foldTotals credits each device to its member's row; devices of no listed member (a leaver, an unenrolled one) land in unattributed, and team is the sum of all.
+func foldTotals(members []member, owners map[string]string, byDevice map[string]totals, from, to time.Time) map[string]any {
+	idx := map[string]int{}
+	for i := range members {
+		if members[i].Status == "active" {
+			members[i].Totals = &totals{}
+			idx["omium:"+members[i].ID] = i
+		}
+	}
+	var team, unattributed totals
+	for device, t := range byDevice {
+		team.add(t)
+		if i, ok := idx[owners[device]]; ok {
+			members[i].Totals.add(t)
+		} else {
+			unattributed.add(t)
+		}
+	}
+	return map[string]any{"window": windowJSON(from, to), "team": team, "unattributed": unattributed}
 }
 
 // PUT /api/v1/team {shared_memory}
@@ -372,7 +478,7 @@ func (m *Module) handleTeamUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"shared_memory": *wire.SharedMemory})
 }
 
-// POST /api/v1/team/invites {email?}: owner only, capped, mints a 7-day invite (m1_081, hash stored) and answers the link once; nothing is emailed.
+// POST /api/v1/team/invites {email?}: owner only, capped, mints a 7-day invite (m1_081, hash stored) and answers the link once; with an email and a mailer the link is also emailed after commit, and `sent` says whether it was.
 
 func (m *Module) handleTeamInvite(w http.ResponseWriter, r *http.Request) {
 	tid, claims, ok := principal(w, r)
@@ -392,10 +498,13 @@ func (m *Module) handleTeamInvite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "M1E-2001", "invite body: want {email?} and nothing else")
 		return
 	}
-	wire.Email = strings.TrimSpace(wire.Email)
-	if wire.Email != "" && (len(wire.Email) > 254 || !strings.Contains(wire.Email, "@")) {
-		writeErr(w, http.StatusBadRequest, "M1E-2001", "email: not an address")
-		return
+	if wire.Email = strings.TrimSpace(wire.Email); wire.Email != "" {
+		addr, err := inviteAddress(wire.Email)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "M1E-2001", "email: want exactly one address")
+			return
+		}
+		wire.Email = addr
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -428,6 +537,13 @@ func (m *Module) handleTeamInvite(w http.ResponseWriter, r *http.Request) {
 		if err := m.roomFor(ctx, tx, tid.UUID(), 1); err != nil {
 			return err
 		}
+		var today int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM m1_team_invites WHERE tenant_id = $1 AND created_at > now() - interval '1 day'`, tid.UUID()).Scan(&today); err != nil {
+			return err
+		}
+		if today >= m.invitesPerDay() {
+			return errInviteRate
+		}
 		return tx.QueryRow(ctx, `INSERT INTO m1_team_invites (tenant_id, token_hash, invited_email, invited_by, expires_at) VALUES ($1, $2, $3, $4, now() + interval '7 days') RETURNING expires_at`,
 			tid.UUID(), hash[:], email, me).Scan(&expires)
 	})
@@ -435,10 +551,88 @@ func (m *Module) handleTeamInvite(w http.ResponseWriter, r *http.Request) {
 		writeTeamErr(w, err, "invite not recorded")
 		return
 	}
+	sent := false
+	if email != nil && m.deps.Mail != nil {
+		sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, err := m.deps.Mail(sctx, inviteMail(*email, claims.Email, inviteBase+token, expires, m.deps.EmailPostal))
+		cancel()
+		if err != nil {
+			slog.Error("appapi: invite email not sent; the invite stands", "err", err)
+		}
+		sent = err == nil
+	}
 	writeJSON(w, map[string]any{
-		"sent": false, "invite_link": inviteBase + token, "invited_email": email,
+		"sent": sent, "invite_link": inviteBase + token, "invited_email": email,
 		"status": "invited", "expires_at": expires.UTC().Format(time.RFC3339Nano),
 	})
+}
+
+// inviteAddress is the one bare address an invite may name, lowercased: a display name, a list or a group is refused, so the mailer is handed exactly one recipient.
+func inviteAddress(raw string) (string, error) {
+	a, err := netmail.ParseAddress(raw)
+	if err != nil || a.Name != "" || len(a.Address) > 254 || a.Address != raw {
+		return "", errors.New("not one bare address")
+	}
+	return strings.ToLower(a.Address), nil
+}
+
+// invitesPerDay caps invites minted per tenant per rolling 24 h, cancelled ones included (cancel frees the seat, not the quota); the ledger is m1_team_invites itself, so a restart forgets nothing.
+func (m *Module) invitesPerDay() int { return 2 * m.maxMembers() }
+
+// inviteMail is the invite's text and HTML; the link carries the token in its fragment, so a mail client that follows it never sends the token to a server.
+func inviteMail(to, from, link string, expires time.Time, postal string) mail.Message {
+	who := strings.TrimSpace(from)
+	if who == "" {
+		who = "A teammate"
+	}
+	day := expires.UTC().Format("2 January 2006")
+	text := who + " invited you to their team on Mark 1.\n\nOpen Mark 1, choose \"Have a team invite?\" and paste this link:\n" + link +
+		"\n\nOnly " + to + " can use it. It works until " + day + ".\nNo Mark 1 yet? Get it at https://mark.omium.ai\n"
+	e := html.EscapeString
+	body := `<p>` + e(who) + ` invited you to their team on Mark 1.</p><p>Open Mark 1, choose <b>Have a team invite?</b> and paste this link:</p><p><a href="` + e(link) + `">` + e(link) + `</a></p><p>Only ` + e(to) + ` can use it. It works until ` + e(day) + `.<br>No Mark 1 yet? Get it at <a href="https://mark.omium.ai">mark.omium.ai</a>.</p>`
+	if postal != "" {
+		text += "\n" + postal + "\n"
+		body += `<p style="color:#888;font-size:12px">` + e(postal) + `</p>`
+	}
+	return mail.Message{To: to, Subject: who + " invited you to a Mark 1 team", Text: text, HTML: body}
+}
+
+// DELETE /api/v1/team/invites/{id}: owner only, user token; a live invite stops working (expires_at = now()), which also frees its seat.
+
+func (m *Module) handleTeamCancelInvite(w http.ResponseWriter, r *http.Request) {
+	tid, claims, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	if claims.Subject == "" {
+		writeTeamErr(w, errUserToken, "")
+		return
+	}
+	id, err := uuid.Parse(strings.TrimPrefix(r.PathValue("id"), "invite:"))
+	if err != nil {
+		writeTeamErr(w, errInviteInvalid, "")
+		return
+	}
+	ctx := r.Context()
+	err = m.deps.PG.WithTenant(ctx, tid, func(tx pgx.Tx) error {
+		var owner *string
+		if err := tx.QueryRow(ctx, `SELECT owner_subject FROM m1_tenants WHERE id = $1`, tid.UUID()).Scan(&owner); err != nil {
+			return err
+		}
+		if owner == nil || teams.Subject(claims.Subject) != *owner {
+			return errNotOwner
+		}
+		tag, err := tx.Exec(ctx, `UPDATE m1_team_invites SET expires_at = now() WHERE id = $1 AND tenant_id = $2 AND accepted_at IS NULL AND expires_at > now()`, id, tid.UUID())
+		if err == nil && tag.RowsAffected() == 0 {
+			return errInviteInvalid
+		}
+		return err
+	})
+	if err != nil {
+		writeTeamErr(w, err, "invite not cancelled")
+		return
+	}
+	writeJSON(w, map[string]any{"id": "invite:" + id.String(), "status": "cancelled"})
 }
 
 // inviteToken takes the raw token or the whole link: what follows '#' (the join link) or the last '/' (the pre-teams link).

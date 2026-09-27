@@ -1,4 +1,9 @@
 {
+  "closed": {
+    "days": 1,
+    "guarantee_grade": true,
+    "tvo": 100
+  },
   "cost_basis": "usd",
   "coverage_band": {
     "coverage_lower": 0.98,
@@ -13,10 +18,20 @@
     "arrests": 0,
     "block_count": 0,
     "blocks": 0,
+    "blocks_resolved": 0,
+    "by_cost_basis": {},
+    "certified": 0,
+    "debit": 0,
     "estimate": true,
+    "label": "estimated",
     "re_exploration_avoided": 0,
+    "restated": {
+      "tasks": 0,
+      "total": 0
+    },
     "routing": 0,
-    "total": 0
+    "total": 0,
+    "version": "savings.v3"
   },
   "tvo": 100,
   "waste": {

@@ -151,6 +151,7 @@ type Effect struct {
 	Checkpoint *receipts.CheckpointEvent // ReceiptCheckpoint events
 	Excerpt    *Excerpt                  // EvidenceExcerpt events at tier E1
 	Deletion   *QuarantineDeletion       // QuarantineDeletion events
+	Task       uuid.UUID                 // TaskOpen/TaskClose: the task this device ran (m1_106), bound once
 }
 
 // EffectsFromBatch projects a decoded batch into stage-11 effects, in batch
@@ -205,6 +206,8 @@ func EffectsFromBatch(b *m1pv1.Batch, fallbackAt time.Time) []Effect {
 				subject, _ := uuid.FromBytes(x.GetEvidenceEventId())
 				e.Excerpt = &Excerpt{ReceiptID: x.GetRedactionReceiptId(), SubjectID: subject}
 			}
+		case *m1pv1.Event_TaskOpen, *m1pv1.Event_TaskClose:
+			e.Task, _ = uuid.FromBytes(ev.GetTaskId())
 		case *m1pv1.Event_QuarantineDeletion:
 			q := body.QuarantineDeletion
 			batch, _ := uuid.FromBytes(q.GetBatchId())
@@ -351,6 +354,9 @@ func (s *Sidefx) worker(q chan job) {
 func (s *Sidefx) Apply(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, seenAt time.Time, edgeVer string, effects []Effect) {
 	if err := s.ApplyLastSeen(ctx, tenant, device, seenAt, edgeVer); err != nil {
 		log.Printf("sidefx: last_seen update failed (tenant %s): %v", tenant, err)
+	}
+	if err := s.bindTasks(ctx, tenant, device, effects); err != nil {
+		log.Printf("sidefx: task binding failed (tenant %s): %v — replay re-derives (05 §2.5)", tenant, err)
 	}
 	// Leaves land BEFORE any checkpoint in the batch is applied: a checkpoint seals the batch before it, and its own batch's leaves must be in the store when the next one arrives on whichever pod.
 	var landed []leaf
@@ -746,6 +752,24 @@ func (s *Sidefx) ApplyLastSeen(ctx context.Context, tenant querychoke.TenantID, 
 			        edge_version = COALESCE(NULLIF($3, ''), edge_version)
 			  WHERE id = $1`,
 			device, seenAt, edgeVer)
+		return err
+	})
+}
+
+// bindTasks records the device each TaskOpen/TaskClose came from; the first landing wins, so E1 attach (08 §2.1) admits only that device.
+func (s *Sidefx) bindTasks(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, effects []Effect) error {
+	var tasks []uuid.UUID
+	for _, e := range effects {
+		if e.Task != uuid.Nil {
+			tasks = append(tasks, e.Task)
+		}
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+	return s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO m1_task_devices (tenant_id, task_id, device_id)
+			SELECT $1, t, $2 FROM unnest($3::uuid[]) t ON CONFLICT (tenant_id, task_id) DO NOTHING`, tenant.UUID(), device, tasks)
 		return err
 	})
 }

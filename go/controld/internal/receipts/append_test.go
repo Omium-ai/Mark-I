@@ -70,7 +70,7 @@ func TestAppendRefusesServiceCredentialBeforeReadingTheBody(t *testing.T) {
 
 func TestAppendRefusesEveryClassOutsideTheInternalSet(t *testing.T) {
 	mux := storelessAppendMux(t, "intel-secret")
-	for _, class := range []string{"checkpoint", "coverage_transition", "guard_contamination", "discontinuity", "key_rotation", "quarantine_deletion", "prompt_capture", ""} {
+	for _, class := range []string{"checkpoint", "coverage_transition", "guard_contamination", "discontinuity", "key_rotation", "quarantine_deletion", "evidence_deletion", "prompt_capture", ""} {
 		body := strings.Replace(goodBody, "memory_admission", class, 1)
 		w := postAppend(mux, "Bearer intel-secret", body)
 		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `\"`+class+`\"`) {

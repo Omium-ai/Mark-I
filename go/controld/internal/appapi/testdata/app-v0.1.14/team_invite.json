@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/app-v0.1.14/team_invite.json",
+  "description": "Mark1-GUI v0.1.14 InviteResult.",
+  "type": "object",
+  "required": ["invite_link", "invited_email", "status"],
+  "properties": { "invite_link": { "type": "string" }, "invited_email": { "type": ["string", "null"] }, "status": { "type": "string" }, "sent": { "type": "boolean" }, "expires_at": { "type": "string" } }
+}

@@ -32,6 +32,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/registry"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/s3land"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/mail"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/memory"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/pg"
@@ -254,7 +255,9 @@ func main() {
 			_, _, err = policy.Bootstrap(ctx, tid)
 			return err
 		},
-		BundleKeys: policy.BundleKeys,
+		BundleKeys:     policy.BundleKeys,
+		DogfoodTenants: cfg.DogfoodTenants,
+		StaffSubjects:  cfg.StaffSubjects, // the dogfood default reaches staff only (16 L8)
 	})
 	// the read surface admits a device token or a Mark 1 user token (desktop spec §7.2); ingest/enroll/policy stay device-only
 	reads := verifier
@@ -275,6 +278,13 @@ func main() {
 		Viewers:            viewers,
 	})
 
+	var mailer func(context.Context, mail.Message) (string, error) // nil ⇒ invites answer sent:false (16-release L3)
+	if cfg.CustomerIOKey != "" {
+		mailer = mail.CustomerIO{Key: cfg.CustomerIOKey, From: cfg.EmailFrom, Region: cfg.CustomerIORegion, HTTP: &http.Client{Timeout: 10 * time.Second}}.Send
+	} else {
+		log.Printf("CUSTOMERIO_APP_API_KEY unset — team invites are not emailed (sent:false)")
+	}
+
 	srv := server.New(cfg.Port, cfg.DrainTimeout)
 	srv.Register(ingest.New(ingest.Deps{ // 8. each module contributes routes + readiness
 		Verifier:          verifier,
@@ -285,8 +295,11 @@ func main() {
 		Sidefx:            sfx,
 		Registry:          registry.NewPG(tenantDB),         // m1_063 schema windows (FR-SPINE-023)
 		IntelServiceToken: cfg.IntelServiceToken,            // service ingest route (06 §1.2 REVISED seam)
+		EvidenceToken:     cfg.EvidenceReadToken,            // the adjudicator's E1 read, a credential intel does not hold
 		DeviceKeys:        ingest.NewPGDeviceKeys(tenantDB), // per-vote signature verification (FR-VERIFY-004)
 		DB:                tenantDB,                         // m1_quarantined_batches tombstone at quarantine landing (m1_080)
+		Members:           tenantDB,                         // a leaver's device token is refused (teams.Participant)
+		Chain:             chainStore,                       // receipts a part deleted because it landed after its withdrawal
 	}), enrollMod, receipts.NewModule(receipts.ModuleDeps{ // 08 §3.4 retrieval + verifier food
 		DB:                tenantDB,
 		PG:                tenantDB,
@@ -312,6 +325,8 @@ func main() {
 		TenantRoot:     enrollMod.TenantRoot,
 		TeamMaxMembers: cfg.TeamMaxMembers,
 		RevokeSubject:  enrollMod.RevokeSubjectDevices,
+		Mail:           mailer,
+		EmailPostal:    cfg.EmailPostal,
 	}))
 
 	// The hourly witness-head job (m1_003; 05 §4.4). Runs only when a

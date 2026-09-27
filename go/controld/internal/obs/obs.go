@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -94,10 +95,7 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return s.ResponseWriter.Write(b)
 }
 
-// HTTPMiddleware wraps an http.Handler with request counting, duration, in-flight
-// gauging, and panic recovery. `pathTemplate` is optional — callers that know
-// their routes (e.g. chi) can pass a fn returning the route template to prevent
-// label cardinality blow-up. Pass nil to fall back to r.URL.Path.
+// HTTPMiddleware wraps an http.Handler with request counting, duration, in-flight gauging, and panic recovery; the path label is the routed ServeMux pattern (r.Pattern, method stripped), never r.URL.Path (an id would mint a series per id), unless pathTemplate overrides it.
 func (c Config) HTTPMiddleware(pathTemplate func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -107,7 +105,7 @@ func (c Config) HTTPMiddleware(pathTemplate func(*http.Request) string) func(htt
 
 			rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
 
-			path := r.URL.Path
+			path := RouteLabel(r)
 			defer func() {
 				if pathTemplate != nil {
 					if tpl := pathTemplate(r); tpl != "" {
@@ -165,4 +163,16 @@ func (c Config) StartMetricsServer(extra map[string]http.Handler) {
 			log.Printf("[obs] metrics server error: %v", err)
 		}
 	}()
+}
+
+// RouteLabel is the metric label for r: its ServeMux pattern without the method, "unrouted" when no pattern matched.
+func RouteLabel(r *http.Request) string {
+	_, p, found := strings.Cut(r.Pattern, " ")
+	if !found {
+		p = r.Pattern
+	}
+	if p == "" {
+		return "unrouted"
+	}
+	return p
 }

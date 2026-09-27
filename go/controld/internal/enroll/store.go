@@ -53,7 +53,7 @@ func (m *Module) upsertUserEnrollment(ctx context.Context, tenant uuid.UUID, cod
 		_, err := tx.Exec(ctx, `
 			INSERT INTO m1_device_enrollments (tenant_id, device_code_hash, device_pubkey, approval_kind)
 			VALUES ($1, $2, $3, 'omium_user')
-			ON CONFLICT (device_code_hash) DO UPDATE SET started_at = now()
+			ON CONFLICT (device_code_hash) DO UPDATE SET started_at = now(), row_seq = DEFAULT
 			 WHERE m1_device_enrollments.status = 'pending'`, tenant, codeHash, pubkey)
 		return err
 	})
@@ -285,7 +285,7 @@ func (m *Module) leftTeam(ctx context.Context, tenant, device uuid.UUID) (bool, 
 			   AND s.subject IS DISTINCT FROM (SELECT owner_subject FROM m1_tenants WHERE id = $1)
 			   AND NOT EXISTS (SELECT 1 FROM m1_team_members WHERE tenant_id = $1 AND subject = s.subject AND role = 'member' AND left_at IS NULL)
 			  FROM (SELECT (SELECT oidc_subject FROM m1_device_enrollments WHERE device_id = $2 AND status = 'approved'
-			                 ORDER BY started_at DESC LIMIT 1) AS subject) s`, tenant, device).Scan(&gone)
+			                 ORDER BY row_seq DESC LIMIT 1) AS subject) s`, tenant, device).Scan(&gone)
 	})
 	return gone, err
 }

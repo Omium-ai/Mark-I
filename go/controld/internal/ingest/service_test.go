@@ -77,7 +77,7 @@ func TestServiceIngestLandsUnderTheServiceDeviceStamp(t *testing.T) {
 	if len(keys) != 1 || !strings.HasPrefix(keys[0], "t/"+h.tenant.String()+"/ingest/v1/") {
 		t.Fatalf("service batch must land under the tenant's ingest prefix, got %v", keys)
 	}
-	if _, dev, _ := h.store.Get(context.Background(), keys[0]); dev != ServiceDevice {
+	if _, dev, _, _ := h.store.Get(context.Background(), keys[0]); dev != ServiceDevice {
 		t.Fatalf("landing object device stamp %s, want ServiceDevice %s", dev, ServiceDevice)
 	}
 	h.drain()

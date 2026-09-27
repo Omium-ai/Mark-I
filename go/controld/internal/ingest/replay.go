@@ -32,7 +32,7 @@ func Replay(ctx context.Context, db registry.DB, store s3land.Store, ins chproj.
 	tenant querychoke.TenantID, from, to time.Time) (int, error) {
 	tenantUUID := tenant.UUID()
 	replayed := 0
-	err := walkLanded(ctx, store, tenant, from, to, func(key string, compressed []byte, device uuid.UUID, batch *m1pv1.Batch, day time.Time) error {
+	err := walkLanded(ctx, store, tenant, from, to, func(key string, compressed []byte, device uuid.UUID, batch *m1pv1.Batch, landed time.Time) error {
 		// Quarantined AFTER landing (Rescan under a newer ruleset): the
 		// m1_quarantined_batches tombstone is the marker (07 §S3 layout) —
 		// the twin itself dies at 30 d. The ingest object is immutable and
@@ -59,7 +59,7 @@ func Replay(ctx context.Context, db registry.DB, store s3land.Store, ins chproj.
 		// proves the tenant.
 		// Stage 10 synchronously (replay is a batch job; the async pool
 		// is for the request path), stage 11 via the sidefx pool.
-		rows := chproj.RowsFromBatch(batch, tenantUUID, device, day)
+		rows := chproj.RowsFromBatch(batch, tenantUUID, device, landed) // received_at reproduces the original receipt (ADR-0013)
 		if err := ins.InsertRows(ctx, chproj.Table, chproj.Columns, rows); err != nil {
 			return err
 		}
@@ -70,7 +70,7 @@ func Replay(ctx context.Context, db registry.DB, store s3land.Store, ins chproj.
 			// BLOCKING enqueue: replay is the bulk path that fills the
 			// queues, and a dropped effect here has no later replay to
 			// recover it — backpressure, never drop (05 §2.5).
-			if err := sfx.EnqueueBlocking(ctx, tenant, device, day, sidefx.EffectsFromBatch(batch, day)); err != nil {
+			if err := sfx.EnqueueBlocking(ctx, tenant, device, landed, sidefx.EffectsFromBatch(batch, landed)); err != nil {
 				return err
 			}
 		}
@@ -135,7 +135,7 @@ func (m *Module) Rescan(ctx context.Context, tenant querychoke.TenantID, from, t
 // ingest: an object that no longer decodes within bounds is a defect to
 // surface, not to skip silently). Errors carry the key.
 func walkLanded(ctx context.Context, store s3land.Store, tenant querychoke.TenantID, from, to time.Time,
-	visit func(key string, compressed []byte, device uuid.UUID, batch *m1pv1.Batch, day time.Time) error) error {
+	visit func(key string, compressed []byte, device uuid.UUID, batch *m1pv1.Batch, landed time.Time) error) error {
 	if tenant.IsZero() {
 		return fmt.Errorf("ingest: replay requires a tenant")
 	}
@@ -145,8 +145,13 @@ func walkLanded(ctx context.Context, store s3land.Store, tenant querychoke.Tenan
 		if err != nil {
 			return err
 		}
+		contributions, err := store.List(ctx, s3land.ContributionPrefix(tenantUUID, day))
+		if err != nil {
+			return err
+		}
+		keys = append(keys, contributions...)
 		for _, key := range keys {
-			compressed, device, err := store.Get(ctx, key)
+			compressed, device, landed, err := store.Get(ctx, key)
 			if err != nil {
 				return err
 			}
@@ -158,7 +163,10 @@ func walkLanded(ctx context.Context, store s3land.Store, tenant querychoke.Tenan
 			if err := proto.Unmarshal(decoded, &batch); err != nil {
 				return fmt.Errorf("ingest: replay %s: %w", key, err)
 			}
-			if err := visit(key, compressed, device, &batch, day); err != nil {
+			if landed.IsZero() {
+				landed = day
+			}
+			if err := visit(key, compressed, device, &batch, landed); err != nil {
 				return fmt.Errorf("ingest: replay %s: %w", key, err)
 			}
 		}

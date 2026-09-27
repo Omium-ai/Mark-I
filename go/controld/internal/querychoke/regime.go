@@ -23,10 +23,31 @@ const (
 	costBasisQuota = "quota"
 )
 
-// Regime is the report's slice of the tenant's m1_075 row (06 §8.4): the basis, and for usd the model whose pinned price row prices it.
+// Regime is the tenant's m1_075 row as controld reads it (06 §8.4): the basis, for usd the model whose pinned price row prices it, and V(task)'s default.
 type Regime struct {
 	CostBasis    string
 	PriceModelID string
+	VDefault     float64
+}
+
+// DefaultRegime is a tenant with no m1_075 row: a subscription (quota) at unit value (ADR-0013).
+var DefaultRegime = Regime{CostBasis: costBasisQuota, VDefault: 1}
+
+// Resolve is the one regime rule, shared by the bootstrap bundle and the report's cost_basis=auto: the tenant's row, else DefaultRegime.
+func Resolve(r *Regime) Regime {
+	if r == nil {
+		return DefaultRegime
+	}
+	return *r
+}
+
+// ResolvedRegime reads the tenant's row through src and applies Resolve.
+func ResolvedRegime(ctx context.Context, src RegimeSource, tid TenantID) (Regime, error) {
+	r, err := loadRegime(ctx, src, tid)
+	if err != nil {
+		return Regime{}, err
+	}
+	return Resolve(r), nil
 }
 
 // RegimeSource resolves a tenant's Regime; (nil, nil) is "no row", the unresolved basis 06 §8.5 issues as indicative.
@@ -42,16 +63,17 @@ func (p PGRegimes) Regime(ctx context.Context, tid TenantID) (*Regime, error) {
 	err := p.DB.WithTenant(ctx, tid, func(tx pgx.Tx) error {
 		var basis string
 		var model *string
+		var vDefault float64
 		err := tx.QueryRow(ctx,
-			`SELECT cost_basis, price_model_id FROM m1_tenant_regimes WHERE tenant_id = $1`,
-			tid.UUID()).Scan(&basis, &model)
+			`SELECT cost_basis, price_model_id, v_default::float8 FROM m1_tenant_regimes WHERE tenant_id = $1`,
+			tid.UUID()).Scan(&basis, &model, &vDefault)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		out = &Regime{CostBasis: basis}
+		out = &Regime{CostBasis: basis, VDefault: vDefault}
 		if model != nil {
 			out.PriceModelID = *model
 		}

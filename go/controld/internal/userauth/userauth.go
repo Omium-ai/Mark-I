@@ -30,10 +30,11 @@ const Audience = "mark1"
 const TenantAdminRole = "tenant_admin"
 
 type UserClaims struct {
-	Sub      string
-	Email    string
-	TenantID uuid.UUID
-	Roles    []string
+	Sub           string
+	Email         string
+	EmailVerified bool // the issuer's email_verified claim; absent reads false
+	TenantID      uuid.UUID
+	Roles         []string
 }
 
 func (c UserClaims) HasRole(role string) bool { return slices.Contains(c.Roles, role) }
@@ -98,6 +99,7 @@ func (t tenantVerifier) Verify(ctx context.Context, bearer string) (auth.Claims,
 type wireClaims struct {
 	Sub      string          `json:"sub"`
 	Email    string          `json:"email"`
+	Verified bool            `json:"email_verified"`
 	TenantID string          `json:"tenant_id"`
 	Rol      json.RawMessage `json:"rol"`
 }
@@ -115,7 +117,7 @@ func (v *Verifier) Verify(ctx context.Context, bearer string) (UserClaims, error
 	if err != nil || tenant == uuid.Nil || wc.Sub == "" {
 		return UserClaims{}, fmt.Errorf("%w: claims lack sub or tenant_id", ErrBadToken)
 	}
-	return UserClaims{Sub: wc.Sub, Email: wc.Email, TenantID: tenant, Roles: roles(wc.Rol)}, nil
+	return UserClaims{Sub: wc.Sub, Email: wc.Email, EmailVerified: wc.Verified, TenantID: tenant, Roles: roles(wc.Rol)}, nil
 }
 
 // roles accepts the platform's list form and the single-string form IdPs also use.

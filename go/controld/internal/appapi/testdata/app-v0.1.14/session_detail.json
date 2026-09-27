@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/app-v0.1.14/session_detail.json",
+  "description": "Mark1-GUI v0.1.14 SessionDetailContract + Task.",
+  "type": "object",
+  "required": ["window", "session", "tasks", "checkpoint_seq", "honesty"],
+  "properties": {
+    "window": { "type": "object", "required": ["from", "to"], "properties": { "from": { "type": "string" }, "to": { "type": "string" } } },
+    "session": { "$ref": "sessions.json#/$defs/session" },
+    "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } },
+    "checkpoint_seq": { "$ref": "sessions.json#/$defs/count" },
+    "honesty": { "$ref": "sessions.json#/$defs/honesty" }
+  },
+  "$defs": {
+    "verdict": { "type": "string", "enum": ["", "unspecified", "satisfied", "violated", "refused", "error"] },
+    "stage": { "type": "string", "enum": ["", "unspecified", "provisional", "certified", "revised"] },
+    "task": {
+      "type": "object",
+      "required": ["task_id", "task_seg_version", "task_class", "opened_at", "closed_at", "resolution", "attempts", "verdict_trail", "evidence", "injections", "arrests"],
+      "properties": {
+        "task_id": { "type": "string" }, "task_seg_version": { "type": "string" }, "task_class": { "type": "string" },
+        "opened_at": { "type": ["string", "null"] }, "closed_at": { "type": ["string", "null"] },
+        "resolution": { "type": "string", "enum": ["", "unspecified", "verdict", "unresolved_session_end", "merged_forward"] },
+        "attempts": { "type": "array", "items": { "type": "object", "required": ["n", "tokens", "cost_usd", "verdict", "verdict_stage"], "properties": {
+          "n": { "type": "integer", "minimum": 1 }, "tokens": { "$ref": "sessions.json#/$defs/count" }, "cost_usd": { "type": "number", "minimum": 0 },
+          "verdict": { "$ref": "#/$defs/verdict" }, "verdict_stage": { "$ref": "#/$defs/stage" }, "p_lcb": { "type": ["number", "null"] } } } },
+        "verdict_trail": { "type": "array", "items": { "type": "object", "required": ["at", "event_id", "stage", "verdict", "certification", "certificate_id", "bundle_seq"], "properties": {
+          "at": { "type": "string" }, "event_id": { "type": "string" }, "stage": { "$ref": "#/$defs/stage" }, "verdict": { "$ref": "#/$defs/verdict" },
+          "certification": { "type": "string", "enum": ["", "unspecified", "uncertified", "bootstrapping", "certified"] },
+          "certificate_id": { "type": ["string", "null"] }, "bundle_seq": { "$ref": "sessions.json#/$defs/count" } } } },
+        "evidence": { "type": "array", "items": { "type": "object", "required": ["at", "event_id", "anchor_id", "vote", "tool", "diagnostic_code", "category", "counts", "path_role", "tamper"], "properties": {
+          "at": { "type": "string" }, "event_id": { "type": "string" }, "anchor_id": { "type": "string" }, "vote": { "$ref": "#/$defs/verdict" },
+          "tool": { "type": "string" }, "diagnostic_code": { "type": "string" }, "category": { "type": "string" }, "counts": { "type": "object" },
+          "path_role": { "type": "string" }, "tamper": { "type": "boolean" } } } },
+        "injections": { "type": "array", "items": { "type": "object", "required": ["at", "event_id", "channel", "tokens_used", "artifact_count"], "properties": {
+          "at": { "type": "string" }, "event_id": { "type": "string" }, "channel": { "type": "string" },
+          "tokens_used": { "$ref": "sessions.json#/$defs/count" }, "artifact_count": { "$ref": "sessions.json#/$defs/count" } } } },
+        "arrests": { "type": "array", "items": { "type": "object", "required": ["at", "event_id", "bundle_seq", "tokens_saved_estimate"], "properties": {
+          "at": { "type": "string" }, "event_id": { "type": "string" }, "bundle_seq": { "$ref": "sessions.json#/$defs/count" },
+          "tokens_saved_estimate": { "$ref": "sessions.json#/$defs/count" } } } }
+      }
+    }
+  }
+}

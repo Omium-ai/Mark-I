@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/klauspost/compress/zstd"
 	"google.golang.org/protobuf/proto"
 
@@ -225,7 +226,12 @@ func (m *Module) ingest(w http.ResponseWriter, r *http.Request, p principal) {
 	// functions of (tenant, batch_id) so the 08 §2.5 retry automaton always
 	// re-PUTs the SAME key and the conditional write can detect it (08 §2.3).
 	receivedAt := m.now()
-	key := s3land.IngestKey(tenantID, headerBatchID)
+	contribution := isContributionBatch(&batch)
+	cleanKey := s3land.IngestKey(tenantID, headerBatchID)
+	if contribution {
+		cleanKey = s3land.ContributionKey(tenantID, headerBatchID)
+	}
+	key := cleanKey
 	if flagged {
 		key = s3land.QuarantineKey(tenantID, headerBatchID)
 		// A batch that first landed CLEAN under the ingest prefix (ack lost
@@ -240,7 +246,7 @@ func (m *Module) ingest(w http.ResponseWriter, r *http.Request, p principal) {
 		// clean is exactly 05 §2.3's fail-closed judgment applied at re-POST
 		// time — the stale quarantine object ages out under the 90-day
 		// lifecycle and is never auto-replayed.
-		switch prior, perr := m.store.Probe(r.Context(), s3land.IngestKey(tenantID, headerBatchID), compressed); {
+		switch prior, perr := m.store.Probe(r.Context(), cleanKey, compressed); {
 		case perr != nil:
 			s3LandFailures.Inc()
 			writeErr(w, errServer("landing store unavailable"))
@@ -259,6 +265,12 @@ func (m *Module) ingest(w http.ResponseWriter, r *http.Request, p principal) {
 			tombstoneFailures.Inc()
 			log.Printf("ingest: quarantine tombstone for batch %s not written: %v", headerBatchID, err)
 			writeErr(w, errServer("quarantine marker unavailable"))
+			return
+		}
+	} else if contribution {
+		if err := m.indexContributions(r.Context(), tenant, deviceID, headerBatchID, key, &batch, receivedAt); err != nil {
+			log.Printf("ingest: contribution index for batch %s not written: %v", headerBatchID, err)
+			writeErr(w, errServer("contribution index unavailable"))
 			return
 		}
 	}
@@ -367,13 +379,24 @@ func (m *Module) checkInvariants(ctx context.Context, b *m1pv1.Batch, headerBatc
 		invariantViolations.WithLabelValues("batch_id_mismatch").Inc()
 		return errInvariant(nil, []string{"batch_id_mismatch"}), true
 	}
-	var badIDs, kinds []string
+	var badIDs, kinds, contribs []string
 	// FR-VERIFY-004: the device's live origin key, resolved at most once per
 	// batch (constant for every vote in it) and only if a vote actually
 	// carries a signature to check -- an all-unsigned batch (or no votes)
 	// never touches m1_device_keys.
 	var pubLooked, pubOK bool
 	var pub ed25519.PublicKey
+	devicePub := func() (ed25519.PublicKey, bool) {
+		if !pubLooked {
+			pubLooked = true
+			if m.deviceKeys != nil {
+				if p, ok, kerr := m.deviceKeys.PublicKey(ctx, tenant, device); kerr == nil {
+					pub, pubOK = p, ok
+				}
+			}
+		}
+		return pub, pubOK
+	}
 	for _, ev := range b.GetEvents() {
 		id, err := uuid.FromBytes(ev.GetEventId())
 		if err != nil || id.Version() != 7 {
@@ -430,33 +453,113 @@ func (m *Module) checkInvariants(ctx context.Context, b *m1pv1.Batch, headerBatc
 				badIDs, kinds = append(badIDs, id.String()), append(kinds, "route_action")
 			}
 		}
+		// ADR-0013: a verify-plane decision's two bases are closed words ("" from an edge that predates them); any other word is a decision no savings cohort can count.
+		if g := ev.GetGuardDecision(); g != nil && (!guardKneeBases[g.GetKneeBasis()] || !guardCostBases[g.GetCostBasis()]) {
+			invariantViolations.WithLabelValues("guard_basis").Inc()
+			badIDs, kinds = append(badIDs, id.String()), append(kinds, "guard_basis")
+		}
 		// FR-VERIFY-004: an empty signature is admitted (pre-ruling producers,
 		// or a device with no enrolled key -- receipt sealing degrades the same
 		// way) and marked unsigned downstream (chproj.unsignedAnchorVotes); a
 		// NON-empty signature that fails to verify is refused here, never
 		// silently dropped to unsigned -- that would let a forged vote pass as
 		// merely uncertified.
+		if c := ev.GetOutcomeContribution(); c != nil {
+			contribs = append(contribs, id.String())
+			if len(c.GetTaskId()) != 16 || !bytes.Equal(c.GetTaskId(), ev.GetTaskId()) || len(c.GetRedactionReceiptRef()) != 32 || c.GetDiffRedacted() == "" {
+				invariantViolations.WithLabelValues("contribution_shape").Inc()
+				badIDs, kinds = append(badIDs, id.String()), append(kinds, "contribution_shape")
+			}
+		}
 		if av := ev.GetAnchorVote(); av != nil {
 			if sig := av.GetSignature(); len(sig) > 0 {
-				if !pubLooked {
-					pubLooked = true
-					if m.deviceKeys != nil {
-						if p, ok, kerr := m.deviceKeys.PublicKey(ctx, tenant, device); kerr == nil {
-							pub, pubOK = p, ok
-						}
-					}
-				}
-				if !pubOK || !verifyAnchorVoteSignature(pub, av, sig) {
+				if pk, ok := devicePub(); !ok || !verifyAnchorVoteSignature(pk, av, sig) {
 					invariantViolations.WithLabelValues("anchor_vote_signature").Inc()
 					badIDs, kinds = append(badIDs, id.String()), append(kinds, "anchor_vote_signature")
 				}
 			}
+		}
+		// 16 L6: a registry-shaped model id, score = uncalibrated P(yes) in [0, 1] (NaN included), locus matching the principal, and a device signature that verifies (a device's score is never admitted unsigned).
+		if rs := ev.GetRmScore(); rs != nil {
+			bad := ""
+			switch sig := rs.GetSignature(); {
+			case !rmModelID.MatchString(rs.GetModelId()):
+				bad = "rm_score_model_id"
+			case !(rs.GetScore() >= 0 && rs.GetScore() <= 1):
+				bad = "rm_score_range"
+			case service != (rs.GetLocus() == m1pv1.JudgeLocus_JUDGE_LOCUS_CLOUD):
+				bad = "rm_score_locus" // CLOUD is the adjudicator's (service ingest, unsigned); a device speaks only CLIENT_SIDE
+			case service:
+			case len(sig) == 0:
+				bad = "rm_score_unsigned"
+			default:
+				if pk, ok := devicePub(); !ok || !verifyRmScoreSignature(pk, rs, sig) {
+					bad = "rm_score_signature"
+				}
+			}
+			if bad != "" {
+				invariantViolations.WithLabelValues(bad).Inc()
+				badIDs, kinds = append(badIDs, id.String()), append(kinds, bad)
+			}
+		}
+	}
+	if len(contribs) > 0 {
+		kind := ""
+		if len(contribs) != len(b.GetEvents()) || len(b.GetDropped()) > 0 {
+			kind = "contribution_not_alone"
+		} else if on, err := m.contributionConsented(ctx, service, tenant, device); err != nil {
+			return errServer("consent store unavailable"), true
+		} else if !on {
+			kind = "contribution_consent"
+		}
+		if kind != "" {
+			invariantViolations.WithLabelValues(kind).Inc()
+			badIDs, kinds = append(badIDs, contribs...), append(kinds, kind)
 		}
 	}
 	if len(badIDs) > 0 || len(kinds) > 0 {
 		return errInvariant(badIDs, kinds), true
 	}
 	return apiErr{}, false
+}
+
+// isContributionBatch: stage 6 refuses a contribution batched with anything else, so one contribution means all.
+func isContributionBatch(b *m1pv1.Batch) bool {
+	return len(b.GetEvents()) > 0 && b.GetEvents()[0].GetOutcomeContribution() != nil
+}
+
+// contributionConsented reads the device's latest m1_082 row: no row, no store or a service principal is no consent (16 L8).
+func (m *Module) contributionConsented(ctx context.Context, service bool, tenant querychoke.TenantID, device uuid.UUID) (bool, error) {
+	if service || m.db == nil {
+		return false, nil
+	}
+	on := false
+	err := m.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `SELECT contribute_outcomes FROM m1_device_consents WHERE device_id = $1 ORDER BY row_seq DESC LIMIT 1`, device).Scan(&on)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	})
+	return on, err
+}
+
+// indexContributions writes the m1_096 index before the landing, the tombstone's order: a row without an object is skipped by export, an object without a row would never be withdrawn.
+func (m *Module) indexContributions(ctx context.Context, tenant querychoke.TenantID, device, batchID uuid.UUID, key string, b *m1pv1.Batch, at time.Time) error {
+	return m.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		for _, ev := range b.GetEvents() {
+			eid, _ := uuid.FromBytes(ev.GetEventId())
+			sid, _ := uuid.FromBytes(ev.GetSessionId())
+			tid, _ := uuid.FromBytes(ev.GetTaskId())
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO m1_outcome_contributions (tenant_id, event_id, batch_id, device_id, session_id, task_id, object_key, received_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (tenant_id, event_id) DO NOTHING`,
+				tenant.UUID(), eid, batchID, device, sid, tid, key, at.UTC()); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // verifyAnchorVoteSignature reproduces verify.proto's signing input --
@@ -466,6 +569,27 @@ func (m *Module) checkInvariants(ctx context.Context, b *m1pv1.Batch, headerBatc
 // still needs its real signature for the wire/payload column) is untouched.
 func verifyAnchorVoteSignature(pub ed25519.PublicKey, av *m1pv1.AnchorVote, sig []byte) bool {
 	clone, ok := proto.Clone(av).(*m1pv1.AnchorVote)
+	if !ok {
+		return false
+	}
+	clone.Signature = nil
+	canon, err := proto.MarshalOptions{Deterministic: true}.Marshal(clone)
+	if err != nil {
+		return false
+	}
+	return receipts.Verify(pub, sig, canon)
+}
+
+var rmModelID = regexp.MustCompile(`^rm:[a-z0-9-]+@[1-9][0-9]*$`)
+
+var (
+	guardKneeBases = map[string]bool{"": true, "prior": true, "anchor_grounded": true, "certified": true, "unknown": true}
+	guardCostBases = map[string]bool{"": true, "usd": true, "quota": true}
+)
+
+// verifyRmScoreSignature is verifyAnchorVoteSignature's twin over RmScore.
+func verifyRmScoreSignature(pub ed25519.PublicKey, rs *m1pv1.RmScore, sig []byte) bool {
+	clone, ok := proto.Clone(rs).(*m1pv1.RmScore)
 	if !ok {
 		return false
 	}

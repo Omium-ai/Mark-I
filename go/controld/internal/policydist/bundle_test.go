@@ -174,6 +174,9 @@ func TestDecodeSectionsRejections(t *testing.T) {
 		{"cost_basis outside closed enum", mut(func(s *Sections) {
 			s.Route.Knee.CostBasis = "tokens"
 		}), "M1E-3005"},
+		{"knee basis outside closed enum", mut(func(s *Sections) {
+			s.Route.Knee.Basis = "unknown"
+		}), "M1E-3001"},
 		{"threshold key is not an identifier", mut(func(s *Sections) {
 			s.Verify.Anchors[0].Thresholds = map[string]float64{"min pass || true": 0.8}
 		}), "M1E-3005"},

@@ -410,3 +410,39 @@ func TestAgentStampedPerSessionFromSessionStart(t *testing.T) {
 		t.Errorf("SessionStart beats a missing SdkInfo: agent %q", got)
 	}
 }
+
+func TestGuardDecisionProjectsBundleSeq(t *testing.T) {
+	session := v7(t)
+	at := time.Date(2026, 9, 26, 9, 0, 0, 0, time.UTC)
+	rows := RowsFromBatch(&m1pv1.Batch{BatchId: v7b(t), Events: []*m1pv1.Event{{
+		EventId: v7b(t), SessionId: session[:], TaskId: v7b(t), OccurredAt: timestamppb.New(at),
+		Body: &m1pv1.Event_GuardDecision{GuardDecision: &m1pv1.GuardDecision{
+			Outcome: m1pv1.GuardOutcome_GUARD_OUTCOME_ARRESTED, ReasonCode: "knee_arrest", KneeBasis: "prior", BundleSeq: 483,
+		}},
+	}}}, uuid.New(), uuid.New(), at)
+	if got := rows[0][col(t, "bundle_seq")]; got != uint64(483) {
+		t.Fatalf("bundle_seq: got %v", got)
+	}
+	if p := rows[0][col(t, "payload")].(string); !strings.Contains(p, `"knee_basis":"prior"`) {
+		t.Fatalf("knee_basis must ride the payload: %s", p)
+	}
+}
+
+// ADR-0013 §10: every projected row carries the receipt time it was handed (m1_ch_003 received_at), apart from the edge's occurred_at, so a savings restatement can ask what controld had received at a day's close.
+func TestRowsCarryReceivedAt(t *testing.T) {
+	sent := time.Date(2026, 9, 25, 23, 0, 0, 0, time.UTC)
+	recv := time.Date(2026, 9, 26, 9, 0, 0, 0, time.UTC)
+	b := &m1pv1.Batch{
+		BatchId: v7b(t), SentAt: timestamppb.New(sent),
+		Events:  []*m1pv1.Event{{EventId: v7b(t), Seq: 1, OccurredAt: timestamppb.New(sent), Body: &m1pv1.Event_TaskOpen{TaskOpen: &m1pv1.TaskOpen{}}}},
+		Dropped: []*m1pv1.Dropped{{Quantity: 1}},
+	}
+	for i, r := range RowsFromBatch(b, uuid.New(), uuid.New(), recv) {
+		if r[col(t, "received_at")] != recv || r[col(t, "occurred_at")] != sent {
+			t.Fatalf("row %d: received_at %v occurred_at %v, want %v and %v", i, r[col(t, "received_at")], r[col(t, "occurred_at")], recv, sent)
+		}
+	}
+	if r := SecurityEventRow(uuid.New(), uuid.New(), uuid.New(), "x", recv); r[col(t, "received_at")] != recv {
+		t.Fatalf("security row received_at %v", r[col(t, "received_at")])
+	}
+}

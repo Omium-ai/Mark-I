@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/app-v0.1.14/sessions.json",
+  "description": "Mark1-GUI v0.1.14 SessionsContract + Session: every counter is z.number().int().min(0), tokens_saved included.",
+  "type": "object",
+  "required": ["window", "sessions", "next_cursor", "honesty"],
+  "properties": {
+    "window": { "type": "object", "required": ["from", "to"], "properties": { "from": { "type": "string" }, "to": { "type": "string" } } },
+    "sessions": { "type": "array", "items": { "$ref": "#/$defs/session" } },
+    "next_cursor": { "type": ["string", "null"] },
+    "honesty": { "$ref": "#/$defs/honesty" }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "honesty": {
+      "description": "Honesty.nullable()",
+      "type": ["object", "null"],
+      "required": ["coverage_band", "cost_basis", "guarantee_grade", "task_seg_version"],
+      "properties": {
+        "coverage_band": { "type": "object", "required": ["observed_fraction", "floor"], "properties": { "observed_fraction": { "type": "number" }, "coverage_lower": { "type": "number" }, "floor": { "type": "number" } } },
+        "cost_basis": { "type": "string", "enum": ["usd", "quota"] },
+        "guarantee_grade": { "type": "boolean" },
+        "task_seg_version": { "type": "string" },
+        "price_table_version": { "type": "string" },
+        "refusal": { "type": "string" }
+      }
+    },
+    "session": {
+      "type": "object",
+      "required": ["session_id", "agent", "project", "started_at", "ended_at", "tokens", "tasks", "verified_outcomes", "arrests", "injections", "route_decisions", "coverage", "checkpoint_seq"],
+      "properties": {
+        "session_id": { "type": "string" }, "agent": { "type": "string" }, "project": { "type": "string" },
+        "started_at": { "type": "string" }, "ended_at": { "type": "string" },
+        "tokens": { "type": "object", "required": ["input", "output", "cache_read", "cache_create"], "properties": { "input": { "$ref": "#/$defs/count" }, "output": { "$ref": "#/$defs/count" }, "cache_read": { "$ref": "#/$defs/count" }, "cache_create": { "$ref": "#/$defs/count" } } },
+        "tasks": { "$ref": "#/$defs/count" }, "verified_outcomes": { "$ref": "#/$defs/count" }, "arrests": { "$ref": "#/$defs/count" },
+        "blocks": { "$ref": "#/$defs/count" }, "tokens_saved": { "$ref": "#/$defs/count" },
+        "injections": { "$ref": "#/$defs/count" }, "route_decisions": { "$ref": "#/$defs/count" },
+        "coverage": {
+          "type": "object", "required": ["capture_paths", "proxy_in_path", "transcript_tailed", "dropped_billing"],
+          "properties": {
+            "capture_paths": { "type": "array", "items": { "type": "string", "enum": ["hooks", "transcript", "proxy", "unspecified"] } },
+            "proxy_in_path": { "type": "boolean" }, "transcript_tailed": { "type": "boolean" }, "dropped_billing": { "$ref": "#/$defs/count" }
+          }
+        },
+        "checkpoint_seq": { "$ref": "#/$defs/count" },
+        "history_import": { "type": "boolean" }
+      }
+    }
+  }
+}

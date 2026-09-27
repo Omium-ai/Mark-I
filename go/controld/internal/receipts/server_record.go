@@ -38,6 +38,7 @@ var ServerRecordTypes = map[string]bool{
 	"key_rotation":        true,
 	"verifier_promotion":  true,
 	"quarantine_deletion": true, // m1_080: subject = batch_id; origin edge (device-verified at stage 11) or cloud (the sweep)
+	"evidence_deletion":   true, // m1_099: subject = task_id; the E1 part's 30 d or withdrawal deletion (ingest SweepEvidence)
 }
 
 // reservedPayloadKeys are the chain fields this function owns. A class-specific

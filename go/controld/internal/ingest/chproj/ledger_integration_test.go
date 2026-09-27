@@ -119,14 +119,14 @@ func (m *memStore) List(_ context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
-func (m *memStore) Get(_ context.Context, key string) ([]byte, uuid.UUID, error) {
+func (m *memStore) Get(_ context.Context, key string) ([]byte, uuid.UUID, time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	body, ok := m.objects[key]
 	if !ok {
-		return nil, uuid.Nil, errors.New("not found")
+		return nil, uuid.Nil, time.Time{}, errors.New("not found")
 	}
-	return body, m.devices[key], nil
+	return body, m.devices[key], time.Time{}, nil
 }
 
 func (m *memStore) has(key string) bool {

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/cloud_rm.json",
+  "title": "GET|PUT /api/v1/verify/cloud-rm",
+  "description": "The tenant's rm:mark1-rm-a@1 register row (m1_073, 16 §L6): whether the cloud reward model may score the E1 task text and sanitized hunks of devices that chose Cloud (m1_097 cloud_rm) on Baseten, US region, zero data retention. Absence is the default (enabled=false with the static disclosure); PUT enabled=true writes the row, PUT enabled=false revokes it. judge_id is the m1_065 register key column.",
+  "type": "object",
+  "required": [
+    "enabled",
+    "judge_id",
+    "subprocessor",
+    "region",
+    "max_tier",
+    "consented_at",
+    "consented_by"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean"
+    },
+    "judge_id": {
+      "type": "string",
+      "pattern": "^rm:[a-z0-9-]+@[1-9][0-9]*$"
+    },
+    "subprocessor": {
+      "type": "string"
+    },
+    "region": {
+      "type": "string"
+    },
+    "max_tier": {
+      "type": "string",
+      "enum": [
+        "E1"
+      ]
+    },
+    "consented_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "consented_by": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

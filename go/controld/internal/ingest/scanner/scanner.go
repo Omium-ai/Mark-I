@@ -84,6 +84,9 @@ func Compile(version string, patterns map[string]string) (*Ruleset, error) {
 	return rs, nil
 }
 
+// ScanBytes scans one opaque part (the E1 attach upload, 08 §2.1) and returns the classes hit.
+func (rs *Ruleset) ScanBytes(b []byte) []string { return rs.scanString(string(b)) }
+
 // ScanBatch scans under the compiled-in Default edition.
 func ScanBatch(b *m1pv1.Batch) []Hit { return Default.Scan(b) }
 

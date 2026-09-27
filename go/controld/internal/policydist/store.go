@@ -93,6 +93,8 @@ type Draft struct {
 	SectionsCBOR []byte
 	// FirstOnly publishes only as the channel's seq 1: a channel that already has a head is left untouched (ErrChannelHasHead), under the same row lock, so two enrollments cannot both bootstrap.
 	FirstOnly bool
+	// KneeBasis is the producer's route.knee.basis for sections republished from a row that withheld it (promotion, rollback, the gate's own resync); the sections' own key wins when present.
+	KneeBasis string
 }
 
 // ErrChannelHasHead is a FirstOnly draft meeting a channel that already published.
@@ -131,13 +133,29 @@ func (s *Store) Publish(ctx context.Context, tenant querychoke.TenantID, d Draft
 	if err != nil {
 		return Published{}, err
 	}
-	secBytes, err := sectionBytes(sections)
-	if err != nil {
-		return Published{}, err
+	intended := sections.Route.Knee.Basis
+	if intended == "" {
+		intended = d.KneeBasis
+	}
+	if intended != "" && !kneeBases[intended] {
+		return Published{}, reject("M1E-3001", "knee basis %q is not the closed enum prior|anchor_grounded|certified (ADR-0013)", intended)
 	}
 
 	var out Published
 	err = s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		// ADR-0013 §8: the key goes out only when every device of the tenant has said it decodes it.
+		capable, err := kneeBasisCapable(ctx, tx, tenant)
+		if err != nil {
+			return err
+		}
+		sections.Route.Knee.Basis = ""
+		if capable {
+			sections.Route.Knee.Basis = intended
+		}
+		secBytes, err := sectionBytes(sections)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO bundle_channel_heads (tenant_id, channel) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
 			tenant.UUID(), d.Channel); err != nil {
@@ -233,11 +251,12 @@ func (s *Store) Publish(ctx context.Context, tenant querychoke.TenantID, d Draft
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO policy_bundles
 			  (tenant_id, channel, seq, body_cbor, body_sha256, prev_hash, max_age,
-			   signatures, signing_key_id, tlog_index, tlog_proof, receipt_id)
-			VALUES ($1, $2, $3, $4, $5, $6, make_interval(secs => $7), $8, $9, $10, $11, $12)`,
+			   signatures, signing_key_id, tlog_index, tlog_proof, receipt_id,
+			   knee_basis_intended, knee_basis)
+			VALUES ($1, $2, $3, $4, $5, $6, make_interval(secs => $7), $8, $9, $10, $11, $12, NULLIF($13, ''), NULLIF($14, ''))`,
 			tenant.UUID(), d.Channel, i64(b.Seq), served, bodyHash[:], headHash,
 			float64(b.MaxAge), sigJSON, s.ring.PrimaryKeyID(),
-			i64(incl.LeafIndex), proofJSON, app.ReceiptID); err != nil {
+			i64(incl.LeafIndex), proofJSON, app.ReceiptID, intended, sections.Route.Knee.Basis); err != nil {
 			return err
 		}
 
@@ -357,6 +376,7 @@ type Served struct {
 	ETag      string
 	SigHeader string // X-Mark1-Bundle-Sig: echo of the in-map sigs (08 §3.2)
 	Proof     string // X-Mark1-Tlog-Proof: echo of the in-map inclusion proof
+	KneeBasis string // ADR-0013: the route.knee.basis these bytes carry, "" when none
 }
 
 // Latest reads the head bundle for (tenant, channel). ErrNoChannel when the
@@ -366,11 +386,11 @@ func (s *Store) Latest(ctx context.Context, tenant querychoke.TenantID, channel 
 	err := s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var sigJSON, proofJSON []byte
 		scanErr := tx.QueryRow(ctx, `
-			SELECT seq, body_cbor, signatures::text, tlog_proof::text
+			SELECT seq, body_cbor, signatures::text, tlog_proof::text, coalesce(knee_basis, '')
 			  FROM policy_bundles
 			 WHERE tenant_id = $1 AND channel = $2
 			 ORDER BY seq DESC LIMIT 1`, tenant.UUID(), channel).
-			Scan(&out.Seq, &out.Body, &sigJSON, &proofJSON)
+			Scan(&out.Seq, &out.Body, &sigJSON, &proofJSON, &out.KneeBasis)
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			return ErrNoChannel
 		}
@@ -535,7 +555,7 @@ func (s *Store) AckCoverage(ctx context.Context, tenant querychoke.TenantID, cha
 			  SELECT DISTINCT ON (a.device_id) a.device_id, a.seq, a.result, a.reject_code
 			    FROM bundle_acks a
 			   WHERE a.tenant_id = $1 AND a.channel = $2
-			   ORDER BY a.device_id, a.acked_at DESC
+			   ORDER BY a.device_id, a.row_seq DESC
 			)
 			SELECT h.head_seq,
 			       count(d.id),
@@ -636,4 +656,81 @@ func signaturesJSON(sigs map[string]Signature) ([]byte, error) {
 		m[name] = map[string]any{"key_id": s.KeyID, "sig": hex.EncodeToString(s.Sig)}
 	}
 	return json.Marshal(m)
+}
+
+// BundleFeatureKneeBasis is the X-Mark1-Bundle-Features word an edge sends when its decoder accepts route.knee.basis (ADR-0013).
+const BundleFeatureKneeBasis = "knee_basis"
+
+// kneeBasisCapable is the gate: no non-revoked device of the tenant is known not to decode route.knee.basis. A device that has not polled since it enrolled is not known either way (NULL); the poll that serves it a head re-checks (Module.kneeBasisFor), so it is never handed a key it refuses.
+func kneeBasisCapable(ctx context.Context, tx pgx.Tx, tenant querychoke.TenantID) (bool, error) {
+	var refusing int64
+	err := tx.QueryRow(ctx, `SELECT count(*) FROM m1_devices
+		 WHERE tenant_id = $1 AND revoked_at IS NULL AND bundle_features IS NOT NULL AND NOT ($2 = ANY(bundle_features))`,
+		tenant.UUID(), BundleFeatureKneeBasis).Scan(&refusing)
+	return refusing == 0, err
+}
+
+// KneeBasisCapable is the gate outside a publication.
+func (s *Store) KneeBasisCapable(ctx context.Context, tenant querychoke.TenantID) (bool, error) {
+	var ok bool
+	err := s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		var err error
+		ok, err = kneeBasisCapable(ctx, tx, tenant)
+		return err
+	})
+	return ok, err
+}
+
+// StampBundleFeatures records the features a device's poll advertised (last word wins, so a downgraded edge clears them); changed reports whether the row moved.
+func (s *Store) StampBundleFeatures(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, features []string) (changed bool, err error) {
+	if features == nil {
+		features = []string{}
+	}
+	err = s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE m1_devices SET bundle_features = $3
+			 WHERE tenant_id = $1 AND id = $2 AND bundle_features IS DISTINCT FROM $3::text[]`, tenant.UUID(), device, features)
+		changed = err == nil && tag.RowsAffected() == 1
+		return err
+	})
+	return changed, err
+}
+
+// headRow is one channel head as the knee-basis resync reads it.
+type headRow struct {
+	Channel         string
+	Seq             int64
+	Body            []byte
+	MaxAge          time.Duration
+	KneeBasis       string
+	Intended        string
+	IntendedUnknown bool // published before m1_104: the producer's word was never recorded
+}
+
+// heads reads every channel head of the tenant.
+func (s *Store) heads(ctx context.Context, tenant querychoke.TenantID) ([]headRow, error) {
+	var out []headRow
+	err := s.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT b.channel, b.seq, b.body_cbor, extract(epoch FROM b.max_age)::float8,
+			       coalesce(b.knee_basis, ''), coalesce(b.knee_basis_intended, ''), b.knee_basis_intended IS NULL
+			  FROM bundle_channel_heads h
+			  JOIN policy_bundles b ON b.tenant_id = h.tenant_id AND b.channel = h.channel AND b.seq = h.head_seq
+			 WHERE h.tenant_id = $1 AND h.head_seq > 0
+			 ORDER BY b.channel`, tenant.UUID())
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var h headRow
+			var maxAge float64
+			if err := rows.Scan(&h.Channel, &h.Seq, &h.Body, &maxAge, &h.KneeBasis, &h.Intended, &h.IntendedUnknown); err != nil {
+				return err
+			}
+			h.MaxAge = time.Duration(maxAge * float64(time.Second))
+			out = append(out, h)
+		}
+		return rows.Err()
+	})
+	return out, err
 }

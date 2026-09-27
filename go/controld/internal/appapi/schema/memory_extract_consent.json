@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/memory_extract_consent.json",
+  "title": "GET|PUT /api/v1/memory/extract-consent",
+  "description": "The tenant's mem:extract@1 register row (m1_092, 16 §L1): whether memory extraction may send certified sessions to Nebius Token Factory through the platform llm-router. Absence is the default (enabled=false with the static disclosure); PUT enabled=true writes the row, PUT enabled=false revokes it. judge_id is the m1_065 register key column.",
+  "type": "object",
+  "required": ["enabled", "judge_id", "subprocessor", "region", "max_tier", "consented_at", "consented_by"],
+  "additionalProperties": false,
+  "properties": {
+    "enabled": { "type": "boolean" },
+    "judge_id": { "type": "string", "pattern": "^mem:[a-z0-9-]+@[1-9][0-9]*$" },
+    "subprocessor": { "type": "string" },
+    "region": { "type": "string" },
+    "max_tier": { "type": "string", "enum": ["E0"] },
+    "consented_at": { "type": ["string", "null"], "format": "date-time" },
+    "consented_by": { "type": ["string", "null"] }
+  }
+}

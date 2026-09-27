@@ -26,9 +26,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,6 +67,8 @@ type Module struct {
 	limiter      *limiter
 	serviceToken string
 	salt         func(uuid.UUID) ([]byte, error)
+	resync       sync.Map // tenant uuid → *sync.Mutex: one knee-basis resync per tenant per process
+	kneeAdded    sync.Map // tenant uuid → time.Time of the last resync that added route.knee.basis back
 }
 
 func NewModule(d ModuleDeps) *Module {
@@ -193,7 +198,7 @@ func (m *Module) handleBundle(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Mark1-Channel", m.steerChannel(r.Context(), tenant, claims.DeviceID))
 	}
 
-	served, err := m.store.Latest(r.Context(), tenant, channel)
+	served, err := m.kneeBasisFor(r.Context(), tenant, claims.DeviceID, r.Header.Get("X-Mark1-Bundle-Features"), channel)
 	switch {
 	case errors.Is(err, ErrNoChannel):
 		// The ONE server-side 3xxx (08 §3.2). Every other 3xxx is an edge-side
@@ -220,6 +225,44 @@ func (m *Module) handleBundle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Mark1-Tlog-Proof", served.Proof)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(served.Body)
+}
+
+// kneeBasisFor stamps what this device's poll advertised and returns the head it may be served (ADR-0013 §8): a head carrying route.knee.basis is never served to a device that did not say it decodes it — the tenant's heads are republished without the key first — and a poll that newly says it decodes resyncs the heads so an upgrade adds the key (at most once per kneeAddEvery per tenant, ReconcileKneeBasis).
+func (m *Module) kneeBasisFor(ctx context.Context, tenant querychoke.TenantID, device uuid.UUID, header, channel string) (Served, error) {
+	features := bundleFeatures(header)
+	changed, err := m.store.StampBundleFeatures(ctx, tenant, device, features)
+	if err != nil {
+		return Served{}, err
+	}
+	served, err := m.store.Latest(ctx, tenant, channel)
+	if err != nil {
+		return Served{}, err
+	}
+	decodes := slices.Contains(features, BundleFeatureKneeBasis)
+	unsafe := served.KneeBasis != "" && !decodes
+	upgraded := changed && decodes && served.KneeBasis == ""
+	if !unsafe && !upgraded {
+		return served, nil // a poll reconciles only when the gate can move: to withhold from this device, or to add the key an upgrade may now allow
+	}
+	if _, err := m.ReconcileKneeBasis(ctx, tenant); err != nil {
+		if unsafe {
+			return Served{}, err
+		}
+		log.Printf("policydist: knee-basis resync %s after a fleet change failed: %v", tenant, err)
+		return served, nil
+	}
+	return m.store.Latest(ctx, tenant, channel)
+}
+
+// bundleFeatures parses X-Mark1-Bundle-Features into its known words, sorted and de-duplicated; an unknown word is dropped, never stored.
+func bundleFeatures(header string) []string {
+	out := []string{}
+	for _, w := range strings.Split(header, ",") {
+		if w = strings.TrimSpace(w); w == BundleFeatureKneeBasis && !slices.Contains(out, w) {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 func matchesETag(header, etag string) bool {

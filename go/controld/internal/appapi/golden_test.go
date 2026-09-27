@@ -96,6 +96,7 @@ func TestAppAPIMatchesDesktopFixtures(t *testing.T) {
 		if g.schema != "" {
 			r.schemas.Validate(g.schema, w.Body.Bytes())
 		}
+		releasedApp(t, map[string]string{"cloud-reports-tvo": "tvo_report.json"}[g.file]+g.schema, w.Body.Bytes())
 		var live any
 		if err := json.Unmarshal(w.Body.Bytes(), &live); err != nil {
 			t.Fatal(err)

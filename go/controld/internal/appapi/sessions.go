@@ -3,6 +3,7 @@ package appapi
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -21,7 +22,8 @@ type sessionRow struct {
 	VerifiedOutcomes uint64   `json:"verified_outcomes"`
 	Arrests          uint64   `json:"arrests"`
 	Blocks           uint64   `json:"blocks"`
-	TokensSaved      uint64   `json:"tokens_saved"` // the edge's estimate over the session's arrests and blocks
+	TokensSaved      int64    `json:"tokens_saved"`     // tokens_saved_net floored at 0: clients before v0.2 parse this field as a count
+	TokensSavedNet   int64    `json:"tokens_saved_net"` // savings.v3's net estimate over the session's tasks; negative when blocks cost more than they saved
 	Injections       uint64   `json:"injections"`
 	RouteDecisions   uint64   `json:"route_decisions"`
 	Coverage         coverage `json:"coverage"`
@@ -64,7 +66,8 @@ func sessionFromRow(row map[string]any) sessionRow {
 		VerifiedOutcomes: asU64(row["tasks_verified"]),
 		Arrests:          asU64(row["arrests"]),
 		Blocks:           asU64(row["blocks"]),
-		TokensSaved:      asU64(row["tokens_saved"]),
+		TokensSaved:      max(asI64(row["tokens_saved"]), 0),
+		TokensSavedNet:   asI64(row["tokens_saved"]),
 		Injections:       asU64(row["injections"]),
 		RouteDecisions:   asU64(row["route_decisions"]),
 		Coverage: coverage{
@@ -421,6 +424,24 @@ func asU64(v any) uint64 {
 			return 0
 		}
 		return uint64(x)
+	}
+	return 0
+}
+
+// asI64 reads a ClickHouse Int64 (a net that may go negative) or any unsigned count, saturating rather than wrapping.
+func asI64(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	case uint32:
+		return int64(x)
+	case uint64:
+		if x > math.MaxInt64 {
+			return math.MaxInt64
+		}
+		return int64(x)
 	}
 	return 0
 }

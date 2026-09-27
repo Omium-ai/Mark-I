@@ -2,15 +2,39 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://omium.ai/mark1/appapi/team_invite.json",
   "title": "POST /api/v1/team/invites",
-  "description": "A minted invite (m1_081): the link carries the raw token exactly once, in the fragment so it never reaches a server log; nothing is emailed in v1, so sent is false.",
+  "description": "A minted invite (m1_081): the link carries the raw token exactly once, in the fragment so it never reaches a server log. sent is true only when an email was given and Customer.io accepted it (tracking and retention off); a failed send keeps the invite.",
   "type": "object",
-  "required": ["sent", "invite_link", "invited_email", "status", "expires_at"],
+  "required": [
+    "sent",
+    "invite_link",
+    "invited_email",
+    "status",
+    "expires_at"
+  ],
   "additionalProperties": false,
   "properties": {
-    "sent": { "type": "boolean", "enum": [false] },
-    "invite_link": { "type": "string", "pattern": "^https://mark\\.omium\\.ai/join#[A-Za-z0-9_-]{43}$" },
-    "invited_email": { "type": ["string", "null"] },
-    "status": { "type": "string", "enum": ["invited"] },
-    "expires_at": { "type": "string", "format": "date-time" }
+    "sent": {
+      "type": "boolean"
+    },
+    "invite_link": {
+      "type": "string",
+      "pattern": "^https://mark\\.omium\\.ai/join#[A-Za-z0-9_-]{43}$"
+    },
+    "invited_email": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "invited"
+      ]
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    }
   }
 }

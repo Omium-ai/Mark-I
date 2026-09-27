@@ -42,7 +42,7 @@ import (
 var perEventClasses = []string{
 	"noise_certificate", "memory_admission", "bundle_publication",
 	"corpus_export", "coverage_transition", "guard_contamination",
-	"key_rotation", "verifier_promotion", "quarantine_deletion",
+	"key_rotation", "verifier_promotion", "quarantine_deletion", "evidence_deletion",
 }
 
 // unknownClass is 02 §9's "seventh event type": a name no layer knows. Shaped
@@ -126,8 +126,8 @@ func TestIntegrationRecordClassesAgreeWithM1_002(t *testing.T) {
 	h := setup(t)
 
 	// Anti-vacuity: every loop in this file iterates one of these two maps.
-	if got := len(receipts.ServerRecordTypes); got != 7 {
-		t.Fatalf("ServerRecordTypes holds %d classes %v, want the 7 server-originated arms of ck_m1_receipts_record_shape (m1_002 + m1_068 + m1_069 + m1_080)",
+	if got := len(receipts.ServerRecordTypes); got != 8 {
+		t.Fatalf("ServerRecordTypes holds %d classes %v, want the 8 server-originated arms of ck_m1_receipts_record_shape (m1_002 + m1_068 + m1_069 + m1_080 + m1_099)",
 			got, sortedClasses(receipts.ServerRecordTypes))
 	}
 	if got := len(receipts.DeviceOriginTypes); got != 3 {

@@ -247,7 +247,7 @@ func TestUnknownEventTypeIsRetainedNotDropped(t *testing.T) {
 	if len(keys) != 1 || !strings.Contains(keys[0], "/ingest/v1/") {
 		t.Fatalf("want one ingest landing, got %v", keys)
 	}
-	landed, _, _ := h.store.Get(context.Background(), keys[0])
+	landed, _, _, _ := h.store.Get(context.Background(), keys[0])
 	decoded, err := decodeZstdBounded(landed)
 	if err != nil {
 		t.Fatal(err)

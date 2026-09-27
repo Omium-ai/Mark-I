@@ -39,10 +39,11 @@
     },
     "knee": {
       "type": "object",
-      "required": ["cost_basis", "v_default", "rows"],
+      "required": ["cost_basis", "basis", "v_default", "rows"],
       "additionalProperties": false,
       "properties": {
         "cost_basis": { "type": "string", "enum": ["usd", "quota"] },
+        "basis": { "type": "string", "enum": ["prior", "anchor_grounded", "certified", "unknown"], "description": "ADR-0013: where the rows' p_lcb came from, as the bundle says; unknown when the bundle predates route.knee.basis" },
         "v_default": { "type": "number" },
         "rows": {
           "type": "array",

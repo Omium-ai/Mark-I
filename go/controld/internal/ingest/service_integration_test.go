@@ -103,7 +103,7 @@ func svcCH(t *testing.T) (*chconn.Conn, chconn.Options, string) {
 	scratch := fmt.Sprintf("c4_svc_%d", time.Now().UnixNano())
 	svcCHSQL(t, dsn, "CREATE DATABASE "+scratch)
 	t.Cleanup(func() { svcCHSQL(t, dsn, "DROP DATABASE IF EXISTS "+scratch) })
-	for _, file := range []string{"m1_ch_001_events.sql", "m1_ch_002_rollups.sql"} {
+	for _, file := range []string{"m1_ch_001_events.sql", "m1_ch_002_rollups.sql", "m1_ch_003_received_at.sql"} {
 		raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "migrations", file))
 		if err != nil {
 			t.Fatal(err)
@@ -337,7 +337,7 @@ func TestIntegrationServiceVerdictReentersTheLedger(t *testing.T) {
 			continue
 		}
 		landed++
-		got, dev, err := store.Get(ctx, k)
+		got, dev, _, err := store.Get(ctx, k)
 		if err != nil || string(got) != string(serviceBytes) || dev != ServiceDevice {
 			t.Fatalf("landing object %s: err=%v bytes_equal=%v device=%s", k, err, string(got) == string(serviceBytes), dev)
 		}

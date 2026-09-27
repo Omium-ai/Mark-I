@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +43,7 @@ func (f *fakeRunner) Run(_ context.Context, q Query) (*Rows, error) {
 	switch q.Template().Name() {
 	case "certified_outcomes":
 		return &Rows{Rows: []map[string]any{{"certified": uint64(1)}}}, nil // a certified tenant unless a test says otherwise
-	case "tvo_task_window", "coverage_band":
+	case "tvo_task_window", "coverage_band", "tvo_task_day":
 		return &Rows{}, nil // live open-day reads: quiet unless a test cans them
 	}
 	return f.rows, nil
@@ -223,9 +224,9 @@ func TestTVOReportContract(t *testing.T) {
 	if resp["tvo"].(float64) != 100 {
 		t.Fatalf("tvo: %v", resp["tvo"])
 	}
-	if resp["guarantee_grade"] != false ||
-		!strings.Contains(resp["refusal"].(string), "no pinned model_prices row for usd") {
-		t.Fatalf("usd without a price pin must issue indicative with the reason stated: %s", w.Body.String())
+	if resp["guarantee_grade"] != false || resp["cost_basis"] != "quota" ||
+		!strings.Contains(resp["refusal"].(string), "shadow price S unconfirmed") {
+		t.Fatalf("no regime row resolves to quota (ADR-0013) and issues indicative with the reason stated: %s", w.Body.String())
 	}
 	if strings.Contains(resp["refusal"].(string), "M1E-5004") {
 		t.Fatalf("band 0.98 must not trip the coverage floor: %s", w.Body.String())
@@ -235,11 +236,11 @@ func TestTVOReportContract(t *testing.T) {
 		band["floor"].(float64) != 0.95 {
 		t.Fatalf("coverage_band must carry the shed-narrowed lower edge and D23's floor: %s", w.Body.String())
 	}
-	if resp["cost_basis"] != "usd" || resp["task_seg_version"] != "task_seg.v1" {
+	if resp["cost_basis"] != "quota" || resp["task_seg_version"] != "task_seg.v1" {
 		t.Fatalf("body shape: %s", w.Body.String())
 	}
 	if _, ok := resp["price_table_version"]; ok {
-		t.Fatalf("an unpinned usd report must not stamp a price table: %s", w.Body.String())
+		t.Fatalf("a quota report must not stamp a price table: %s", w.Body.String())
 	}
 	waste := resp["waste"].(map[string]any)
 	if waste["re_exploration_tokens"].(float64) != 20 {
@@ -606,5 +607,170 @@ func TestTVOReportOpenDayRendersLive(t *testing.T) {
 	}
 	if resp["task_seg_version"] != "task_seg.v1" {
 		t.Fatalf("task_seg_version: %v", resp["task_seg_version"])
+	}
+}
+
+// Zero verified outcomes is an unmeasured denominator, never a perfect 0 tokens/outcome: the window and the closed-day grade say null, and the day has no trend point (absent, which every client parses).
+func TestTVOReportIsNullWithoutVerifiedOutcomes(t *testing.T) {
+	run := coveredDayFake(0)
+	_, mux, _, bearer := newTestModule(t, run, false)
+	body := report(t, mux, bearer, "")
+	trend := body["trend"].([]any)
+	if body["tvo"] != nil || len(trend) != 0 || body["closed"].(map[string]any)["tvo"] != nil {
+		t.Fatalf("tvo must be null with no verified outcome: %v", body)
+	}
+	if !strings.Contains(body["refusal"].(string), "zero verified outcomes") {
+		t.Fatalf("the refusal still names the empty denominator: %v", body)
+	}
+}
+
+func coveredDayFake(verified uint64) *fakeRunner {
+	run := coveredDay()
+	run.rows.Rows[0]["tasks_verified"] = verified
+	return run
+}
+
+// savings.v3 (doc 16 ruling 4): credit the blocks whose task was then fixed, debit the usage after blocks on tasks that were not, arrests apart; the net can go negative and certified narrows it to certified tasks decided under the report's basis.
+func TestTVOReportSavingsIsANetEstimate(t *testing.T) {
+	task := func(blocks, blockSaved, post, arrests, arrestSaved uint64, word, stage string, pS, pV float64) map[string]any {
+		return map[string]any{
+			"blocks": blocks, "block_saved": blockSaved, "post_block_tokens": post, "arrests": arrests, "arrest_saved": arrestSaved,
+			"fused_verdict": word, "verdict_stage": stage, "p_satisfied": pS, "p_violated": pV, "p_refused": 0.02, "p_error": 0.01,
+			"decision_basis": "quota",
+		}
+	}
+	run := coveredDay()
+	run.byTemplate["savings"] = &Rows{Rows: []map[string]any{
+		task(2, 800, 5000, 0, 0, "satisfied", "revised", 0.9, 0.05),  // fixed after two blocks: +800
+		task(1, 400, 3000, 0, 0, "violated", "certified", 0.1, 0.85), // never fixed, certified: −3000
+		task(0, 0, 0, 1, 1200, "violated", "revised", 0.1, 0.85),     // an arrest: forced retry avoided, not in the net
+		task(1, 100, 50, 0, 0, "refused", "provisional", 0.7, 0.2),   // bootstrap band says refused, the mode says fixed: +100
+	}}
+	_, mux, _, bearer := newTestModule(t, run, false)
+	got := report(t, mux, bearer, "")["tokens_saved"].(map[string]any)
+	want := map[string]any{
+		"label": "estimated", "estimate": true, "version": "savings.v3",
+		"total": -2100.0, "blocks": 900.0, "block_count": 4.0, "blocks_resolved": 3.0, "debit": 3000.0,
+		"arrests": 1200.0, "arrest_count": 1.0, "re_exploration_avoided": 0.0, "routing": 0.0, "certified": -3000.0,
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("tokens_saved.%s = %v, want %v: %v", k, got[k], v, got)
+		}
+	}
+	if q := got["by_cost_basis"].(map[string]any)["quota"].(map[string]any); q["total"] != -2100.0 || q["block_count"] != 4.0 || q["arrest_count"] != 1.0 {
+		t.Fatalf("one basis, one cohort carrying the whole net: %v", got["by_cost_basis"])
+	}
+	if r := got["restated"].(map[string]any); r["tasks"] != 0.0 || r["total"] != 0.0 {
+		t.Fatalf("rows with no decision day restate nothing: %v", r)
+	}
+}
+
+// ADR-0013: a task sits in the cohort of the basis its first decision was priced under; a decision recorded without one is "unknown", shown apart and never certified, and the certified figure counts only the report's own basis.
+func TestFoldSavingsCohortsByDecisionBasis(t *testing.T) {
+	row := func(basis string, saved, post uint64, word, stage string) map[string]any {
+		return map[string]any{
+			"blocks": uint64(1), "block_saved": saved, "post_block_tokens": post, "arrests": uint64(0), "arrest_saved": uint64(0),
+			"fused_verdict": word, "verdict_stage": stage, "decision_basis": basis,
+		}
+	}
+	rows := []map[string]any{
+		row("usd", 800, 0, "satisfied", "certified"),
+		row("quota", 0, 3000, "violated", "certified"),
+		row("", 100, 0, "satisfied", "certified"),
+		{"blocks": uint64(0), "arrests": uint64(2), "arrest_saved": uint64(900), "decision_basis": ""},
+	}
+	now := time.Now().UTC()
+	for basis, cert := range map[string]int64{"usd": 800, "quota": -3000} {
+		got := foldSavings(rows, basis, now).body()
+		if got["total"] != int64(-2100) || got["certified"] != cert {
+			t.Fatalf("report under %s: total %v certified %v, want −2100 and %d (the unknown +100 is never certified)", basis, got["total"], got["certified"], cert)
+		}
+		by := got["by_cost_basis"].(map[string]any)
+		for b, want := range map[string][3]any{"usd": {int64(800), uint64(1), uint64(0)}, "quota": {int64(-3000), uint64(1), uint64(0)}, basisUnknown: {int64(100), uint64(1), uint64(2)}} {
+			c := by[b].(map[string]any)
+			if c["total"] != want[0] || c["block_count"] != want[1] || c["arrest_count"] != want[2] {
+				t.Fatalf("cohort %s = %v, want %v", b, c, want)
+			}
+		}
+	}
+}
+
+// A verdict, usage or block that reached controld after a decision day closed moves the figure, and the report says so: a closed day's net that differs from its net as received at close is restated (an edge offline over midnight included), an open day is live and restates nothing, and a verdict received before the close restates nothing.
+func TestFoldSavingsRestatesClosedDaysOnly(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	closed, open := now.AddDate(0, 0, -3).Format(time.DateOnly), now.Format(time.DateOnly)
+	row := func(day, word, stage, wordClose, stageClose string, post, postClose uint64) map[string]any {
+		return map[string]any{
+			"blocks": uint64(1), "block_saved": uint64(800), "arrests": uint64(0), "decision_basis": "quota", "decision_day": day,
+			"fused_verdict": word, "verdict_stage": stage, "post_block_tokens": post,
+			"blocks_at_close": uint64(1), "block_saved_at_close": uint64(800),
+			"fused_verdict_at_close": wordClose, "verdict_stage_at_close": stageClose, "post_block_tokens_at_close": postClose,
+		}
+	}
+	offline := row(closed, "satisfied", "certified", "", "", 0, 0) // an edge offline over midnight: its block reached controld after the day closed
+	offline["blocks_at_close"], offline["block_saved_at_close"] = uint64(0), uint64(0)
+	rows := []map[string]any{
+		offline,
+		row(closed, "satisfied", "revised", "violated", "provisional", 500, 500),  // a REVISED verdict after the close: −500 at close, +800 now
+		row(closed, "violated", "certified", "violated", "provisional", 900, 500), // still unfixed, 400 more spent after the close
+		row(closed, "satisfied", "revised", "satisfied", "revised", 0, 0),         // the verdict landed before the close
+		row(closed, "satisfied", "certified", "", "", 0, 0),                       // no verdict at close, none spent: 0 then, +800 now
+		row(open, "satisfied", "revised", "violated", "provisional", 500, 500),    // today is live, not restated
+	}
+	got := foldSavings(rows, "quota", now).body()
+	if r := got["restated"].(map[string]any); r["tasks"] != uint64(4) || r["total"] != int64(1300-400+800+800) {
+		t.Fatalf("restated %v, want 4 tasks, +2500 (the offline edge's block included)", r)
+	}
+	if got["total"] != int64(800+800-900+800+800+800) {
+		t.Fatalf("the net is always the ledger as it stands now: %v", got["total"])
+	}
+	if next := foldSavings(rows, "quota", now.AddDate(0, 0, 2)).body()["restated"].(map[string]any); next["tasks"] != uint64(5) {
+		t.Fatalf("once today closes its late verdict is a restatement too: %v", next)
+	}
+}
+
+// The fold is a pure function of the rows: a rerun, or the same rows in another order, answers the same body.
+func TestFoldSavingsIsIdempotent(t *testing.T) {
+	now := time.Now().UTC()
+	day := now.AddDate(0, 0, -5).Format(time.DateOnly)
+	rows := []map[string]any{
+		{"blocks": uint64(1), "block_saved": uint64(300), "decision_basis": "usd", "decision_day": day, "fused_verdict": "satisfied", "verdict_stage": "certified", "fused_verdict_at_close": "violated", "verdict_stage_at_close": "provisional", "post_block_tokens_at_close": uint64(40)},
+		{"blocks": uint64(2), "block_saved": uint64(500), "post_block_tokens": uint64(700), "decision_basis": "", "decision_day": day, "fused_verdict": "violated", "verdict_stage": "revised", "post_block_tokens_at_close": uint64(700)},
+		{"arrests": uint64(1), "arrest_saved": uint64(1200), "decision_basis": "quota"},
+	}
+	first := foldSavings(rows, "usd", now).body()
+	again := foldSavings(rows, "usd", now).body()
+	reversed := foldSavings([]map[string]any{rows[2], rows[1], rows[0]}, "usd", now).body()
+	if !reflect.DeepEqual(first, again) || !reflect.DeepEqual(first, reversed) {
+		t.Fatalf("fold is not idempotent:\n%v\n%v\n%v", first, again, reversed)
+	}
+}
+
+// I2: today's live day refuses the window's guarantee by name, and the closed days keep a grade of their own.
+func TestTVOReportGradesClosedDaysApartFromToday(t *testing.T) {
+	now := time.Now().UTC()
+	run := coveredDay()
+	run.rows.Rows[0]["day"] = now.AddDate(0, 0, -3)
+	run.byTemplate["tvo_task_window"] = &Rows{Rows: []map[string]any{{
+		"task_id": "a", "attempt_n": uint64(1), "gen_tokens": uint64(500), "verifier_tokens": uint64(0),
+		"fused_verdict": "refused", "verdict_stage": "revised", "task_seg_version": "task_seg.v1",
+		"p_satisfied": 0.7, "p_violated": 0.2, "p_refused": 0.05, "p_error": 0.05,
+	}}}
+	run.byTemplate["coverage_band"] = &Rows{Rows: []map[string]any{{"day": now, "observed_ms": uint64(10), "bypass_ms": uint64(90), "disabled_ms": uint64(0)}}}
+	regimes := &fakeRegimes{rows: map[uuid.UUID]*Regime{}}
+	_, mux, tenant, bearer := newTestModule(t, run, false, regimes)
+	regimes.rows[tenant] = &Regime{CostBasis: "usd", PriceModelID: "claude-sonnet-5"}
+	w := do(mux, "GET", "/api/v1/reports/tvo?window=7d", bearer, "")
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if body["guarantee_grade"] != false || !strings.Contains(body["refusal"].(string), "open day(s) reported live") {
+		t.Fatalf("the window with today in it stays indicative: %v", body)
+	}
+	closed := body["closed"].(map[string]any)
+	if closed["guarantee_grade"] != true || closed["tvo"].(float64) != 100 || closed["days"].(float64) != 1 || closed["refusal"] != nil {
+		t.Fatalf("the closed days grade on their own numbers: %v", closed)
 	}
 }

@@ -100,7 +100,7 @@ func (m *Module) handleCertificates(w http.ResponseWriter, r *http.Request) {
 			  FROM noise_certificates c
 			  JOIN m1_verifiers v ON v.id = c.verifier_id
 			 WHERE c.tenant_id = $1
-			 ORDER BY c.issued_at DESC NULLS LAST, c.id`, tid.UUID())
+			 ORDER BY c.row_seq DESC`, tid.UUID())
 		if err != nil {
 			return err
 		}
@@ -170,6 +170,7 @@ type rung struct {
 
 type knee struct {
 	CostBasis string    `json:"cost_basis"`
+	Basis     string    `json:"basis"` // ADR-0013: the bundle's word for where p came from, "unknown" when it predates the key
 	VDefault  float64   `json:"v_default"`
 	Rows      []kneeRow `json:"rows"`
 }
@@ -256,7 +257,10 @@ func summarize(b *policydist.Bundle, channel string, seq int64, keyID string, pu
 		Channel: channel, Seq: seq, IssuedAt: b.IssuedAt.UTC().Format(time.RFC3339Nano),
 		PublishedAt: published.UTC().Format(time.RFC3339Nano), MaxAgeS: b.MaxAge, SigningKeyID: keyID,
 		Ladders: []ladder{}, CPVS: []cpvsEntry{},
-		Knee: knee{CostBasis: b.Sections.Route.Knee.CostBasis, VDefault: b.Sections.Route.Knee.VDefault, Rows: []kneeRow{}},
+		Knee: knee{CostBasis: b.Sections.Route.Knee.CostBasis, Basis: b.Sections.Route.Knee.Basis, VDefault: b.Sections.Route.Knee.VDefault, Rows: []kneeRow{}},
+	}
+	if s.Knee.Basis == "" {
+		s.Knee.Basis = "unknown"
 	}
 	for _, l := range b.Sections.Route.Ladders {
 		rungs := make([]rung, 0, len(l.Rungs))

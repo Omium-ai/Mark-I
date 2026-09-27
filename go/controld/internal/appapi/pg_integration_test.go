@@ -95,7 +95,7 @@ func setupPG(t *testing.T) *pgRig {
 	if _, err := bootstrap.Exec(ctx, `SELECT pg_advisory_lock(7231060)`); err != nil {
 		t.Fatal(err)
 	}
-	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "migrations", "m1_0*.sql"))
+	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "migrations", "m1_[0-9]*.sql"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("migrations not found: %v", err)
 	}
@@ -242,6 +242,7 @@ func (r *pgRig) ok(path string, tenant uuid.UUID, schema string) map[string]any 
 		r.t.Fatalf("GET %s: %d %s", path, code, body)
 	}
 	r.schema.Validate(schema, body)
+	releasedApp(r.t, schema, body)
 	var out map[string]any
 	if err := json.Unmarshal(body, &out); err != nil {
 		r.t.Fatal(err)
@@ -407,8 +408,8 @@ func TestIntegrationRouteBundleFromCatalog(t *testing.T) {
 	}
 	knee := body["knee"].(map[string]any)
 	rows := knee["rows"].([]any)
-	if knee["cost_basis"] != "usd" || knee["v_default"] != 1.5 || len(rows) != 2 || rows[0].(map[string]any)["p_lcb"] != 0.91 || rows[1].(map[string]any)["p_lcb"] != nil {
-		t.Fatalf("knee table, D-Z null preserved: %v", knee)
+	if knee["cost_basis"] != "usd" || knee["basis"] != "unknown" || knee["v_default"] != 1.5 || len(rows) != 2 || rows[0].(map[string]any)["p_lcb"] != 0.91 || rows[1].(map[string]any)["p_lcb"] != nil {
+		t.Fatalf("knee table, D-Z null preserved, a bundle without route.knee.basis reads unknown (ADR-0013): %v", knee)
 	}
 	if body["epsilon"] != 0.03 || body["exploration_opt_in"] != true || body["price_table_version"] != priced {
 		t.Fatalf("epsilon, opt-in, price table: %v", body)

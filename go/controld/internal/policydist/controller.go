@@ -91,6 +91,9 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if _, err := c.mod.ReconcileKneeBasis(ctx, tenant); err != nil {
+			log.Printf("policydist: knee-basis resync %s failed: %v", id, err)
+		}
 		var channels []string
 		err = c.mod.store.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
 			rows, err := tx.Query(ctx, `SELECT channel FROM bundle_channel_heads WHERE tenant_id = $1 AND head_seq > 0`, id)
@@ -210,9 +213,10 @@ func (c *Controller) Tick(ctx context.Context, tenant querychoke.TenantID, chann
 func (c *Controller) promote(ctx context.Context, tenant querychoke.TenantID, seq int64) error {
 	var body []byte
 	var maxAge float64
+	var intended string
 	err := c.mod.store.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT body_cbor, extract(epoch FROM max_age)::float8 FROM policy_bundles WHERE tenant_id = $1 AND channel = $2 AND seq = $3`,
-			tenant.UUID(), CanaryChannel, seq).Scan(&body, &maxAge)
+		return tx.QueryRow(ctx, `SELECT body_cbor, extract(epoch FROM max_age)::float8, coalesce(knee_basis_intended, '') FROM policy_bundles WHERE tenant_id = $1 AND channel = $2 AND seq = $3`,
+			tenant.UUID(), CanaryChannel, seq).Scan(&body, &maxAge, &intended)
 	})
 	if err != nil {
 		return fmt.Errorf("policydist: promotion of canary seq %d: reading it: %w", seq, err)
@@ -225,7 +229,7 @@ func (c *Controller) promote(ctx context.Context, tenant querychoke.TenantID, se
 	if err != nil {
 		return err
 	}
-	p, err := c.mod.Publish(ctx, tenant, Draft{Channel: BootstrapChannel, MaxAge: time.Duration(maxAge * float64(time.Second)), SectionsCBOR: sections})
+	p, err := c.mod.Publish(ctx, tenant, Draft{Channel: BootstrapChannel, MaxAge: time.Duration(maxAge * float64(time.Second)), SectionsCBOR: sections, KneeBasis: intended})
 	if err != nil {
 		return fmt.Errorf("policydist: promotion of canary seq %d: %w", seq, err)
 	}
@@ -241,9 +245,10 @@ func (c *Controller) promote(ctx context.Context, tenant querychoke.TenantID, se
 func (c *Controller) rollback(ctx context.Context, tenant querychoke.TenantID, channel string, seq int64) error {
 	var body []byte
 	var maxAge float64
+	var intended string
 	err := c.mod.store.db.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT body_cbor, extract(epoch FROM max_age)::float8 FROM policy_bundles WHERE tenant_id = $1 AND channel = $2 AND seq = $3`,
-			tenant.UUID(), channel, seq-1).Scan(&body, &maxAge)
+		return tx.QueryRow(ctx, `SELECT body_cbor, extract(epoch FROM max_age)::float8, coalesce(knee_basis_intended, '') FROM policy_bundles WHERE tenant_id = $1 AND channel = $2 AND seq = $3`,
+			tenant.UUID(), channel, seq-1).Scan(&body, &maxAge, &intended)
 	})
 	if err != nil {
 		return fmt.Errorf("policydist: rollback of seq %d: reading seq %d: %w", seq, seq-1, err)
@@ -256,7 +261,7 @@ func (c *Controller) rollback(ctx context.Context, tenant querychoke.TenantID, c
 	if err != nil {
 		return err
 	}
-	p, err := c.mod.Publish(ctx, tenant, Draft{Channel: channel, MaxAge: time.Duration(maxAge * float64(time.Second)), SectionsCBOR: sections})
+	p, err := c.mod.Publish(ctx, tenant, Draft{Channel: channel, MaxAge: time.Duration(maxAge * float64(time.Second)), SectionsCBOR: sections, KneeBasis: intended})
 	if err != nil {
 		return fmt.Errorf("policydist: rollback of seq %d: %w", seq, err)
 	}

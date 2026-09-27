@@ -123,7 +123,7 @@ func setupApp(t *testing.T) *appRig {
 		_ = bootstrap.Exec(context.Background(), "DROP DATABASE IF EXISTS "+scratch)
 		_ = bootstrap.Close()
 	})
-	for _, file := range []string{"m1_ch_001_events.sql", "m1_ch_002_rollups.sql"} {
+	for _, file := range []string{"m1_ch_001_events.sql", "m1_ch_002_rollups.sql", "m1_ch_003_received_at.sql"} {
 		raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "migrations", file))
 		if err != nil {
 			t.Fatal(err)

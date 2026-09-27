@@ -76,7 +76,15 @@
       "abstained": 0,
       "score": 0,
       "tamper": 0,
-      "stage": "certified"
+      "stage": "certified",
+      "calibration_version": "",
+      "locus": "",
+      "execution_hash": "",
+      "tier_used": "",
+      "vote_trigger": "",
+      "task_verdict": "satisfied",
+      "task_noise_cert_id": "55555555-5555-5555-5555-555555555555",
+      "device_id": "66666666-6666-6666-6666-666666666666"
     },
     {
       "task_id": "44444444-4444-4444-4444-444444444444",
@@ -91,7 +99,15 @@
       "abstained": 0,
       "score": 0,
       "tamper": 0,
-      "stage": "certified"
+      "stage": "certified",
+      "calibration_version": "",
+      "locus": "JUDGE_LOCUS_CLOUD",
+      "execution_hash": "",
+      "tier_used": "EVIDENCE_TIER_E1",
+      "vote_trigger": "JUDGE_TRIGGER_ALWAYS",
+      "task_verdict": "satisfied",
+      "task_noise_cert_id": "55555555-5555-5555-5555-555555555555",
+      "device_id": "66666666-6666-6666-6666-666666666666"
     },
     {
       "task_id": "44444444-4444-4444-4444-444444444444",
@@ -106,7 +122,15 @@
       "abstained": 0,
       "score": 0.7,
       "tamper": 0,
-      "stage": "certified"
+      "stage": "certified",
+      "calibration_version": "rm-a-cal@1",
+      "locus": "RM_LOCUS_CLIENT_SIDE",
+      "execution_hash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "tier_used": "",
+      "vote_trigger": "",
+      "task_verdict": "satisfied",
+      "task_noise_cert_id": "55555555-5555-5555-5555-555555555555",
+      "device_id": "66666666-6666-6666-6666-666666666666"
     },
     {
       "task_id": "44444444-4444-4444-4444-444444444444",
@@ -121,7 +145,15 @@
       "abstained": 1,
       "score": 0,
       "tamper": 0,
-      "stage": "certified"
+      "stage": "certified",
+      "calibration_version": "",
+      "locus": "",
+      "execution_hash": "",
+      "tier_used": "",
+      "vote_trigger": "",
+      "task_verdict": "satisfied",
+      "task_noise_cert_id": "55555555-5555-5555-5555-555555555555",
+      "device_id": "66666666-6666-6666-6666-666666666666"
     }
   ],
   "policy_compiler_attempts": [

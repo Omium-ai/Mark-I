@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://omium.ai/mark1/appapi/cloud_judge.json",
   "title": "GET|PUT /api/v1/verify/cloud-judge",
-  "description": "The tenant's m1_065 cloud-judge consent (06 §6.5): the judge this build would dispatch, and whether a live consent row admits it. Absence is the default (enabled=false, the judge's static disclosure fields); PUT enabled=true writes the only row this route can ever write, PUT enabled=false revokes it.",
+  "description": "The tenant's m1_065 cloud-judge consent (06 §6.5; 16 §L1: judge:grounded-rubric@2 on Nebius Token Factory, global processing): the judge this build would dispatch, and whether a live consent row admits it. Absence is the default (enabled=false, the judge's static disclosure fields); PUT enabled=true writes the only row this route can ever write, PUT enabled=false revokes it.",
   "type": "object",
   "required": ["enabled", "judge_id", "subprocessor", "region", "max_tier", "consented_at", "consented_by"],
   "additionalProperties": false,

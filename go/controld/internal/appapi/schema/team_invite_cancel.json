@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omium.ai/mark1/appapi/team_invite_cancel.json",
+  "title": "DELETE /api/v1/team/invites/{id}",
+  "description": "Owner only, user token: a live invite stops working (expires_at = now()) and frees its seat. {id} is the invite:<uuid> row id of GET /team or the bare uuid. Refusals: 403 not_owner / user_token_required, 404 invite_invalid (unknown, expired, accepted or another team's).",
+  "type": "object",
+  "required": ["id", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^invite:[0-9a-f-]{36}$" },
+    "status": { "type": "string", "enum": ["cancelled"] }
+  }
+}

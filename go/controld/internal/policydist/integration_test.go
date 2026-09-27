@@ -132,7 +132,7 @@ func itSetup(t *testing.T) *itHarness {
 	if _, err := bootstrap.Exec(ctx, `SELECT pg_advisory_lock(7231060)`); err != nil {
 		t.Fatal(err)
 	}
-	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "migrations", "m1_0*.sql"))
+	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "migrations", "m1_[0-9]*.sql"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("migrations not found: %v (%d)", err, len(files))
 	}
@@ -501,6 +501,12 @@ func TestIntegrationPolicyDistribution(t *testing.T) {
 			body := fmt.Sprintf(`{"channel":"stable","seq":%d,"bundle_hash":"%s","result":"applied"%s}`,
 				seq, hex.EncodeToString(hash[:]), extra)
 			return h.req(http.MethodPost, "/api/v1/policy/ack", token, strings.NewReader(body), ackHdr)
+		}
+		// m1_105: A1's older ACK carries a LATER acked_at (clock stepped back), yet the row written last is the device's latest; ordering by acked_at would misread seq 1.
+		if _, err := h.admin.Exec(ctx, `INSERT INTO bundle_acks (tenant_id, channel, seq, device_id, acked_at, result, bundle_hash, edge_version)
+			VALUES ($1, 'stable', $2, $3, now() + interval '1 hour', 'applied', $4, '1.4.1')`,
+			h.tenantAID, first.Seq, h.deviceA1, first.BodySHA256[:]); err != nil {
+			t.Fatal(err)
 		}
 		resp := ack(h.tokenA1, 2, second.BodySHA256, "")
 		defer itClose(resp)

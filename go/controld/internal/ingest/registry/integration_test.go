@@ -92,7 +92,7 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	dir := filepath.Join("..", "..", "..", "..", "..", "migrations")
-	files, err := filepath.Glob(filepath.Join(dir, "m1_0*.sql"))
+	files, err := filepath.Glob(filepath.Join(dir, "m1_[0-9]*.sql"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("migrations not found: %v (%d)", err, len(files))
 	}

@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -144,9 +145,9 @@ func setupQC(t *testing.T) *itRig {
 		_ = bootstrap.Close()
 	})
 
-	// The REAL DDL: m1_ch_001 (events) then m1_ch_002 (rollups), database
+	// The REAL DDL: m1_ch_001 (events), m1_ch_002 (rollups), m1_ch_003 (received_at), database
 	// name rewritten for scratch isolation, nothing else.
-	for _, file := range []string{"m1_ch_001_events.sql", "m1_ch_002_rollups.sql"} {
+	for _, file := range []string{"m1_ch_001_events.sql", "m1_ch_002_rollups.sql", "m1_ch_003_received_at.sql"} {
 		raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "migrations", file))
 		if err != nil {
 			t.Fatal(err)
@@ -593,6 +594,152 @@ func TestIntegrationTvoTaskWindowCarriesThePreWindowOpener(t *testing.T) {
 	}
 }
 
+// savings.v3 and tvo_task_day over the real ledger: the block on the fixed task is credited its estimate, only the usage AFTER the block on the unfixed task is debited, the arrest stays apart, a pre-ADR-0013 decision (no cost_basis) is never certified, and each attempt's tokens land on the day they were spent.
+func TestIntegrationSavingsV2AndTaskDay(t *testing.T) {
+	rig := setupQC(t)
+	ctx := context.Background()
+	tenant, device, session := uuid.New(), uuid.New(), uuid.Must(uuid.NewV7())
+	fixed, unfixed, arrested := uuid.New(), uuid.New(), uuid.New()
+	at := func(day, minute int) time.Time { return time.Date(2026, 8, 27+day, 10, minute, 0, 0, time.UTC) }
+	cols := []string{
+		"tenant_id", "occurred_at", "session_id", "event_id", "seq", "session_epoch", "device_id", "event_type", "event_class", "agent",
+		"input_tokens", "output_tokens", "cost_basis", "task_id", "payload", "verdict", "verdict_stage", "p_satisfied", "p_violated", "p_refused", "p_error",
+	}
+	seq := uint64(0)
+	row := func(when time.Time, task uuid.UUID, typ, class string, in uint64, payload, verdict, stage string, pS, pV float32) []any {
+		seq++
+		return []any{tenant, when, session, uuid.Must(uuid.NewV7()), seq, uint32(1), device, typ, class, "claudecode", in, uint64(0), "quota", task, payload, verdict, stage, pS, pV, float32(0), float32(0)}
+	}
+	block := `{"outcome":"GUARD_OUTCOME_BLOCKED","reason_code":"stop_gate_block","tokens_saved_estimate":%d}`
+	if err := rig.ingest.InsertRows(ctx, "m1p_events", cols, [][]any{
+		row(at(1, 0), fixed, "Usage", "billing", 1000, `{}`, "", "", 0, 0),
+		row(at(1, 1), fixed, "GuardDecision", "route", 0, fmt.Sprintf(block, 500), "", "", 0, 0),
+		row(at(1, 2), fixed, "Usage", "billing", 2000, `{}`, "", "", 0, 0),
+		row(at(1, 3), fixed, "VerdictEvent", "verdict", 0, `{}`, "refused", "revised", 0.7, 0.2),
+		row(at(1, 0), unfixed, "Usage", "billing", 300, `{}`, "", "", 0, 0),
+		row(at(1, 1), unfixed, "GuardDecision", "route", 0, fmt.Sprintf(block, 200), "", "", 0, 0),
+		row(at(2, 2), unfixed, "Usage", "billing", 700, `{}`, "", "", 0, 0),
+		row(at(2, 3), unfixed, "VerdictEvent", "verdict", 0, `{}`, "violated", "certified", 0.1, 0.8),
+		row(at(1, 5), arrested, "GuardDecision", "route", 0, `{"outcome":"GUARD_OUTCOME_ARRESTED","reason_code":"knee_arrest","tokens_saved_estimate":1200}`, "", "", 0, 0),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	reg, err := LoadTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(name string, p Params) []map[string]any {
+		tpl, _ := reg.Lookup(name)
+		q, err := Build(mustTenant(t, tenant), tpl, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := rig.runner.Run(ctx, q)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return rows.Rows
+	}
+	got := foldSavings(run("savings", Params{"from": "2026-08-28", "to": "2026-08-29"}), "quota", time.Now()).body()
+	for k, want := range map[string]any{"total": int64(-200), "blocks": uint64(500), "debit": uint64(700), "block_count": uint64(2), "blocks_resolved": uint64(1), "arrests": uint64(1200), "arrest_count": uint64(1), "certified": int64(0)} {
+		if got[k] != want {
+			t.Fatalf("savings.%s = %v, want %v (%v)", k, got[k], want, got)
+		}
+	}
+	days := map[string][]map[string]any{}
+	for _, r := range run("tvo_task_day", Params{"from": "2026-08-28", "to": "2026-08-30"}) {
+		days[asDay(r["day"])] = append(days[asDay(r["day"])], r)
+	}
+	d1, d2 := foldAttempts(days["2026-08-28"]), foldAttempts(days["2026-08-29"])
+	if d1.tokens != 3300 || d1.verified != 1 || d2.tokens != 700 || d2.verified != 0 {
+		t.Fatalf("per-day fold: day1=%+v day2=%+v rows=%v", d1, d2, days)
+	}
+}
+
+// savings.v3 over the real ledger (ADR-0013): a task decided inside [from, to] resolves on a verdict dated after `to`, its closed decision day is restated by name, the decision's own cost_basis picks its cohort, and a replayed copy of every event changes nothing.
+func TestIntegrationSavingsV3LateVerdictsAndBasis(t *testing.T) {
+	rig := setupQC(t)
+	ctx := context.Background()
+	tenant, device, session := uuid.New(), uuid.New(), uuid.Must(uuid.NewV7())
+	late, early, legacy := uuid.New(), uuid.New(), uuid.New()
+	at := func(day, hour int) time.Time { return time.Date(2026, 8, 27+day, hour, 0, 0, 0, time.UTC) }
+	cols := []string{
+		"tenant_id", "occurred_at", "session_id", "event_id", "seq", "session_epoch", "device_id", "event_type", "event_class", "agent",
+		"input_tokens", "output_tokens", "cost_basis", "task_id", "payload", "verdict", "verdict_stage", "p_satisfied", "p_violated", "p_refused", "p_error", "received_at",
+	}
+	seq := uint64(0)
+	var rows [][]any
+	received := time.Time{}
+	row := func(when time.Time, task uuid.UUID, typ, class string, in uint64, payload, verdict, stage string, pS, pV float32) {
+		seq++
+		got := when
+		if !received.IsZero() {
+			got = received
+		}
+		rows = append(rows, []any{tenant, when, session, uuid.Must(uuid.NewV7()), seq, uint32(1), device, typ, class, "claudecode", in, uint64(0), "quota", task, payload, verdict, stage, pS, pV, float32(0), float32(0), got})
+	}
+	block := `{"outcome":"GUARD_OUTCOME_BLOCKED","reason_code":"stop_gate_block","tokens_saved_estimate":%d%s}`
+	// late: blocked on day 1 (inside the window), still failing at day 1's close, fixed by a verdict dated day 3 — after `to` and after the close.
+	row(at(1, 9), late, "GuardDecision", "route", 0, fmt.Sprintf(block, 500, `,"cost_basis":"quota"`), "", "", 0, 0)
+	row(at(1, 10), late, "Usage", "billing", 400, `{}`, "", "", 0, 0)
+	row(at(1, 11), late, "VerdictEvent", "verdict", 0, `{}`, "violated", "provisional", 0.2, 0.7)
+	row(at(3, 9), late, "VerdictEvent", "verdict", 0, `{}`, "satisfied", "revised", 0.8, 0.1)
+	// early: blocked and fixed the same day, before its close; priced under usd by its bundle.
+	row(at(1, 9), early, "GuardDecision", "route", 0, fmt.Sprintf(block, 300, `,"cost_basis":"usd"`), "", "", 0, 0)
+	row(at(1, 12), early, "VerdictEvent", "verdict", 0, `{}`, "satisfied", "certified", 0.9, 0.05)
+	// legacy: an edge that predates cost_basis; never fixed, spends after the block across the close.
+	row(at(1, 9), legacy, "GuardDecision", "route", 0, fmt.Sprintf(block, 200, ``), "", "", 0, 0)
+	row(at(1, 10), legacy, "Usage", "billing", 100, `{}`, "", "", 0, 0)
+	row(at(2, 10), legacy, "Usage", "billing", 50, `{}`, "", "", 0, 0)
+	row(at(2, 11), legacy, "VerdictEvent", "verdict", 0, `{}`, "violated", "certified", 0.1, 0.8)
+	// offline: an edge offline over midnight — decided and fixed at 23:00 on day 1, received at 09:00 on day 2, after day 1 closed (02:00): a visible restatement, never a silent move.
+	offline := uuid.New()
+	received = at(2, 9)
+	row(at(1, 23), offline, "GuardDecision", "route", 0, fmt.Sprintf(block, 250, `,"cost_basis":"usd"`), "", "", 0, 0)
+	row(at(1, 23).Add(30*time.Minute), offline, "VerdictEvent", "verdict", 0, `{}`, "satisfied", "certified", 0.9, 0.05)
+	received = time.Time{}
+	// a decision after `to` is outside the window: it opens no task here.
+	row(at(3, 9), uuid.New(), "GuardDecision", "route", 0, fmt.Sprintf(block, 9000, `,"cost_basis":"quota"`), "", "", 0, 0)
+	if err := rig.ingest.InsertRows(ctx, "m1p_events", cols, rows); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	reg, err := LoadTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl, _ := reg.Lookup("savings")
+	q, err := Build(mustTenant(t, tenant), tpl, Params{"from": "2026-08-28", "to": "2026-08-28"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fold := func() map[string]any {
+		got, err := rig.runner.Run(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return foldSavings(got.Rows, "quota", time.Now()).body()
+	}
+	first := fold()
+	for k, want := range map[string]any{"total": int64(500 + 300 - 150 + 250), "block_count": uint64(4), "blocks_resolved": uint64(3), "debit": uint64(150), "certified": int64(0)} {
+		if first[k] != want {
+			t.Fatalf("savings.%s = %v, want %v (%v)", k, first[k], want, first)
+		}
+	}
+	by := first["by_cost_basis"].(map[string]any)
+	if by["quota"].(map[string]any)["total"] != int64(500) || by["usd"].(map[string]any)["total"] != int64(300+250) || by["unknown"].(map[string]any)["total"] != int64(-150) {
+		t.Fatalf("cohorts by the decision's own basis: %v", by)
+	}
+	if r := first["restated"].(map[string]any); r["tasks"] != uint64(3) || r["total"] != int64(500+400-50+250) {
+		t.Fatalf("restated %v: the late fix (−400 at close → +500), the legacy task's post-close spend (−100 → −150) and the offline edge's day (0 at close → +250)", r)
+	}
+	if err := rig.ingest.InsertRows(ctx, "m1p_events", cols, rows); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if again := fold(); !reflect.DeepEqual(first, again) {
+		t.Fatalf("a replayed batch moved the figure:\n%v\n%v", first, again)
+	}
+}
+
 // coverage_band.v2 reads the surface from the transition rows: a device enabled at 12:00 on day 0 is observed 12 h that day and 24 h the next, less a 2 h mark1_off window and a 10 min bypass on day 1; a history_import marker (days of "duration") is a label, not a gap.
 func TestIntegrationCoverageBandFromTransitions(t *testing.T) {
 	rig := setupQC(t)
@@ -798,6 +945,9 @@ func TestIntegrationIntelTemplatesServeConsumersLive(t *testing.T) {
 	got := map[string]string{}
 	for _, r := range votes {
 		got[fmt.Sprint(r["verifier_id"])] = fmt.Sprint(r["vote"], "/", r["is_anchor"], "/", r["stage"])
+		if fmt.Sprint(r["task_verdict"]) != "satisfied" || fmt.Sprint(r["task_noise_cert_id"]) != seedNoiseCertID.String() {
+			t.Fatalf("adjudication_votes: every vote row carries its task's certified verdict and cert: %v", r)
+		}
 	}
 	if len(votes) != 2 || got["ruff@1"] != "satisfied/1/certified" || got["judge:rubric@2"] != "violated/0/certified" {
 		t.Fatalf("adjudication_votes: %v", votes)

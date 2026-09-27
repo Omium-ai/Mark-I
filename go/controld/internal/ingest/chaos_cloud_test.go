@@ -392,7 +392,7 @@ func (r *chaosRig) landedEvents() (map[uuid.UUID]bool, int) {
 		}
 		for _, key := range keys {
 			objects++
-			compressed, _, err := r.s3.Get(ctx, key)
+			compressed, _, _, err := r.s3.Get(ctx, key)
 			if err != nil {
 				r.t.Fatal(err)
 			}

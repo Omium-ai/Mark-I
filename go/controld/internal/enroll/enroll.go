@@ -110,6 +110,10 @@ type Deps struct {
 	Bootstrap func(ctx context.Context, tenant uuid.UUID) error
 	// BundleKeys is policydist.Module.BundleKeys: the section keys every ACTIVE and refresh body pins on the edge (bundle_section_keys); nil ⇒ absent.
 	BundleKeys func() []policydist.ManifestKey
+	// DogfoodTenants are Omium's own tenants (config.DogfoodTenants); their staff get contribute_outcomes_default on an ACTIVE body (16 L8).
+	DogfoodTenants []uuid.UUID
+	// StaffSubjects are enrollment subjects that count as Omium staff without a verified @omium.ai email (config STAFF_SUBJECTS).
+	StaffSubjects []string
 }
 
 type Module struct {
@@ -128,6 +132,8 @@ type Module struct {
 	pepper     []byte
 	bootstrap  func(context.Context, uuid.UUID) error
 	bundleKeys func() []policydist.ManifestKey
+	dogfood    []uuid.UUID
+	staff      []string
 
 	nonces    *nonceStore
 	pollGap   *pacer         // §8.2: /poll at the flow's own interval (5 s)
@@ -149,7 +155,7 @@ func New(d Deps) *Module {
 		obsCfg: d.ObsCfg, cache: d.Cache, users: d.Users,
 		baseURL: d.PublicBaseURL, minEdge: d.ServerMinEdge,
 		http: d.HTTPClient, now: d.Now, pepper: d.TenantPepper,
-		bootstrap: d.Bootstrap, bundleKeys: d.BundleKeys,
+		bootstrap: d.Bootstrap, bundleKeys: d.BundleKeys, dogfood: d.DogfoodTenants, staff: d.StaffSubjects,
 		nonces:    newNonceStore(d.Now),
 		pollGap:   newPacer(pollInterval, d.Now),
 		startIP:   newBucketLimiter(10, time.Hour, d.Now),

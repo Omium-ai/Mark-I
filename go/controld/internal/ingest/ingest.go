@@ -8,6 +8,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -22,7 +23,9 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/scanner"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/ingest/sidefx"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/receipts"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/server"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/teams"
 )
 
 // SecurityRecorder is the "+ security event" half of the two ingest refusals
@@ -74,24 +77,33 @@ type Deps struct {
 	Now      func() time.Time
 	// IntelServiceToken verifies the internal service ingest route (service.go); empty ⇒ the surface is absent, never open.
 	IntelServiceToken string
+	// EvidenceToken is the adjudicator's own credential for the E1 read (attach.go handleEvidence); empty ⇒ every read is refused.
+	EvidenceToken string
+	// Chain receipts the deletion of a part that landed after its withdrawal (attach.go); nil ⇒ the object is still deleted, the next sweep receipts it.
+	Chain *receipts.Store
+	// Members refuses a leaver's device token on ingest, attach and consents (teams.Participant); nil ⇒ no membership check.
+	Members teams.DB
 }
 
 type Module struct {
-	verifier     auth.Verifier
-	obsCfg       obs.Config
-	pgReady      PGReady
-	store        s3land.Store
-	proj         *chproj.Projector
-	sfx          *sidefx.Sidefx
-	security     SecurityRecorder
-	registry     registry.Registry
-	scanner      *scanner.Ruleset
-	deviceKeys   DeviceKeys
-	db           registry.DB
-	limiter      *Limiter
-	sem          chan struct{}
-	now          func() time.Time
-	serviceToken string
+	verifier      auth.Verifier
+	obsCfg        obs.Config
+	pgReady       PGReady
+	store         s3land.Store
+	proj          *chproj.Projector
+	sfx           *sidefx.Sidefx
+	security      SecurityRecorder
+	registry      registry.Registry
+	scanner       *scanner.Ruleset
+	deviceKeys    DeviceKeys
+	db            registry.DB
+	members       teams.DB
+	chain         *receipts.Store
+	limiter       *Limiter
+	sem           chan struct{}
+	now           func() time.Time
+	serviceToken  string
+	evidenceToken string
 }
 
 func New(d Deps) *Module {
@@ -108,21 +120,24 @@ func New(d Deps) *Module {
 		d.Scanner = scanner.Default
 	}
 	m := &Module{
-		verifier:     d.Verifier,
-		obsCfg:       d.ObsCfg,
-		pgReady:      d.PG,
-		store:        d.Store,
-		proj:         d.Proj,
-		sfx:          d.Sidefx,
-		security:     d.Security,
-		registry:     d.Registry,
-		scanner:      d.Scanner,
-		deviceKeys:   d.DeviceKeys,
-		db:           d.DB,
-		limiter:      NewLimiter(),
-		sem:          make(chan struct{}, d.PoolSize),
-		now:          d.Now,
-		serviceToken: d.IntelServiceToken,
+		verifier:      d.Verifier,
+		obsCfg:        d.ObsCfg,
+		pgReady:       d.PG,
+		store:         d.Store,
+		proj:          d.Proj,
+		sfx:           d.Sidefx,
+		security:      d.Security,
+		registry:      d.Registry,
+		scanner:       d.Scanner,
+		deviceKeys:    d.DeviceKeys,
+		db:            d.DB,
+		members:       d.Members,
+		chain:         d.Chain,
+		limiter:       NewLimiter(),
+		sem:           make(chan struct{}, d.PoolSize),
+		now:           d.Now,
+		serviceToken:  d.IntelServiceToken,
+		evidenceToken: d.EvidenceToken,
 	}
 	if m.security == nil {
 		m.security = &projectorSecurity{proj: d.Proj}
@@ -139,8 +154,17 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	chain := server.Chain(m.verifier, m.obsCfg, func(reason string) {
 		authFailures.WithLabelValues(reason).Inc()
 	})
-	mux.Handle("POST /m1p/v1/ingest", chain(http.HandlerFunc(m.handleIngest)))
-	mux.Handle("PUT /api/v1/consents", chain(http.HandlerFunc(m.handleConsents)))
+	member := teams.Participant(m.members, func(w http.ResponseWriter, err error) {
+		if errors.Is(err, teams.ErrNotMember) {
+			writeErr(w, apiErr{http.StatusForbidden, "M1E-1007", "not_member: this device's owner is no longer on the team", nil})
+			return
+		}
+		writeErr(w, errServer("team membership lookup failed"))
+	})
+	mux.Handle("POST /m1p/v1/ingest", chain(member(http.HandlerFunc(m.handleIngest))))
+	mux.Handle("PUT /api/v1/consents", chain(member(http.HandlerFunc(m.handleConsents))))
+	mux.Handle("POST /api/v1/attach", chain(member(http.HandlerFunc(m.handleAttach))))
+	mux.Handle("GET /internal/v1/evidence/{task}", m.obsCfg.HTTPMiddleware(nil)(http.HandlerFunc(m.handleEvidence)))
 	mux.Handle("POST /internal/v1/ingest/service", m.obsCfg.HTTPMiddleware(nil)(http.HandlerFunc(m.handleServiceIngest)))
 }
 

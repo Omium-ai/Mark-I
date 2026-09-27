@@ -22,6 +22,7 @@ import (
 
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/auth"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/enroll"
+	"github.com/Omium-ai/omium-mark1/go/controld/internal/mail"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/querychoke"
 	"github.com/Omium-ai/omium-mark1/go/controld/internal/userauth"
@@ -57,6 +58,7 @@ func (r *pgRig) send(method, path, bearer, body string) (int, []byte) {
 func (r *pgRig) decode(schema string, body []byte) map[string]any {
 	r.t.Helper()
 	r.schema.Validate(schema, body)
+	releasedApp(r.t, schema, body)
 	var out map[string]any
 	if err := json.Unmarshal(body, &out); err != nil {
 		r.t.Fatal(err)
@@ -84,7 +86,7 @@ func (r *pgRig) approvedEnrollment(tenant uuid.UUID, approver string, at time.Ti
 }
 
 // teamAPI is setupPG's module wired the way main.go wires it for teams, capped at max.
-func (r *pgRig) teamAPI(max int) *httptest.Server {
+func (r *pgRig) teamAPI(max int, mailer ...func(context.Context, mail.Message) (string, error)) *httptest.Server {
 	r.t.Helper()
 	jwks, _ := json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: r.userKey.Public(), Algorithm: "ES256", Use: "sig", KeyID: "it"}}})
 	users, err := userauth.New("https://issuer.it", string(jwks))
@@ -97,12 +99,16 @@ func (r *pgRig) teamAPI(max int) *httptest.Server {
 	}
 	verifier := auth.Multi(auth.NewHMACVerifier([]byte(testKey), auth.StaticRevocations{}), users.TeamVerifier(r.db))
 	obsCfg := obs.Config{ServiceName: "appapi-team-it"}
-	m := New(Deps{
+	d := Deps{
 		Verifier: verifier, ObsCfg: obsCfg, Registry: reg, Runner: r.run,
 		Reports: querychoke.New(querychoke.Deps{Registry: reg, Runner: r.run, Verifier: verifier, ObsCfg: obsCfg}),
 		PG:      r.db, TeamMaxMembers: max,
 		RevokeSubject: enroll.New(enroll.Deps{DB: r.db}).RevokeSubjectDevices,
-	})
+	}
+	if len(mailer) > 0 {
+		d.Mail, d.EmailPostal = mailer[0], "Omium, 1 Test St"
+	}
+	m := New(d)
 	mux := http.NewServeMux()
 	m.RegisterRoutes(mux)
 	api := httptest.NewServer(mux)
@@ -237,7 +243,7 @@ func TestIntegrationTeamUnderRLS(t *testing.T) {
 	r.refusedTeam(http.MethodPost, "/api/v1/team/invites", bob, `{}`, http.StatusForbidden, "not_owner")
 	// Tenant-wide settings are the owner's: a member cannot share the team's memory or send teammates' evidence to the cloud judge.
 	r.refusedTeam(http.MethodPut, "/api/v1/team", bob, `{"shared_memory":true}`, http.StatusForbidden, "not_owner")
-	r.refusedTeam(http.MethodPut, "/api/v1/verify/cloud-judge", bob, `{"enabled":true}`, http.StatusForbidden, "not_owner")
+	r.refusedTeam(http.MethodPut, "/api/v1/verify/cloud-judge", bob, `{"enabled":true,"judge_id":"judge:grounded-rubric@2"}`, http.StatusForbidden, "not_owner")
 	if code, body := r.send(http.MethodPut, "/api/v1/team", alice, `{"shared_memory":true}`); code != http.StatusOK {
 		t.Fatalf("the owner flips shared memory: %d %s", code, body)
 	}
@@ -252,6 +258,9 @@ func TestIntegrationTeamUnderRLS(t *testing.T) {
 	open := invite(alice, ``)
 	r.refusedTeam(http.MethodPost, "/api/v1/team/invites", alice, ``, http.StatusConflict, "team_full")
 	accept(dave, open)
+	daveDevice := auth.Mint([]byte(testKey), tenantA, r.approvedEnrollment(tenantA, "omium:dave", time.Now().UTC()), time.Hour)
+	aliceDevice := auth.Mint([]byte(testKey), tenantA, r.approvedEnrollment(tenantA, "omium:alice", time.Now().UTC()), time.Hour)
+	team(daveDevice)
 	r.refusedTeam(http.MethodPost, "/api/v1/team/invites/accept", dave, `{"token":"`+eveLink+`"}`, http.StatusConflict, "already_in_team")
 
 	// Leave: the owner cannot, a member's answer is their own token tenant, and a second leave is from their personal tenant.
@@ -262,6 +271,11 @@ func TestIntegrationTeamUnderRLS(t *testing.T) {
 	}
 	r.refusedTeam(http.MethodPost, "/api/v1/team/leave", dave, ``, http.StatusConflict, "owner_cannot_leave")
 	r.refusedTeam(http.MethodPost, "/api/v1/team/leave", carol, ``, http.StatusConflict, "owner_cannot_leave")
+	// A leaver's device keeps its token (up to 24 h) but no longer reads the team: every app route refuses it, the owner's device still reads.
+	for _, path := range []string{"/api/v1/team", "/api/v1/verify/labels", "/api/v1/verify/certificates", "/api/v1/verify/cloud-judge", "/api/v1/me", "/api/v1/sessions"} {
+		r.refusedTeam(http.MethodGet, path, daveDevice, ``, http.StatusForbidden, "not_member")
+	}
+	team(aliceDevice)
 
 	// The cap is re-checked at accept under the row lock: an invite minted under 3 cannot land under 2.
 	again := invite(alice, ``)
@@ -363,5 +377,46 @@ func TestIntegrationTeamsMigration(t *testing.T) {
 		if err := r.admin.QueryRow(ctx, `SELECT `+q).Scan(&got); err != nil || got != want {
 			t.Errorf("%s = %v (%v), want %v", q, got, err, want)
 		}
+	}
+}
+
+// Invite abuse: one bare address per invite (lowercased before it is stored or mailed), and at most 2 x TEAM_MAX_MEMBERS invites per tenant per 24 h counted from m1_team_invites itself, so cancelling frees the seat but not the quota and a restarted controld still refuses.
+func TestIntegrationInvitesAreOneAddressAndCappedPerDay(t *testing.T) {
+	r := setupPG(t)
+	ctx := context.Background()
+	mailer := &fakeMailer{}
+	r.api = r.teamAPI(2, mailer.send)
+	tenant := r.personal("olga")
+	olga := r.userToken("olga", tenant)
+	for _, bad := range []string{`{"email":"a@it.example, b@it.example"}`, `{"email":"Eve <e@it.example>"}`, `{"email":"team: a@it.example;"}`} {
+		if code, raw := r.send(http.MethodPost, "/api/v1/team/invites", olga, bad); code != http.StatusBadRequest {
+			t.Fatalf("invite %s: %d %s", bad, code, raw)
+		}
+	}
+	if n := r.adminCount("m1_team_invites"); n != 0 || len(mailer.sent) != 0 {
+		t.Fatalf("a refused address minted %d invites and sent %d mails", n, len(mailer.sent))
+	}
+	for i := 0; i < 4; i++ {
+		code, raw := r.send(http.MethodPost, "/api/v1/team/invites", olga, `{"email":"Pat@IT.example"}`)
+		inv := r.decode("team_invite.json", raw)
+		if code != http.StatusOK || inv["invited_email"] != "pat@it.example" || mailer.sent[len(mailer.sent)-1].To != "pat@it.example" {
+			t.Fatalf("invite %d: %d %s", i, code, raw)
+		}
+		var id uuid.UUID
+		if err := r.admin.QueryRow(ctx, `SELECT id FROM m1_team_invites WHERE tenant_id = $1 AND expires_at > now()`, tenant).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if code, raw := r.send(http.MethodDelete, "/api/v1/team/invites/invite:"+id.String(), olga, ""); code != http.StatusOK {
+			t.Fatalf("cancel %d: %d %s", i, code, raw)
+		}
+	}
+	r.refusedTeam(http.MethodPost, "/api/v1/team/invites", olga, `{}`, http.StatusTooManyRequests, "invite_rate_limited")
+	r.api = r.teamAPI(2, mailer.send)
+	r.refusedTeam(http.MethodPost, "/api/v1/team/invites", olga, `{}`, http.StatusTooManyRequests, "invite_rate_limited")
+	if _, err := r.admin.Exec(ctx, `UPDATE m1_team_invites SET created_at = created_at - interval '25 hours', expires_at = LEAST(expires_at, created_at - interval '25 hours') WHERE tenant_id = $1`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if code, raw := r.send(http.MethodPost, "/api/v1/team/invites", olga, `{}`); code != http.StatusOK {
+		t.Fatalf("a day later the quota is back: %d %s", code, raw)
 	}
 }

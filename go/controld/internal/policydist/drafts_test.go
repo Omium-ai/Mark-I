@@ -62,7 +62,7 @@ func TestDraftPublisherDecodesCompilerFixture(t *testing.T) {
 		t.Fatalf("ladders: %+v", r.Ladders)
 	}
 	k := r.Knee
-	if k.CostBasis != "quota" || k.VDefault != 5 || len(k.Rows) != 2 ||
+	if k.CostBasis != "quota" || k.Basis != "certified" || k.VDefault != 5 || len(k.Rows) != 2 ||
 		k.Rows[0].N != 1 || !near(k.Rows[0].CN, 2.4) || k.Rows[0].PLCB == nil || !near(*k.Rows[0].PLCB, 0.5973204854580024) ||
 		k.Rows[1].N != 2 || !near(k.Rows[1].CN, 5.6) || k.Rows[1].PLCB == nil || !near(*k.Rows[1].PLCB, 0.33630882869327483) {
 		t.Fatalf("knee: %+v", k)

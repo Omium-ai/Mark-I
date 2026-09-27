@@ -53,7 +53,7 @@ func NewPGViewers(db TenantDB) *PGViewers { return &PGViewers{DB: db, memo: map[
 const viewerSQL = `WITH me AS (
   SELECT coalesce($2::text, (SELECT oidc_subject FROM m1_device_enrollments
                               WHERE tenant_id = $1 AND device_id = $3::uuid AND status = 'approved'
-                              ORDER BY started_at DESC LIMIT 1)) AS subject)
+                              ORDER BY row_seq DESC LIMIT 1)) AS subject)
 SELECT coalesce(me.subject, ''),
        EXISTS (SELECT 1 FROM m1_team_members WHERE tenant_id = $1 AND role = 'member'),
        ARRAY(SELECT DISTINCT e.device_id::text FROM m1_device_enrollments e

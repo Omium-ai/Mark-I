@@ -60,6 +60,7 @@ type Config struct {
 	RollupWriteEnabled bool
 	IntelServiceToken  string // INTEL_SERVICE_TOKEN — the ADR-0010 §2.2 service credential seam
 	IntelBaseURL       string // INTEL_BASE_URL — mark1-intel base URL for the memory proxy; unset ⇒ /api/v1/memory/* answer 503
+	EvidenceReadToken  string // EVIDENCE_READ_TOKEN — the adjudicator's own E1 read credential; unset ⇒ GET /internal/v1/evidence/* refuses every caller
 
 	IngestBucket string // S3_INGEST_BUCKET required
 	// S3_ENDPOINT is set only for the dev/compose MinIO stack (13 §11 C4:
@@ -158,6 +159,14 @@ type Config struct {
 	RevocationCacheMaxAge time.Duration
 	DrainTimeout          time.Duration // DRAIN_TIMEOUT default 25s (< pod grace 30s, 05 §1.5)
 	TeamMaxMembers        int           // TEAM_MAX_MEMBERS default 10: owner + active members + live invites (15-teams)
+
+	CustomerIOKey    string // CUSTOMERIO_APP_API_KEY — unset ⇒ invite email not sent (sent:false)
+	CustomerIORegion string // CUSTOMERIO_REGION us|eu, default us
+	EmailFrom        string // EMAIL_FROM default noreply@mail.omium.ai
+	EmailPostal      string // EMAIL_POSTAL_ADDRESS — the sender's postal address in every email footer
+
+	StaffSubjects  []string    // STAFF_SUBJECTS — enrollment subjects ("omium:<user id>", or a tenant IdP subject) treated as Omium staff for the dogfood default; empty by default
+	DogfoodTenants []uuid.UUID // DOGFOOD_TENANTS — Omium's own team tenants; their devices default contribute_outcomes on at enrollment (16 L8), never a customer's
 }
 
 // Load reads the environment. Any missing required key is an error — the
@@ -266,6 +275,10 @@ func Load() (Config, error) {
 	if c.IntelBaseURL != "" && c.IntelServiceToken == "" {
 		return Config{}, fmt.Errorf("config: INTEL_BASE_URL set without INTEL_SERVICE_TOKEN — the memory proxy would present nothing and every edge sync would 502 (boot refusal R1, 05 §1.2)")
 	}
+	c.EvidenceReadToken = os.Getenv("EVIDENCE_READ_TOKEN")
+	if c.EvidenceReadToken != "" && c.EvidenceReadToken == c.IntelServiceToken {
+		return Config{}, fmt.Errorf("config: EVIDENCE_READ_TOKEN equals INTEL_SERVICE_TOKEN — every holder of the shared token could read E1 evidence (boot refusal R1, 05 §1.2)")
+	}
 	switch v := os.Getenv("QUERYCHOKE_ROLLUP_WRITE"); v {
 	case "":
 		c.RollupWriteEnabled = c.IntelServiceToken != ""
@@ -324,6 +337,28 @@ func Load() (Config, error) {
 	}
 	if c.TeamMaxMembers, err = strconv.Atoi(envOr("TEAM_MAX_MEMBERS", "10")); err != nil || c.TeamMaxMembers < 1 {
 		return Config{}, fmt.Errorf("config: TEAM_MAX_MEMBERS=%q is not a positive integer (boot refusal R1)", os.Getenv("TEAM_MAX_MEMBERS"))
+	}
+	c.CustomerIOKey = os.Getenv("CUSTOMERIO_APP_API_KEY")
+	c.CustomerIORegion = envOr("CUSTOMERIO_REGION", "us")
+	if c.CustomerIORegion != "us" && c.CustomerIORegion != "eu" {
+		return Config{}, fmt.Errorf("config: CUSTOMERIO_REGION=%q is not us or eu (boot refusal R1)", c.CustomerIORegion)
+	}
+	c.EmailFrom = envOr("EMAIL_FROM", "noreply@mail.omium.ai")
+	c.EmailPostal = os.Getenv("EMAIL_POSTAL_ADDRESS")
+	for _, s := range strings.Split(os.Getenv("DOGFOOD_TENANTS"), ",") {
+		if s = strings.TrimSpace(s); s == "" {
+			continue
+		}
+		id, err := uuid.Parse(s)
+		if err != nil || id == uuid.Nil || !strings.EqualFold(id.String(), s) {
+			return Config{}, fmt.Errorf("config: DOGFOOD_TENANTS entry %q is not a canonical tenant uuid (boot refusal R1)", s)
+		}
+		c.DogfoodTenants = append(c.DogfoodTenants, id)
+	}
+	for _, s := range strings.Split(os.Getenv("STAFF_SUBJECTS"), ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			c.StaffSubjects = append(c.StaffSubjects, s)
+		}
 	}
 	return c, nil
 }

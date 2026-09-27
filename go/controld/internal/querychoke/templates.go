@@ -168,7 +168,7 @@ ORDER BY day, task_seg_version`,
 		// m1_ch_002's mv_tvo_task does it: `... AS verdict` over
 		// `e.verdict != ''` resolves the unqualified alias recursively and
 		// ClickHouse rejects the aggregate-in-WHERE cycle.
-		// v4 counts a consecutive-block cap that ended a loop (reason block_cap, told to the human like a knee stop) as an arrest: in bootstrap the knee never fires, so the cap is the arrest a tester actually gets.
+		// v4 counts a consecutive-block cap that ended a loop (reason block_cap, told to the human like a knee stop) as an arrest: the cap is the arrest a loop gets when the knee is not evaluable or its repair rounds keep restarting (ADR-0012).
 		name:    "interventions",
 		version: "interventions.v4",
 		body: `SELECT e.task_id AS task_id,
@@ -231,24 +231,58 @@ FROM (SELECT event_id, task_id
 		timeout:  timeoutReport,
 	},
 	{
-		// GET /reports/tvo tokens_saved: the verify plane's decisions on a task, by reason (knee_arrest, stop_gate_block), with the edge's savings estimate summed — an estimate, labelled so on every surface that shows it.
+		// GET /reports/tvo tokens_saved (savings.v3, doc 16 ruling 4, ADR-0013): one row per task with a verify-plane decision in [from, to] — the block and arrest estimates, the usage spent after the task's first block, and the terminal verdict's word/stage/posterior the handler resolves with the rollup's rule. Membership is the decision; resolution is not windowed: the verdict and the post-block usage are read through today, so a verdict dated after `to` (a slow anchor's REVISED, the adjudicator's verdict dated at its window close, a nightly judge or RM) still moves the figure. The *_at_close columns are the same reads over the rows controld had RECEIVED by the decision day's rollup close (day end + 2 h, live.go rollupGrace; received_at, m1_ch_003), so an edge offline over midnight restates the day visibly instead of moving it silently. decision_basis is the first decision's cost_basis (GuardDecision field 10), '' from an edge that predates it. The net against plain Claude Code is folded in Go; arrests stay a separate "forced retries avoided" figure. Estimates, labelled so on every surface that shows them.
 		name:    "savings",
-		version: "savings.v1",
-		body: `SELECT JSONExtractString(e.payload, 'reason_code') AS reason,
-       count() AS decisions,
-       sum(JSONExtractUInt(e.payload, 'tokens_saved_estimate')) AS tokens_saved
-FROM (SELECT event_id, payload
-      FROM m1p_events
-      WHERE {{tenant_pred}}
-        AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
-        AND event_type = 'GuardDecision'
-        AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
-      LIMIT 1 BY event_id) AS e
-GROUP BY reason`,
+		version: "savings.v3",
+		body: `SELECT e.task_id AS task_id,
+       countIf(e.decision AND e.reason = 'stop_gate_block') AS blocks,
+       sumIf(e.saved, e.decision AND e.reason = 'stop_gate_block') AS block_saved,
+       countIf(e.decision AND e.reason = 'stop_gate_block' AND e.received < e.closes_at) AS blocks_at_close,
+       sumIf(e.saved, e.decision AND e.reason = 'stop_gate_block' AND e.received < e.closes_at) AS block_saved_at_close,
+       countIf(e.decision AND e.reason IN ('knee_arrest', 'block_cap')) AS arrests,
+       sumIf(e.saved, e.decision AND e.reason IN ('knee_arrest', 'block_cap')) AS arrest_saved,
+       argMinIf(e.basis, (e.session_epoch, e.seq), e.decision) AS decision_basis,
+       toDate(min(e.first_decision)) AS decision_day,
+       sumIf(e.tokens, e.event_type = 'Usage' AND e.first_block > toDateTime64(0, 3) AND e.occurred_at > e.first_block) AS post_block_tokens,
+       sumIf(e.tokens, e.event_type = 'Usage' AND e.first_block > toDateTime64(0, 3) AND e.occurred_at > e.first_block AND e.received < e.closes_at) AS post_block_tokens_at_close,
+       argMaxIf(e.verdict, (e.session_epoch, e.seq), e.verdict != '')       AS fused_verdict,
+       argMaxIf(e.verdict_stage, (e.session_epoch, e.seq), e.verdict != '') AS verdict_stage,
+       toFloat64(argMaxIf(e.p_satisfied, (e.session_epoch, e.seq), e.verdict != '')) AS p_satisfied,
+       toFloat64(argMaxIf(e.p_violated, (e.session_epoch, e.seq), e.verdict != ''))  AS p_violated,
+       toFloat64(argMaxIf(e.p_refused, (e.session_epoch, e.seq), e.verdict != ''))   AS p_refused,
+       toFloat64(argMaxIf(e.p_error, (e.session_epoch, e.seq), e.verdict != ''))     AS p_error,
+       argMaxIf(e.verdict, (e.session_epoch, e.seq), e.verdict != '' AND e.received < e.closes_at)       AS fused_verdict_at_close,
+       argMaxIf(e.verdict_stage, (e.session_epoch, e.seq), e.verdict != '' AND e.received < e.closes_at) AS verdict_stage_at_close,
+       toFloat64(argMaxIf(e.p_satisfied, (e.session_epoch, e.seq), e.verdict != '' AND e.received < e.closes_at)) AS p_satisfied_at_close,
+       toFloat64(argMaxIf(e.p_violated, (e.session_epoch, e.seq), e.verdict != '' AND e.received < e.closes_at))  AS p_violated_at_close,
+       toFloat64(argMaxIf(e.p_refused, (e.session_epoch, e.seq), e.verdict != '' AND e.received < e.closes_at))   AS p_refused_at_close,
+       toFloat64(argMaxIf(e.p_error, (e.session_epoch, e.seq), e.verdict != '' AND e.received < e.closes_at))     AS p_error_at_close
+FROM (SELECT task_id, occurred_at, received, session_epoch, seq, event_type, decision, reason, saved, basis, tokens, verdict, verdict_stage,
+             p_satisfied, p_violated, p_refused, p_error, first_block, first_decision,
+             toStartOfDay(first_decision) + INTERVAL 26 HOUR AS closes_at
+      FROM (SELECT task_id, occurred_at, received, session_epoch, seq, event_type, decision, reason, saved, basis, tokens, verdict, verdict_stage,
+                   p_satisfied, p_violated, p_refused, p_error,
+                   minIf(occurred_at, decision AND reason = 'stop_gate_block') OVER (PARTITION BY task_id) AS first_block,
+                   minIf(occurred_at, decision) OVER (PARTITION BY task_id) AS first_decision
+            FROM (SELECT event_id, task_id, occurred_at, min(received_at) OVER (PARTITION BY event_id) AS received, session_epoch, seq, event_type, verdict, verdict_stage,
+                         p_satisfied, p_violated, p_refused, p_error,
+                         event_type = 'GuardDecision' AND toDate(occurred_at) <= {to:Date} AS decision,
+                         JSONExtractString(payload, 'reason_code') AS reason,
+                         JSONExtractUInt(payload, 'tokens_saved_estimate') AS saved,
+                         JSONExtractString(payload, 'cost_basis') AS basis,
+                         input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens AS tokens
+                  FROM m1p_events
+                  WHERE {{tenant_pred}}
+                    AND toDate(occurred_at) >= {from:Date}
+                    AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+                    AND event_type IN ('GuardDecision', 'Usage', 'VerdictEvent')
+                  LIMIT 1 BY event_id) AS r) AS d) AS e
+GROUP BY e.task_id
+HAVING blocks + arrests > 0`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},
 		devices:  true,
-		rowLimit: 100,
+		rowLimit: maxRowLimit,
 		timeout:  timeoutReport,
 	},
 	{
@@ -323,6 +357,50 @@ FROM (SELECT task_id, session_epoch, seq, verdict, verdict_stage, cost_usd, even
 WHERE e.in_window OR (e.event_type = 'TaskOpen' AND e.live_rows > 0)
 GROUP BY e.task_id, e.attempt_n
 ORDER BY e.task_id, e.attempt_n`,
+		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
+		readSet:  []string{"m1p_events"},
+		devices:  true,
+		rowLimit: maxRowLimit,
+		timeout:  timeoutReport,
+	},
+	{
+		// A team member's per-day trend (doc 16 L3): tvo_task_window.v4's attempt arithmetic over the whole window, each attempt's rows split by the UTC day they happened on, so live.go folds one day at a time the way the rollup folds its day. tvo_task_window stays as it is (intel reads it).
+		name:    "tvo_task_day",
+		version: "tvo_task_day.v1",
+		body: `SELECT e.day AS day,
+       e.task_id AS task_id,
+       e.attempt_n AS attempt_n,
+       sum(e.input_tokens + e.output_tokens + e.cache_creation_input_tokens + e.cache_read_input_tokens) AS gen_tokens,
+       toUInt64(0) AS verifier_tokens,
+       argMaxIf(e.verdict, (e.session_epoch, e.seq), e.verdict != '')       AS fused_verdict,
+       argMaxIf(e.verdict_stage, (e.session_epoch, e.seq), e.verdict != '') AS verdict_stage,
+       toFloat64(argMaxIf(e.p_satisfied, (e.session_epoch, e.seq), e.verdict != '')) AS p_satisfied,
+       toFloat64(argMaxIf(e.p_violated, (e.session_epoch, e.seq), e.verdict != ''))  AS p_violated,
+       toFloat64(argMaxIf(e.p_refused, (e.session_epoch, e.seq), e.verdict != ''))   AS p_refused,
+       toFloat64(argMaxIf(e.p_error, (e.session_epoch, e.seq), e.verdict != ''))     AS p_error,
+       any(e.task_seg_version) AS task_seg_version
+FROM (SELECT task_id, session_epoch, seq, verdict, verdict_stage, in_window, toDate(occurred_at) AS day,
+             p_satisfied, p_violated, p_refused, p_error,
+             input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+             least(1 + countIf(verdict != '' AND verdict_stage IN ('certified', 'revised'))
+                       OVER (PARTITION BY task_id ORDER BY session_epoch, seq
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                   greatest(1, countIf(verdict != '' AND verdict_stage IN ('certified', 'revised'))
+                       OVER (PARTITION BY task_id))) AS attempt_n,
+             max(JSONExtractString(payload, 'task_seg_version')) OVER (PARTITION BY task_id) AS task_seg_version
+      FROM (SELECT event_id, task_id, session_epoch, seq, verdict, verdict_stage, payload, occurred_at,
+                   toDate(occurred_at) >= {from:Date} AND toDate(occurred_at) < {to:Date} AS in_window,
+                   p_satisfied, p_violated, p_refused, p_error,
+                   input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+            FROM m1p_events
+            WHERE {{tenant_pred}}
+              AND task_id != toUUID('00000000-0000-0000-0000-000000000000')
+              AND ((event_type IN ('Usage', 'VerdictEvent', 'TaskOpen') AND toDate(occurred_at) >= {from:Date} AND toDate(occurred_at) < {to:Date})
+                OR (event_type = 'TaskOpen' AND toDate(occurred_at) >= {from:Date} - INTERVAL 7 DAY AND toDate(occurred_at) < {to:Date} + INTERVAL 1 DAY))
+            LIMIT 1 BY event_id) AS d) AS e
+WHERE e.in_window
+GROUP BY e.day, e.task_id, e.attempt_n
+ORDER BY e.day, e.task_id, e.attempt_n`,
 		params:   map[string]paramSpec{"from": {kind: pDate}, "to": {kind: pDate}},
 		readSet:  []string{"m1p_events"},
 		devices:  true,
@@ -423,8 +501,10 @@ ORDER BY occurred_at, task_id`,
 	},
 	{
 		// adjudicator spectral_estimate over [from, to]: one row per verifier vote; vote is the wire Verdict name lowercased ('' on RmScore, which carries score), stage is the task's latest verdict stage, tamper the AnchorVote envelope flag (06 §2.4: quarantined from estimation by the reader).
+		// v3 (16 §L6): RmScore's calibration_version and locus, JudgeVote's tier_used and trigger (protojson enum names, '' when the edge predates them), the task's stage-final verdict and noise cert (promotion pairs against the certified ledger), and the device (the cloud RM's per-device cloud_rm consent).
+		// v4 (16 §L6): RmScore's execution_hash (protojson base64, '' when absent), which the adjudicator matches against the model's sealed rm-exec/v1 hash.
 		name:    "adjudication_votes",
-		version: "adjudication_votes.v2",
+		version: "adjudication_votes.v4",
 		body: `SELECT e.task_id AS task_id,
        e.event_id AS vote_id,
        e.session_id AS session_id,
@@ -440,10 +520,20 @@ ORDER BY occurred_at, task_id`,
        lower(replaceOne(JSONExtractString(e.payload, 'vote'), 'VERDICT_', '')) IN ('refused', 'error') AS abstained,
        JSONExtractFloat(e.payload, 'score') AS score,
        JSONExtractBool(e.payload, 'integrity', 'tamper') AS tamper,
-       e.task_stage AS stage
-FROM (SELECT event_id, task_id, session_id, session_epoch, seq, event_type, payload,
-             argMaxIf(verdict_stage, (session_epoch, seq), verdict != '') OVER (PARTITION BY task_id) AS task_stage
-      FROM (SELECT event_id, task_id, session_id, session_epoch, seq, event_type, payload, verdict, verdict_stage
+       e.task_stage AS stage,
+       JSONExtractString(e.payload, 'calibration_version') AS calibration_version,
+       JSONExtractString(e.payload, 'locus') AS locus,
+       JSONExtractString(e.payload, 'execution_hash') AS execution_hash,
+       JSONExtractString(e.payload, 'tier_used') AS tier_used,
+       JSONExtractString(e.payload, 'trigger') AS vote_trigger,
+       e.task_verdict AS task_verdict,
+       e.task_noise_cert_id AS task_noise_cert_id,
+       e.device_id AS device_id
+FROM (SELECT event_id, task_id, session_id, device_id, session_epoch, seq, event_type, payload,
+             argMaxIf(verdict_stage, (session_epoch, seq), verdict != '') OVER (PARTITION BY task_id) AS task_stage,
+             argMaxIf(verdict, (session_epoch, seq), verdict_stage IN ('certified', 'revised')) OVER (PARTITION BY task_id) AS task_verdict,
+             argMaxIf(noise_cert_id, (session_epoch, seq), verdict_stage IN ('certified', 'revised')) OVER (PARTITION BY task_id) AS task_noise_cert_id
+      FROM (SELECT event_id, task_id, session_id, device_id, session_epoch, seq, event_type, payload, verdict, verdict_stage, noise_cert_id
             FROM m1p_events
             WHERE {{tenant_pred}}
               AND toDate(occurred_at) BETWEEN {from:Date} AND {to:Date}
