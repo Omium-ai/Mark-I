@@ -1,13 +1,13 @@
 """readjudicate (06 §1.2): the nightly escalation caller. Per tenant, the trailing window's
 ledger votes are fused once at the provisional stage; tasks inside the D18 margin of a Chow
-band edge (06 §6.2 step 1) are escalated: the T2 reward model votes in shadow (06 §12.4 row
-2), the repo's declared test anchor re-runs as a T3 certified run under the t3:e2b@1 consent,
-and adjudicate(..., escalation=True) fuses everything (FR-VERIFY-017). The adjudicated
-VerdictEvents re-enter the ledger through controld's service ingest route (app/ledger.py)
-before the rows land in escalations (adj_002); promotion.step reads the shadow pairs back out."""
+band edge (06 §6.2 step 1) are escalated: the repo's declared test anchor re-runs as a T3
+certified run under the t3:e2b@1 consent, and adjudicate(..., escalation=True) fuses everything
+(FR-VERIFY-017). The adjudicated VerdictEvents re-enter the ledger through controld's service
+ingest route (app/ledger.py) before the rows land in escalations (adj_002). The T2 reward model
+no longer rides escalation (16 §Independence: no ambiguity-triggered running): it scores every
+task at the edge or in app/rm/cloud.py, and its RmScore rows fold here like any vote."""
 
 import contextlib
-import json
 import logging
 from collections import Counter
 from collections.abc import Iterable
@@ -38,19 +38,19 @@ from app.certs.store import current_cert
 from app.choke import run_template
 from app.db import set_local_tenant
 from app.jobs.nightly import SPECTRAL_WINDOW_DAYS, VOTES_TEMPLATE, _spectral_run
-from app.judges.cloud_path import EvidenceReader, pg_consent_reader
+from app.jobs.votes import column_of, groups_of, kind_of, vote_of
+from app.judges.cloud_path import EvidenceReader
 from app.judges.specs import JudgeRefused
-from app.registry.catalog import RegistryEntry, entry_from_row, list_verifiers
-from app.registry.handlers import _KIND_TIER, KIND_CONSISTENCY, NormalizedVote, normalize_votes
+from app.registry.catalog import RegistryEntry, list_verifiers
+from app.registry.handlers import _KIND_TIER, KIND_CONSISTENCY, NormalizedVote
 from app.registry.integrity import IntegrityFlags
-from app.registry.promotion import Measurement, ShadowPair, shadow_ids, split_shadow, youden
-from app.rm.scorer import RewardScorer, RmSettings, shadow_fuse, to_raw_vote
+from app.registry.promotion import canary_ids, shadow_ids, split_shadow
 
 log = logging.getLogger("adjudicator.readjudicate")
 
 MARGIN = 0.10  # D18 (06 §6.2 step 1): escalate iff fused |eta - band edges| < margin
 NO_ATTEMPT = UUID(int=0)  # 07 §2: Event carries task_id only; the ledger has no attempt id
-_FAMILY_KIND = {"JudgeVote": "judge", "RmScore": "rm", "ConsistencyVote": "consistency"}
+RM_NOT_ESCALATION_SCOPED = "rm_not_escalation_scoped"
 _WIRE = {"satisfied": "accept", "violated": "reject", "refused": "abstain", "error": "abstain"}
 _UNWIRE = {"accept": "satisfied", "reject": "violated"}
 
@@ -77,29 +77,20 @@ def is_candidate(eta: float, costs: Costs, margin: float = MARGIN) -> bool:
     return min(abs(eta - lo), abs(eta - hi)) < margin
 
 
-def _kind(row: dict[str, Any], registry: dict[str, RegistryEntry]) -> str | None:
-    entry = registry.get(str(row["verifier_id"]))
-    if entry is not None:
-        return entry.kind
-    if row["family"] == "AnchorVote":
-        # ponytail: unlisted anchor = the wide lint row, never the clamp; kind lives in m1_verifiers
-        return "test" if row["verifier_id"] in TEST_ANCHORS else "lint"
-    return _FAMILY_KIND.get(str(row["family"]))
-
-
 def votes_by_task(
     rows: list[dict[str, Any]], registry: dict[str, RegistryEntry]
 ) -> dict[UUID, list[NormalizedVote]]:
     """`adjudication_votes` rows (task, epoch, seq order) → the latest vote per (task, verifier);
-    '' (RmScore: no calibration_version on the wire) and unresolvable kinds are counted, never
-    voted."""
+    an RmScore folds through its calibration, and one nothing folds (unknown calibration, a
+    non-finite score) or an unresolvable kind is counted, never voted."""
     latest: dict[tuple[UUID, str], NormalizedVote] = {}
+    groups = groups_of(rows, registry)
     for r in rows:
-        vote, kind = _WIRE.get(str(r["vote"])), _kind(r, registry)
+        vote, kind = _WIRE.get(vote_of(r, registry)), kind_of(r, registry)
         if vote is None or kind is None:
             readjudicate_skipped_total[f"vote_unusable:{r['family']}"] += 1
             continue
-        task = UUID(str(r["task_id"]))
+        task, column = UUID(str(r["task_id"])), column_of(r, registry)
         latest[task, str(r["verifier_id"])] = NormalizedVote(
             verifier_id=str(r["verifier_id"]),
             kind=kind,
@@ -109,6 +100,8 @@ def votes_by_task(
             evidence_digest=b"",
             integrity=IntegrityFlags(tamper=bool(r["tamper"]), infra_failed=r["vote"] == "error"),
             tier=_KIND_TIER[kind],
+            column=column,
+            group=groups[column],
         )
     out: dict[UUID, list[NormalizedVote]] = {}
     for (task, _vid), v in latest.items():
@@ -127,21 +120,22 @@ def sessions_by_task(rows: list[dict[str, Any]]) -> dict[UUID, UUID]:
 
 
 def bundle_for(votes: Iterable[NormalizedVote], spectral: dict[str, Any] | None) -> Bundle:
-    """The window's spectral laws (06 §4, [satisfied, violated] rows) over the calibrated
-    defaults; the estimator is binary-latent, so refused/error rows stay at the prior."""
+    """The window's spectral laws (06 §4, [satisfied, violated] rows) per estimation column, each
+    in its catalog group (16 §L7: an E0-fallback vote fuses on `<id>/E0`, never its E1 law); a
+    column with no law yet is listed at its kind's calibrated prior. The estimator is binary-latent,
+    so refused/error rows stay at the prior."""
     laws = spectral["confusion"] if spectral and spectral["passed"] else {}
     verifiers = {}
     for v in votes:
-        law = laws.get(v.verifier_id)
-        if law is None or v.verifier_id in verifiers:
+        if v.law_id in verifiers:
             continue
-        default = CALIBRATED_CONFUSION[v.kind]
-        verifiers[v.verifier_id] = VerifierParams(
-            v.verifier_id,
+        default, law = CALIBRATED_CONFUSION[v.kind], laws.get(v.law_id)
+        verifiers[v.law_id] = VerifierParams(
+            v.law_id,
             v.kind,
-            (tuple(law[0]), tuple(law[1]), default[2], default[3]),
-            KIND_TO_GROUP[v.kind],
-            "spectral",
+            default if law is None else (tuple(law[0]), tuple(law[1]), default[2], default[3]),
+            v.group or KIND_TO_GROUP[v.kind],
+            "prior" if law is None else "spectral",
         )
     return Bundle(verifiers=verifiers, calibrated_defaults=True)
 
@@ -159,18 +153,6 @@ def registry_by_wire_id(entries: Iterable[RegistryEntry]) -> dict[str, RegistryE
 
 def _edge_verdict(v: NormalizedVote) -> str:
     return _UNWIRE.get(v.vote) or ("error" if v.integrity.infra_failed else "refused")
-
-
-def _scorer(
-    http: httpx.AsyncClient, pool: asyncpg.Pool, evidence_for: EvidenceReader | None
-) -> RewardScorer | None:
-    if evidence_for is None:
-        return None
-    try:
-        settings = RmSettings()
-    except ValidationError:
-        return None
-    return RewardScorer(settings, http, pg_consent_reader(pool), evidence_for)
 
 
 def _runner(
@@ -204,12 +186,11 @@ async def escalate(
     bundle: Bundle,
     costs: Costs,
     cert_id: str,
-    scorer: RewardScorer | None,
     runner: CertifiedRunner | None,
     registry: dict[str, RegistryEntry],
 ) -> Escalation:
-    """One escalation: T3 under consent, the RM in shadow, then the escalation-stage fusion.
-    Every failure is a counted reason on the row; nothing is ever imputed."""
+    """One escalation: T3 under consent, then the escalation-stage fusion. Every failure is a
+    counted reason on the row; nothing is ever imputed."""
     t3_votes: list[NormalizedVote] = []
     run, t3_skipped = None, None
     anchor = min(
@@ -239,26 +220,11 @@ async def escalate(
             for r in run.refusals:
                 readjudicate_skipped_total[f"t3_vote_{r.reason}"] += 1
 
-    rm_vote, rm_skipped = None, "rm_no_scorer"
-    if scorer is not None:
-        score = await scorer.score(tenant_id, task_id, NO_ATTEMPT)
-        raw = to_raw_vote(score, task_id, NO_ATTEMPT, b"") if score else None
-        if raw is None:
-            rm_skipped = "rm_refused"
-        else:
-            rm_votes, refusals = await normalize_votes([raw], registry)
-            rm_vote = rm_votes[0] if rm_votes else None
-            rm_skipped = None if rm_votes else f"rm_{refusals[0].reason}"
-    if rm_skipped:
-        readjudicate_skipped_total[rm_skipped] += 1
     if t3_skipped:
         readjudicate_skipped_total[":".join(t3_skipped.split(":")[:2])] += 1
 
     votes = [*fused, *t3_votes]
-    if rm_vote is None:
-        event = adjudicate(votes, bundle, costs, cert_id, escalation=True)
-    else:
-        event, _pair = shadow_fuse(votes, rm_vote, bundle, costs, cert_id, escalation=True)
+    event = adjudicate(votes, bundle, costs, cert_id, escalation=True)
     consistency = sum(1 for v in votes if v.kind == KIND_CONSISTENCY)
     return Escalation(
         task_id=task_id,
@@ -269,9 +235,9 @@ async def escalate(
         agreement_rate=run.consistency.agreement_rate if run else None,
         certified_run_id=run.run_id if run else None,
         t3_skipped=t3_skipped,
-        rm_verifier_id=rm_vote.verifier_id if rm_vote else None,
-        rm_vote=rm_vote.vote if rm_vote else None,
-        rm_skipped=rm_skipped,
+        rm_verifier_id=None,
+        rm_vote=None,
+        rm_skipped=RM_NOT_ESCALATION_SCOPED,
     )
 
 
@@ -326,9 +292,9 @@ async def run(
     evidence_for: EvidenceReader | None = None,
     archive_for: ArchiveReader | None = None,
 ) -> None:
-    """Scheduler target `app.jobs.readjudicate:run`. `evidence_for` (RM evidence) and
-    `archive_for` (the E1 worktree tar) are reader seams: no choke template serves either
-    today, so without them the RM and T3 legs are counted skips, never imputed votes."""
+    """Scheduler target `app.jobs.readjudicate:run`. `archive_for` (the E1 worktree tar) is a
+    reader seam: without it the T3 leg is a counted skip, never an imputed vote.
+    `evidence_for` is unread since the RM left escalation (kept for the callers' signature)."""
     settings = ctx.settings
     if not settings.querychoke_base_url:
         raise RuntimeError("ADJ_QUERYCHOKE_BASE_URL is unset: readjudicate has no ledger read path")
@@ -354,6 +320,7 @@ async def run(
         cert_id = str(cert.id) if cert.status == CERTIFIED else ""
         async with ctx.pool.acquire() as conn:
             shadow = await shadow_ids(conn, ctx.tenant_id)
+            canary = await canary_ids(conn, ctx.tenant_id)
             async with conn.transaction():
                 await set_local_tenant(conn, ctx.tenant_id)
                 spectral = await _spectral_run(conn, ctx.tenant_id, ctx.window_start)
@@ -369,11 +336,10 @@ async def run(
             sessions = sessions_by_task(rows)
             bundle = bundle_for((v for vs in tasks.values() for v in vs), spectral)
             costs = Costs()
-            scorer = _scorer(client, ctx.pool, evidence_for)
             runner = _runner(client, ctx.pool, archive_for, registry)
             escalations: list[Escalation] = []
             for task_id, votes in tasks.items():
-                fused, _ = split_shadow(votes, shadow)
+                fused, _ = split_shadow(votes, shadow, canary)
                 provisional = adjudicate(fused, bundle, costs, cert_id)
                 if task_id in done or not is_candidate(provisional.posterior[0], costs):
                     continue
@@ -386,7 +352,6 @@ async def run(
                         bundle,
                         costs,
                         cert_id,
-                        scorer,
                         runner,
                         registry,
                     )
@@ -427,49 +392,3 @@ async def run(
         dict(readjudicate_skipped_total),
     )
     return None
-
-
-async def measured_pairs(conn: asyncpg.Connection, tenant_id: str) -> dict[UUID, Measurement]:
-    """escalations rows → 06 §12.4 row-2 pairs per promotion head; the bar is the incumbent's
-    prior Youden, or 0 (abstain-always, m1_069) when the head augments the ensemble."""
-    async with conn.transaction():
-        await set_local_tenant(conn, tenant_id)
-        heads = await conn.fetch(
-            "SELECT p.id, v.verifier_key || '@' || v.version AS vid, i.id AS inc_id, "
-            "i.verifier_key AS inc_key, i.version AS inc_version, i.kind AS inc_kind, "
-            "i.definition::text AS inc_definition, i.effective_execution_hash AS inc_hash, "
-            "i.retired_at AS inc_retired "
-            "FROM m1_verifier_promotions p JOIN m1_verifiers v ON v.id = p.verifier_id "
-            "LEFT JOIN m1_verifiers i ON i.id = p.incumbent_verifier_id WHERE p.tenant_id = $1",
-            UUID(tenant_id),
-        )
-        rows = await conn.fetch(
-            "SELECT rm_verifier_id, rm_vote, verdict::text AS verdict, noise_cert_id "
-            "FROM escalations WHERE tenant_id = $1 AND rm_vote IS NOT NULL",
-            UUID(tenant_id),
-        )
-    pairs: dict[str, list[ShadowPair]] = {}
-    for r in rows:
-        pairs.setdefault(r["rm_verifier_id"], []).append(
-            ShadowPair(r["rm_vote"], r["verdict"], str(r["noise_cert_id"] or ""))
-        )
-    out: dict[UUID, Measurement] = {}
-    for h in heads:
-        if h["vid"] not in pairs:
-            continue
-        bar = 0.0
-        if h["inc_id"] is not None:
-            inc = entry_from_row(
-                {
-                    "id": h["inc_id"],
-                    "verifier_key": h["inc_key"],
-                    "version": h["inc_version"],
-                    "kind": h["inc_kind"],
-                    "definition": json.loads(h["inc_definition"]),
-                    "effective_execution_hash": h["inc_hash"],
-                    "retired_at": h["inc_retired"],
-                }
-            )
-            bar = youden(CALIBRATED_CONFUSION[inc.kind])  # type: ignore[index]
-        out[h["id"]] = Measurement(pairs[h["vid"]], bar)
-    return out

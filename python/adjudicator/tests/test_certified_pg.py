@@ -19,10 +19,11 @@ from app.certified.runner import (
     pg_run_recorder,
     pg_t3_consent_reader,
 )
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.judges.cloud_path import Consent
 from app.registry.catalog import entry_from_row
 from mark1_receipts import canonical_json
+from tests.roles import service_pool
 from tests.test_certified import ANCHOR, T3_ID, TEMPLATE, FakeE2B, Harness
 from tests.test_pg_stores import _mk_tenant
 
@@ -43,7 +44,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN unset under M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"{DSN!r} unreachable under M1_REQUIRE_STORES=1: {exc!r}", pytrace=False)
@@ -90,23 +91,23 @@ def _row(tenant: UUID, consent: UUID, div: int, **kw) -> RunRow:
     return RunRow(**base)
 
 
-async def test_register_admits_t3_keys_beside_judge_keys_and_nothing_else(pool):
-    tenant = UUID(await _mk_tenant(pool))
+async def test_register_admits_t3_keys_beside_judge_keys_and_nothing_else(admin, pool):
+    tenant = UUID(await _mk_tenant(admin))
     read = pg_t3_consent_reader(pool)
     assert await read(tenant, CONSENT_ID) is None
-    cid = await _consent(pool, tenant)
-    await _consent(pool, tenant, key="judge:grounded-rubric@1", max_tier="E0")
+    cid = await _consent(admin, tenant)
+    await _consent(admin, tenant, key="judge:grounded-rubric@1", max_tier="E0")
     got = await read(tenant, CONSENT_ID)
     assert got == (cid, Consent("e2b", "us", "E1"))
     with pytest.raises(asyncpg.CheckViolationError):
-        await _consent(pool, tenant, key="sandbox:e2b@1")
+        await _consent(admin, tenant, key="sandbox:e2b@1")
     with pytest.raises(asyncpg.CheckViolationError):
-        await _consent(pool, UUID(await _mk_tenant(pool)), max_tier="E2")
+        await _consent(admin, UUID(await _mk_tenant(admin)), max_tier="E2")
 
 
-async def test_run_rows_carry_signed_divergence_and_the_tenant_running_mean(pool):
-    a, b = UUID(await _mk_tenant(pool)), UUID(await _mk_tenant(pool))
-    ca, cb = await _consent(pool, a), await _consent(pool, b)
+async def test_run_rows_carry_signed_divergence_and_the_tenant_running_mean(admin, pool):
+    a, b = UUID(await _mk_tenant(admin)), UUID(await _mk_tenant(admin))
+    ca, cb = await _consent(admin, a), await _consent(admin, b)
     record = pg_run_recorder(pool)
     _, m1 = await record(_row(a, ca, 1))
     _, m2 = await record(_row(a, ca, 1))
@@ -122,7 +123,7 @@ async def test_run_rows_carry_signed_divergence_and_the_tenant_running_mean(pool
         await record(_row(b, uuid4(), 0))
 
 
-async def test_rls_isolation_on_certified_runs(pool):
+async def test_rls_isolation_on_certified_runs(admin, pool):
     async with pool.acquire() as conn:
         bypass = await conn.fetchval(
             "SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname = current_user"
@@ -132,8 +133,8 @@ async def test_rls_isolation_on_certified_runs(pool):
         if REQUIRE_STORES:
             pytest.fail(msg, pytrace=False)
         pytest.skip(msg)
-    a, b = UUID(await _mk_tenant(pool)), UUID(await _mk_tenant(pool))
-    ca = await _consent(pool, a)
+    a, b = UUID(await _mk_tenant(admin)), UUID(await _mk_tenant(admin))
+    ca = await _consent(admin, a)
     run_id, _ = await pg_run_recorder(pool)(_row(a, ca, 1))
     async with pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM m1_certified_runs") == 0  # no GUC
@@ -164,10 +165,10 @@ async def test_rls_isolation_on_certified_runs(pool):
                 )
 
 
-async def test_runner_end_to_end_lands_a_row_the_registry_recognises(pool):
-    tenant = UUID(await _mk_tenant(pool))
-    cid = await _consent(pool, tenant)
-    async with pool.acquire() as conn:
+async def test_runner_end_to_end_lands_a_row_the_registry_recognises(admin, pool):
+    tenant = UUID(await _mk_tenant(admin))
+    cid = await _consent(admin, tenant)
+    async with admin.acquire() as conn:
         rows = await conn.fetch(
             """
             INSERT INTO m1_verifiers (verifier_key, kind, version, display_name, definition,

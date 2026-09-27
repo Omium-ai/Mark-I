@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from graphlib import CycleError, TopologicalSorter
 
-CADENCES = frozenset({"nightly", "hourly"})
+CADENCES = frozenset({"nightly", "hourly", "weekly"})
 
 
 class RegistryError(ValueError):

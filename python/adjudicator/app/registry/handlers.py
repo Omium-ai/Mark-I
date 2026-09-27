@@ -85,6 +85,12 @@ class NormalizedVote:
     evidence_digest: bytes
     integrity: IntegrityFlags
     tier: Literal["T0", "T1", "T2", "T3"]
+    column: str = ""  # 16 §L7 law key, votes.column_of (`<id>/E0`: E0 fallback); "" = verifier_id
+    group: str = ""  # that column's correlation group, votes.groups_of; "" = the kind's
+
+    @property
+    def law_id(self) -> str:
+        return self.column or self.verifier_id
 
 
 @dataclass(frozen=True)

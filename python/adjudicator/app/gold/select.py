@@ -121,7 +121,8 @@ async def add_members(
             ON CONFLICT (gold_set_id, task_digest)
               DO UPDATE SET true_label = EXCLUDED.true_label,
                             label_source = EXCLUDED.label_source,
-                            labeled_at = now()
+                            labeled_at = now(),
+                            row_seq = DEFAULT
             """,
             [(gold_set_id, UUID(tenant_id), d, label, src) for d, label, src in members],
         )
@@ -134,6 +135,7 @@ async def freeze_gold_set(pool: asyncpg.Pool, tenant_id: str, gold_set_id: UUID)
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant_id)
         await conn.execute(
-            "UPDATE gold_sets SET frozen_at = now() WHERE id = $1 AND frozen_at IS NULL",
+            "UPDATE gold_sets SET frozen_at = now(), row_seq = DEFAULT "
+            "WHERE id = $1 AND frozen_at IS NULL",
             gold_set_id,
         )

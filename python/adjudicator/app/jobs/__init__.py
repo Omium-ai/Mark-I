@@ -1,7 +1,8 @@
 """adjudicator-svc's nightly cascade (06 §1.2, §5): gold.refresh and spectral.estimate are
 independent; certs.recompute and readjudicate.run follow spectral.estimate; promotion.step
 measures readjudicate's shadow pairs; judge_batch.run follows readjudicate.run and lands
-last, so a slow Batch API window never holds the cascade."""
+last, so a slow Batch API window never holds the cascade; rm_cloud.run scores the consented
+tenants' tasks on Baseten beside it (16 §L6)."""
 
 from app.jobs.registry import Job
 
@@ -22,4 +23,5 @@ JOBS: tuple[Job, ...] = (
         ("certs.recompute", "readjudicate.run"),
     ),
     Job("judge_batch.run", "app.jobs.judge_batch:run", "nightly", ("readjudicate.run",)),
+    Job("rm_cloud.run", "app.rm.cloud:run", "nightly", ("readjudicate.run",)),
 )

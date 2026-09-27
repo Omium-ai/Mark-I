@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import math
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -18,15 +19,16 @@ import httpx
 import numpy as np
 from mark1_receipts import append_server_record
 
-from app.certs.compute import compute_certificate
+from app.certs.compute import compute_certificate, structural_violation
 from app.certs.state_machine import CERTIFIED, GOLD_BOOTSTRAP_MIN, CertEvidence, next_status
 from app.certs.store import current_cert, insert_cert
 from app.choke import run_template
 from app.db import set_local_tenant
 from app.gold.rotate import MAX_AGE_DAYS, GoldLabel, fresh_fraction, scoring_window
 from app.gold.score import score_agreement
-from app.registry.catalog import list_verifiers
-from app.spectral.estimate import Estimate, estimate
+from app.jobs.votes import column_of, estimable, groups_of, kind_of, vote_of
+from app.registry.catalog import SOUND_REJECTORS, RegistryEntry, list_verifiers
+from app.spectral.estimate import Estimate, estimate, predicted_noise
 from app.spectral.moments import ABSTAIN, ACCEPT, REJECT
 
 log = logging.getLogger("adjudicator.jobs")
@@ -36,14 +38,7 @@ VOTES_TEMPLATE = "adjudication_votes"
 GOLD_TEMPLATE = "gold_vs_verdict"
 # ponytail: trailing window = the D16 30-day freshness horizon; a per-tenant knob later.
 SPECTRAL_WINDOW_DAYS = 30
-# 06 §4.1 step 1: correlation groups are known by construction from the vote family.
-_GROUP = {
-    "AnchorVote": "syntactic",
-    "JudgeVote": "judges",
-    "RmScore": "rms",
-    "ConsistencyVote": "consistency",
-}
-# handlers.py _WIRE_VOTE as codes; anything else ('' on RmScore: no calibration yet) = did not vote.
+# handlers.py _WIRE_VOTE as codes; anything else ('' = an RmScore nothing folds) = did not vote.
 _CODE = {"satisfied": ACCEPT, "violated": REJECT, "refused": ABSTAIN, "error": ABSTAIN}
 
 
@@ -52,7 +47,7 @@ async def _latest_set(
 ) -> asyncpg.Record | None:
     return await conn.fetchrow(
         "SELECT id, agent, frozen_at FROM gold_sets WHERE tenant_id = $1 "
-        "AND (frozen_at IS NOT NULL) = $2 ORDER BY created_at DESC LIMIT 1",
+        "AND (frozen_at IS NOT NULL) = $2 ORDER BY row_seq DESC LIMIT 1",
         UUID(tenant_id),
         frozen,
     )
@@ -78,7 +73,7 @@ async def gold_refresh(ctx: Any) -> None:
         await set_local_tenant(conn, ctx.tenant_id)
         open_sets = await conn.fetch(
             "SELECT id, agent FROM gold_sets WHERE tenant_id = $1 AND frozen_at IS NULL "
-            "ORDER BY created_at",
+            "ORDER BY row_seq",
             UUID(ctx.tenant_id),
         )
         for open_set in open_sets:
@@ -93,7 +88,7 @@ async def gold_refresh(ctx: Any) -> None:
                 continue
             frozen = await conn.fetchrow(
                 "SELECT id FROM gold_sets WHERE tenant_id = $1 AND agent = $2 "
-                "AND frozen_at IS NOT NULL ORDER BY frozen_at DESC LIMIT 1",
+                "AND frozen_at IS NOT NULL ORDER BY row_seq DESC LIMIT 1",
                 UUID(ctx.tenant_id),
                 open_set["agent"],
             )
@@ -129,6 +124,23 @@ async def gold_refresh(ctx: Any) -> None:
     return None
 
 
+def tenant_root(ctx: Any) -> bytes | None:
+    """HKDF-SHA256(pepper, info=mark1-tenant-root-v1:<tenant>) as controld enroll.TenantRoot."""
+    pepper = getattr(ctx.settings, "tenant_hmac_pepper", None)
+    if not pepper:
+        return None
+    prk = hmac.new(b"\x00" * 32, bytes.fromhex(pepper), hashlib.sha256).digest()
+    info = f"mark1-tenant-root-v1:{UUID(ctx.tenant_id)}".encode()
+    return hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
+
+
+def task_digest(root: bytes, session_id: Any, task_id: Any) -> bytes:
+    """m1_021's task_digest = HMAC-SHA256(tenant root, session_id ‖ task_id)."""
+    return hmac.new(
+        root, UUID(str(session_id)).bytes + UUID(str(task_id)).bytes, hashlib.sha256
+    ).digest()
+
+
 async def _ledger_pairs(
     ctx: Any, members: list[GoldLabel], *, http: httpx.AsyncClient | None = None
 ) -> list[tuple[str, str]]:
@@ -137,14 +149,11 @@ async def _ledger_pairs(
     root, session_id ‖ task_id) (intel corpus/export.py task_digest, the one definition), the
     root HKDF-SHA256(pepper, info=mark1-tenant-root-v1:<tenant>) as controld enroll.TenantRoot.
     No pepper ⇒ [] = unmeasured, which no status transition can read as agreement."""
-    pepper = getattr(ctx.settings, "tenant_hmac_pepper", None)
-    if not members or not pepper:
+    root = tenant_root(ctx)
+    if not members or root is None:
         if members:
             log.warning("certs.recompute %s: no tenant_hmac_pepper, unmeasured", ctx.tenant_id)
         return []
-    prk = hmac.new(b"\x00" * 32, bytes.fromhex(pepper), hashlib.sha256).digest()
-    info = f"mark1-tenant-root-v1:{UUID(ctx.tenant_id)}".encode()
-    root = hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
     settings = ctx.settings
     # ponytail: tasks complete before they are labeled; 2×D17 covers a label at the window edge.
     window = {
@@ -164,39 +173,52 @@ async def _ledger_pairs(
             tenant_id=ctx.tenant_id,
         )
     verdict = {
-        hmac.new(
-            root, UUID(str(r["session_id"])).bytes + UUID(str(r["task_id"])).bytes, hashlib.sha256
-        ).digest(): str(r["fused_verdict"])
+        task_digest(root, r["session_id"], r["task_id"]): str(r["fused_verdict"])
         for r in rows
         if r["verdict_stage"] in ("certified", "revised")
     }
     return [(m.true_label, verdict[m.task_digest]) for m in members if m.task_digest in verdict]
 
 
-def vote_matrix(rows: list[dict[str, Any]]) -> tuple[np.ndarray, list[str], list[bool], list[str]]:
-    """`adjudication_votes` rows → (votes (N, V) codes with -1 missing, groups, anchors, verifiers).
-    Tampered anchor votes are quarantined from estimation (06 §2.4)."""
-    rows = [r for r in rows if not r["tamper"]]
-    verifiers = sorted({str(r["verifier_id"]) for r in rows})
+def vote_matrix(
+    rows: list[dict[str, Any]], registry: Mapping[str, RegistryEntry] | None = None
+) -> tuple[np.ndarray, list[str], list[bool], list[str]]:
+    """`adjudication_votes` rows → (votes (N, V) codes with -1 missing, groups, sound-rejector
+    mask, verifiers). Tampered anchor votes are quarantined from estimation (06 §2.4), and so
+    are ambiguity-triggered judge votes (they feed fusion only); an RmScore folds through its
+    calibration; groups come from the catalog row (16 §Independence rules), an E1 judge's
+    E0-fallback votes are their own column, and G4 orients on compile/test alone. Every member
+    votes here, shadow included."""
+    registry = registry or {}
+    rows = [
+        r for r in rows if not r["tamper"] and estimable(r) and kind_of(r, registry) is not None
+    ]
+    verifiers = sorted({column_of(r, registry) for r in rows})
     tasks = sorted({str(r["task_id"]) for r in rows})
     ti = {t: i for i, t in enumerate(tasks)}
     vi = {v: i for i, v in enumerate(verifiers)}
     votes = np.full((len(tasks), len(verifiers)), -1)
-    family: dict[str, str] = {}
-    anchor: dict[str, bool] = {}
+    kind: dict[str, str | None] = {}
     for r in rows:
-        v = str(r["verifier_id"])
-        votes[ti[str(r["task_id"])], vi[v]] = _CODE.get(r["vote"], -1)
-        family[v] = str(r["family"])
-        anchor[v] = bool(r["is_anchor"])
-    groups = [_GROUP.get(family[v], family[v]) for v in verifiers]
-    return votes, groups, [anchor[v] for v in verifiers], verifiers
+        v = column_of(r, registry)
+        votes[ti[str(r["task_id"])], vi[v]] = _CODE.get(vote_of(r, registry), -1)
+        kind[v] = kind_of(r, registry)
+    group = groups_of(rows, registry)
+    return (
+        votes,
+        [group[v] for v in verifiers],
+        [kind[v] in SOUND_REJECTORS for v in verifiers],
+        verifiers,
+    )
 
 
-def run_spectral(rows: list[dict[str, Any]]) -> tuple[Estimate | None, dict[str, Any]]:
+def run_spectral(
+    rows: list[dict[str, Any]], registry: Mapping[str, RegistryEntry] | None = None
+) -> tuple[Estimate | None, dict[str, Any]]:
     """The pure half of spectral.estimate: (Estimate, or None when no vote reached us; the row
-    to persist)."""
-    votes, groups, anchors, verifiers = vote_matrix(rows)
+    to persist). A passed run carries Thm 6.1's predicted noise of its own labels ("selfcert")
+    for certs.recompute's structural check against gold."""
+    votes, groups, anchors, verifiers = vote_matrix(rows, registry)
     if not verifiers:
         return None, {
             "n_tasks": 0,
@@ -208,10 +230,14 @@ def run_spectral(rows: list[dict[str, Any]]) -> tuple[Estimate | None, dict[str,
     est = estimate(votes, groups, anchors)
     diag = est.diagnostics
     passed = diag.passed
+    diagnostics = _jsonable(asdict(diag))
+    diagnostics["groups"] = dict(zip(verifiers, groups, strict=True))
+    if passed:
+        diagnostics["selfcert"] = _jsonable(predicted_noise(est.posterior))
     return est, {
         "n_tasks": diag.n_tasks,
         "passed": passed,
-        "diagnostics": _jsonable(asdict(diag)),
+        "diagnostics": diagnostics,
         "confusion": {v: est.confusion[i].tolist() for i, v in enumerate(verifiers)}
         if passed
         else {},
@@ -253,7 +279,9 @@ async def spectral_estimate(ctx: Any, *, http: httpx.AsyncClient | None = None) 
             bearer=settings.querychoke_token.get_secret_value(),
             tenant_id=ctx.tenant_id,
         )
-    est, run = run_spectral(rows)
+    from app.jobs.readjudicate import registry_by_wire_id
+
+    est, run = run_spectral(rows, registry_by_wire_id(await list_verifiers(ctx.pool)))
     async with ctx.pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, ctx.tenant_id)
         await conn.execute(
@@ -312,12 +340,16 @@ async def certs_recompute(ctx: Any, *, http: httpx.AsyncClient | None = None) ->
         members = await _members(conn, frozen["id"]) if frozen else []
         run = await _spectral_run(conn, ctx.tenant_id, ctx.window_start)
     window = scoring_window(members, now)
-    comp = compute_certificate(score_agreement(await _ledger_pairs(ctx, window)))
+    score = score_agreement(await _ledger_pairs(ctx, window))
+    comp = compute_certificate(score)
+    structural = structural_violation(run["diagnostics"].get("selfcert") if run else None, score)
+    if structural:
+        log.warning("certs.recompute %s: predicted noise outside gold CI", ctx.tenant_id)
     evidence = CertEvidence(
         gold_n=len(window),
         fresh_frac=fresh_fraction(members, now),
         estimator_ran=run is not None,
-        identifiability_passed=bool(run and run["passed"]),
+        identifiability_passed=bool(run and run["passed"]) and not structural,
         natarajan_ok=comp.natarajan_ok,
     )
     current = (await current_cert(ctx.pool, ctx.tenant_id)).status
@@ -347,7 +379,9 @@ async def certs_recompute(ctx: Any, *, http: httpx.AsyncClient | None = None) ->
                 identifiable=evidence.identifiability_passed,
                 diagnostics={
                     **run["diagnostics"],
-                    "confusion": run["confusion"].get(v.verifier_key),
+                    "structural_violation": structural,
+                    "confusion": run["confusion"].get(f"{v.verifier_key}@{v.version}")
+                    or run["confusion"].get(v.verifier_key),
                 }
                 if run
                 else None,
@@ -363,13 +397,120 @@ async def certs_recompute(ctx: Any, *, http: httpx.AsyncClient | None = None) ->
     return None
 
 
+async def _gold_labels(conn: asyncpg.Connection, tenant_id: str) -> dict[bytes, str]:
+    """task_digest → the latest human or T3 label (never batch-readjudication: that one is the
+    ensemble grading itself)."""
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (task_digest) task_digest, true_label::text AS true_label "
+            "FROM gold_set_members WHERE tenant_id = $1 AND label_source IN ('t3', 'human') "
+            "ORDER BY task_digest, row_seq DESC",
+            UUID(tenant_id),
+        )
+    return {bytes(r["task_digest"]): r["true_label"] for r in rows}
+
+
+async def _heads(conn: asyncpg.Connection, tenant_id: str) -> list[dict[str, Any]]:
+    """Every live head: its wire id, state, and the bar — the incumbent's prior Youden, or 0
+    (abstain-always, m1_069) when it augments the ensemble."""
+    from app.adjudicate.likelihoods import CALIBRATED_CONFUSION
+    from app.registry.promotion import youden
+
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        rows = await conn.fetch(
+            "SELECT p.id, p.state::text AS state, v.verifier_key || '@' || v.version AS vid, "
+            "i.definition::text AS inc_definition, i.kind AS inc_kind "
+            "FROM m1_verifier_promotions p JOIN m1_verifiers v ON v.id = p.verifier_id "
+            "LEFT JOIN m1_verifiers i ON i.id = p.incumbent_verifier_id "
+            "WHERE p.tenant_id = $1 AND p.state <> 'retired'",
+            UUID(tenant_id),
+        )
+    out = []
+    for h in rows:
+        bar = 0.0
+        if h["inc_kind"] is not None:
+            definition = json.loads(h["inc_definition"] or "{}")
+            kind = definition.get("kind") or {"judge": "judge", "reward_model": "rm"}.get(
+                h["inc_kind"], "consistency"
+            )
+            bar = youden(CALIBRATED_CONFUSION[kind])
+        out.append({"id": h["id"], "state": h["state"], "vid": h["vid"], "bar": bar})
+    return out
+
+
+def measurements(
+    rows: list[dict[str, Any]],
+    registry: Mapping[str, RegistryEntry],
+    heads: list[dict[str, Any]],
+    gold: Mapping[UUID, str],
+    shadow: set[str],
+    bundle: Any,
+) -> dict[UUID, Any]:
+    """16 §L6 promotion pairs: a head's vote against the gold label where the task has one,
+    else (non-serving heads only — a serving member helped make the verdict) against the task's
+    certified ledger verdict under its noise cert. Never escalations. A canary head also gets
+    the watch over its hashed slice."""
+    from app.adjudicate.algorithm import adjudicate
+    from app.jobs.readjudicate import votes_by_task
+    from app.registry.promotion import (
+        GOLD,
+        SERVING,
+        CanaryWatch,
+        Measurement,
+        ShadowPair,
+        in_canary,
+    )
+
+    tasks = votes_by_task(rows, registry)
+    ledger: dict[UUID, tuple[str, str]] = {}
+    for r in rows:
+        if r.get("task_verdict") in ("satisfied", "violated", "refused", "error"):
+            ledger[UUID(str(r["task_id"]))] = (r["task_verdict"], str(r["task_noise_cert_id"]))
+    out: dict[UUID, Any] = {}
+    for h in heads:
+        member = {t: v for t, vs in tasks.items() for v in vs if v.verifier_id == h["vid"]}
+        if not member:
+            continue
+        pairs = []
+        for task, v in member.items():
+            if task in gold:
+                pairs.append(ShadowPair(v.vote, gold[task], GOLD))
+            elif h["state"] not in SERVING and task in ledger:
+                pairs.append(ShadowPair(v.vote, *ledger[task]))
+        watch = None
+        if h["state"] == "canary":
+            n = flips = 0
+            gw, go = [0, 0], [0, 0]
+            for task, vote in member.items():
+                if not in_canary(task):
+                    continue
+                base = [v for v in tasks[task] if v.verifier_id not in shadow]
+                with_, without = adjudicate([*base, vote], bundle), adjudicate(base, bundle)
+                n += 1
+                flips += with_.verdict != without.verdict
+                if gold.get(task) in ("satisfied", "violated"):
+                    gw[0] += with_.verdict == gold[task]
+                    go[0] += without.verdict == gold[task]
+                    gw[1] += 1
+                    go[1] += 1
+            watch = CanaryWatch(n, flips, (gw[0], gw[1]), (go[0], go[1]))
+        out[h["id"]] = Measurement(pairs, h["bar"], votes=len(member), canary=watch)
+    return out
+
+
 async def promotion_step(ctx: Any, *, http: httpx.AsyncClient | None = None) -> str | None:
-    """06 §12.4 gates for every shadow/serving learned member over readjudicate's shadow
-    pairs, each edge receipted through controld; the last receipt id, if any."""
-    from app.jobs.readjudicate import measured_pairs
-    from app.registry.promotion import run_promotion
+    """06 §12.4 for every head, each edge receipted through controld; the register caller runs
+    first so a newly seeded learned member is born in probation the same night."""
+    from app.jobs.readjudicate import bundle_for, registry_by_wire_id, votes_by_task
+    from app.registry.promotion import register_catalog, run_promotion, shadow_ids
 
     settings = ctx.settings
+    window = {
+        "from": (ctx.day - timedelta(days=SPECTRAL_WINDOW_DAYS - 1)).isoformat(),
+        "to": ctx.day.isoformat(),
+    }
     own = (
         contextlib.nullcontext(http) if http else httpx.AsyncClient(timeout=settings.http_timeout_s)
     )
@@ -380,6 +521,41 @@ async def promotion_step(ctx: Any, *, http: httpx.AsyncClient | None = None) -> 
             settings.querychoke_base_url,
             settings.querychoke_token.get_secret_value(),
         )
-        measured = await measured_pairs(conn, ctx.tenant_id)
+        entries = await list_verifiers(ctx.pool)
+        await register_catalog(conn, tenant_id=ctx.tenant_id, entries=entries)
+        rows = await run_template(
+            client,
+            settings.querychoke_base_url,
+            VOTES_TEMPLATE,
+            window,
+            bearer=settings.querychoke_token.get_secret_value(),
+            tenant_id=ctx.tenant_id,
+        )
+        registry = registry_by_wire_id(entries)
+        root = tenant_root(ctx)
+        labels = await _gold_labels(conn, ctx.tenant_id) if root else {}
+        gold = (
+            {
+                UUID(str(r["task_id"])): labels[d]
+                for r in rows
+                if r.get("session_id")
+                and (d := task_digest(root, r["session_id"], r["task_id"])) in labels
+            }
+            if root
+            else {}
+        )
+        async with conn.transaction():
+            await set_local_tenant(conn, ctx.tenant_id)
+            spectral = await _spectral_run(conn, ctx.tenant_id, ctx.window_start)
+        tasks = votes_by_task(rows, registry)
+        bundle = bundle_for((v for vs in tasks.values() for v in vs), spectral)
+        measured = measurements(
+            rows,
+            registry,
+            await _heads(conn, ctx.tenant_id),
+            gold,
+            await shadow_ids(conn, ctx.tenant_id),
+            bundle,
+        )
         report = await run_promotion(conn, append, tenant_id=ctx.tenant_id, measured=measured)
     return str(report.receipt_ids[-1]) if report.receipt_ids else None

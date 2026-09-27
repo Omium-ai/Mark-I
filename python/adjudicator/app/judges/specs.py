@@ -11,7 +11,7 @@ registered set are the same fact stated twice, asserted at import; a judge_id ou
 the set is REFUSED with a typed error, never faked into a vote."""
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 from uuid import UUID, uuid5
 
@@ -51,13 +51,15 @@ class JudgeSpec:
     text, tier requirement or model rung is a NEW version with no inherited confusion)."""
 
     judge_id: str
+    locus: Literal["edge", "cloud"]  # edge = the customer's own key; cloud = Omium's router
     rubric: str  # the static, cacheable prefix — DATA, distributes like a field map
     evidence_tier: Tier
     model: str
-    subprocessor: str  # vendor the cloud path would disclose (06 §6.5 precondition 2)
-    region: str  # vendor-side inference geo the cloud path pins (precondition 3)
+    subprocessor: str  # vendor the consent row must name (06 §6.5 precondition 2)
+    region: str  # vendor-side processing region the consent row must name (precondition 3)
     token_budget: int
     confusion: Confusion  # 06 §2.3: a fresh version starts from the shrunk prior
+    e0_rubric: str | None = None  # an E1 judge's rubric for a task with no E1 evidence; votes E0
 
 
 _GROUNDED_RUBRIC = (
@@ -68,24 +70,53 @@ _GROUNDED_RUBRIC = (
     "to judge honestly, `error` only when the evidence itself is malformed."
 )
 
+# 16 §L7: reads only the task and the change, never anchor output, so it is a view of its own
+_DIFF_RUBRIC = (
+    "You are a code-change judge. You see the task the change was made for, when it was shared, "
+    "and the change itself as secret-scrubbed diff hunks. Judge ONLY whether the change does "
+    "what the task asks, from the text supplied; do not speculate beyond it. Reply with exactly "
+    "one word from: satisfied|violated|refused|error. Use `refused` when the hunks are "
+    "insufficient to judge honestly, `error` only when the input itself is malformed."
+)
+
 JUDGE_SPECS: dict[str, JudgeSpec] = {
     "judge:grounded-rubric@1": JudgeSpec(
         judge_id="judge:grounded-rubric@1",
+        locus="edge",
         rubric=_GROUNDED_RUBRIC,
         evidence_tier="E0",
-        # cheapest rung that accepts inference_geo; 06 §6.5's Haiku rung cannot pin a region
         model="claude-sonnet-5",
         subprocessor="anthropic",
         region="us",
         token_budget=2048,
         confusion=CALIBRATED_CONFUSION["judge"],
     ),
+    # 16 §L1: the cloud judge is GLM on Nebius Token Factory through the platform llm-router
+    "judge:grounded-rubric@2": JudgeSpec(
+        judge_id="judge:grounded-rubric@2",
+        locus="cloud",
+        rubric=_DIFF_RUBRIC,
+        evidence_tier="E1",
+        model="zai-org/GLM-5.2",
+        subprocessor="nebius",
+        region="global",
+        token_budget=2048,
+        confusion=CALIBRATED_CONFUSION["judge"],
+        e0_rubric=_GROUNDED_RUBRIC,
+    ),
 }
-_REGISTERED_JUDGES = frozenset({"judge:grounded-rubric@1"})
+_REGISTERED_JUDGES = frozenset({"judge:grounded-rubric@1", "judge:grounded-rubric@2"})
 
 # The registry and the registered set are the same fact stated twice (probes.py rule).
 assert set(JUDGE_SPECS) == _REGISTERED_JUDGES
 assert all(s.judge_id == k and s.evidence_tier in TIERS for k, s in JUDGE_SPECS.items())
+
+
+def at_tier(spec: JudgeSpec, tier: str) -> JudgeSpec:
+    """The spec as it judged at `tier`: an E1 judge falling back to E0 votes E0 on its E0 rubric."""
+    if tier == spec.evidence_tier or spec.e0_rubric is None or tier != "E0":
+        return spec
+    return replace(spec, evidence_tier="E0", rubric=spec.e0_rubric, e0_rubric=None)
 
 
 def spec_for(judge_id: str, profile: str) -> JudgeSpec:
@@ -144,6 +175,8 @@ class ClientSideJudge:
         self, tenant_id: UUID, judge_id: str, task_id: UUID, attempt_id: UUID, session_id: UUID
     ) -> JudgeRequest:
         spec = spec_for(judge_id, self._profile)
+        if spec.locus != "edge":
+            raise refuse("refused_cloud_judge_at_edge", spec.judge_id)
         if not self._base_url or not self._token:
             raise refuse("refused_no_controld", "controld base URL or service token unset")
         req = JudgeRequest(

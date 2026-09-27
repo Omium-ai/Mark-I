@@ -67,7 +67,7 @@ async def current_cert(pool: asyncpg.Pool, tenant_id: str) -> CertRow:
             FROM noise_certificates
             WHERE tenant_id = $1
             ORDER BY (status = 'certified' AND expires_at > now()) DESC,
-                     issued_at DESC NULLS LAST
+                     row_seq DESC
             LIMIT 1
             """,
             UUID(tenant_id),

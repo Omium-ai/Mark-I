@@ -1,27 +1,29 @@
-"""judge_batch (06 §1.2, §6): the nightly judge dispatch. Per tenant, a task in the trailing
-window that is ambiguous under D18 (§6.2 step 1) and carries no vote from a registered E0/E1
-judge gets one. The default locus is the edge (C4): one JudgeRequest per task rides controld's
-fan-out route and the customer's own key votes. Under a live m1_065 consent row that admits the
-judge (§6.5 preconditions 1-4) the cloud path runs instead: one Anthropic Batch per (tenant,
-judge), region-pinned, the votes re-entering the ledger through the service ingest route
-(app/ledger.py) with the token counts booked on judge_dispatches (adj_003, §6.4). Idempotent
-per task: a vote in the ledger makes the task a non-candidate; a spent cloud row is re-posted,
-never re-called (§7.3.5)."""
+"""judge_batch (06 §1.2, §6; 16 §L1): the nightly judge dispatch. Per tenant, a task in the
+trailing window that carries no vote from a registered E0/E1 judge gets one. An edge judge (C4)
+takes the tasks ambiguous under D18 (§6.2 step 1), one JudgeRequest each over controld's fan-out
+route, and the customer's own key votes. A cloud judge runs on every task (trigger ALWAYS, 16
+§Independence) only under a live m1_065 consent row that admits it (§6.5 preconditions 1-4),
+and only on a task whose device's latest m1_082 row keeps cloud_judge on (E1 hunks also need
+e1 on; a task no device consent covers never leaves): one router call per task (app/llm.py,
+pinned model, capped per tenant-day), the votes re-entering the ledger through the service
+ingest route (app/ledger.py) with the token counts booked on judge_dispatches (adj_003,
+§6.4). Idempotent per task: a vote in the ledger makes the task a non-candidate; a spent
+cloud row is re-posted, never re-called (§7.3.5)."""
 
+import asyncio
 import contextlib
 import json
 import logging
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Any
 from uuid import UUID
 
-import anthropic
 import asyncpg
 import httpx
-from anthropic import AsyncAnthropic
 from m1p.v1 import Event, JudgeVote, Verdict
 
 from app import ledger
@@ -42,17 +44,24 @@ from app.jobs.readjudicate import (
     votes_by_task,
 )
 from app.judges.cloud_path import (
-    AnthropicBatchRunner,
-    BatchRunner,
     EvidenceReader,
     admit,
-    batch_request,
+    device_tiers,
     judge_vote,
     pg_consent_reader,
-    usage_of,
+    task_tiers,
     vote_from,
 )
-from app.judges.specs import JUDGE_SPECS, ClientSideJudge, JudgeRefused, JudgeSpec, request_id_for
+from app.judges.evidence import PerTask, e1_reader
+from app.judges.specs import (
+    JUDGE_SPECS,
+    ClientSideJudge,
+    JudgeRefused,
+    JudgeSpec,
+    at_tier,
+    request_id_for,
+)
+from app.llm import Completion, RouterClient, RouterRefused, reserve_today
 from app.registry.catalog import list_verifiers
 from app.registry.handlers import NormalizedVote
 from app.registry.promotion import shadow_ids, split_shadow
@@ -81,6 +90,7 @@ class Dispatch:
     batch_id: str | None = None
     usage: Mapping[str, int] = field(default_factory=dict)
     spent: bool = False
+    tier: str | None = None  # the evidence tier the cloud vote was cast on
 
 
 def lacks_vote_from(votes: Iterable[NormalizedVote], judge_id: str) -> bool:
@@ -127,7 +137,7 @@ async def spent_rows(conn: asyncpg.Connection, tenant_id: str) -> dict[tuple[UUI
         rows = await conn.fetch(
             "SELECT task_id, judge_id, request_id, window_start, vote::text AS vote, model, "
             "batch_id, input_tokens, output_tokens, cache_creation_input_tokens, "
-            "cache_read_input_tokens FROM judge_dispatches "
+            "cache_read_input_tokens, evidence_tier FROM judge_dispatches "
             "WHERE tenant_id = $1 AND vote IS NOT NULL",
             UUID(tenant_id),
         )
@@ -142,39 +152,80 @@ async def client_side(
     sessions: Mapping[UUID, UUID],
     window_start: datetime,
 ) -> list[Dispatch]:
-    """The C4 default. A refused POST propagates: controld being down fails the run, it does
-    not silently skip a night. The request_id is the edge's dedupe key, so the nightly
-    repost of a task still lacking its vote is the recovery the SSE hub has no replay for."""
-    out = []
+    """The C4 default. A controld 5xx on one task is retried once then a counted skip; every
+    task failing (controld down) fails the run, it does not silently skip a night. The
+    request_id is the edge's dedupe key, so the nightly repost of a task still lacking its
+    vote is the recovery the SSE hub has no replay for."""
+    out, guard = [], PerTask(judge_batch_skipped_total, "controld_unavailable")
     for task_id in candidates:
         session = sessions.get(task_id)
         if session is None:
             judge_batch_skipped_total["no_session_id"] += 1
             continue
-        req = await judge.run(tenant, spec.judge_id, task_id, NO_ATTEMPT, session)
-        out.append(
-            Dispatch(task_id, spec.judge_id, UUID(req.request_id), "client_side", window_start)
+        req, ok = await guard(
+            partial(judge.run, tenant, spec.judge_id, task_id, NO_ATTEMPT, session)
         )
+        if ok:
+            out.append(
+                Dispatch(task_id, spec.judge_id, UUID(req.request_id), "client_side", window_start)
+            )
+    guard.check()
     return out
 
 
 def _from_row(spec: JudgeSpec, row: Mapping[str, Any]) -> Dispatch:
+    tier = row.get("evidence_tier") or spec.evidence_tier
     return Dispatch(
         UUID(str(row["task_id"])),
         spec.judge_id,
         UUID(str(row["request_id"])),
         "cloud",
         row["window_start"],
-        vote=judge_vote(spec, Verdict[str(row["vote"]).upper()]),
+        vote=judge_vote(at_tier(spec, tier), Verdict[str(row["vote"]).upper()]),
         model=row["model"],
         batch_id=row["batch_id"],
         usage={c: int(row[c]) for c in USAGE_COLUMNS},
         spent=True,
+        tier=tier,
     )
 
 
+async def evidence_of(
+    spec: JudgeSpec,
+    task_id: UUID,
+    task_rows: Mapping[UUID, list[Mapping[str, Any]]],
+    evidence_for: EvidenceReader | None,
+) -> tuple[JudgeSpec, str] | None:
+    """The spec as it judges this task and what it reads: E1 hunks when receipted ones exist,
+    else the E0 anchor facts on the E0 rubric (tier_used=E0), else nothing to judge."""
+    if spec.evidence_tier == "E1" and evidence_for is not None:
+        try:
+            return spec, await evidence_for(task_id, NO_ATTEMPT, "E1")
+        except JudgeRefused as exc:
+            judge_batch_skipped_total[f"e1_{exc.reason.split(':', 1)[0]}"] += 1
+    e0 = at_tier(spec, "E0")
+    if e0.evidence_tier != "E0":
+        judge_batch_skipped_total["cloud_no_evidence_reader"] += 1
+        return None
+    facts = e0_evidence(task_rows.get(task_id, ()))
+    if facts == "[]":
+        judge_batch_skipped_total["cloud_no_evidence"] += 1  # no anchor ran: nothing to read
+        return None
+    return e0, facts
+
+
+def usage_of(reply: Completion) -> dict[str, int]:
+    """The four counters 06 §6.4 books as verifier spend v; the router has no cache-write count."""
+    return {
+        "input_tokens": reply.input_tokens,
+        "output_tokens": reply.output_tokens,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": reply.cached_tokens,
+    }
+
+
 async def cloud(
-    batch: BatchRunner,
+    router: RouterClient,
     spec: JudgeSpec,
     candidates: Iterable[UUID],
     sessions: Mapping[UUID, UUID],
@@ -182,10 +233,15 @@ async def cloud(
     evidence_for: EvidenceReader | None,
     spent: Mapping[tuple[UUID, str], dict],
     window_start: datetime,
+    cap: int,
+    reserve: Callable[[int], Awaitable[int]],
+    tiers: Mapping[UUID, str],
 ) -> list[Dispatch]:
-    """06 §6.5 under an admitted consent: one Batch for every candidate not already spent;
-    a missing, errored or off-region result is a counted skip the next night retries."""
-    out, pending = [], []
+    """06 §6.5 under an admitted consent: one router call per candidate not already spent and
+    admitted by its devices' consent (`tiers`, task_tiers: E0 facts only, or E1 hunks too), at
+    most `cap` per run and what `reserve` grants of the tenant's UTC-day ledger (m1_101); a
+    refused, blocked or off-model reply is a counted skip the next night retries."""
+    out, pending, guard = [], [], PerTask(judge_batch_skipped_total, "cloud_controld_unavailable")
     for task_id in candidates:
         if task_id not in sessions:
             judge_batch_skipped_total["no_session_id"] += 1
@@ -194,30 +250,32 @@ async def cloud(
         if row is not None:
             out.append(_from_row(spec, row))
             continue
-        if spec.evidence_tier == "E0":
-            evidence = e0_evidence(task_rows.get(task_id, ()))
-        elif evidence_for is None:
-            judge_batch_skipped_total["cloud_no_evidence_reader"] += 1
+        tier = tiers.get(task_id)
+        if tier is None:
+            judge_batch_skipped_total["cloud_device_not_consented"] += 1
             continue
-        else:
-            evidence = await evidence_for(task_id, NO_ATTEMPT, spec.evidence_tier)
-        request_id = request_id_for(spec.judge_id, task_id, NO_ATTEMPT)
-        pending.append((task_id, request_id, batch_request(spec, request_id, evidence)))
-    if not pending:
-        return out
-    # ponytail: one batch awaited inline; split into submit/collect halves keyed by batch_id
-    # if a batch ever outlives the runner's 2 h lease.
-    batch_id, messages = await batch.run([r for _, _, r in pending])
-    for task_id, request_id, _ in pending:
-        msg = messages.get(request_id)
-        if msg is None:
-            judge_batch_skipped_total["cloud_result_missing"] += 1
+        if len(pending) == cap:
+            judge_batch_skipped_total["cloud_run_cap"] += 1
             continue
-        try:
-            vote = vote_from(spec, msg)
-        except JudgeRefused as exc:
-            judge_batch_skipped_total[exc.reason.split(":", 1)[0]] += 1
+        judged, _ = await guard(
+            partial(evidence_of, spec, task_id, task_rows, evidence_for if tier == "E1" else None)
+        )
+        if judged is not None:
+            pending.append((task_id, request_id_for(spec.judge_id, task_id, NO_ATTEMPT), *judged))
+    guard.check()
+    granted = await reserve(len(pending))
+    judge_batch_skipped_total["cloud_daily_cap"] += len(pending) - granted
+    pending = pending[:granted]
+    replies = await asyncio.gather(
+        *(router.complete(s.model, s.rubric, e, s.token_budget) for _, _, s, e in pending),
+        return_exceptions=True,
+    )
+    for (task_id, request_id, task_spec, _), reply in zip(pending, replies, strict=True):
+        if isinstance(reply, RouterRefused):
+            judge_batch_skipped_total[reply.reason.split(":", 1)[0]] += 1
             continue
+        if isinstance(reply, BaseException):
+            raise reply
         out.append(
             Dispatch(
                 task_id,
@@ -225,10 +283,10 @@ async def cloud(
                 UUID(request_id),
                 "cloud",
                 window_start,
-                vote=vote,
-                model=spec.model,
-                batch_id=batch_id,
-                usage=usage_of(msg),
+                vote=vote_from(task_spec, reply),
+                model=reply.model,
+                usage=usage_of(reply),
+                tier=task_spec.evidence_tier,
             )
         )
     return out
@@ -241,8 +299,8 @@ async def _upsert(conn: asyncpg.Connection, tenant_id: str, dispatches: Iterable
             await conn.execute(
                 "INSERT INTO judge_dispatches (tenant_id, task_id, judge_id, request_id, "
                 "window_start, locus, vote, model, batch_id, input_tokens, output_tokens, "
-                "cache_creation_input_tokens, cache_read_input_tokens) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7::verdict, $8, $9, $10, $11, $12, $13) "
+                "cache_creation_input_tokens, cache_read_input_tokens, evidence_tier) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7::verdict, $8, $9, $10, $11, $12, $13, $14) "
                 "ON CONFLICT (tenant_id, task_id, judge_id) DO UPDATE SET "
                 "request_id = EXCLUDED.request_id, window_start = EXCLUDED.window_start, "
                 "locus = EXCLUDED.locus, vote = EXCLUDED.vote, model = EXCLUDED.model, "
@@ -250,7 +308,7 @@ async def _upsert(conn: asyncpg.Connection, tenant_id: str, dispatches: Iterable
                 "output_tokens = EXCLUDED.output_tokens, "
                 "cache_creation_input_tokens = EXCLUDED.cache_creation_input_tokens, "
                 "cache_read_input_tokens = EXCLUDED.cache_read_input_tokens, "
-                "dispatched_at = now()",
+                "evidence_tier = EXCLUDED.evidence_tier, dispatched_at = now()",
                 UUID(tenant_id),
                 d.task_id,
                 d.judge_id,
@@ -261,6 +319,7 @@ async def _upsert(conn: asyncpg.Connection, tenant_id: str, dispatches: Iterable
                 d.model,
                 d.batch_id,
                 *(d.usage.get(c) for c in USAGE_COLUMNS),
+                d.tier,
             )
 
 
@@ -285,12 +344,12 @@ async def run(
     *,
     http: httpx.AsyncClient | None = None,
     evidence_for: EvidenceReader | None = None,
-    batch: BatchRunner | None = None,
 ) -> None:
-    """Scheduler target `app.jobs.judge_batch:run`. `evidence_for` is the E1 reader seam (no
-    choke template serves sanitized hunks to this job yet; E0 renders from the window's own
-    anchor votes); `batch` defaults to the Anthropic Batch API under ANTHROPIC_API_KEY, built
-    only once a consented cloud dispatch is actually due."""
+    """Scheduler target `app.jobs.judge_batch:run`. `evidence_for` is the E1 reader seam,
+    controld's attach store under ADJ_EVIDENCE_TOKEN by default (app/judges/evidence.py; unset,
+    no E1 read at all): a task with no served E1 part falls back to E0 anchor facts and votes
+    tier_used=E0. The cloud judge calls
+    LLM_ROUTER_URL; unset, a consented tenant's night is a counted skip."""
     settings = ctx.settings
     if not settings.querychoke_base_url:
         raise RuntimeError("ADJ_QUERYCHOKE_BASE_URL is unset: judge_batch has no ledger path")
@@ -304,6 +363,9 @@ async def run(
         contextlib.nullcontext(http) if http else httpx.AsyncClient(timeout=settings.http_timeout_s)
     )
     async with own as client:
+        e1_token = settings.evidence_token.get_secret_value()
+        if evidence_for is None and e1_token:
+            evidence_for = e1_reader(client, settings.querychoke_base_url, e1_token, tenant)
         rows = await run_template(
             client,
             settings.querychoke_base_url,
@@ -329,58 +391,59 @@ async def run(
             bundle = bundle_for((v for vs in tasks.values() for v in vs), spectral)
             costs = Costs()
             consent_for = pg_consent_reader(ctx.pool)
+            tiers = task_tiers(task_rows, await device_tiers(conn, ctx.tenant_id))
             edge = ClientSideJudge(client, settings.querychoke_base_url, bearer)
+            router = (
+                RouterClient(client, settings.llm_router_url) if settings.llm_router_url else None
+            )
             dispatches: list[Dispatch] = []
             for spec in JUDGE_SPECS.values():
                 if spec.evidence_tier == "E2":
                     continue  # 06 §6.5: no E2 branch, at either locus
-                candidates = select(tasks, shadow, bundle, costs, cert_id, spec.judge_id)
-                consent = await consent_for(tenant, spec.judge_id)
-                admitted = False
-                if consent is not None:
-                    try:
-                        admit(spec, consent)
-                        admitted = True
-                    except JudgeRefused as exc:
-                        judge_batch_skipped_total[f"cloud_{exc.reason.split(':', 1)[0]}"] += 1
-                        log.warning(
-                            "judge_batch %s %s: %s; client-side", ctx.tenant_id, spec.judge_id, exc
-                        )
-                if admitted and batch is None and settings.anthropic_api_key is None:
-                    # consented tenants never fall back to client-side: a counted skip
-                    judge_batch_skipped_total["cloud_no_vendor_key"] += 1
-                    log.warning(
-                        "judge_batch %s %s: ANTHROPIC_API_KEY unset", ctx.tenant_id, spec.judge_id
-                    )
-                elif admitted:
-                    if batch is None:
-                        batch = AnthropicBatchRunner(
-                            AsyncAnthropic(api_key=settings.anthropic_api_key.get_secret_value())
-                        )
-                    try:
-                        dispatches += await cloud(
-                            batch,
-                            spec,
-                            candidates,
-                            sessions,
-                            task_rows,
-                            evidence_for,
-                            spent,
-                            ctx.window_start,
-                        )
-                    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
-                        # a refused vendor key is config, not a failed night: counted
-                        judge_batch_skipped_total["cloud_vendor_key_rejected"] += 1
-                        log.warning(
-                            "judge_batch %s %s: vendor refused the key (%s)",
-                            ctx.tenant_id,
-                            spec.judge_id,
-                            exc.status_code,
-                        )
-                else:
+                if spec.locus == "edge":
+                    candidates = select(tasks, shadow, bundle, costs, cert_id, spec.judge_id)
                     dispatches += await client_side(
                         edge, tenant, spec, candidates, sessions, ctx.window_start
                     )
+                    continue
+                # 16 §Independence: the cloud judge runs on every task it can, never on ambiguity
+                candidates = [t for t, vs in tasks.items() if lacks_vote_from(vs, spec.judge_id)]
+                consent = await consent_for(tenant, spec.judge_id)
+                if consent is None:
+                    continue  # no consent: the cloud judge does not run for this tenant
+                if consent.max_tier == "E0":
+                    spec = at_tier(spec, "E0")  # an E0 consent admits the E0 fallback, never E1
+                try:
+                    admit(spec, consent)
+                except JudgeRefused as exc:
+                    judge_batch_skipped_total[f"cloud_{exc.reason.split(':', 1)[0]}"] += 1
+                    log.warning("judge_batch %s %s: %s", ctx.tenant_id, spec.judge_id, exc)
+                    continue
+                if router is None:
+                    judge_batch_skipped_total["cloud_no_router"] += 1
+                    log.warning(
+                        "judge_batch %s %s: LLM_ROUTER_URL unset", ctx.tenant_id, spec.judge_id
+                    )
+                    continue
+                dispatches += await cloud(
+                    router,
+                    spec,
+                    candidates,
+                    sessions,
+                    task_rows,
+                    evidence_for,
+                    spent,
+                    ctx.window_start,
+                    settings.judge_max_tasks_per_run,
+                    partial(
+                        reserve_today,
+                        conn,
+                        ctx.tenant_id,
+                        spec.judge_id,
+                        cap=settings.judge_max_tasks_per_day,
+                    ),
+                    tiers,
+                )
             # Row before POST: a retry re-posts the spent vote under the same event_id.
             await _upsert(conn, ctx.tenant_id, (d for d in dispatches if not d.spent))
             events = wire(tenant, sessions, dispatches)

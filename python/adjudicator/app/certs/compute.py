@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from app.gold.score import GoldScore
 
 _Z95 = 1.959963984540054  # two-sided 95%
+_Z975 = 2.241402727604947  # two-sided 97.5%: 95% family-wise over ρ₊ and ρ₋
 
 
 def wilson_interval(k: int, n: int, z: float = _Z95) -> tuple[float, float]:
@@ -84,3 +85,21 @@ def compute_certificate(score: GoldScore) -> CertComputation:
         abstention_mass=score.abstention_mass,
         gold_n=score.gold_n,
     )
+
+
+def structural_violation(selfcert: dict | None, score: GoldScore) -> bool:
+    """The model's own predicted ρ± (Thm 6.1 from the estimated laws) outside the gold Wilson
+    CI on either side (Bonferroni over the two, so one check at 95%): the clique structure is
+    wrong — a derived view, a hidden correlation — and no identifiability gate can see it.
+    Unmeasured on either side ⇒ not flagged."""
+    if not selfcert or score.n_plus == 0 or score.n_minus == 0:
+        return False
+    for key, k, n in (
+        ("rho_plus", score.k_plus, score.n_plus),
+        ("rho_minus", score.k_minus, score.n_minus),
+    ):
+        lo, hi = wilson_interval(k, n, _Z975)
+        pred = selfcert.get(key)
+        if pred is None or not math.isfinite(pred) or not lo <= pred <= hi:
+            return True
+    return False

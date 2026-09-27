@@ -1,19 +1,22 @@
 """adj_003 against real Postgres: the nightly cascade lands judge_batch.run in job_runs after
-readjudicate.run, a live m1_065 consent row routes the judge to the cloud path and the spent
-rows carry the token counts, a re-run is already_done, a forced re-run re-posts the spent votes
-without a second Batch call, no consent row means client-side rows with no vote, the CHECK
-refuses a half-recorded cloud row, and RLS keeps one tenant's dispatches invisible to another."""
+readjudicate.run, a live m1_065 consent row admits the cloud judge and the spent rows carry the
+token counts, a re-run is already_done, a forced re-run re-posts the spent votes without a second
+router call, m1_092 revoked every live @1 cloud consent, no consent row means edge rows with no
+vote, the CHECK refuses a half-recorded cloud row, and RLS keeps one tenant's dispatches
+invisible to another."""
 
 import functools
 import os
-from datetime import UTC, datetime
+import random
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import asyncpg
 import httpx
 import pytest
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.jobs import JOBS
 from app.jobs.judge_batch import run
 from app.jobs.nightly import certs_recompute, promotion_step, spectral_estimate
@@ -21,19 +24,21 @@ from app.jobs.readjudicate import run as readjudicate_run
 from app.jobs.registry import validate
 from app.jobs.runner import run_many
 from app.registry.promotion import RECEIPT_TYPE
-from m1p.v1 import Verdict
-from pydantic import SecretStr
+from m1p.v1 import JudgeTrigger, Verdict
+from tests.roles import service_pool
 from tests.test_jobs import FakeChoke
 from tests.test_judge_batch import (
     AMBIGUOUS,
+    CANDIDATES,
+    CLOUD_TASKS,
+    EDGE,
     JID,
-    MIDBAND,
-    NO_TEST,
+    JUDGED,
     SPEC,
-    FakeBatch,
     FakeCloud,
     all_rows,
     rid,
+    settings,
 )
 from tests.test_pg_stores import FakeControld, _mk_tenant
 from tests.test_readjudicate import env as _env
@@ -52,10 +57,9 @@ pytestmark = [
 ]
 
 NOW = datetime(2026, 9, 16, 3, 0, tzinfo=UTC)
+MIGRATION = Path(__file__).resolve().parents[3] / "migrations/m1_092_router_judge_consents.sql"
 WINDOW = datetime(2026, 9, 15, tzinfo=UTC)
-SETTINGS = SimpleNamespace(
-    querychoke_base_url="http://choke", querychoke_token=SecretStr("svc"), http_timeout_s=5.0
-)
+SETTINGS = settings(http_timeout_s=5.0)
 
 
 @pytest.fixture
@@ -63,7 +67,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN unset under M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"{DSN!r} unreachable under M1_REQUIRE_STORES=1: {exc!r}", pytrace=False)
@@ -75,24 +79,50 @@ async def pool():
 
 
 async def _consent(pool, tenant: str, **over) -> UUID:
-    row = {"subprocessor": "anthropic", "region": "us", "max_tier": "E0", **over}
+    row = {"subprocessor": "nebius", "region": "global", "max_tier": "E1", "judge_id": JID, **over}
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         return await conn.fetchval(
             "INSERT INTO m1_cloud_judge_consents (tenant_id, judge_id, subprocessor, region, "
             "max_tier, consented_by) VALUES ($1, $2, $3, $4, $5, 'test') RETURNING id",
             UUID(tenant),
-            JID,
+            row["judge_id"],
             row["subprocessor"],
             row["region"],
             row["max_tier"],
         )
 
 
-async def _dispatches(pool, tenant: str) -> dict[UUID, dict]:
+async def _device(pool, tenant: str, *consents: tuple[bool, bool, timedelta]) -> list[dict]:
+    """A device of `tenant` with m1_082 rows (e1, cloud_judge, recorded_at skew) in write order,
+    and all_rows() re-stamped as recorded by it (m1_devices.id is global, the fixture's is not)."""
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
-        rows = await conn.fetch("SELECT * FROM judge_dispatches ORDER BY task_id")
+        device = await conn.fetchval(
+            "INSERT INTO m1_devices (tenant_id, platform, hostname_hmac) "
+            "VALUES ($1, 'linux', $2) RETURNING id",
+            UUID(tenant),
+            random.randbytes(32),
+        )
+        for e1, cloud_judge, skew in consents:
+            await conn.execute(
+                "INSERT INTO m1_device_consents (tenant_id, device_id, e1, cloud_judge, training, "
+                "recorded_at) VALUES ($1, $2, $3, $4, false, now() + $5::interval)",
+                UUID(tenant),
+                device,
+                e1,
+                cloud_judge,
+                skew,
+            )
+    return [{**r, "device_id": str(device)} for r in all_rows()]
+
+
+async def _dispatches(pool, tenant: str, jid: str = JID) -> dict[UUID, dict]:
+    async with pool.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant)
+        rows = await conn.fetch(
+            "SELECT * FROM judge_dispatches WHERE judge_id = $1 ORDER BY task_id", jid
+        )
     return {r["task_id"]: dict(r) for r in rows}
 
 
@@ -105,14 +135,14 @@ def _http(cloud: FakeCloud, controld: FakeControld) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-def _targets(http: httpx.AsyncClient, batch: FakeBatch) -> dict:
+def _targets(http: httpx.AsyncClient) -> dict:
     return {
         **validate(JOBS),
         "spectral.estimate": functools.partial(spectral_estimate, http=FakeChoke([]).client()),
         "certs.recompute": functools.partial(certs_recompute, http=http),
         "readjudicate.run": functools.partial(readjudicate_run, http=http),
         "promotion.step": functools.partial(promotion_step, http=http),
-        "judge_batch.run": functools.partial(run, http=http, batch=batch),
+        "judge_batch.run": functools.partial(run, http=http),
     }
 
 
@@ -122,93 +152,115 @@ def _ctx(pool, tenant: str) -> SimpleNamespace:
     )
 
 
-async def test_cascade_dispatches_to_the_cloud_under_consent_and_books_the_spend(pool, env):
-    tenant = await _mk_tenant(pool)
-    await _consent(pool, tenant)
-    cloud, batch = FakeCloud(all_rows()), FakeBatch()
+async def test_cascade_dispatches_to_the_cloud_under_consent_and_books_the_spend(admin, pool, env):
+    tenant = await _mk_tenant(admin)
+    await _consent(admin, tenant)
+    cloud = FakeCloud(await _device(admin, tenant, (True, True, timedelta(0))))
     http = _http(cloud, FakeControld({RECEIPT_TYPE, "noise_certificate"}))
 
-    results = await run_many(
-        pool, SETTINGS, list(JOBS), _targets(http, batch), tenant_id=tenant, now=NOW
-    )
+    results = await run_many(pool, SETTINGS, list(JOBS), _targets(http), tenant_id=tenant, now=NOW)
     assert results["readjudicate.run"] == "succeeded"
     assert results["judge_batch.run"] == "succeeded"
-    assert len(batch.calls) == 1 and cloud.dispatched == []
-    # MIDBAND is bootstrap-refused: a candidate since the select rule widened
-    assert {r["custom_id"] for r in batch.calls[0]} == {rid(AMBIGUOUS), rid(NO_TEST), rid(MIDBAND)}
+    assert len(cloud.completions) == 4 and cloud.edge_ids() == {EDGE}
     recs = await _dispatches(pool, tenant)
-    assert set(recs) == {AMBIGUOUS, NO_TEST, MIDBAND}
+    assert set(recs) == CLOUD_TASKS, "the cloud judge runs on every task, not only ambiguous ones"
     rec = recs[AMBIGUOUS]
     assert (rec["locus"], rec["vote"], rec["model"], rec["batch_id"]) == (
         "cloud",
         "violated",
         SPEC.model,
-        "msgbatch_1",
+        None,
     )
     assert rec["request_id"] == UUID(rid(AMBIGUOUS)) and rec["window_start"] == WINDOW
     assert (rec["input_tokens"], rec["output_tokens"]) == (1200, 3)
     assert (rec["cache_creation_input_tokens"], rec["cache_read_input_tokens"]) == (0, 1100)
     votes = {UUID(bytes=e.task_id): e.judge_vote for e in cloud.events()}
-    assert {t: v.vote for t, v in votes.items()} == {
-        AMBIGUOUS: Verdict.VIOLATED,
-        NO_TEST: Verdict.VIOLATED,
-        MIDBAND: Verdict.VIOLATED,
-    }
+    assert {t: v.vote for t, v in votes.items()} == {t: Verdict.VIOLATED for t in CLOUD_TASKS}
+    assert {v.trigger for v in votes.values()} == {JudgeTrigger.ALWAYS}
+    assert {r["evidence_tier"] for r in recs.values()} == {"E0"}, "no E1 reader: the E0 fallback"
+    # The runner's order, never finished_at's: now() is wall clock, and WSL2 steps it backwards.
+    assert list(results).index("readjudicate.run") < list(results).index("judge_batch.run")
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         jobs = await conn.fetch(
-            "SELECT job, outcome, attempts, finished_at FROM job_runs WHERE tenant_id = $1 "
-            "AND job IN ('judge_batch.run', 'readjudicate.run') ORDER BY finished_at",
+            "SELECT job, outcome, attempts FROM job_runs WHERE tenant_id = $1 "
+            "AND job IN ('judge_batch.run', 'readjudicate.run') ORDER BY job",
             tenant,
         )
-    assert [(j["job"], j["outcome"], j["attempts"]) for j in jobs] == [
-        ("readjudicate.run", "succeeded", 1),
+    assert [tuple(j) for j in jobs] == [
         ("judge_batch.run", "succeeded", 1),
+        ("readjudicate.run", "succeeded", 1),
     ]
 
-    again = await run_many(
-        pool, SETTINGS, list(JOBS), _targets(http, batch), tenant_id=tenant, now=NOW
-    )
-    assert again["judge_batch.run"] == "already_done" and len(batch.calls) == 1
+    again = await run_many(pool, SETTINGS, list(JOBS), _targets(http), tenant_id=tenant, now=NOW)
+    assert again["judge_batch.run"] == "already_done" and len(cloud.completions) == 4
 
     # A forced re-run of the same window: the spent rows are re-posted, the model is not.
-    async with pool.acquire() as conn, conn.transaction():
+    async with admin.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         await conn.execute("DELETE FROM job_runs WHERE job = 'judge_batch.run'")
     posted_before = len(cloud.ingested)
-    await run(_ctx(pool, tenant), http=http, batch=batch)
-    assert len(batch.calls) == 1 and len(cloud.ingested) == posted_before + 1
+    await run(_ctx(pool, tenant), http=http)
+    assert len(cloud.completions) == 4 and len(cloud.ingested) == posted_before + 1
     ids = [bytes(e.event_id) for e in cloud.events()]
-    assert len(ids) == 6 and len(set(ids)) == 3, "the re-post carries the same three event_ids"
+    assert len(ids) == 8 and len(set(ids)) == 4, "the re-post carries the same four event_ids"
     assert await _dispatches(pool, tenant) == recs
 
 
-async def test_no_consent_row_means_client_side_rows_with_no_vote(pool):
-    tenant = await _mk_tenant(pool)
-    cloud, batch = FakeCloud(all_rows()), FakeBatch()
-    await run(_ctx(pool, tenant), http=cloud.client(), batch=batch)
-    assert batch.calls == [] and cloud.ingested == []
-    assert {d["request"]["requestId"] for d in cloud.dispatched} == {
-        rid(AMBIGUOUS),
-        rid(NO_TEST),
-        rid(MIDBAND),
-    }
-    recs = await _dispatches(pool, tenant)
+async def test_m1_092_revokes_live_anthropic_consent_and_the_check_admits_mem(admin, pool):
+    migrate = os.environ.get("M1_MIGRATE_PG_DSN", "")
+    if not migrate:
+        pytest.fail("M1_MIGRATE_PG_DSN unset: m1_092 needs the migrator to re-run", pytrace=False)
+    tenant = await _mk_tenant(admin)
+    old = await _consent(admin, tenant, judge_id=EDGE, subprocessor="anthropic", region="us")
+    await _consent(admin, tenant, judge_id="mem:extract@1", max_tier="E0")
+    conn = await asyncpg.connect(migrate)
+    try:
+        await conn.execute(MIGRATION.read_text())  # idempotent + re-runnable, house style
+    finally:
+        await conn.close()
+    async with admin.acquire() as conn, conn.transaction():
+        await set_local_tenant(conn, tenant)
+        rows = await conn.fetch(
+            "SELECT id, judge_id, revoked_at IS NOT NULL AS revoked, revoked_reason "
+            "FROM m1_cloud_judge_consents ORDER BY judge_id"
+        )
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO m1_cloud_judge_consents (tenant_id, judge_id, subprocessor, region, "
+                "max_tier, consented_by) VALUES ($1, 'memory:extract@1', 'nebius', 'global', "
+                "'E0', 'test')",
+                UUID(tenant),
+            )
+    assert [(r["judge_id"], r["revoked"], r["revoked_reason"]) for r in rows] == [
+        (EDGE, True, "subprocessor_changed:anthropic->nebius"),
+        ("mem:extract@1", False, None),
+    ]
+    assert rows[0]["id"] == old, "revoked by UPDATE, never deleted"
+
+
+async def test_no_consent_row_means_edge_rows_with_no_vote(admin, pool):
+    tenant = await _mk_tenant(admin)
+    cloud = FakeCloud(all_rows())
+    await run(_ctx(pool, tenant), http=cloud.client())
+    assert cloud.completions == [] and cloud.ingested == []
+    edge_ids = {rid(t, EDGE) for t in (*CANDIDATES, JUDGED)}
+    assert {d["request"]["requestId"] for d in cloud.dispatched} == edge_ids
+    assert await _dispatches(pool, tenant) == {}
+    recs = await _dispatches(pool, tenant, EDGE)
     assert {t: (r["locus"], r["vote"], r["input_tokens"]) for t, r in recs.items()} == {
-        AMBIGUOUS: ("client_side", None, None),
-        NO_TEST: ("client_side", None, None),
-        MIDBAND: ("client_side", None, None),
+        t: ("client_side", None, None) for t in (*CANDIDATES, JUDGED)
     }
     # The next night reposts under the same request_id (the edge's dedupe key).
-    await run(_ctx(pool, tenant), http=cloud.client(), batch=batch)
+    await run(_ctx(pool, tenant), http=cloud.client())
     assert (
-        len(cloud.dispatched) == 6
-        and len({d["request"]["requestId"] for d in cloud.dispatched}) == 3
+        len(cloud.dispatched) == 8
+        and {d["request"]["requestId"] for d in cloud.dispatched} == edge_ids
     )
 
 
-async def test_check_refuses_a_cloud_row_without_its_spend(pool):
-    tenant = await _mk_tenant(pool)
+async def test_check_refuses_a_cloud_row_without_its_spend(admin, pool):
+    tenant = await _mk_tenant(admin)
     base = dict(
         tenant_id=UUID(tenant),
         task_id=uuid4(),
@@ -246,12 +298,12 @@ async def test_check_refuses_a_cloud_row_without_its_spend(pool):
         await insert()
 
 
-async def test_rls_hides_another_tenants_dispatches(pool):
-    a, b = await _mk_tenant(pool), await _mk_tenant(pool)
+async def test_rls_hides_another_tenants_dispatches(admin, pool):
+    a, b = await _mk_tenant(admin), await _mk_tenant(admin)
     cloud = FakeCloud(all_rows())
-    await run(_ctx(pool, a), http=cloud.client(), batch=FakeBatch())
-    assert set(await _dispatches(pool, a)) == {AMBIGUOUS, NO_TEST, MIDBAND}
-    assert await _dispatches(pool, b) == {}
+    await run(_ctx(pool, a), http=cloud.client())
+    assert set(await _dispatches(pool, a, EDGE)) == {*CANDIDATES, JUDGED}
+    assert await _dispatches(pool, b, EDGE) == {}
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, b)
         with pytest.raises(asyncpg.InsufficientPrivilegeError):
@@ -264,3 +316,51 @@ async def test_rls_hides_another_tenants_dispatches(pool):
                 uuid4(),
                 WINDOW,
             )
+
+
+async def test_the_daily_ledger_never_over_grants_and_rls_keeps_it_per_tenant(admin, pool):
+    """m1_101 under concurrency: two reservations racing on one tenant-day split the cap, a third
+    gets nothing, and another tenant's day is its own row, invisible to the first."""
+    import asyncio
+
+    from app.llm import reserve_today
+
+    a, b = await _mk_tenant(admin), await _mk_tenant(admin)
+    async with pool.acquire() as c1, pool.acquire() as c2:
+        got = await asyncio.gather(
+            reserve_today(c1, a, JID, 40, 60), reserve_today(c2, a, JID, 40, 60)
+        )
+    assert sorted(got) == [20, 40]
+    async with pool.acquire() as c:
+        assert await reserve_today(c, a, JID, 5, 60) == 0
+        assert await reserve_today(c, b, JID, 5, 60) == 5
+        async with c.transaction():
+            await set_local_tenant(c, b)
+            rows = await c.fetch("SELECT tenant_id, units FROM m1_llm_spend_days")
+    assert [(str(r["tenant_id"]), r["units"]) for r in rows] == [(b, 5)]
+
+
+async def test_the_devices_last_written_consent_gates_the_cloud_judge(admin, pool):
+    """H4: the tenant row is on, the member's device turned cloud_judge off with a clock stepped
+    backwards: row_seq, not recorded_at, decides, and nothing of the member's leaves."""
+    tenant = await _mk_tenant(admin)
+    await _consent(admin, tenant)
+    early = timedelta(hours=-1)
+    rows = await _device(admin, tenant, (True, True, timedelta(0)), (True, False, early))
+    cloud = FakeCloud(rows)
+    await run(_ctx(pool, tenant), http=cloud.client())
+    assert cloud.completions == [] and await _dispatches(pool, tenant) == {}
+    assert cloud.edge_ids() == {EDGE}
+
+    regrant = await _device(admin, tenant, (False, False, timedelta(0)), (True, True, 2 * early))
+    cloud = FakeCloud(regrant)
+    await run(_ctx(pool, tenant), http=cloud.client())
+    assert len(cloud.completions) == 4 and set(await _dispatches(pool, tenant)) == CLOUD_TASKS
+
+
+async def test_a_device_with_no_consent_row_sends_nothing(admin, pool):
+    tenant = await _mk_tenant(admin)
+    await _consent(admin, tenant)
+    cloud = FakeCloud(await _device(admin, tenant))
+    await run(_ctx(pool, tenant), http=cloud.client())
+    assert cloud.completions == [] and await _dispatches(pool, tenant) == {}

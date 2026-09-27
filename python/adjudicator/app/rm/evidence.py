@@ -1,5 +1,5 @@
-"""RewardScorer's evidence_for over the E1 archive: the admitted, receipted parts of
-app/certified/archive.py rendered as the untrusted-data string SYSTEM scopes."""
+"""An E1 evidence_for over the archive: the admitted, receipted parts of
+app/certified/archive.py rendered as one string — the sanitized hunks app/rm/cloud.py sends."""
 
 from datetime import date
 from uuid import UUID

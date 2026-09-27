@@ -192,7 +192,7 @@ def adjudicate(
     unknown = 0
     coverage = 0
     for v in informative:
-        p = bundle.params_for(v.verifier_id, v.kind)
+        p = bundle.params_for(v.law_id, v.kind)
         if p is None:  # D-X: unlisted verifier — no likelihood, but counted
             unknown += 1
             continue

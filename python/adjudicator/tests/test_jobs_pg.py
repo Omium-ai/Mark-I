@@ -8,22 +8,24 @@ import os
 import random
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
 import httpx
 import numpy as np
 import pytest
 from app.certs.state_machine import GOLD_BOOTSTRAP_MIN
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.gold.select import add_members, create_gold_set
 from app.jobs import JOBS
 from app.jobs.nightly import certs_recompute, gold_refresh, spectral_estimate
 from app.jobs.registry import validate
 from app.jobs.runner import run_many
 from pydantic import SecretStr
-from tests.test_jobs import PAPER2, FakeChoke, vote_rows
+from tests.roles import service_pool
+from tests.test_jobs import NAMES, PAPER2, FakeChoke, vote_rows
 from tests.test_pg_stores import FakeControld, _mk_judge_verifier, _mk_tenant
+from tests.test_rm_pg import _mk_sealed_rm
 
 DSN = os.environ.get("M1_TEST_PG_DSN", "")
 REQUIRE_STORES = os.environ.get("M1_REQUIRE_STORES", "0") == "1"
@@ -79,7 +81,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN unset under M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"{DSN!r} unreachable under M1_REQUIRE_STORES=1: {exc!r}", pytrace=False)
@@ -105,9 +107,9 @@ async def _tenant_state(pool: asyncpg.Pool, tenant: str) -> tuple[list, int, lis
     return sets, certs, runs
 
 
-async def test_cascade_freezes_a_formed_set_and_ledgers_both_jobs(pool):
-    tenant = await _mk_tenant(pool)
-    await _mk_judge_verifier(pool)
+async def test_cascade_freezes_a_formed_set_and_ledgers_both_jobs(admin, pool):
+    tenant = await _mk_tenant(admin)
+    await _mk_judge_verifier(admin)
     gold_set = await create_gold_set(pool, tenant, "claudecode")
     labels = [
         (random.randbytes(32), random.choice(["satisfied", "violated"]), "t3")
@@ -147,10 +149,10 @@ async def test_cascade_freezes_a_formed_set_and_ledgers_both_jobs(pool):
     assert {(r["attempts"], r["requested"]) for r in runs if r["job"] in MINE} == {(1, 2)}
 
 
-async def test_snapshots_grow_with_the_open_set(pool):
+async def test_snapshots_grow_with_the_open_set(admin, pool):
     """gold.refresh mints a new frozen snapshot only when the open set grew; the latest
     snapshot (what certs cite) carries every label, so the D15 200 gate is reachable."""
-    tenant = await _mk_tenant(pool)
+    tenant = await _mk_tenant(admin)
     gold_set = await create_gold_set(pool, tenant, "claudecode")
     labels = [(random.randbytes(32), "satisfied", "human") for _ in range(GOLD_BOOTSTRAP_MIN)]
     await add_members(pool, tenant, gold_set, labels)
@@ -167,7 +169,7 @@ async def test_snapshots_grow_with_the_open_set(pool):
         rows = await conn.fetch(
             "SELECT s.frozen_at, count(m.*) AS n FROM gold_sets s "
             "LEFT JOIN gold_set_members m ON m.gold_set_id = s.id "
-            "WHERE s.tenant_id = $1 GROUP BY s.id, s.frozen_at ORDER BY s.frozen_at NULLS FIRST",
+            "WHERE s.tenant_id = $1 GROUP BY s.id, s.frozen_at ORDER BY s.row_seq",
             UUID(tenant),
         )
     assert [(r["frozen_at"] is not None, r["n"]) for r in rows] == [
@@ -177,8 +179,8 @@ async def test_snapshots_grow_with_the_open_set(pool):
     ]
 
 
-async def test_unformed_set_stays_open(pool):
-    tenant = await _mk_tenant(pool)
+async def test_unformed_set_stays_open(admin, pool):
+    tenant = await _mk_tenant(admin)
     gold_set = await create_gold_set(pool, tenant, "claudecode")
     await add_members(pool, tenant, gold_set, [(random.randbytes(32), "violated", "t3")])
     results = await run_many(pool, SETTINGS, list(JOBS), _targets([]), tenant_id=tenant, now=NOW)
@@ -192,8 +194,8 @@ async def test_unformed_set_stays_open(pool):
     assert certs == []
 
 
-async def test_failed_refresh_skips_recompute(pool):
-    tenant = await _mk_tenant(pool)
+async def test_failed_refresh_skips_recompute(admin, pool):
+    tenant = await _mk_tenant(admin)
 
     async def broken(ctx) -> None:
         raise RuntimeError("gold source down")
@@ -207,16 +209,21 @@ async def test_failed_refresh_skips_recompute(pool):
     }
 
 
-async def test_spectral_run_lands_and_its_verdict_rides_the_cert_row(pool, simulate):
+async def test_spectral_run_lands_and_its_verdict_rides_the_cert_row(admin, pool, simulate):
     """Planted Paper II votes through the mock choke: the spectral_runs row carries the
     passed gate + per-verifier laws, certs.recompute copies identifiable/diagnostics (and
     the verifier's own law) onto the bootstrapping cert row it issues, and the same window
     re-run upserts rather than duplicates."""
-    tenant = await _mk_tenant(pool)
-    judge = await _mk_judge_verifier(pool)
-    async with pool.acquire() as conn:
+    tenant = await _mk_tenant(admin)
+    async with admin.acquire() as conn:
+        judge = await conn.fetchval(
+            "INSERT INTO m1_verifiers (verifier_key, kind, version, display_name, definition) "
+            "VALUES ($1, 'judge', 1, 'test judge', $2::jsonb) RETURNING id",
+            f"judge:test-{uuid4().hex[:8]}",
+            json.dumps({"kind": "judge", "group": "judge"}),  # a diff-reading judge's own clique
+        )
         judge_key = await conn.fetchval(
-            "SELECT verifier_key FROM m1_verifiers WHERE id = $1", judge
+            "SELECT verifier_key || '@1' FROM m1_verifiers WHERE id = $1", judge
         )
     gold_set = await create_gold_set(pool, tenant, "claudecode")
     await add_members(
@@ -225,8 +232,13 @@ async def test_spectral_run_lands_and_its_verdict_rides_the_cert_row(pool, simul
         gold_set,
         [(random.randbytes(32), "satisfied", "t3") for _ in range(GOLD_BOOTSTRAP_MIN)],
     )
+    rm_key = f"rm:rrm-{uuid4().hex[:8]}"
+    await _mk_sealed_rm(admin, rm_key, tenant=tenant, group="rm-a")
     votes, _ = simulate(np.random.default_rng(1), [0.4, 0.6], PAPER2, 5000)
-    rows = vote_rows(votes, (judge_key, "rrm", "anchor"))
+    rows = [
+        {**r, "verifier_id": f"{rm_key}@1"} if r["verifier_id"] == NAMES[1] else r
+        for r in vote_rows(votes, (judge_key, NAMES[1], NAMES[2]))
+    ]
 
     results = await run_many(pool, SETTINGS, list(JOBS), _targets(rows), tenant_id=tenant, now=NOW)
     assert results["spectral.estimate"] == "succeeded" and results["certs.recompute"] == "succeeded"
@@ -240,8 +252,8 @@ async def test_spectral_run_lands_and_its_verdict_rides_the_cert_row(pool, simul
         )
     assert run["passed"] and run["n_tasks"] == 5000
     laws = json.loads(run["confusion"])
-    assert set(laws) == {judge_key, "rrm", "anchor"}
-    assert abs(np.array(laws["anchor"]) - PAPER2[2]).max() < 0.03
+    assert set(laws) == {judge_key, f"{rm_key}@1", NAMES[2]}
+    assert abs(np.array(laws[NAMES[2]]) - PAPER2[2]).max() < 0.03
     # Natarajan is unmeasurable (no gold-vs-verdict pairs yet) so certified is NOT claimed —
     # but the identifiability half of the claim is on the row, with this verifier's law.
     (cert,) = certs
@@ -256,7 +268,7 @@ async def test_spectral_run_lands_and_its_verdict_rides_the_cert_row(pool, simul
         **_targets(rows),
         "spectral.estimate": functools.partial(spectral_estimate, http=FakeChoke([]).client()),
     }
-    async with pool.acquire() as conn, conn.transaction():
+    async with admin.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         await conn.execute("DELETE FROM job_runs WHERE job = 'spectral.estimate'")
     await run_many(pool, SETTINGS, list(JOBS), targets, tenant_id=tenant, now=NOW)

@@ -20,12 +20,13 @@ import httpx
 import pytest
 from app.certs.compute import compute_certificate
 from app.certs.store import RECEIPT_TYPE, ReceiptAppend, current_cert, insert_cert
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.gold.score import score_agreement
 from app.gold.select import add_members, create_gold_set, freeze_gold_set
 from app.judges.cloud_path import Consent, pg_consent_reader
 from app.registry.catalog import list_verifiers
 from mark1_receipts import ReceiptAppendError, append_server_record
+from tests.roles import service_pool
 
 DSN = os.environ.get("M1_TEST_PG_DSN", "")
 # The justfile's zero-skip inversion (its head; conformance/tenancy/conftest.py is the
@@ -64,7 +65,7 @@ async def pool():
     # Direct DSN (no sslmode injection): the test harness DSN says what it means.
     # The GUC-reset setup= is kept — it is part of what is under test.
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(
@@ -151,9 +152,9 @@ class FakeControld:
         return functools.partial(append_server_record, http, "http://controld", "svc")
 
 
-async def test_gold_and_cert_round_trip(pool):
-    tenant = await _mk_tenant(pool)
-    verifier = await _mk_judge_verifier(pool)
+async def test_gold_and_cert_round_trip(admin, pool):
+    tenant = await _mk_tenant(admin)
+    verifier = await _mk_judge_verifier(admin)
 
     gold_set = await create_gold_set(pool, tenant, "claudecode")
     members = [(random.randbytes(32), "satisfied", "t3") for _ in range(3)] + [
@@ -209,11 +210,11 @@ async def test_gold_and_cert_round_trip(pool):
     assert verifier in keys
 
 
-async def test_certified_is_earned_refused_by_the_db(pool):
+async def test_certified_is_earned_refused_by_the_db(admin, pool):
     """Phase 2 can never mint 'certified' (identifiable=False, no NATARAJAN LCB row):
     the write path must surface m1_021's CHECK, never work around it."""
-    tenant = await _mk_tenant(pool)
-    verifier = await _mk_judge_verifier(pool)
+    tenant = await _mk_tenant(admin)
+    verifier = await _mk_judge_verifier(admin)
     gold_set = await create_gold_set(pool, tenant, "claudecode")
     await freeze_gold_set(pool, tenant, gold_set)
     comp = compute_certificate(
@@ -229,11 +230,11 @@ async def test_certified_is_earned_refused_by_the_db(pool):
     assert (await current_cert(pool, tenant)).id is None
 
 
-async def test_unreceipted_cert_is_never_issued(pool):
+async def test_unreceipted_cert_is_never_issued(admin, pool):
     """controld refuses or fails the append ⇒ no noise_certificates row at all (fail-closed);
     the same call succeeds once the chain answers."""
-    tenant = await _mk_tenant(pool)
-    verifier = await _mk_judge_verifier(pool)
+    tenant = await _mk_tenant(admin)
+    verifier = await _mk_judge_verifier(admin)
     comp = compute_certificate(score_agreement([]))
     controld = FakeControld()
     for failure, code in (
@@ -291,14 +292,14 @@ async def test_require_stores_forbids_silent_self_disable(pool):
     assert (res.returncode != 0) == bool(bypass), res.stdout
 
 
-async def test_tenant_predicate_holds_under_bypass_role(pool):
+async def test_tenant_predicate_holds_under_bypass_role(admin, pool):
     """The store's explicit WHERE tenant_id is the belt to RLS's braces: this test runs
     under WHATEVER role the DSN provides — including BYPASSRLS/superuser, where RLS is
     inert — and must still never see a foreign tenant's certificate. Deliberately no
     bypass-skip: the bypass case is the whole point (the rds_superuser lesson)."""
-    tenant_a = await _mk_tenant(pool)
-    tenant_b = await _mk_tenant(pool)
-    verifier = await _mk_judge_verifier(pool)
+    tenant_a = await _mk_tenant(admin)
+    tenant_b = await _mk_tenant(admin)
+    verifier = await _mk_judge_verifier(admin)
     comp = compute_certificate(score_agreement([]))
     append = FakeControld().append()
     await insert_cert(pool, tenant_a, verifier, "bootstrapping", comp, None, append=append)
@@ -308,7 +309,7 @@ async def test_tenant_predicate_holds_under_bypass_role(pool):
     )
 
     # A tenant with no certs reads the honest floor, never someone else's row.
-    tenant_c = await _mk_tenant(pool)
+    tenant_c = await _mk_tenant(admin)
     got_c = await current_cert(pool, tenant_c)
     assert got_c.id is None
     assert got_c.status == "uncertified"
@@ -323,7 +324,7 @@ async def test_tenant_predicate_holds_under_bypass_role(pool):
     assert got_b.expires_at > got_b.issued_at
 
 
-async def test_rls_isolation_between_tenants(pool):
+async def test_rls_isolation_between_tenants(admin, pool):
     async with pool.acquire() as conn:
         bypass = await conn.fetchval(
             "SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname = current_user"
@@ -338,9 +339,9 @@ async def test_rls_isolation_between_tenants(pool):
                 pytrace=False,
             )
         pytest.skip(msg)
-    tenant_a = await _mk_tenant(pool)
-    tenant_b = await _mk_tenant(pool)
-    verifier = await _mk_judge_verifier(pool)
+    tenant_a = await _mk_tenant(admin)
+    tenant_b = await _mk_tenant(admin)
+    verifier = await _mk_judge_verifier(admin)
     comp = compute_certificate(score_agreement([]))
     a_cert = await insert_cert(
         pool, tenant_a, verifier, "bootstrapping", comp, None, append=FakeControld().append()
@@ -363,20 +364,20 @@ async def test_rls_isolation_between_tenants(pool):
     assert a_cert not in {r["id"] for r in visible}
 
 
-async def test_cloud_judge_consent_read_is_tenant_scoped_revocable_and_never_e2(pool):
+async def test_cloud_judge_consent_read_is_tenant_scoped_revocable_and_never_e2(admin, pool):
     """m1_065 as the cloud path reads it (06 §6.5 preconditions 1-4 at the DB layer)."""
-    tenant_a, tenant_b = UUID(await _mk_tenant(pool)), UUID(await _mk_tenant(pool))
-    jid = "judge:grounded-rubric@1"
+    tenant_a, tenant_b = UUID(await _mk_tenant(admin)), UUID(await _mk_tenant(admin))
+    jid = "judge:grounded-rubric@2"
     read = pg_consent_reader(pool)
 
     async def insert(tenant: UUID, max_tier: str):
-        async with pool.acquire() as conn, conn.transaction():
+        async with admin.acquire() as conn, conn.transaction():
             await set_local_tenant(conn, str(tenant))
             await conn.execute(
                 """
                 INSERT INTO m1_cloud_judge_consents
                   (tenant_id, judge_id, subprocessor, region, max_tier, consented_by)
-                VALUES ($1, $2, 'anthropic', 'us', $3, 'test')
+                VALUES ($1, $2, 'nebius', 'global', $3, 'test')
                 """,
                 tenant,
                 jid,
@@ -385,13 +386,13 @@ async def test_cloud_judge_consent_read_is_tenant_scoped_revocable_and_never_e2(
 
     assert await read(tenant_a, jid) is None  # absence is the default, not an error
     await insert(tenant_a, "E0")
-    assert await read(tenant_a, jid) == Consent("anthropic", "us", "E0")
+    assert await read(tenant_a, jid) == Consent("nebius", "global", "E0")
     assert await read(tenant_b, jid) is None  # tenant B sees nothing of A's consent
     # E2 never reaches the cloud path: the CHECK refuses the row, not just the read.
     with pytest.raises(asyncpg.CheckViolationError):
         await insert(tenant_b, "E2")
     # Revocation is an UPDATE the read honours; the history row stays.
-    async with pool.acquire() as conn, conn.transaction():
+    async with admin.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, str(tenant_a))
         await conn.execute(
             "UPDATE m1_cloud_judge_consents SET revoked_at = now(), revoked_reason = 'test' "

@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from app.adjudicate.chow import Costs
 from app.spectral.identifiability import ANCHOR_SEPARATION, MIN_TASKS, Diagnostics, diagnose
 from app.spectral.moments import REJECT, group_observations, onehot
 
@@ -108,3 +109,19 @@ def estimate(
     if failed:
         return Estimate(None, None, None, n_votes, diag)
     return Estimate(conf[:, :, perm].transpose(0, 2, 1), prior[perm], q[:, perm], n_votes, diag)
+
+
+def predicted_noise(q: np.ndarray, band: tuple[float, float] = Costs().band) -> dict[str, float]:
+    """Paper II Thm 6.1 plug-in: the noise of the Chow-thresholded label on covered tasks,
+    ρ₊ = P(η ≤ lo | Y=S, covered), ρ₋ = P(η ≥ hi | Y=V, covered), summed over the window's
+    own vote profiles under the fitted model (q = P(Y | λ), columns [satisfied, violated])."""
+    lo, hi = band
+    eta = q[:, 0]
+    low, high = eta <= lo, eta >= hi
+    cov = low | high
+    s, v = q[:, 0] * cov, q[:, 1] * cov
+    return {
+        "rho_plus": float((q[:, 0] * low).sum() / s.sum()) if s.sum() else float("nan"),
+        "rho_minus": float((q[:, 1] * high).sum() / v.sum()) if v.sum() else float("nan"),
+        "band": [lo, hi],
+    }

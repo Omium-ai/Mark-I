@@ -1,30 +1,26 @@
-"""The cloud-judge path (06 §6.5) — the ONLY place this service calls a model vendor.
+"""The cloud-judge path (06 §6.5): admission for every consent-gated cloud member, and the
+router reply → vote step for the cloud judge (16 §L1, app/llm.py makes the call).
 
 Four hard preconditions, machine-checked at admission, none waivable in code:
 (1) a live tenant consent row (m1_065), (2) that row names this judge's subprocessor,
-(3) that row names the region the call is pinned to, (4) evidence tier <= the consented
+(3) that row names the vendor's processing region, (4) evidence tier <= the consented
 tier, and E2 never — refused before consent is even read. Every failure is a typed
-`JudgeRefused`; no vote is ever synthesized around a refusal."""
+`JudgeRefused`; no vote is ever synthesized around a refusal. On top of the tenant row, each
+task's own device decides whether its evidence may go (m1_082 cloud_judge, e1): `device_tiers`
+and `task_tiers` below."""
 
-import asyncio
 import hashlib
-import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 from uuid import UUID
 
 import asyncpg
-from anthropic import AsyncAnthropic
-from anthropic.types import Message
-from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
-from anthropic.types.messages.batch_create_params import Request
-from m1p.v1 import EvidenceTier, JudgeLocus, JudgeVote, Verdict
+from m1p.v1 import EvidenceTier, JudgeLocus, JudgeTrigger, JudgeVote, Verdict
 
 from app.db import set_local_tenant
-from app.judges.specs import TIERS, JudgeSpec, refuse, spec_for
-
-log = logging.getLogger("adjudicator.cloud_path")
+from app.judges.specs import TIERS, JudgeSpec, refuse
+from app.llm import Completion
 
 
 @dataclass(frozen=True)
@@ -57,6 +53,43 @@ def pg_consent_reader(pool: asyncpg.Pool) -> ConsentReader:
     return read
 
 
+NIL_DEVICE = UUID(int=0)
+# controld ingest.ServiceDevice, the stamp on every service batch; test_judges pins it to Go.
+SERVICE_DEVICE = UUID("db04ac08-e817-5f51-a555-2aa350c56d33")
+
+
+async def device_tiers(conn: asyncpg.Connection, tenant_id: str) -> dict[UUID, str]:
+    """The highest tier each device lets the cloud judge read, from its LATEST m1_082 row
+    (append-only, ordered by row_seq): cloud_judge admits E0 anchor facts, e1 on top admits E1
+    hunks. A device whose latest row turns cloud_judge off, or that recorded no row, is absent."""
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant_id)
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (device_id) device_id, e1, cloud_judge FROM m1_device_consents "
+            "WHERE tenant_id = $1 ORDER BY device_id, row_seq DESC",
+            UUID(tenant_id),
+        )
+    return {UUID(str(r["device_id"])): "E1" if r["e1"] else "E0" for r in rows if r["cloud_judge"]}
+
+
+def task_tiers(
+    task_rows: Mapping[UUID, Iterable[Mapping[str, Any]]], devices: Mapping[UUID, str]
+) -> dict[UUID, str]:
+    """task → the highest tier EVERY device that recorded it admits. Service-authored rows
+    (nil or ServiceDevice) speak for no device. A task with no device on its rows, or one
+    device with no admitting consent, is absent: nothing of it leaves."""
+    out = {}
+    for task, rows in task_rows.items():
+        ids = {UUID(str(r["device_id"])) for r in rows if r.get("device_id")} - {
+            NIL_DEVICE,
+            SERVICE_DEVICE,
+        }
+        tiers = {devices.get(d) for d in ids}
+        if ids and None not in tiers:
+            out[task] = "E1" if tiers == {"E1"} else "E0"
+    return out
+
+
 def admit(spec: JudgeSpec, consent: Consent | None) -> None:
     """06 §6.5 preconditions (1)-(4). Order matters: E2 is refused structurally, before
     any consent could be read to (mis)permit it."""
@@ -83,7 +116,7 @@ _TIER = {"E0": EvidenceTier.E0, "E1": EvidenceTier.E1, "E2": EvidenceTier.E2}
 def parse_verdict(stop_reason: str | None, text: str) -> Verdict:
     """Model output → wire verdict. A model refusal IS the judge refusing; anything the
     vocabulary cannot name is the run failing (Paper II's event E), never a guess."""
-    if stop_reason == "refusal":
+    if stop_reason in ("refusal", "content_filter"):
         return Verdict.REFUSED
     word = text.strip().strip("`.").lower()
     try:
@@ -93,55 +126,10 @@ def parse_verdict(stop_reason: str | None, text: str) -> Verdict:
     return Verdict.ERROR if v == Verdict.UNSPECIFIED else v
 
 
-class CloudJudge:
-    """Runs here, under consent. `consent_for` reads m1_065; `evidence_for` assembles
-    the tier-bounded evidence text (E0 typed record / E1 sanitized hunks) — injected
-    because the ledger read lives behind controld's query choke, not in this service."""
-
-    locus = JudgeLocus.CLOUD
-
-    def __init__(
-        self,
-        client: AsyncAnthropic,
-        consent_for: ConsentReader,
-        evidence_for: EvidenceReader,
-        profile: str = "saas",
-    ) -> None:
-        self._client = client
-        self._consent_for = consent_for
-        self._evidence_for = evidence_for
-        self._profile = profile
-
-    async def run(
-        self, tenant_id: UUID, judge_id: str, task_id: UUID, attempt_id: UUID, session_id: UUID
-    ) -> JudgeVote:
-        spec = spec_for(judge_id, self._profile)
-        admit(spec, await self._consent_for(tenant_id, judge_id))
-        evidence = await self._evidence_for(task_id, attempt_id, spec.evidence_tier)
-        # ponytail: one Messages call per task; the nightly Batch API path is jobs/judge_batch.py
-        msg = await self._client.messages.create(**message_params(spec, evidence))
-        return vote_from(spec, msg)
-
-
-def message_params(spec: JudgeSpec, evidence: str) -> MessageCreateParamsNonStreaming:
-    """The one call shape both cloud loci make: rubric as the cached static prefix (06 §6.3),
-    the evidence as the user turn, the region pinned (§6.5 precondition 3)."""
-    return MessageCreateParamsNonStreaming(
-        model=spec.model,
-        max_tokens=spec.token_budget,
-        system=[{"type": "text", "text": spec.rubric, "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": evidence}],
-        inference_geo=spec.region,
-    )
-
-
-def vote_from(spec: JudgeSpec, msg: Message) -> JudgeVote:
-    """A served region other than the pinned one is a refusal, never a vote."""
-    served = msg.usage.inference_geo
-    if served is not None and served != spec.region:
-        raise refuse(f"refused_region_mismatch:{spec.region}", f"served from {served!r}")
-    text = "".join(b.text for b in msg.content if b.type == "text")
-    return judge_vote(spec, parse_verdict(msg.stop_reason, text))
+def vote_from(spec: JudgeSpec, reply: Completion) -> JudgeVote:
+    """The router already refused a reply served by any model but the pinned one."""
+    text = reply.text.rsplit("</think>", 1)[-1]  # a reasoning model's trace is not its answer
+    return judge_vote(spec, parse_verdict(reply.finish_reason, text))
 
 
 def judge_vote(spec: JudgeSpec, vote: Verdict) -> JudgeVote:
@@ -152,45 +140,5 @@ def judge_vote(spec: JudgeSpec, vote: Verdict) -> JudgeVote:
         # ponytail: sha256 not HMAC_tenant; no Python resolver for m1_001's hmac salt exists yet
         rubric_hash=hashlib.sha256(spec.rubric.encode()).digest(),
         locus=JudgeLocus.CLOUD,
+        trigger=JudgeTrigger.ALWAYS,  # judge_batch runs the cloud judge on every task it can
     )
-
-
-class BatchRunner(Protocol):
-    async def run(self, requests: Sequence[Request]) -> tuple[str, dict[str, Message]]: ...
-
-
-class AnthropicBatchRunner:
-    """intel memory/extract.py's Batch API runner, keeping the whole Message: the job books
-    usage (06 §6.4) and reads stop_reason (a refusal IS the judge refusing)."""
-
-    def __init__(self, client: AsyncAnthropic, *, poll_s: float = 60.0) -> None:
-        self._client = client
-        self._poll_s = poll_s
-
-    async def run(self, requests: Sequence[Request]) -> tuple[str, dict[str, Message]]:
-        batch = await self._client.messages.batches.create(requests=list(requests))
-        while batch.processing_status != "ended":
-            await asyncio.sleep(self._poll_s)
-            batch = await self._client.messages.batches.retrieve(batch.id)
-        out: dict[str, Message] = {}
-        async for r in await self._client.messages.batches.results(batch.id):
-            if r.result.type == "succeeded":
-                out[r.custom_id] = r.result.message
-            else:
-                log.warning("batch %s: %s %s", batch.id, r.custom_id, r.result.type)
-        return batch.id, out
-
-
-def batch_request(spec: JudgeSpec, request_id: str, evidence: str) -> Request:
-    return Request(custom_id=request_id, params=message_params(spec, evidence))
-
-
-def usage_of(msg: Message) -> dict[str, Any]:
-    """The four counters 06 §6.4 books as verifier spend v (cache_read is §6.3's SLO)."""
-    u = msg.usage
-    return {
-        "input_tokens": u.input_tokens,
-        "output_tokens": u.output_tokens,
-        "cache_creation_input_tokens": u.cache_creation_input_tokens or 0,
-        "cache_read_input_tokens": u.cache_read_input_tokens or 0,
-    }

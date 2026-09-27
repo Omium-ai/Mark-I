@@ -8,7 +8,8 @@ from uuid import UUID, uuid4
 import asyncpg
 import pytest
 from app.certified.archive import Excerpt, RedactionReceipt, admit, pg_receipt_reader
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
+from tests.roles import service_pool
 from tests.test_pg_stores import _mk_tenant
 
 DSN = os.environ.get("M1_TEST_PG_DSN", "")
@@ -28,7 +29,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN unset under M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"{DSN!r} unreachable under M1_REQUIRE_STORES=1: {exc!r}", pytrace=False)
@@ -73,11 +74,11 @@ async def _mk_receipt(pool: asyncpg.Pool, tenant: str, x: Excerpt, part: bytes) 
         )
 
 
-async def test_bound_receipt_reads_back_under_its_tenant_only(pool):
-    tenant, other = await _mk_tenant(pool), await _mk_tenant(pool)
+async def test_bound_receipt_reads_back_under_its_tenant_only(admin, pool):
+    tenant, other = await _mk_tenant(admin), await _mk_tenant(admin)
     part = b"+sanitized\n"
     x = Excerpt(uuid4(), uuid4(), "attach.x.e1", hashlib.sha256(tenant.encode()).digest())
-    await _mk_receipt(pool, tenant, x, part)
+    await _mk_receipt(admin, tenant, x, part)
 
     got = await pg_receipt_reader(pool, UUID(tenant))(x.receipt_id)
     assert got == RedactionReceipt(x.evidence_event_id, hashlib.sha256(part).digest(), x.event_id)

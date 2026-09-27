@@ -14,7 +14,6 @@ dependencies = [
     "numpy>=2.0.0",                # the ENTIRE numeric surface of spectral/ (06 §4: numpy only, ~500 LoC)
     "mark1-receipts",              # workspace
     "m1p-proto",                   # workspace (proto/gen/python)
-    "anthropic>=1.0",              # cloud-judge path ONLY (06 §6.5); consent-gated in judges/cloud_path.py
     "zstandard>=0.23",             # M1P wire is zstd (08 §2.1); no stdlib codec before 3.14
 ]
 

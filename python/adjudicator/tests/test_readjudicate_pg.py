@@ -1,7 +1,8 @@
 """adj_002 against real Postgres: the nightly cascade lands readjudicate.run and promotion.step in
-job_runs, the escalations row cites the m1_certified_runs row it ran, the shadow pair accrues
-on the m1_069 head through promotion.step (FR-LEARN-004), the CHECKs refuse half-recorded
-legs, and RLS keeps one tenant's escalations invisible to another."""
+job_runs, the escalations row cites the m1_certified_runs row it ran, the RM's folded RmScore
+votes accrue on the m1_069 head against the certified ledger through promotion.step
+(FR-LEARN-004, 16 §L6), the CHECKs refuse half-recorded legs, and RLS keeps one tenant's
+escalations invisible to another."""
 
 import functools
 import json
@@ -14,26 +15,24 @@ import asyncpg
 import httpx
 import pytest
 from app.certified.runner import CONSENT_ID, CONSISTENCY_ID, definition, execution_hash
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.jobs import JOBS
 from app.jobs.judge_batch import run as judge_batch_run
 from app.jobs.nightly import certs_recompute, promotion_step, spectral_estimate
-from app.jobs.readjudicate import NO_ATTEMPT, measured_pairs, run
+from app.jobs.readjudicate import NO_ATTEMPT, RM_NOT_ESCALATION_SCOPED, run
 from app.jobs.registry import validate
 from app.jobs.runner import run_many
-from app.registry.promotion import RECEIPT_TYPE, ShadowPair, register, transition
-from app.rm.scorer import definition as rm_definition
+from app.registry.promotion import RECEIPT_TYPE, register, transition
 from mark1_receipts import canonical_json
 from pydantic import SecretStr
+from tests.roles import service_pool
 from tests.test_certified import ANCHOR, T3_ID, TEMPLATE
 from tests.test_jobs import FakeChoke
-from tests.test_judge_batch import FakeBatch
 from tests.test_pg_stores import FakeControld, _mk_judge_verifier, _mk_tenant
 from tests.test_promotion_pg import _head, _mk_cert
-from tests.test_readjudicate import AMBIGUOUS, NO_TEST, FakeCloud, row, rows
+from tests.test_readjudicate import AMBIGUOUS, NO_TEST, FakeCloud, rm_row, row, rows
 from tests.test_readjudicate import env as _env
-from tests.test_rm import RM_ID
-from tests.test_rm import SETTINGS as RM_SETTINGS
+from tests.test_rm_pg import _mk_sealed_rm
 
 env = _env  # the ADJ_RM_* / ADJ_E2B_* fixture, re-exported for this module's collection
 
@@ -50,7 +49,12 @@ pytestmark = [
 
 NOW = datetime(2026, 9, 16, 3, 0, tzinfo=UTC)
 SETTINGS = SimpleNamespace(
-    querychoke_base_url="http://choke", querychoke_token=SecretStr("svc"), http_timeout_s=5.0
+    querychoke_base_url="http://choke",
+    querychoke_token=SecretStr("svc"),
+    http_timeout_s=5.0,
+    llm_router_url="",
+    judge_max_tasks_per_day=60,
+    judge_max_tasks_per_run=60,
 )
 
 
@@ -59,7 +63,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN unset under M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"{DSN!r} unreachable under M1_REQUIRE_STORES=1: {exc!r}", pytrace=False)
@@ -71,7 +75,8 @@ async def pool():
 
 
 async def _verifier(pool, key: str, kind: str, defn: dict, xh: bytes | None = None) -> UUID:
-    """A global m1_verifiers row keyed so registry_by_wire_id resolves the wire id."""
+    """A global m1_verifiers row keyed so registry_by_wire_id resolves the wire id. The code pins
+    these keys, so a row already there must be exactly this one, never silently reused."""
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO m1_verifiers (verifier_key, kind, version, display_name, definition, "
@@ -82,17 +87,27 @@ async def _verifier(pool, key: str, kind: str, defn: dict, xh: bytes | None = No
             canonical_json(defn),
             xh,
         )
-        return await conn.fetchval(
-            "SELECT id FROM m1_verifiers WHERE verifier_key = $1 AND version = 1", key
+        row = await conn.fetchrow(
+            "SELECT id, kind, definition, effective_execution_hash FROM m1_verifiers "
+            "WHERE verifier_key = $1 AND version = 1",
+            key,
         )
+    assert (row["kind"], json.loads(row["definition"]), row["effective_execution_hash"]) == (
+        kind,
+        defn,
+        xh,
+    ), f"{key}@1 in the shared catalog is not this test's row"
+    return row["id"]
 
 
-async def _verifiers(pool) -> UUID:
+async def _verifiers(pool, tenant: str) -> tuple[UUID, str]:
     await _verifier(
         pool, T3_ID, "anchor", definition(ANCHOR, TEMPLATE), execution_hash(ANCHOR, TEMPLATE)
     )
     await _verifier(pool, CONSISTENCY_ID.split("@")[0], "consistency", {"kind": "consistency"})
-    return await _verifier(pool, RM_ID.split("@")[0], "reward_model", rm_definition(RM_SETTINGS))
+    await _verifier(pool, "judge:g", "judge", {"kind": "judge", "group": "judge"})
+    key = f"rm:readj-{uuid4().hex[:8]}"
+    return await _mk_sealed_rm(pool, key, tenant=tenant), f"{key}@1"
 
 
 async def _consent(pool, tenant: str) -> UUID:
@@ -138,17 +153,21 @@ def _targets(http: httpx.AsyncClient) -> dict:
             run, http=http, evidence_for=_evidence, archive_for=_archive
         ),
         "promotion.step": functools.partial(promotion_step, http=http),
-        "judge_batch.run": functools.partial(judge_batch_run, http=http, batch=FakeBatch()),
+        "judge_batch.run": functools.partial(judge_batch_run, http=http),
     }
 
 
-async def test_cascade_escalates_persists_and_accrues_the_shadow_pair(pool, env):
-    tenant = await _mk_tenant(pool)
-    rm_verifier = await _verifiers(pool)
-    consent = await _consent(pool, tenant)
+def _certified(r: dict, verdict: str, cert: str) -> dict:
+    return {**r, "task_verdict": verdict, "task_noise_cert_id": cert}
+
+
+async def test_cascade_escalates_persists_and_accrues_the_shadow_pair(admin, pool, env):
+    tenant = await _mk_tenant(admin)
+    rm_verifier, rm_id = await _verifiers(admin, tenant)
+    consent = await _consent(admin, tenant)
     controld = FakeControld({RECEIPT_TYPE, "noise_certificate"})
     async with pool.acquire() as conn:
-        cert = await _mk_cert(conn, tenant, await _mk_judge_verifier(pool))
+        cert = await _mk_cert(conn, tenant, await _mk_judge_verifier(admin))
         pid = await register(conn, tenant_id=tenant, verifier_id=rm_verifier)
         await transition(
             conn,
@@ -159,14 +178,18 @@ async def test_cascade_escalates_persists_and_accrues_the_shadow_pair(pool, env)
             to_state="shadow",
             reason="eval_card_complete",
         )
-    # lint-accept + judge-accept: eta 0.891, just over 1 - A/D and inside its margin; no test
+    # lint-accept + a diff judge's accept (two cliques): eta 0.891, just over 1 - A/D; no test
     # anchor, so the escalated verdict is `satisfied` and the Youden pairs have both classes.
+    # The RM scored all three tasks (0.9 folds to accept) and the ledger certified them.
     satisfied_task = uuid4()
     cloud = FakeCloud(
         [
             *rows(),
             row(satisfied_task, "ruff@cat-1", "AnchorVote", "satisfied"),
             row(satisfied_task, "judge:g@1", "JudgeVote", "satisfied", seq=2),
+            _certified({**rm_row(AMBIGUOUS, 0.9), "verifier_id": rm_id}, "violated", cert),
+            _certified({**rm_row(NO_TEST, 0.9), "verifier_id": rm_id}, "violated", cert),
+            _certified({**rm_row(satisfied_task, 0.9), "verifier_id": rm_id}, "satisfied", cert),
         ]
     )
     http = _http(cloud, controld)
@@ -185,7 +208,8 @@ async def test_cascade_escalates_persists_and_accrues_the_shadow_pair(pool, env)
     )
     assert rec["noise_cert_id"] == UUID(cert) and len(rec["posterior"]) == 4
     assert (rec["consistency_fused"], rec["consistency_excluded"]) == (1, 0)
-    assert (rec["rm_verifier_id"], rec["rm_vote"], rec["rm_skipped"]) == (RM_ID, "accept", None)
+    assert (rec["rm_verifier_id"], rec["rm_vote"]) == (None, None)
+    assert rec["rm_skipped"] == RM_NOT_ESCALATION_SCOPED
     assert rec["t3_skipped"] is None and rec["agreement_rate"] == 1
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
@@ -196,17 +220,11 @@ async def test_cascade_escalates_persists_and_accrues_the_shadow_pair(pool, env)
     assert t3["attempt_id"] == NO_ATTEMPT and t3["verdict"] == "violated"
     assert t3["edge_verdict"] == "satisfied" and t3["divergence"] == 1
 
-    # FR-LEARN-004: the pair reached run_promotion and the m1_069 head counted it.
+    # FR-LEARN-004: the RM's 3 votes pair with certified verdicts; the m1_069 head counts them
     async with pool.acquire() as conn:
-        measured = await measured_pairs(conn, tenant)
         head = await _head(conn, tenant, pid)
-    assert set(measured) == {pid} and measured[pid].bar == 0.0
-    assert sorted(measured[pid].pairs, key=lambda p: p.verdict) == [
-        ShadowPair("accept", "satisfied", cert),
-        ShadowPair("accept", "violated", cert),
-        ShadowPair("accept", "violated", cert),
-    ]
     assert head["state"] == "shadow" and head["shadow_n"] == 3 and head["cert_id"] == UUID(cert)
+    assert head["gold_n"] == 0 and head["bar"] == 0
     async with pool.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         jobs = await conn.fetch(
@@ -222,19 +240,19 @@ async def test_cascade_escalates_persists_and_accrues_the_shadow_pair(pool, env)
     assert len(cloud.e2b.calls) == 5, "one sandbox lifecycle; the re-run touched nothing"
 
     # A task whose T3 ran is final; one without a run is recomputed into the same row.
-    async with pool.acquire() as conn, conn.transaction():
+    async with admin.acquire() as conn, conn.transaction():
         await set_local_tenant(conn, tenant)
         await conn.execute("DELETE FROM job_runs WHERE job = 'readjudicate.run'")
     ctx = SimpleNamespace(
         pool=pool, settings=SETTINGS, tenant_id=tenant, window_start=NOW, day=NOW.date()
     )
     await run(ctx, http=http, evidence_for=_evidence, archive_for=_archive)
-    assert len(cloud.e2b.calls) == 5 and len(cloud.rm_calls) == 5
+    assert len(cloud.e2b.calls) == 5
     assert len(await _escalations(pool, tenant)) == 3
 
 
-async def test_checks_refuse_half_recorded_legs(pool):
-    tenant = await _mk_tenant(pool)
+async def test_checks_refuse_half_recorded_legs(admin, pool):
+    tenant = await _mk_tenant(admin)
     base = dict(
         tenant_id=UUID(tenant),
         task_id=uuid4(),
@@ -274,7 +292,7 @@ async def test_checks_refuse_half_recorded_legs(pool):
     assert len(await _escalations(pool, tenant)) == 1
 
 
-async def test_rls_isolation_on_escalations(pool):
+async def test_rls_isolation_on_escalations(admin, pool):
     async with pool.acquire() as conn:
         bypass = await conn.fetchval(
             "SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname = current_user"
@@ -284,7 +302,7 @@ async def test_rls_isolation_on_escalations(pool):
         if REQUIRE_STORES:
             pytest.fail(msg, pytrace=False)
         pytest.skip(msg)
-    a, b = await _mk_tenant(pool), await _mk_tenant(pool)
+    a, b = await _mk_tenant(admin), await _mk_tenant(admin)
     task = uuid4()
     sql = (
         "INSERT INTO escalations (tenant_id, task_id, window_start, eta, provisional, verdict, "

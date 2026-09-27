@@ -89,15 +89,13 @@ CALIBRATED_CONFUSION: MappingProxyType[str, Confusion] = MappingProxyType(
 # no compiled bundle yet). Values from the 06 §3.2 worked example's bundle — DESIGN.
 DEFAULT_PRIORS = (0.55, 0.30, 0.10, 0.05)
 
-# Correlation groups (06 §4.1, known BY CONSTRUCTION): syntactic∪tests is ONE group —
-# a linter and a test failing on the same diff is one observation about the diff
-# (07, normative; restated in 06 §3.1 step 2). Judges and RMs form their own cliques.
+# Correlation groups (06 §4.1); fallback def.group. Tests/judges/RMs own clique (16 §Indep).
 KIND_TO_GROUP: MappingProxyType[str, str] = MappingProxyType(
     {
         "lint": "syntactic",
         "typecheck": "syntactic",
         "compile": "syntactic",
-        "test": "syntactic",
+        "test": "tests",
         "judge": "judges",
         "rm": "rms",
         "consistency": "consistency",

@@ -17,6 +17,7 @@ from m1p.v1 import (
     CertificationStatus,
     Event,
     JudgeVote,
+    RmScore,
     SdkInfo,
     Verdict,
     VerdictEvent,
@@ -38,6 +39,7 @@ _CERTIFICATION = {
 }
 _DOMAIN = b"adjudicator/verdict/"
 _JUDGE_DOMAIN = b"adjudicator/judge/"
+_RM_DOMAIN = b"adjudicator/rm/"
 
 
 def deterministic_v7(domain: bytes, key: bytes, at: datetime) -> bytes:
@@ -109,6 +111,24 @@ def judge_vote_wire(
         occurred_at=at,
         session_epoch=SERVICE_EPOCH,
         judge_vote=vote,
+    )
+
+
+def rm_score_wire(
+    score: RmScore, *, tenant_id: UUID, task_id: UUID, session_id: UUID, window_start: datetime
+) -> Event:
+    """The cloud RM's score (16 §L6), one deterministic event_id per (tenant, task, model)."""
+    at = window_close(window_start)
+    return Event(
+        event_id=deterministic_v7(
+            _RM_DOMAIN, tenant_id.bytes + task_id.bytes + score.model_id.encode(), at
+        ),
+        seq=int(at.timestamp() * 1000),
+        session_id=session_id.bytes,
+        task_id=task_id.bytes,
+        occurred_at=at,
+        session_epoch=SERVICE_EPOCH,
+        rm_score=score,
     )
 
 

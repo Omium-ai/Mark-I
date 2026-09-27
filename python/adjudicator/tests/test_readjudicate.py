@@ -1,7 +1,7 @@
-"""readjudicate (06 §1.2) through fake choke rows, a fake vLLM and a fake E2B: the D18 selection
-rule pinned, the RM's zero fusion weight on the escalated verdict, T3 only under consent, the
-consistency vote fusing only at escalation=True (FR-VERIFY-017), shadow pairs reaching
-run_promotion through promotion.step (FR-LEARN-004), and every failure a counted skip."""
+"""readjudicate (06 §1.2) through fake choke rows and a fake E2B: the D18 selection rule
+pinned, a folded RmScore of an unpromoted RM carrying zero fusion weight, T3 only under consent,
+the consistency vote fusing only at escalation=True (FR-VERIFY-017), and every failure a
+counted skip. The RM never rides escalation (16 §Independence)."""
 
 import contextlib
 import json
@@ -25,21 +25,21 @@ from app.jobs import nightly, readjudicate
 from app.jobs.readjudicate import (
     MARGIN,
     NO_ATTEMPT,
+    RM_NOT_ESCALATION_SCOPED,
     bundle_for,
     is_candidate,
-    measured_pairs,
     readjudicate_skipped_total,
     registry_by_wire_id,
     votes_by_task,
 )
 from app.registry.catalog import RegistryEntry
 from app.registry.handlers import KIND_CONSISTENCY, KIND_TEST
-from app.registry.promotion import Measurement, ShadowPair, youden
+from app.rm.scorer import CALIBRATION_VERSION
 from m1p.v1 import Batch, CertificationStatus, VerdictStage
 from pydantic import SecretStr
 from tests.test_certified import ANCHOR, T3_ID, TEMPLATE, FakeE2B
-from tests.test_jobs import VOTE_ROW, FakeChoke
-from tests.test_rm import GOOD, KEY, RM_ID
+from tests.test_jobs import RM_XH, VOTE_ROW, FakeChoke
+from tests.test_rm import KEY, RM_ID
 
 TENANT = str(uuid4())
 CERT = uuid4()
@@ -105,7 +105,7 @@ def entry(key: str, kind: str, db_kind: str, xh: bytes | None = None) -> dict:
 REGISTRY_ROWS = [
     entry(T3_ID, KIND_TEST, "anchor", execution_hash(ANCHOR, TEMPLATE)),
     entry(CONSISTENCY_ID.split("@")[0], KIND_CONSISTENCY, "consistency"),
-    entry(RM_ID.split("@")[0], "rm", "reward_model"),
+    entry(RM_ID.split("@")[0], "rm", "reward_model", RM_XH),
 ]
 
 
@@ -126,6 +126,9 @@ class FakePool:
     async def fetch(self, sql, *args):
         if "FROM m1_verifiers" in sql:
             return REGISTRY_ROWS
+        if "RIGHT JOIN m1_verifiers" in sql:  # promotion.fusion_states: the RM has no head
+            key, version = RM_ID.split("@")
+            return [{"verifier_key": key, "version": int(version), "scope": None, "state": None}]
         if "m1_verifier_promotions" in sql:
             return []
         if "FROM escalations" in sql:
@@ -179,12 +182,11 @@ def _cert_row(status: str) -> dict:
 
 
 class FakeCloud:
-    """One MockTransport for the choke, controld's service ingest, vLLM and both E2B hosts."""
+    """One MockTransport for the choke, controld's service ingest and both E2B hosts."""
 
-    def __init__(self, choke_rows, rm_reply=GOOD, e2b: FakeE2B | None = None, ingest=200):
+    def __init__(self, choke_rows, e2b: FakeE2B | None = None, ingest=200):
         self.choke = FakeChoke(choke_rows)
-        self.rm_reply, self.e2b = rm_reply, e2b or FakeE2B(stdout=b"FAILED t.py::t\n", exit_code=1)
-        self.rm_calls: list[httpx.Request] = []
+        self.e2b = e2b or FakeE2B(stdout=b"FAILED t.py::t\n", exit_code=1)
         self.ingested: list[httpx.Request] = []
         self.ingest = ingest
 
@@ -201,9 +203,6 @@ class FakeCloud:
             return await self.choke.client().send(
                 httpx.Request(req.method, req.url, headers=req.headers, content=req.content)
             )
-        if host == "rm.test":
-            self.rm_calls.append(req)
-            return httpx.Response(200, json={"choices": [{"message": {"content": self.rm_reply}}]})
         return self.e2b(req)
 
     def client(self) -> httpx.AsyncClient:
@@ -232,8 +231,6 @@ async def _archive(task_id, attempt_id, tier):
 
 @pytest.fixture
 def env(monkeypatch):
-    monkeypatch.setenv("ADJ_RM_BASE_URL", "http://rm.test/v1")
-    monkeypatch.setenv("ADJ_RM_API_KEY", KEY)
     monkeypatch.setenv("ADJ_E2B_API_KEY", E2B_KEY)
     monkeypatch.setenv("ADJ_E2B_TEMPLATE", TEMPLATE)
 
@@ -289,16 +286,25 @@ async def test_run_escalates_only_tasks_inside_the_margin_and_persists_the_row(e
     assert (rec["vote_count"], rec["consistency_fused"], rec["consistency_excluded"]) == (3, 1, 0)
     assert rec["agreement_rate"] == Decimal("1.000000")  # T3 violated, provisional violated
     assert rec["certified_run_id"] is not None and rec["t3_skipped"] is None
-    assert (rec["rm_verifier_id"], rec["rm_vote"], rec["rm_skipped"]) == (RM_ID, "accept", None)
-    assert len(cloud.rm_calls) == 2 and len(pool.runs) == 1
+    assert (rec["rm_verifier_id"], rec["rm_vote"]) == (None, None)
+    assert rec["rm_skipped"] == RM_NOT_ESCALATION_SCOPED and len(pool.runs) == 1
     no_test = esc[NO_TEST]
     assert no_test["t3_skipped"] == "t3_no_test_anchor" and no_test["certified_run_id"] is None
     assert no_test["agreement_rate"] is None and no_test["consistency_fused"] == 0
 
 
-async def test_rm_shadow_vote_never_changes_the_escalated_verdict(env):
-    """A sharp reject from the RM (score 0.02) on a task the ensemble accepts: the escalated
-    verdict and posterior are bit-identical to the run without any RM, and the pair is recorded."""
+def rm_row(task: UUID, score: float, seq: int = 3) -> dict:
+    return {
+        **row(task, RM_ID, "RmScore", "", seq=seq),
+        "score": score,
+        "calibration_version": CALIBRATION_VERSION,
+    }
+
+
+async def test_unpromoted_rm_score_folds_but_never_moves_the_escalated_verdict(env):
+    """A sharp RmScore reject (0.02 folds to violated) on a task the ensemble accepts: the RM
+    has no promotion head, so fusion_states holds it in probation and the escalated verdict and
+    posterior are bit-identical to the ledger without it."""
     ambiguous_accept = uuid4()
     accept_rows = [
         row(ambiguous_accept, ANCHOR, "AnchorVote", "satisfied"),
@@ -306,22 +312,22 @@ async def test_rm_shadow_vote_never_changes_the_escalated_verdict(env):
     ]
     e2b_pass = FakeE2B(stdout=b"3 passed\n", exit_code=0)
     with_rm = await _run(
-        FakePool(),
-        FakeCloud(
-            accept_rows, rm_reply=json.dumps({"score": 0.02, "rationale": "x"}), e2b=e2b_pass
-        ),
+        FakePool(), FakeCloud([*accept_rows, rm_row(ambiguous_accept, 0.02)], e2b=e2b_pass)
     )
-    pool = FakePool()
-    without = await _run(pool, FakeCloud(accept_rows, e2b=FakeE2B(exit_code=0)), evidence=None)
+    without = await _run(FakePool(), FakeCloud(accept_rows, e2b=FakeE2B(exit_code=0)))
     a, b = with_rm[ambiguous_accept], without[ambiguous_accept]
-    assert a["rm_vote"] == "reject" and b["rm_vote"] is None and b["rm_skipped"] == "rm_no_scorer"
     assert (a["verdict"], a["posterior"], a["stage"]) == (b["verdict"], b["posterior"], b["stage"])
     assert a["verdict"] == "satisfied" and a["vote_count"] == b["vote_count"] == 3
-    # Positive control: the same reject COUNTED would flip it (the bundle lists rm as a kind).
+    registry = registry_by_wire_id(
+        [RegistryEntry(uuid4(), RM_ID.split("@")[0], 1, "reward_model", "rm", RM_XH, False)]
+    )
+    votes = votes_by_task([*accept_rows, rm_row(ambiguous_accept, 0.02)], registry)
+    rm = next(v for v in votes[ambiguous_accept] if v.verifier_id == RM_ID)
+    assert (rm.kind, rm.vote, rm.tier) == ("rm", "reject", "T2")
+    # Positive control: the same folded reject COUNTED would move it.
     bundle = Bundle(calibrated_defaults=True)
-    votes = votes_by_task(accept_rows, {})[ambiguous_accept]
-    rm = replace(votes[0], verifier_id=RM_ID, kind="rm", vote="reject", tier="T2")
-    assert adjudicate([*votes, rm], bundle).posterior != adjudicate(votes, bundle).posterior
+    honest = [v for v in votes[ambiguous_accept] if v.verifier_id != RM_ID]
+    assert adjudicate([*honest, rm], bundle).posterior != adjudicate(honest, bundle).posterior
 
 
 async def test_t3_runs_only_under_a_live_t3_consent(env):
@@ -379,7 +385,9 @@ async def test_bundle_uses_the_windows_spectral_laws_and_stamps_only_a_certified
     assert bundle.verifiers[ANCHOR].confusion[:2] == ((0.95, 0.02, 0.03), (0.5, 0.45, 0.05))
     assert bundle.verifiers[ANCHOR].confusion[2:] == CALIBRATED_CONFUSION["test"][2:]
     assert adjudicate(votes, bundle, noise_cert_id=str(CERT)).stage == "CERTIFIED"
-    assert bundle_for(votes, {"passed": False, "confusion": {}}).verifiers == {}
+    unfit = bundle_for(votes, {"passed": False, "confusion": {}}).verifiers
+    assert {p.provenance for p in unfit.values()} == {"prior"}
+    assert unfit.keys() == bundle.verifiers.keys()
     assert bundle_for(votes, None).calibrated_defaults
     for status, want in (("bootstrapping", None), (None, None), ("certified", CERT)):
         esc = await _run(
@@ -392,17 +400,16 @@ async def test_bundle_uses_the_windows_spectral_laws_and_stamps_only_a_certified
 async def test_every_failure_is_a_counted_skip_never_a_fabricated_vote(env):
     before = dict(readjudicate_skipped_total)
     pool = FakePool()
-    esc = await _run(pool, FakeCloud(rows(), rm_reply="not json", e2b=FakeE2B(fail_at="create")))
+    esc = await _run(pool, FakeCloud(rows(), e2b=FakeE2B(fail_at="create")))
     rec = esc[AMBIGUOUS]
-    assert (rec["rm_vote"], rec["rm_skipped"]) == (None, "rm_refused")
+    assert (rec["rm_vote"], rec["rm_skipped"]) == (None, RM_NOT_ESCALATION_SCOPED)
     # A sandbox that never came up is a T3 run whose anchor vote is an infra abstain, so the
     # escalated verdict is the ledger's alone -- never a `violated` invented from the outage.
     assert rec["certified_run_id"] is not None and rec["t3_skipped"] is None
     assert rec["verdict"] == "violated" and rec["consistency_fused"] == 1
     assert pool.runs[0][10] == "error"
     counted = {k: v - before.get(k, 0) for k, v in readjudicate_skipped_total.items()}
-    assert counted["rm_refused"] == 2 and counted["t3_no_test_anchor"] == 1
-    assert counted["vote_unusable:RmScore"] == 0 if "vote_unusable:RmScore" in counted else True
+    assert counted["t3_no_test_anchor"] == 1
     with pytest.raises(RuntimeError, match="ADJ_QUERYCHOKE_BASE_URL"):
         await readjudicate.run(_ctx(FakePool(), base_url=""), http=FakeCloud([]).client())
 
@@ -460,90 +467,6 @@ def test_latest_vote_per_verifier_wins_and_kinds_resolve_through_the_registry():
         == "lint"
     )
     assert all(v.attempt_id == NO_ATTEMPT for v in votes)
-
-
-class FakeConn:
-    def __init__(self, heads, rows):
-        self.heads, self.rows = heads, rows
-
-    def transaction(self):
-        return contextlib.nullcontext()
-
-    async def execute(self, sql, *args):
-        assert sql.startswith("SELECT set_config")
-
-    async def fetch(self, sql, *args):
-        return self.heads if "m1_verifier_promotions" in sql else self.rows
-
-
-def _head(pid, vid, incumbent_kind=None):
-    inc = incumbent_kind is not None
-    return {
-        "id": pid,
-        "vid": vid,
-        "inc_id": uuid4() if inc else None,
-        "inc_key": "judge:incumbent" if inc else None,
-        "inc_version": 1 if inc else None,
-        "inc_kind": "judge" if inc else None,
-        "inc_definition": json.dumps({"kind": incumbent_kind}) if inc else None,
-        "inc_hash": None,
-        "inc_retired": None,
-    }
-
-
-async def test_measured_pairs_reach_run_promotion_through_promotion_step(monkeypatch):
-    rm_pid, judge_pid, idle_pid = uuid4(), uuid4(), uuid4()
-    heads = [
-        _head(rm_pid, RM_ID),
-        _head(judge_pid, "judge:l@1", "judge"),
-        _head(idle_pid, "rm:idle@1"),
-    ]
-    esc_rows = [
-        {
-            "rm_verifier_id": RM_ID,
-            "rm_vote": "reject",
-            "verdict": "violated",
-            "noise_cert_id": CERT,
-        },
-        {
-            "rm_verifier_id": RM_ID,
-            "rm_vote": "accept",
-            "verdict": "satisfied",
-            "noise_cert_id": None,
-        },
-        {
-            "rm_verifier_id": "judge:l@1",
-            "rm_vote": "reject",
-            "verdict": "refused",
-            "noise_cert_id": CERT,
-        },
-    ]
-    measured = await measured_pairs(FakeConn(heads, esc_rows), TENANT)
-    assert set(measured) == {rm_pid, judge_pid}
-    assert measured[rm_pid] == Measurement(
-        [ShadowPair("reject", "violated", str(CERT)), ShadowPair("accept", "satisfied", "")], 0.0
-    )
-    assert measured[judge_pid] == Measurement(
-        [ShadowPair("reject", "refused", str(CERT))], youden(CALIBRATED_CONFUSION["judge"])
-    )
-
-    seen = {}
-
-    async def fake_run_promotion(conn, append, *, tenant_id, measured, now=None):
-        seen["measured"], seen["append"] = measured, append
-        return SimpleNamespace(receipt_ids=(uuid4(),))
-
-    monkeypatch.setattr("app.registry.promotion.run_promotion", fake_run_promotion)
-
-    class Pool:
-        @contextlib.asynccontextmanager
-        async def acquire(self):
-            yield FakeConn(heads, esc_rows)
-
-    ctx = SimpleNamespace(pool=Pool(), tenant_id=TENANT, settings=_ctx(None).settings)
-    assert await nightly.promotion_step(ctx, http=httpx.AsyncClient()) is not None
-    assert seen["measured"] == measured
-    assert seen["append"].args[1:] == ("http://choke", "svc")  # the controld appender, bearer bound
 
 
 async def test_no_key_appears_in_logs(env, caplog):

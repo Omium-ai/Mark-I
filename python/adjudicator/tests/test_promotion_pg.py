@@ -12,12 +12,13 @@ from uuid import UUID, uuid4
 import asyncpg
 import httpx
 import pytest
-from app.db import _tenant_guc_reset, set_local_tenant
+from app.db import set_local_tenant
 from app.jobs.nightly import promotion_step
 from app.registry import promotion
 from app.registry.promotion import RECEIPT_TYPE, Measurement, register, run_promotion, transition
 from mark1_receipts import ReceiptAppendError
 from pydantic import SecretStr
+from tests.roles import service_pool
 from tests.test_pg_stores import FakeControld, _mk_judge_verifier, _mk_tenant
 from tests.test_promotion import pairs
 
@@ -40,7 +41,7 @@ async def pool():
     if not DSN:
         pytest.fail("M1_TEST_PG_DSN unset under M1_REQUIRE_STORES=1", pytrace=False)
     try:
-        p = await asyncpg.create_pool(dsn=DSN, min_size=1, max_size=3, setup=_tenant_guc_reset)
+        p = await service_pool(min_size=1, max_size=3)
     except Exception as exc:
         if REQUIRE_STORES:
             pytest.fail(f"{DSN!r} unreachable under M1_REQUIRE_STORES=1: {exc!r}", pytrace=False)
@@ -101,7 +102,7 @@ async def _ledger(conn, tenant: str, pid: UUID) -> list[tuple[str, str, str]]:
         await set_local_tenant(conn, tenant)
         rows = await conn.fetch(
             "SELECT from_state, to_state, reason FROM m1_verifier_promotion_transitions "
-            "WHERE promotion_id = $1 ORDER BY at, from_state",
+            "WHERE promotion_id = $1 ORDER BY row_seq",
             pid,
         )
     return [(r["from_state"], r["to_state"], r["reason"]) for r in rows]
@@ -112,7 +113,7 @@ async def _receipt_ids(conn, tenant: str, pid: UUID) -> list[UUID]:
         await set_local_tenant(conn, tenant)
         rows = await conn.fetch(
             "SELECT receipt_id FROM m1_verifier_promotion_transitions "
-            "WHERE promotion_id = $1 ORDER BY at",
+            "WHERE promotion_id = $1 ORDER BY row_seq",
             pid,
         )
     return [r["receipt_id"] for r in rows]
@@ -139,9 +140,9 @@ def _acked(controld: FakeControld, tenant: str) -> list[dict]:
     ]
 
 
-async def _candidate(conn, pool, append, *, to_shadow=True) -> tuple[str, UUID, UUID]:
-    tenant = await _mk_tenant(pool)
-    verifier = await _mk_judge_verifier(pool)
+async def _candidate(conn, admin, append, *, to_shadow=True) -> tuple[str, UUID, UUID]:
+    tenant = await _mk_tenant(admin)
+    verifier = await _mk_judge_verifier(admin)
     pid = await register(conn, tenant_id=tenant, verifier_id=verifier)
     if to_shadow:
         await transition(
@@ -166,10 +167,21 @@ def _sqlstate(excinfo) -> str:
     return excinfo.value.sqlstate
 
 
-async def test_promotion_pipeline_state_machine(conn, pool, controld, append):
+async def _age(conn, tenant: str, pid: UUID, hours: float = 49) -> None:
+    """Backdate the head past m1_098's 48 h canary hold (state_since is not the state)."""
+    async with conn.transaction():
+        await set_local_tenant(conn, tenant)
+        await conn.execute(
+            "UPDATE m1_verifier_promotions SET state_since = $2 WHERE id = $1",
+            pid,
+            datetime.now(UTC) - timedelta(hours=hours),
+        )
+
+
+async def test_promotion_pipeline_state_machine(admin, conn, pool, controld, append):
     """No path to active without shadow votes, an LCB pass over the bar under a live cert,
     and a canary row; every edge lands one ledger row and one chained receipt."""
-    tenant, verifier, pid = await _candidate(conn, pool, append)
+    tenant, verifier, pid = await _candidate(conn, admin, append)
     cert = await _mk_cert(conn, tenant, verifier)
 
     for frm, to in (("probation", "lcb_promoted"), ("shadow", "active"), ("shadow", "canary")):
@@ -198,6 +210,9 @@ async def test_promotion_pipeline_state_machine(conn, pool, controld, append):
         await _step(conn, append, tenant, pid, "lcb_promoted", "active")
     assert _sqlstate(e) == CHECK_VIOLATION
     await _step(conn, append, tenant, pid, "lcb_promoted", "canary", "canary_plan_attached")
+    with pytest.raises(asyncpg.CheckViolationError, match="canary_hold"):
+        await _step(conn, append, tenant, pid, "canary", "active", "widen_criteria_met")
+    await _age(conn, tenant, pid)
     await _step(conn, append, tenant, pid, "canary", "active", "widen_criteria_met")
     assert (await _head(conn, tenant, pid))["state"] == "active"
 
@@ -226,9 +241,9 @@ async def test_promotion_pipeline_state_machine(conn, pool, controld, append):
     assert all(r["idempotency_key"] == f"promotion.step:{r['subject_id']}" for r in cited)
 
 
-async def test_registration_and_direct_state_writes_refused_by_the_db(conn, pool, append):
-    tenant, verifier, pid = await _candidate(conn, pool, append)
-    other = await _mk_judge_verifier(pool)
+async def test_registration_and_direct_state_writes_refused_by_the_db(admin, conn, pool, append):
+    tenant, verifier, pid = await _candidate(conn, admin, append)
+    other = await _mk_judge_verifier(admin)
     async with conn.transaction():
         await set_local_tenant(conn, tenant)
         with pytest.raises(asyncpg.CheckViolationError, match="registers in probation"):
@@ -251,17 +266,23 @@ async def test_registration_and_direct_state_writes_refused_by_the_db(conn, pool
     ):
         async with conn.transaction():
             await set_local_tenant(conn, tenant)
-            with pytest.raises(asyncpg.InsufficientPrivilegeError, match="append-only"):
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
                 await conn.execute(stmt, pid)
+        async with admin.acquire() as owner, owner.transaction():
+            await set_local_tenant(owner, tenant)
+            with pytest.raises(asyncpg.InsufficientPrivilegeError, match="append-only"):
+                await owner.execute(stmt, pid)
     assert (await _head(conn, tenant, pid))["state"] == "shadow"
     assert len(await _ledger(conn, tenant, pid)) == 1
 
 
 @pytest.mark.parametrize("status,expired", [("bootstrapping", False), ("certified", True)])
-async def test_promotion_refused_without_live_certified_cert(conn, pool, append, status, expired):
+async def test_promotion_refused_without_live_certified_cert(
+    admin, conn, pool, append, status, expired
+):
     """C5 twice: uncertified pairs are not evidence (n stays 0), and a head whose cert_id is
     not currently certified cannot cross into lcb_promoted even with the numbers in place."""
-    tenant, verifier, pid = await _candidate(conn, pool, append)
+    tenant, verifier, pid = await _candidate(conn, admin, append)
     dead = await _mk_cert(conn, tenant, verifier, status=status, expired=expired)
     rep = await run_promotion(
         conn, append, tenant_id=tenant, measured={pid: Measurement(pairs(600, 0.9, 0.0, cert=dead))}
@@ -290,20 +311,23 @@ async def test_promotion_refused_without_live_certified_cert(conn, pool, append,
         await conn.execute(
             "UPDATE m1_verifier_promotions SET shadow_n = 499, cert_id = $2 WHERE id = $1",
             pid,
-            UUID(await _mk_cert(conn, tenant, await _mk_judge_verifier(pool))),
+            UUID(await _mk_cert(conn, tenant, await _mk_judge_verifier(admin))),
         )
     with pytest.raises(asyncpg.CheckViolationError, match="insufficient_evidence.*shadow_n=499"):
         await _step(conn, append, tenant, pid, "shadow", "lcb_promoted")
     assert (await _head(conn, tenant, pid))["state"] == "shadow"
 
 
-async def test_demotion_on_regression_and_stale_evidence_refused(conn, pool, controld, append):
-    tenant, verifier, pid = await _candidate(conn, pool, append)
+async def test_demotion_on_regression_and_stale_evidence_refused(
+    admin, conn, pool, controld, append
+):
+    tenant, verifier, pid = await _candidate(conn, admin, append)
     cert = await _mk_cert(conn, tenant, verifier)
     await run_promotion(
         conn, append, tenant_id=tenant, measured={pid: Measurement(pairs(600, 0.8, 0.1, cert=cert))}
     )
     await _step(conn, append, tenant, pid, "lcb_promoted", "canary")
+    await _age(conn, tenant, pid)
     await _step(conn, append, tenant, pid, "canary", "active")
 
     steady = Measurement(pairs(600, 0.8, 0.1, seed=7, cert=cert), bar=0.5)
@@ -349,11 +373,11 @@ async def test_demotion_on_regression_and_stale_evidence_refused(conn, pool, con
     assert [r["payload"]["reason"] for r in cited][-2:] == ["regression", "lcb_promotion"]
 
 
-async def test_receipt_and_ledger_row_share_one_transaction(conn, pool, controld, append):
+async def test_receipt_and_ledger_row_share_one_transaction(admin, conn, pool, controld, append):
     """The receipt comes first and the row commits carrying its id: a controld 500 lands no
     transition (the negative), a DB-refused edge leaves controld's receipt an orphan that no
     ledger row cites (the insert_cert posture), and a legal edge's row names its receipt."""
-    tenant, verifier, pid = await _candidate(conn, pool, append)
+    tenant, verifier, pid = await _candidate(conn, admin, append)
     controld.fail_with = (500, "M1E-9500", "chain head locked")
     with pytest.raises(ReceiptAppendError, match="M1E-9500"):
         await _step(conn, append, tenant, pid, "shadow", "retired", "withdrawn")
@@ -383,9 +407,9 @@ async def test_receipt_and_ledger_row_share_one_transaction(conn, pool, controld
         await _step(conn, append, tenant, pid, "retired", "shadow")
 
 
-async def test_nightly_step_retires_after_shadow_ttl(conn, pool, controld, append):
-    tenant, _verifier, pid = await _candidate(conn, pool, append)
-    fresh_tenant, _v2, fresh = await _candidate(conn, pool, append)
+async def test_nightly_step_retires_after_shadow_ttl(admin, conn, pool, controld, append):
+    tenant, _verifier, pid = await _candidate(conn, admin, append)
+    fresh_tenant, _v2, fresh = await _candidate(conn, admin, append)
     async with conn.transaction():
         await set_local_tenant(conn, tenant)
         await conn.execute(
@@ -393,11 +417,20 @@ async def test_nightly_step_retires_after_shadow_ttl(conn, pool, controld, appen
             pid,
             datetime.now(UTC) - promotion.SHADOW_TTL - timedelta(days=1),
         )
-    http = httpx.AsyncClient(transport=httpx.MockTransport(controld.handler), base_url="http://c")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/internal/v1/query":  # the adjudication_votes window: empty
+            return httpx.Response(200, json={"rows": [], "template_version": "x.v3"})
+        return controld.handler(req)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://c")
     settings = SimpleNamespace(
         querychoke_base_url="http://controld", querychoke_token=SecretStr("svc"), http_timeout_s=5.0
     )
-    ctx = SimpleNamespace(pool=pool, tenant_id=tenant, settings=settings)
+    day = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    ctx = SimpleNamespace(
+        pool=pool, tenant_id=tenant, settings=settings, window_start=day, day=day.date()
+    )
     assert await promotion_step(ctx, http=http) is not None
     assert (await _head(conn, tenant, pid))["state"] == "retired"
     assert await _ledger(conn, tenant, pid) == [
@@ -405,10 +438,12 @@ async def test_nightly_step_retires_after_shadow_ttl(conn, pool, controld, appen
         ("shadow", "retired", "shadow_ttl"),
     ]
     assert _acked(controld, tenant)[-1]["payload"]["reason"] == "shadow_ttl"
-    fresh_ctx = SimpleNamespace(pool=pool, tenant_id=fresh_tenant, settings=settings)
+    fresh_ctx = SimpleNamespace(
+        pool=pool, tenant_id=fresh_tenant, settings=settings, window_start=day, day=day.date()
+    )
     assert await promotion_step(fresh_ctx, http=http) is None
     assert (await _head(conn, fresh_tenant, fresh))["state"] == "shadow"
-    stale_tenant, v3, stale = await _candidate(conn, pool, append)
+    stale_tenant, v3, stale = await _candidate(conn, admin, append)
     cert = await _mk_cert(conn, stale_tenant, v3)
     async with conn.transaction():
         await set_local_tenant(conn, stale_tenant)
@@ -422,9 +457,9 @@ async def test_nightly_step_retires_after_shadow_ttl(conn, pool, controld, appen
     assert rep.retired == 1 and (await _head(conn, stale_tenant, stale))["state"] == "retired"
 
 
-async def test_shadow_ids_and_rls(conn, pool, append):
-    tenant, verifier, pid = await _candidate(conn, pool, append)
-    other = await _mk_tenant(pool)
+async def test_shadow_ids_and_rls(admin, conn, pool, append):
+    tenant, verifier, pid = await _candidate(conn, admin, append)
+    other = await _mk_tenant(admin)
     async with conn.transaction():
         await set_local_tenant(conn, tenant)
         key = await conn.fetchrow(
@@ -432,7 +467,7 @@ async def test_shadow_ids_and_rls(conn, pool, append):
         )
     vid = f"{key['verifier_key']}@{key['version']}"
     assert vid in await promotion.shadow_ids(conn, tenant)
-    assert await promotion.shadow_ids(conn, other) == set()
+    assert vid not in await promotion.shadow_ids(conn, other), "a judge with no head there serves"
     cert = await _mk_cert(conn, tenant, verifier)
     await run_promotion(
         conn, append, tenant_id=tenant, measured={pid: Measurement(pairs(600, 0.8, 0.1, cert=cert))}
@@ -440,6 +475,10 @@ async def test_shadow_ids_and_rls(conn, pool, append):
     assert (await _head(conn, tenant, pid))["state"] == "lcb_promoted"
     assert vid in await promotion.shadow_ids(conn, tenant), "lcb_promoted still serves nothing"
     await _step(conn, append, tenant, pid, "lcb_promoted", "canary")
+    assert vid in await promotion.canary_ids(conn, tenant), "canary fuses on its slice only"
+    assert vid in await promotion.shadow_ids(conn, tenant)
+    await _age(conn, tenant, pid)
+    await _step(conn, append, tenant, pid, "canary", "active")
     assert vid not in await promotion.shadow_ids(conn, tenant)
     async with conn.transaction():
         await set_local_tenant(conn, other)
@@ -457,8 +496,8 @@ async def test_shadow_ids_and_rls(conn, pool, append):
             )
 
 
-async def test_canary_regression_returns_to_shadow(conn, pool, append):
-    tenant, verifier, pid = await _candidate(conn, pool, append)
+async def test_canary_regression_returns_to_shadow(admin, conn, pool, append):
+    tenant, verifier, pid = await _candidate(conn, admin, append)
     cert = await _mk_cert(conn, tenant, verifier)
     await run_promotion(
         conn, append, tenant_id=tenant, measured={pid: Measurement(pairs(600, 0.8, 0.1, cert=cert))}
