@@ -456,6 +456,9 @@ impl Guard {
                 tokens_saved_estimate: 0,
                 attempt: 0,
                 evidence: String::new(),
+                knee_basis: String::new(),
+                cost_basis: String::new(),
+                bundle_seq: 0,
                 reason_code: String::new(),
             });
         let decision = if off {
@@ -487,6 +490,9 @@ pub fn refused_record(refusal: Refusal, fingerprint: Option<[u8; 32]>) -> pb::Gu
         tokens_saved_estimate: 0,
         attempt: 0,
         evidence: String::new(),
+        knee_basis: String::new(),
+        cost_basis: String::new(),
+        bundle_seq: 0,
         reason_code: refusal.reason_code().to_owned(),
     }
 }

@@ -104,6 +104,8 @@ Each entry carries `tlog_head` (D-S): the pinned log head the driving caller hol
 | `cortex_ranker_bad_stage` | M1E-3001 / schema | a properly SIGNED seq-0 bundle whose `learned_ranker.stage` is `canary`: the stage is a closed enum (07 rule 1c), and an enum miss is schema, never the paged M1E-3005 |
 | `exploration_opt_in_false` | M1E-3001 / schema | D-EF: a properly SIGNED seq-0 bundle with `route.exploration.epsilon = 0.05` and `route.exploration_opt_in = false`: ε > 0 under a signed present-false opt-in refuses in both decoders |
 | `exploration_opt_in_absent` | M1E-3001 / schema | D-EF: the same bundle with `route.exploration_opt_in` dropped entirely: ε > 0 with the opt-in key absent refuses the same as present-false, fail closed like the controld publisher — closes the carve-out `full` needed before this freeze |
+| `knee_basis` | accept | ADR-0013's OPTIONAL `route.knee.basis` = `anchor_grounded`: the drivers assert the decoded word (and that `knee_p_lcb`, which lacks the key, decodes to none), since an accept alone would not catch a decoder that swallowed it |
+| `knee_basis_bad` | M1E-3001 / schema | a properly SIGNED seq-0 bundle whose `route.knee.basis` is `unknown`: the closed enum is prior / anchor_grounded / certified, and "unknown" is the edge's record of an ABSENT key, never a wire value |
 
 Every implementation MUST drive every manifest entry, positives and negatives, and for
 accepts assert `body_sha256_hex` plus the `summary` fields against its own decode.
@@ -137,6 +139,12 @@ Rust `conf_vectors_bundle_rotation_*` (mark1-policy, reference), Go
 `TestConfVectorsBundleRotationManifests` (controld publish-side validator).
 
 ## Changelog
+
+- **2026-09-26 — 35 → 37 vectors (6 accepts / 31 rejects; no new kind), additive.** Two
+  appended for the knee table's new OPTIONAL `basis` key (ADR-0013): `knee_basis`,
+  `knee_basis_bad`. Every pre-existing `.cbor` file and `rotation_*.json` manifest is
+  byte-identical to the previous freeze (sha256 diffed before/after regeneration);
+  `manifest.json` differs ONLY by the two appended entries.
 
 - **2026-09-16 — 33 → 35 vectors (5 accepts / 30 rejects; no new kind), D-EF re-freeze
   (RECONCILIATION D-EF, ledger FR-ROUTE-003).** `full` now carries the D-EF pair with a

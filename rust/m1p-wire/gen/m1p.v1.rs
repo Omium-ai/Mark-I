@@ -103,6 +103,53 @@ pub struct ArtifactOutcome {
     pub artifact_followed: bool,
 }
 // ---------------------------------------------------------------------------
+// Outcome contributions (16 L8; rm-design §3.7, §5.7)
+// ---------------------------------------------------------------------------
+
+/// One consented task N days after close: text passed the path and admit axes before the spool; controld keeps it out of m1p_events beyond an index row.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OutcomeContribution {
+    /// \[P1\] 16 bytes, equals Event.task_id
+    #[prost(bytes="vec", tag="1")]
+    pub task_id: ::prost::alloc::vec::Vec<u8>,
+    /// \[P2\] the task's opening prompt, redacted
+    #[prost(string, tag="2")]
+    pub intent_text_redacted: ::prost::alloc::string::String,
+    /// \[P2\] the task's diff, redacted
+    #[prost(string, tag="3")]
+    pub diff_redacted: ::prost::alloc::string::String,
+    /// \[P0\] execution- and time-grounded only
+    #[prost(message, optional, tag="4")]
+    pub labels: ::core::option::Option<OutcomeLabels>,
+    /// \[P1\] 32-byte hash of the device-signed redaction receipt
+    #[prost(bytes="vec", tag="5")]
+    pub redaction_receipt_ref: ::prost::alloc::vec::Vec<u8>,
+    /// \[P0\] "<agent>/<model>\[,<model>\]" that produced the diff
+    #[prost(string, tag="6")]
+    pub generator: ::prost::alloc::string::String,
+    /// \[P0\] days between task close and labelling
+    #[prost(uint32, tag="7")]
+    pub label_age_days: u32,
+}
+/// Never a fused verdict, never an LLM label (16 "Independence rules").
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct OutcomeLabels {
+    /// \[P0\] fraction of added lines alive at HEAD; -1 = unknown
+    #[prost(double, tag="1")]
+    pub survival_30d: f64,
+    /// \[P0\] a later commit reverts the task's commit
+    #[prost(enumeration="OutcomeLabel", tag="2")]
+    pub reverted: i32,
+    /// \[P0\] consented test anchors on a clean HEAD
+    #[prost(enumeration="OutcomeLabel", tag="3")]
+    pub tests_pass: i32,
+    /// \[P0\] m1_086 gold; the edge leaves it unset, export fills it
+    #[prost(enumeration="Verdict", tag="4")]
+    pub human: i32,
+}
+// ---------------------------------------------------------------------------
 // Receipt checkpoints (contract C13). 07 §3 + 07 "The receipt chain".
 // ---------------------------------------------------------------------------
 
@@ -309,6 +356,8 @@ pub enum EvidenceTier {
     E1 = 2,
     /// full diff (VPC/self-host only)
     E2 = 3,
+    /// raw local diff read on the device by the edge judge; never leaves it
+    E1Local = 4,
 }
 impl EvidenceTier {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -321,6 +370,7 @@ impl EvidenceTier {
             EvidenceTier::E0 => "EVIDENCE_TIER_E0",
             EvidenceTier::E1 => "EVIDENCE_TIER_E1",
             EvidenceTier::E2 => "EVIDENCE_TIER_E2",
+            EvidenceTier::E1Local => "EVIDENCE_TIER_E1_LOCAL",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -330,6 +380,37 @@ impl EvidenceTier {
             "EVIDENCE_TIER_E0" => Some(Self::E0),
             "EVIDENCE_TIER_E1" => Some(Self::E1),
             "EVIDENCE_TIER_E2" => Some(Self::E2),
+            "EVIDENCE_TIER_E1_LOCAL" => Some(Self::E1Local),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum OutcomeLabel {
+    /// unknown
+    Unspecified = 0,
+    Yes = 1,
+    No = 2,
+}
+impl OutcomeLabel {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            OutcomeLabel::Unspecified => "OUTCOME_LABEL_UNSPECIFIED",
+            OutcomeLabel::Yes => "OUTCOME_LABEL_YES",
+            OutcomeLabel::No => "OUTCOME_LABEL_NO",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "OUTCOME_LABEL_UNSPECIFIED" => Some(Self::Unspecified),
+            "OUTCOME_LABEL_YES" => Some(Self::Yes),
+            "OUTCOME_LABEL_NO" => Some(Self::No),
             _ => None,
         }
     }
@@ -1371,6 +1452,25 @@ pub struct GuardDecision {
     /// excerpt. Empty on an arrest. The app's feed shows it beside the block.
     #[prost(string, tag="7")]
     pub evidence: ::prost::alloc::string::String,
+    /// \[P1\] ADR-0012: where the knee's p(r) came from — "prior" (the bootstrap
+    /// bundle's Paper I prior), "anchor_grounded" (fitted on anchor outcomes)
+    /// or "certified" (fitted on certified attempts, 06 §10.3). ADR-0013: read
+    /// from the applied bundle's route.knee.basis, never inferred; "unknown"
+    /// when that bundle predates the key. Empty on a block and on a block-cap
+    /// arrest. attempt (6) stays the attempt count n for the ledger; the knee
+    /// itself reads the repair round r.
+    #[prost(string, tag="8")]
+    pub knee_basis: ::prost::alloc::string::String,
+    /// \[P1\] The applied policy bundle's seq the decision was taken under;
+    /// projected into m1p_events.bundle_seq (the interventions read).
+    #[prost(uint64, tag="9")]
+    pub bundle_seq: u64,
+    /// \[P1\] ADR-0013: the applied bundle's route.knee.cost_basis ("usd" |
+    /// "quota") the decision was priced under, on every verify-plane decision.
+    /// Empty from an edge that predates the field: savings reads it as an
+    /// "unknown" basis, labelled and never counted as certified.
+    #[prost(string, tag="10")]
+    pub cost_basis: ::prost::alloc::string::String,
 }
 // ---------------------------------------------------------------------------
 // Bundle ACK — the other half of policy distribution (05 §4.3, 08 §3.2)
@@ -1636,6 +1736,9 @@ pub struct JudgeVote {
     /// \[P0\]
     #[prost(enumeration="JudgeLocus", tag="5")]
     pub locus: i32,
+    /// \[P0\] why the judge ran; spectral estimation
+    #[prost(enumeration="JudgeTrigger", tag="6")]
+    pub trigger: i32,
 }
 /// adjudicator-svc → mark1d, the client-side-first path (06 §6.2 step 2, ADR-0008):
 /// what crosses to the edge so the daemon can run the judge with the CUSTOMER'S
@@ -1684,12 +1787,21 @@ pub struct RmScore {
     /// \[P0\] "rm:<name>@<version>"
     #[prost(string, tag="1")]
     pub model_id: ::prost::alloc::string::String,
-    /// \[P0\] raw scalar
+    /// \[P0\] uncalibrated P(yes) = sigmoid(logit(" yes") − logit(" no")) in \[0,1\]; calibration_version maps log(p/(1−p))
     #[prost(double, tag="2")]
     pub score: f64,
     /// \[P0\] mapping used to fold into the ensemble
     #[prost(string, tag="3")]
     pub calibration_version: ::prost::alloc::string::String,
+    /// \[P0\] rm-exec/v1 BLAKE3(gguf ‖ 0x00 ‖ "llama.cpp b<build>" ‖ 0x00 ‖ template_sha hex) at CLIENT_SIDE
+    #[prost(bytes="vec", tag="4")]
+    pub execution_hash: ::prost::alloc::vec::Vec<u8>,
+    /// \[P0\] Ed25519 by the device origin key over canonical(RmScore, signature cleared), as AnchorVote
+    #[prost(bytes="vec", tag="5")]
+    pub signature: ::prost::alloc::vec::Vec<u8>,
+    /// \[P0\] CLIENT_SIDE (mark1-rm on the device) | CLOUD
+    #[prost(enumeration="JudgeLocus", tag="6")]
+    pub locus: i32,
 }
 /// Escalation-scoped only (T3 runs and escalation events); excluded from
 /// ensemble-size assumptions — consistency votes are not "free" members.
@@ -1806,6 +1918,39 @@ impl DiffClassification {
             "DIFF_CLASSIFICATION_TEST_TOUCHED" => Some(Self::TestTouched),
             "DIFF_CLASSIFICATION_CONFIG_TOUCHED" => Some(Self::ConfigTouched),
             "DIFF_CLASSIFICATION_SUPPRESSION_TOUCHED" => Some(Self::SuppressionTouched),
+            _ => None,
+        }
+    }
+}
+/// What made a judge run on a task. 16 §Independence: a judge whose running
+/// depends on another clique's vote (AMBIGUOUS) feeds fusion only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum JudgeTrigger {
+    Unspecified = 0,
+    /// ran on every task it could, independent of any vote
+    Always = 1,
+    /// dispatched because the fused verdict was ambiguous
+    Ambiguous = 2,
+}
+impl JudgeTrigger {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            JudgeTrigger::Unspecified => "JUDGE_TRIGGER_UNSPECIFIED",
+            JudgeTrigger::Always => "JUDGE_TRIGGER_ALWAYS",
+            JudgeTrigger::Ambiguous => "JUDGE_TRIGGER_AMBIGUOUS",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "JUDGE_TRIGGER_UNSPECIFIED" => Some(Self::Unspecified),
+            "JUDGE_TRIGGER_ALWAYS" => Some(Self::Always),
+            "JUDGE_TRIGGER_AMBIGUOUS" => Some(Self::Ambiguous),
             _ => None,
         }
     }
@@ -2081,7 +2226,7 @@ pub struct Event {
     #[prost(sint64, tag="903")]
     pub clock_skew_ms: i64,
     /// ---- Body (exactly one) -------------------------------------------------
-    #[prost(oneof="event::Body", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39")]
+    #[prost(oneof="event::Body", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40")]
     pub body: ::core::option::Option<event::Body>,
 }
 /// Nested message and enum types in `Event`.
@@ -2146,6 +2291,9 @@ pub mod event {
         /// opt-in tiers only (E1/E2)
         #[prost(message, tag="39")]
         EvidenceExcerpt(super::EvidenceExcerpt),
+        /// consented training upload (16 L8)
+        #[prost(message, tag="40")]
+        OutcomeContribution(super::OutcomeContribution),
     }
 }
 /// Loss accounting. Exactly three fields by design: what, which class, how

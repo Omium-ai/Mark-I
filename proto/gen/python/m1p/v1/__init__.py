@@ -75,6 +75,13 @@ class EvidenceTier(betterproto.Enum):
     E0 = 1
     E1 = 2
     E2 = 3
+    E1_LOCAL = 4
+
+
+class OutcomeLabel(betterproto.Enum):
+    UNSPECIFIED = 0
+    YES = 1
+    NO = 2
 
 
 class CapturePath(betterproto.Enum):
@@ -216,6 +223,17 @@ class DiffClassification(betterproto.Enum):
     TEST_TOUCHED = 3
     CONFIG_TOUCHED = 4
     SUPPRESSION_TOUCHED = 5
+
+
+class JudgeTrigger(betterproto.Enum):
+    """
+    What made a judge run on a task. 16 §Independence: a judge whose running
+     depends on another clique's vote (AMBIGUOUS) feeds fusion only.
+    """
+
+    UNSPECIFIED = 0
+    ALWAYS = 1
+    AMBIGUOUS = 2
 
 
 class JudgeLocus(betterproto.Enum):
@@ -399,6 +417,31 @@ class ArtifactOutcome(betterproto.Message):
     artifact_id: bytes = betterproto.bytes_field(1)
     task_verdict: "Verdict" = betterproto.enum_field(2)
     artifact_followed: bool = betterproto.bool_field(3)
+
+
+@dataclass(eq=False, repr=False)
+class OutcomeContribution(betterproto.Message):
+    """
+    One consented task N days after close: text passed the path and admit axes before the spool; controld keeps it out of m1p_events beyond an index row.
+    """
+
+    task_id: bytes = betterproto.bytes_field(1)
+    intent_text_redacted: str = betterproto.string_field(2)
+    diff_redacted: str = betterproto.string_field(3)
+    labels: "OutcomeLabels" = betterproto.message_field(4)
+    redaction_receipt_ref: bytes = betterproto.bytes_field(5)
+    generator: str = betterproto.string_field(6)
+    label_age_days: int = betterproto.uint32_field(7)
+
+
+@dataclass(eq=False, repr=False)
+class OutcomeLabels(betterproto.Message):
+    """Never a fused verdict, never an LLM label (16 "Independence rules")."""
+
+    survival_30_d: float = betterproto.double_field(1)
+    reverted: "OutcomeLabel" = betterproto.enum_field(2)
+    tests_pass: "OutcomeLabel" = betterproto.enum_field(3)
+    human: "Verdict" = betterproto.enum_field(4)
 
 
 @dataclass(eq=False, repr=False)
@@ -978,6 +1021,31 @@ class GuardDecision(betterproto.Message):
      excerpt. Empty on an arrest. The app's feed shows it beside the block.
     """
 
+    knee_basis: str = betterproto.string_field(8)
+    """
+    [P1] ADR-0012: where the knee's p(r) came from — "prior" (the bootstrap
+     bundle's Paper I prior), "anchor_grounded" (fitted on anchor outcomes)
+     or "certified" (fitted on certified attempts, 06 §10.3). ADR-0013: read
+     from the applied bundle's route.knee.basis, never inferred; "unknown"
+     when that bundle predates the key. Empty on a block and on a block-cap
+     arrest. attempt (6) stays the attempt count n for the ledger; the knee
+     itself reads the repair round r.
+    """
+
+    bundle_seq: int = betterproto.uint64_field(9)
+    """
+    [P1] The applied policy bundle's seq the decision was taken under;
+     projected into m1p_events.bundle_seq (the interventions read).
+    """
+
+    cost_basis: str = betterproto.string_field(10)
+    """
+    [P1] ADR-0013: the applied bundle's route.knee.cost_basis ("usd" |
+     "quota") the decision was priced under, on every verify-plane decision.
+     Empty from an edge that predates the field: savings reads it as an
+     "unknown" basis, labelled and never counted as certified.
+    """
+
 
 @dataclass(eq=False, repr=False)
 class BundleAck(betterproto.Message):
@@ -1193,6 +1261,7 @@ class JudgeVote(betterproto.Message):
     tier_used: "EvidenceTier" = betterproto.enum_field(3)
     rubric_hash: bytes = betterproto.bytes_field(4)
     locus: "JudgeLocus" = betterproto.enum_field(5)
+    trigger: "JudgeTrigger" = betterproto.enum_field(6)
 
 
 @dataclass(eq=False, repr=False)
@@ -1225,6 +1294,9 @@ class RmScore(betterproto.Message):
     model_id: str = betterproto.string_field(1)
     score: float = betterproto.double_field(2)
     calibration_version: str = betterproto.string_field(3)
+    execution_hash: bytes = betterproto.bytes_field(4)
+    signature: bytes = betterproto.bytes_field(5)
+    locus: "JudgeLocus" = betterproto.enum_field(6)
 
 
 @dataclass(eq=False, repr=False)
@@ -1490,6 +1562,9 @@ class Event(betterproto.Message):
     artifact_outcome: "ArtifactOutcome" = betterproto.message_field(37, group="body")
     route_decision: "RouteDecision" = betterproto.message_field(38, group="body")
     evidence_excerpt: "EvidenceExcerpt" = betterproto.message_field(39, group="body")
+    outcome_contribution: "OutcomeContribution" = betterproto.message_field(
+        40, group="body"
+    )
     tenant_id: bytes = betterproto.bytes_field(900)
     """
     ---- SERVER-STAMPED band (900–999) --------------------------------------

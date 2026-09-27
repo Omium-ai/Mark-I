@@ -112,6 +112,22 @@ message GuardDecision {
   // "; "-joined — the typed EvidenceRecord vocabulary, never a path, never an
   // excerpt. Empty on an arrest. The app's feed shows it beside the block.
   string evidence = 7;
+  // [P1] ADR-0012: where the knee's p(r) came from — "prior" (the bootstrap
+  // bundle's Paper I prior), "anchor_grounded" (fitted on anchor outcomes)
+  // or "certified" (fitted on certified attempts, 06 §10.3). ADR-0013: read
+  // from the applied bundle's route.knee.basis, never inferred; "unknown"
+  // when that bundle predates the key. Empty on a block and on a block-cap
+  // arrest. attempt (6) stays the attempt count n for the ledger; the knee
+  // itself reads the repair round r.
+  string knee_basis = 8;
+  // [P1] The applied policy bundle's seq the decision was taken under;
+  // projected into m1p_events.bundle_seq (the interventions read).
+  uint64 bundle_seq = 9;
+  // [P1] ADR-0013: the applied bundle's route.knee.cost_basis ("usd" |
+  // "quota") the decision was priced under, on every verify-plane decision.
+  // Empty from an edge that predates the field: savings reads it as an
+  // "unknown" basis, labelled and never counted as certified.
+  string cost_basis = 10;
 }
 
 // 07 §3, verbatim, plus the verify plane's two outcomes.

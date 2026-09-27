@@ -418,6 +418,9 @@ mod tests {
             tokens_saved_estimate: 0,
             attempt: 0,
             evidence: String::new(),
+            knee_basis: String::new(),
+            cost_basis: String::new(),
+            bundle_seq: 0,
             reason_code: crate::guard::REASON_UNPROVISIONED.to_owned(),
         });
     }

@@ -179,6 +179,7 @@ message Event {
     ArtifactOutcome artifact_outcome = 37;
     RouteDecision route_decision = 38;
     EvidenceExcerpt evidence_excerpt = 39;  // opt-in tiers only (E1/E2)
+    OutcomeContribution outcome_contribution = 40;  // consented training upload (16 L8)
   }
 
   // ---- SERVER-STAMPED band (900–999) --------------------------------------

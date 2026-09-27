@@ -429,6 +429,40 @@
       "tlog_head": null
     },
     {
+      "body_sha256_hex": "ebc4102d2f44a7fae302866b2dda1f8b09eed08c9ef2a2c90e5e5cb4fcb7f288",
+      "expect": "accept",
+      "file": "knee_basis.cbor",
+      "file_sha256_hex": "6386bd708b8599238a942b9e6d1f8bfdc0a5ccc2028537adfc2cf0cb05defcf7",
+      "last_applied_seq": null,
+      "name": "knee_basis",
+      "summary": {
+        "agents": 1,
+        "anchors": 2,
+        "channel": "local",
+        "correlation_groups": 1,
+        "exploration_epsilon": 0.0,
+        "issued_at_epoch_s": 1787961600,
+        "knee_rows": 3,
+        "max_age_s": 31536000,
+        "max_consecutive_blocks": 3,
+        "quarantined": 0,
+        "seq": 0,
+        "stop_gate_enabled": true,
+        "verifiers": 3
+      },
+      "tlog_head": null
+    },
+    {
+      "code": "M1E-3001",
+      "expect": "reject",
+      "file": "knee_basis_bad.cbor",
+      "file_sha256_hex": "0d80ca494d655900840f18ce6d1baedcb4a2cd9837c9ee8caef48b5ecc76e3ce",
+      "kind": "schema",
+      "last_applied_seq": null,
+      "name": "knee_basis_bad",
+      "tlog_head": null
+    },
+    {
       "code": "M1E-3003",
       "expect": "reject",
       "file": "forged_inclusion_root_seq2.cbor",

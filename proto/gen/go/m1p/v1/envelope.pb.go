@@ -480,6 +480,7 @@ type Event struct {
 	//	*Event_ArtifactOutcome
 	//	*Event_RouteDecision
 	//	*Event_EvidenceExcerpt
+	//	*Event_OutcomeContribution
 	Body isEvent_Body `protobuf_oneof:"body"`
 	// ---- SERVER-STAMPED band (900–999) --------------------------------------
 	// Populated by controld.ingest from VERIFIED token claims and its own
@@ -794,6 +795,15 @@ func (x *Event) GetEvidenceExcerpt() *EvidenceExcerpt {
 	return nil
 }
 
+func (x *Event) GetOutcomeContribution() *OutcomeContribution {
+	if x != nil {
+		if x, ok := x.Body.(*Event_OutcomeContribution); ok {
+			return x.OutcomeContribution
+		}
+	}
+	return nil
+}
+
 func (x *Event) GetTenantId() []byte {
 	if x != nil {
 		return x.TenantId
@@ -928,6 +938,10 @@ type Event_EvidenceExcerpt struct {
 	EvidenceExcerpt *EvidenceExcerpt `protobuf:"bytes,39,opt,name=evidence_excerpt,json=evidenceExcerpt,proto3,oneof"` // opt-in tiers only (E1/E2)
 }
 
+type Event_OutcomeContribution struct {
+	OutcomeContribution *OutcomeContribution `protobuf:"bytes,40,opt,name=outcome_contribution,json=outcomeContribution,proto3,oneof"` // consented training upload (16 L8)
+}
+
 func (*Event_SessionStart) isEvent_Body() {}
 
 func (*Event_SessionEnd) isEvent_Body() {}
@@ -975,6 +989,8 @@ func (*Event_ArtifactOutcome) isEvent_Body() {}
 func (*Event_RouteDecision) isEvent_Body() {}
 
 func (*Event_EvidenceExcerpt) isEvent_Body() {}
+
+func (*Event_OutcomeContribution) isEvent_Body() {}
 
 // Loss accounting. Exactly three fields by design: what, which class, how
 // many. Every shed, eviction, expiry, CRC loss, quarantine or degraded parse
@@ -1066,7 +1082,7 @@ const file_m1p_v1_envelope_proto_rawDesc = "" +
 	"\x02os\x18\x03 \x01(\tR\x02os\x12\x12\n" +
 	"\x04arch\x18\x04 \x01(\tR\x04arch\x12\x14\n" +
 	"\x05agent\x18\x05 \x01(\tR\x05agent\x12#\n" +
-	"\ragent_version\x18\x06 \x01(\tR\fagentVersion\"\x99\x0e\n" +
+	"\ragent_version\x18\x06 \x01(\tR\fagentVersion\"\xeb\x0e\n" +
 	"\x05Event\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\fR\aeventId\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1d\n" +
@@ -1105,7 +1121,8 @@ const file_m1p_v1_envelope_proto_rawDesc = "" +
 	"\x10memory_injection\x18$ \x01(\v2\x17.m1p.v1.MemoryInjectionH\x00R\x0fmemoryInjection\x12D\n" +
 	"\x10artifact_outcome\x18% \x01(\v2\x17.m1p.v1.ArtifactOutcomeH\x00R\x0fartifactOutcome\x12>\n" +
 	"\x0eroute_decision\x18& \x01(\v2\x15.m1p.v1.RouteDecisionH\x00R\rrouteDecision\x12D\n" +
-	"\x10evidence_excerpt\x18' \x01(\v2\x17.m1p.v1.EvidenceExcerptH\x00R\x0fevidenceExcerpt\x12\x1c\n" +
+	"\x10evidence_excerpt\x18' \x01(\v2\x17.m1p.v1.EvidenceExcerptH\x00R\x0fevidenceExcerpt\x12P\n" +
+	"\x14outcome_contribution\x18( \x01(\v2\x1b.m1p.v1.OutcomeContributionH\x00R\x13outcomeContribution\x12\x1c\n" +
 	"\ttenant_id\x18\x84\a \x01(\fR\btenantId\x12\x1c\n" +
 	"\tdevice_id\x18\x85\a \x01(\fR\bdeviceId\x12<\n" +
 	"\vreceived_at\x18\x86\a \x01(\v2\x1a.google.protobuf.TimestampR\n" +
@@ -1183,6 +1200,7 @@ var file_m1p_v1_envelope_proto_goTypes = []any{
 	(*ArtifactOutcome)(nil),       // 28: m1p.v1.ArtifactOutcome
 	(*RouteDecision)(nil),         // 29: m1p.v1.RouteDecision
 	(*EvidenceExcerpt)(nil),       // 30: m1p.v1.EvidenceExcerpt
+	(*OutcomeContribution)(nil),   // 31: m1p.v1.OutcomeContribution
 }
 var file_m1p_v1_envelope_proto_depIdxs = []int32{
 	3,  // 0: m1p.v1.Batch.sdk:type_name -> m1p.v1.SdkInfo
@@ -1214,14 +1232,15 @@ var file_m1p_v1_envelope_proto_depIdxs = []int32{
 	28, // 26: m1p.v1.Event.artifact_outcome:type_name -> m1p.v1.ArtifactOutcome
 	29, // 27: m1p.v1.Event.route_decision:type_name -> m1p.v1.RouteDecision
 	30, // 28: m1p.v1.Event.evidence_excerpt:type_name -> m1p.v1.EvidenceExcerpt
-	6,  // 29: m1p.v1.Event.received_at:type_name -> google.protobuf.Timestamp
-	1,  // 30: m1p.v1.Dropped.reason:type_name -> m1p.v1.DropReason
-	0,  // 31: m1p.v1.Dropped.durability_class:type_name -> m1p.v1.DurabilityClass
-	32, // [32:32] is the sub-list for method output_type
-	32, // [32:32] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	31, // 29: m1p.v1.Event.outcome_contribution:type_name -> m1p.v1.OutcomeContribution
+	6,  // 30: m1p.v1.Event.received_at:type_name -> google.protobuf.Timestamp
+	1,  // 31: m1p.v1.Dropped.reason:type_name -> m1p.v1.DropReason
+	0,  // 32: m1p.v1.Dropped.durability_class:type_name -> m1p.v1.DurabilityClass
+	33, // [33:33] is the sub-list for method output_type
+	33, // [33:33] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_envelope_proto_init() }
@@ -1259,6 +1278,7 @@ func file_m1p_v1_envelope_proto_init() {
 		(*Event_ArtifactOutcome)(nil),
 		(*Event_RouteDecision)(nil),
 		(*Event_EvidenceExcerpt)(nil),
+		(*Event_OutcomeContribution)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

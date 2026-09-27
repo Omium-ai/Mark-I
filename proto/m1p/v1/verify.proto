@@ -128,6 +128,17 @@ message JudgeVote {
   EvidenceTier tier_used = 3;  // [P0] what the judge actually saw
   bytes rubric_hash = 4;       // [P1] HMAC_tenant of the rubric prefix served
   JudgeLocus locus = 5;        // [P0]
+  JudgeTrigger trigger = 6;    // [P0] why the judge ran; spectral estimation
+                               //      reads only vote-independent triggers
+                               //      (ALWAYS), never AMBIGUOUS (16 §Independence)
+}
+
+// What made a judge run on a task. 16 §Independence: a judge whose running
+// depends on another clique's vote (AMBIGUOUS) feeds fusion only.
+enum JudgeTrigger {
+  JUDGE_TRIGGER_UNSPECIFIED = 0;
+  JUDGE_TRIGGER_ALWAYS = 1;     // ran on every task it could, independent of any vote
+  JUDGE_TRIGGER_AMBIGUOUS = 2;  // dispatched because the fused verdict was ambiguous
 }
 
 // adjudicator-svc → mark1d, the client-side-first path (06 §6.2 step 2, ADR-0008):
@@ -158,8 +169,11 @@ enum JudgeLocus {
 // One T2 learned reward model's scalar score.
 message RmScore {
   string model_id = 1;             // [P0] "rm:<name>@<version>"
-  double score = 2;                // [P0] raw scalar
+  double score = 2;                // [P0] uncalibrated P(yes) = sigmoid(logit(" yes") − logit(" no")) in [0,1]; calibration_version maps log(p/(1−p))
   string calibration_version = 3;  // [P0] mapping used to fold into the ensemble
+  bytes execution_hash = 4;        // [P0] rm-exec/v1 BLAKE3(gguf ‖ 0x00 ‖ "llama.cpp b<build>" ‖ 0x00 ‖ template_sha hex) at CLIENT_SIDE
+  bytes signature = 5;             // [P0] Ed25519 by the device origin key over canonical(RmScore, signature cleared), as AnchorVote
+  JudgeLocus locus = 6;            // [P0] CLIENT_SIDE (mark1-rm on the device) | CLOUD
 }
 
 // Escalation-scoped only (T3 runs and escalation events); excluded from

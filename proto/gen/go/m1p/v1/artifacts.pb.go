@@ -249,6 +249,7 @@ const (
 	EvidenceTier_EVIDENCE_TIER_E0          EvidenceTier = 1 // typed record only (the default)
 	EvidenceTier_EVIDENCE_TIER_E1          EvidenceTier = 2 // sanitized diff hunks, redaction-receipted (opt-in)
 	EvidenceTier_EVIDENCE_TIER_E2          EvidenceTier = 3 // full diff (VPC/self-host only)
+	EvidenceTier_EVIDENCE_TIER_E1_LOCAL    EvidenceTier = 4 // raw local diff read on the device by the edge judge; never leaves it
 )
 
 // Enum value maps for EvidenceTier.
@@ -258,12 +259,14 @@ var (
 		1: "EVIDENCE_TIER_E0",
 		2: "EVIDENCE_TIER_E1",
 		3: "EVIDENCE_TIER_E2",
+		4: "EVIDENCE_TIER_E1_LOCAL",
 	}
 	EvidenceTier_value = map[string]int32{
 		"EVIDENCE_TIER_UNSPECIFIED": 0,
 		"EVIDENCE_TIER_E0":          1,
 		"EVIDENCE_TIER_E1":          2,
 		"EVIDENCE_TIER_E2":          3,
+		"EVIDENCE_TIER_E1_LOCAL":    4,
 	}
 )
 
@@ -292,6 +295,55 @@ func (x EvidenceTier) Number() protoreflect.EnumNumber {
 // Deprecated: Use EvidenceTier.Descriptor instead.
 func (EvidenceTier) EnumDescriptor() ([]byte, []int) {
 	return file_m1p_v1_artifacts_proto_rawDescGZIP(), []int{3}
+}
+
+type OutcomeLabel int32
+
+const (
+	OutcomeLabel_OUTCOME_LABEL_UNSPECIFIED OutcomeLabel = 0 // unknown
+	OutcomeLabel_OUTCOME_LABEL_YES         OutcomeLabel = 1
+	OutcomeLabel_OUTCOME_LABEL_NO          OutcomeLabel = 2
+)
+
+// Enum value maps for OutcomeLabel.
+var (
+	OutcomeLabel_name = map[int32]string{
+		0: "OUTCOME_LABEL_UNSPECIFIED",
+		1: "OUTCOME_LABEL_YES",
+		2: "OUTCOME_LABEL_NO",
+	}
+	OutcomeLabel_value = map[string]int32{
+		"OUTCOME_LABEL_UNSPECIFIED": 0,
+		"OUTCOME_LABEL_YES":         1,
+		"OUTCOME_LABEL_NO":          2,
+	}
+)
+
+func (x OutcomeLabel) Enum() *OutcomeLabel {
+	p := new(OutcomeLabel)
+	*p = x
+	return p
+}
+
+func (x OutcomeLabel) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (OutcomeLabel) Descriptor() protoreflect.EnumDescriptor {
+	return file_m1p_v1_artifacts_proto_enumTypes[4].Descriptor()
+}
+
+func (OutcomeLabel) Type() protoreflect.EnumType {
+	return &file_m1p_v1_artifacts_proto_enumTypes[4]
+}
+
+func (x OutcomeLabel) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use OutcomeLabel.Descriptor instead.
+func (OutcomeLabel) EnumDescriptor() ([]byte, []int) {
+	return file_m1p_v1_artifacts_proto_rawDescGZIP(), []int{4}
 }
 
 // The ONLY default-tier evidence carrier. Deliberately has no field that
@@ -600,6 +652,168 @@ func (x *ArtifactOutcome) GetArtifactFollowed() bool {
 	return false
 }
 
+// One consented task N days after close: text passed the path and admit axes before the spool; controld keeps it out of m1p_events beyond an index row.
+type OutcomeContribution struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	TaskId              []byte                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`                                          // [P1] 16 bytes, equals Event.task_id
+	IntentTextRedacted  string                 `protobuf:"bytes,2,opt,name=intent_text_redacted,json=intentTextRedacted,proto3" json:"intent_text_redacted,omitempty"`    // [P2] the task's opening prompt, redacted
+	DiffRedacted        string                 `protobuf:"bytes,3,opt,name=diff_redacted,json=diffRedacted,proto3" json:"diff_redacted,omitempty"`                        // [P2] the task's diff, redacted
+	Labels              *OutcomeLabels         `protobuf:"bytes,4,opt,name=labels,proto3" json:"labels,omitempty"`                                                        // [P0] execution- and time-grounded only
+	RedactionReceiptRef []byte                 `protobuf:"bytes,5,opt,name=redaction_receipt_ref,json=redactionReceiptRef,proto3" json:"redaction_receipt_ref,omitempty"` // [P1] 32-byte hash of the device-signed redaction receipt
+	Generator           string                 `protobuf:"bytes,6,opt,name=generator,proto3" json:"generator,omitempty"`                                                  // [P0] "<agent>/<model>[,<model>]" that produced the diff
+	LabelAgeDays        uint32                 `protobuf:"varint,7,opt,name=label_age_days,json=labelAgeDays,proto3" json:"label_age_days,omitempty"`                     // [P0] days between task close and labelling
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *OutcomeContribution) Reset() {
+	*x = OutcomeContribution{}
+	mi := &file_m1p_v1_artifacts_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OutcomeContribution) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OutcomeContribution) ProtoMessage() {}
+
+func (x *OutcomeContribution) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_artifacts_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OutcomeContribution.ProtoReflect.Descriptor instead.
+func (*OutcomeContribution) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_artifacts_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *OutcomeContribution) GetTaskId() []byte {
+	if x != nil {
+		return x.TaskId
+	}
+	return nil
+}
+
+func (x *OutcomeContribution) GetIntentTextRedacted() string {
+	if x != nil {
+		return x.IntentTextRedacted
+	}
+	return ""
+}
+
+func (x *OutcomeContribution) GetDiffRedacted() string {
+	if x != nil {
+		return x.DiffRedacted
+	}
+	return ""
+}
+
+func (x *OutcomeContribution) GetLabels() *OutcomeLabels {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+func (x *OutcomeContribution) GetRedactionReceiptRef() []byte {
+	if x != nil {
+		return x.RedactionReceiptRef
+	}
+	return nil
+}
+
+func (x *OutcomeContribution) GetGenerator() string {
+	if x != nil {
+		return x.Generator
+	}
+	return ""
+}
+
+func (x *OutcomeContribution) GetLabelAgeDays() uint32 {
+	if x != nil {
+		return x.LabelAgeDays
+	}
+	return 0
+}
+
+// Never a fused verdict, never an LLM label (16 "Independence rules").
+type OutcomeLabels struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Survival_30D  float64                `protobuf:"fixed64,1,opt,name=survival_30d,json=survival30d,proto3" json:"survival_30d,omitempty"`                   // [P0] fraction of added lines alive at HEAD; -1 = unknown
+	Reverted      OutcomeLabel           `protobuf:"varint,2,opt,name=reverted,proto3,enum=m1p.v1.OutcomeLabel" json:"reverted,omitempty"`                    // [P0] a later commit reverts the task's commit
+	TestsPass     OutcomeLabel           `protobuf:"varint,3,opt,name=tests_pass,json=testsPass,proto3,enum=m1p.v1.OutcomeLabel" json:"tests_pass,omitempty"` // [P0] consented test anchors on a clean HEAD
+	Human         Verdict                `protobuf:"varint,4,opt,name=human,proto3,enum=m1p.v1.Verdict" json:"human,omitempty"`                               // [P0] m1_086 gold; the edge leaves it unset, export fills it
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OutcomeLabels) Reset() {
+	*x = OutcomeLabels{}
+	mi := &file_m1p_v1_artifacts_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OutcomeLabels) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OutcomeLabels) ProtoMessage() {}
+
+func (x *OutcomeLabels) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_artifacts_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OutcomeLabels.ProtoReflect.Descriptor instead.
+func (*OutcomeLabels) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_artifacts_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *OutcomeLabels) GetSurvival_30D() float64 {
+	if x != nil {
+		return x.Survival_30D
+	}
+	return 0
+}
+
+func (x *OutcomeLabels) GetReverted() OutcomeLabel {
+	if x != nil {
+		return x.Reverted
+	}
+	return OutcomeLabel_OUTCOME_LABEL_UNSPECIFIED
+}
+
+func (x *OutcomeLabels) GetTestsPass() OutcomeLabel {
+	if x != nil {
+		return x.TestsPass
+	}
+	return OutcomeLabel_OUTCOME_LABEL_UNSPECIFIED
+}
+
+func (x *OutcomeLabels) GetHuman() Verdict {
+	if x != nil {
+		return x.Human
+	}
+	return Verdict_VERDICT_UNSPECIFIED
+}
+
 // Edge announcement of a checkpoint: batch N events / T seconds -> Merkle root
 // -> chained DUAL-SIGNED receipt in Postgres (07 §3, 07 "The checkpoint
 // model"). `mark1d` seals every N events or T seconds — bundle-tunable, with
@@ -648,7 +862,7 @@ type ReceiptCheckpoint struct {
 
 func (x *ReceiptCheckpoint) Reset() {
 	*x = ReceiptCheckpoint{}
-	mi := &file_m1p_v1_artifacts_proto_msgTypes[4]
+	mi := &file_m1p_v1_artifacts_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -660,7 +874,7 @@ func (x *ReceiptCheckpoint) String() string {
 func (*ReceiptCheckpoint) ProtoMessage() {}
 
 func (x *ReceiptCheckpoint) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_artifacts_proto_msgTypes[4]
+	mi := &file_m1p_v1_artifacts_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -673,7 +887,7 @@ func (x *ReceiptCheckpoint) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReceiptCheckpoint.ProtoReflect.Descriptor instead.
 func (*ReceiptCheckpoint) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_artifacts_proto_rawDescGZIP(), []int{4}
+	return file_m1p_v1_artifacts_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ReceiptCheckpoint) GetCheckpointSeq() uint64 {
@@ -751,7 +965,21 @@ const file_m1p_v1_artifacts_proto_rawDesc = "" +
 	"\vartifact_id\x18\x01 \x01(\fR\n" +
 	"artifactId\x122\n" +
 	"\ftask_verdict\x18\x02 \x01(\x0e2\x0f.m1p.v1.VerdictR\vtaskVerdict\x12+\n" +
-	"\x11artifact_followed\x18\x03 \x01(\bR\x10artifactFollowed\"\x86\x02\n" +
+	"\x11artifact_followed\x18\x03 \x01(\bR\x10artifactFollowed\"\xac\x02\n" +
+	"\x13OutcomeContribution\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\fR\x06taskId\x120\n" +
+	"\x14intent_text_redacted\x18\x02 \x01(\tR\x12intentTextRedacted\x12#\n" +
+	"\rdiff_redacted\x18\x03 \x01(\tR\fdiffRedacted\x12-\n" +
+	"\x06labels\x18\x04 \x01(\v2\x15.m1p.v1.OutcomeLabelsR\x06labels\x122\n" +
+	"\x15redaction_receipt_ref\x18\x05 \x01(\fR\x13redactionReceiptRef\x12\x1c\n" +
+	"\tgenerator\x18\x06 \x01(\tR\tgenerator\x12$\n" +
+	"\x0elabel_age_days\x18\a \x01(\rR\flabelAgeDays\"\xc0\x01\n" +
+	"\rOutcomeLabels\x12!\n" +
+	"\fsurvival_30d\x18\x01 \x01(\x01R\vsurvival30d\x120\n" +
+	"\breverted\x18\x02 \x01(\x0e2\x14.m1p.v1.OutcomeLabelR\breverted\x123\n" +
+	"\n" +
+	"tests_pass\x18\x03 \x01(\x0e2\x14.m1p.v1.OutcomeLabelR\ttestsPass\x12%\n" +
+	"\x05human\x18\x04 \x01(\x0e2\x0f.m1p.v1.VerdictR\x05human\"\x86\x02\n" +
 	"\x11ReceiptCheckpoint\x12%\n" +
 	"\x0echeckpoint_seq\x18\x01 \x01(\x04R\rcheckpointSeq\x12\x1f\n" +
 	"\vmerkle_root\x18\x02 \x01(\fR\n" +
@@ -780,12 +1008,17 @@ const file_m1p_v1_artifacts_proto_rawDesc = "" +
 	"\x0ePATH_ROLE_TEST\x10\x01\x12\x11\n" +
 	"\rPATH_ROLE_SRC\x10\x02\x12\x14\n" +
 	"\x10PATH_ROLE_CONFIG\x10\x03\x12\x14\n" +
-	"\x10PATH_ROLE_VENDOR\x10\x04*o\n" +
+	"\x10PATH_ROLE_VENDOR\x10\x04*\x8b\x01\n" +
 	"\fEvidenceTier\x12\x1d\n" +
 	"\x19EVIDENCE_TIER_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10EVIDENCE_TIER_E0\x10\x01\x12\x14\n" +
 	"\x10EVIDENCE_TIER_E1\x10\x02\x12\x14\n" +
-	"\x10EVIDENCE_TIER_E2\x10\x03B\x90\x01\n" +
+	"\x10EVIDENCE_TIER_E2\x10\x03\x12\x1a\n" +
+	"\x16EVIDENCE_TIER_E1_LOCAL\x10\x04*Z\n" +
+	"\fOutcomeLabel\x12\x1d\n" +
+	"\x19OUTCOME_LABEL_UNSPECIFIED\x10\x00\x12\x15\n" +
+	"\x11OUTCOME_LABEL_YES\x10\x01\x12\x14\n" +
+	"\x10OUTCOME_LABEL_NO\x10\x02B\x90\x01\n" +
 	"\n" +
 	"com.m1p.v1B\x0eArtifactsProtoP\x01Z9github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1;m1pv1\xa2\x02\x03MXX\xaa\x02\x06M1p.V1\xca\x02\x06M1p\\V1\xe2\x02\x12M1p\\V1\\GPBMetadata\xea\x02\aM1p::V1b\x06proto3"
 
@@ -801,30 +1034,37 @@ func file_m1p_v1_artifacts_proto_rawDescGZIP() []byte {
 	return file_m1p_v1_artifacts_proto_rawDescData
 }
 
-var file_m1p_v1_artifacts_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_m1p_v1_artifacts_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_m1p_v1_artifacts_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_m1p_v1_artifacts_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_m1p_v1_artifacts_proto_goTypes = []any{
-	(Verdict)(0),              // 0: m1p.v1.Verdict
-	(EvidenceCategory)(0),     // 1: m1p.v1.EvidenceCategory
-	(PathRole)(0),             // 2: m1p.v1.PathRole
-	(EvidenceTier)(0),         // 3: m1p.v1.EvidenceTier
-	(*EvidenceRecord)(nil),    // 4: m1p.v1.EvidenceRecord
-	(*EvidenceCounts)(nil),    // 5: m1p.v1.EvidenceCounts
-	(*EvidenceExcerpt)(nil),   // 6: m1p.v1.EvidenceExcerpt
-	(*ArtifactOutcome)(nil),   // 7: m1p.v1.ArtifactOutcome
-	(*ReceiptCheckpoint)(nil), // 8: m1p.v1.ReceiptCheckpoint
+	(Verdict)(0),                // 0: m1p.v1.Verdict
+	(EvidenceCategory)(0),       // 1: m1p.v1.EvidenceCategory
+	(PathRole)(0),               // 2: m1p.v1.PathRole
+	(EvidenceTier)(0),           // 3: m1p.v1.EvidenceTier
+	(OutcomeLabel)(0),           // 4: m1p.v1.OutcomeLabel
+	(*EvidenceRecord)(nil),      // 5: m1p.v1.EvidenceRecord
+	(*EvidenceCounts)(nil),      // 6: m1p.v1.EvidenceCounts
+	(*EvidenceExcerpt)(nil),     // 7: m1p.v1.EvidenceExcerpt
+	(*ArtifactOutcome)(nil),     // 8: m1p.v1.ArtifactOutcome
+	(*OutcomeContribution)(nil), // 9: m1p.v1.OutcomeContribution
+	(*OutcomeLabels)(nil),       // 10: m1p.v1.OutcomeLabels
+	(*ReceiptCheckpoint)(nil),   // 11: m1p.v1.ReceiptCheckpoint
 }
 var file_m1p_v1_artifacts_proto_depIdxs = []int32{
-	1, // 0: m1p.v1.EvidenceRecord.category:type_name -> m1p.v1.EvidenceCategory
-	5, // 1: m1p.v1.EvidenceRecord.counts:type_name -> m1p.v1.EvidenceCounts
-	2, // 2: m1p.v1.EvidenceRecord.path_role:type_name -> m1p.v1.PathRole
-	3, // 3: m1p.v1.EvidenceExcerpt.tier:type_name -> m1p.v1.EvidenceTier
-	0, // 4: m1p.v1.ArtifactOutcome.task_verdict:type_name -> m1p.v1.Verdict
-	5, // [5:5] is the sub-list for method output_type
-	5, // [5:5] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	1,  // 0: m1p.v1.EvidenceRecord.category:type_name -> m1p.v1.EvidenceCategory
+	6,  // 1: m1p.v1.EvidenceRecord.counts:type_name -> m1p.v1.EvidenceCounts
+	2,  // 2: m1p.v1.EvidenceRecord.path_role:type_name -> m1p.v1.PathRole
+	3,  // 3: m1p.v1.EvidenceExcerpt.tier:type_name -> m1p.v1.EvidenceTier
+	0,  // 4: m1p.v1.ArtifactOutcome.task_verdict:type_name -> m1p.v1.Verdict
+	10, // 5: m1p.v1.OutcomeContribution.labels:type_name -> m1p.v1.OutcomeLabels
+	4,  // 6: m1p.v1.OutcomeLabels.reverted:type_name -> m1p.v1.OutcomeLabel
+	4,  // 7: m1p.v1.OutcomeLabels.tests_pass:type_name -> m1p.v1.OutcomeLabel
+	0,  // 8: m1p.v1.OutcomeLabels.human:type_name -> m1p.v1.Verdict
+	9,  // [9:9] is the sub-list for method output_type
+	9,  // [9:9] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_artifacts_proto_init() }
@@ -837,8 +1077,8 @@ func file_m1p_v1_artifacts_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_m1p_v1_artifacts_proto_rawDesc), len(file_m1p_v1_artifacts_proto_rawDesc)),
-			NumEnums:      4,
-			NumMessages:   5,
+			NumEnums:      5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

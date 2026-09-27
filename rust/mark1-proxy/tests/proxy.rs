@@ -229,6 +229,7 @@ fn route_section(epsilon: f64) -> RouteSection {
         }],
         knee: KneeTable {
             cost_basis: CostBasis::Usd,
+            basis: None,
             rows: vec![],
             v_default: 0.0,
         },

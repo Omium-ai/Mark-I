@@ -152,6 +152,7 @@ enum EvidenceTier {
   EVIDENCE_TIER_E0 = 1;  // typed record only (the default)
   EVIDENCE_TIER_E1 = 2;  // sanitized diff hunks, redaction-receipted (opt-in)
   EVIDENCE_TIER_E2 = 3;  // full diff (VPC/self-host only)
+  EVIDENCE_TIER_E1_LOCAL = 4;  // raw local diff read on the device by the edge judge; never leaves it
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +164,35 @@ message ArtifactOutcome {
   bytes artifact_id = 1;        // [P1]
   Verdict task_verdict = 2;     // [P0]
   bool artifact_followed = 3;   // [P0] heuristic: did the trajectory use it
+}
+
+// ---------------------------------------------------------------------------
+// Outcome contributions (16 L8; rm-design §3.7, §5.7)
+// ---------------------------------------------------------------------------
+
+// One consented task N days after close: text passed the path and admit axes before the spool; controld keeps it out of m1p_events beyond an index row.
+message OutcomeContribution {
+  bytes task_id = 1;               // [P1] 16 bytes, equals Event.task_id
+  string intent_text_redacted = 2; // [P2] the task's opening prompt, redacted
+  string diff_redacted = 3;        // [P2] the task's diff, redacted
+  OutcomeLabels labels = 4;        // [P0] execution- and time-grounded only
+  bytes redaction_receipt_ref = 5; // [P1] 32-byte hash of the device-signed redaction receipt
+  string generator = 6;            // [P0] "<agent>/<model>[,<model>]" that produced the diff
+  uint32 label_age_days = 7;       // [P0] days between task close and labelling
+}
+
+// Never a fused verdict, never an LLM label (16 "Independence rules").
+message OutcomeLabels {
+  double survival_30d = 1;         // [P0] fraction of added lines alive at HEAD; -1 = unknown
+  OutcomeLabel reverted = 2;       // [P0] a later commit reverts the task's commit
+  OutcomeLabel tests_pass = 3;     // [P0] consented test anchors on a clean HEAD
+  Verdict human = 4;               // [P0] m1_086 gold; the edge leaves it unset, export fills it
+}
+
+enum OutcomeLabel {
+  OUTCOME_LABEL_UNSPECIFIED = 0;   // unknown
+  OUTCOME_LABEL_YES = 1;
+  OUTCOME_LABEL_NO = 2;
 }
 
 // ---------------------------------------------------------------------------

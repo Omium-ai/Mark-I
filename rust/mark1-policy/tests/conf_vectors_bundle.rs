@@ -17,7 +17,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use mark1_policy::{verify_and_decode, LearnedRanker, RankerStage, Section, SectionKeys, TlogHead};
+use mark1_policy::{
+    verify_and_decode, KneeBasis, LearnedRanker, RankerStage, Section, SectionKeys, TlogHead,
+};
 use mark1_receipt::{hex, Ed25519Signer, KeyEntry, KeyRole, Signer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -242,6 +244,22 @@ fn conf_vectors_bundle_knee_p_lcb() {
     assert_eq!(rows[0].p_lcb, None, "absent must never become 0.0");
     assert_eq!(rows[1].p_lcb, Some(0.0));
     assert_eq!(rows[2].p_lcb, Some(0.75));
+}
+
+#[test]
+fn conf_vectors_bundle_knee_basis() {
+    // ADR-0013: the bundle's own word surfaces, and a bundle without the key (knee_p_lcb) stays None.
+    let m = manifest();
+    let keys = key_set(&m);
+    let raw = fs::read(dir().join("knee_basis.cbor")).unwrap();
+    let bundle = verify_and_decode(&raw, &keys, None, None).unwrap();
+    assert_eq!(bundle.route.knee.basis, Some(KneeBasis::AnchorGrounded));
+    let raw = fs::read(dir().join("knee_p_lcb.cbor")).unwrap();
+    let bundle = verify_and_decode(&raw, &keys, None, None).unwrap();
+    assert_eq!(
+        bundle.route.knee.basis, None,
+        "absent must never read as a basis"
+    );
 }
 
 #[test]

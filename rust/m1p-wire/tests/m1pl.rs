@@ -267,6 +267,7 @@ fn frame_roundtrip_every_event_family() {
         Body::ArtifactOutcome(Default::default()),
         Body::RouteDecision(Default::default()),
         Body::EvidenceExcerpt(Default::default()),
+        Body::OutcomeContribution(Default::default()),
     ];
     for body in bodies {
         let ev = pb::Event {

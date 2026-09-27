@@ -201,9 +201,18 @@ pub enum CostBasis {
     Quota,
 }
 
+/// Where the knee rows' p came from (ADR-0013); `None` is a bundle that predates the key, recorded as "unknown", never guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KneeBasis {
+    Prior,
+    AnchorGrounded,
+    Certified,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KneeTable {
     pub cost_basis: CostBasis,
+    pub basis: Option<KneeBasis>,
     /// `c(n)` at attempt `n`; the gate stops when `p̂_LCB(n)·V(task) ≤ c(n)`.
     pub rows: Vec<KneeRow>,
     pub v_default: f64,

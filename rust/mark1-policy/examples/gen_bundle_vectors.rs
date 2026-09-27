@@ -1093,6 +1093,35 @@ fn build_vectors(signers: &Signers) -> Result<Vec<Vector>> {
         expect: None,
     });
 
+    // knee_basis / knee_basis_bad — ADR-0013's optional route.knee.basis: surfaced verbatim, and a signed "unknown" (the edge's word for an absent key) refused as schema.
+    for (name, basis, expect) in [
+        ("knee_basis", "anchor_grounded", None),
+        ("knee_basis_bad", "unknown", Some(("M1E-3001", "schema"))),
+    ] {
+        let mut sections = sections_full(false);
+        let mut route = section_of(&sections, "route")?.clone();
+        let mut knee = section_of(&route, "knee")?.clone();
+        map_add(&mut knee, "basis", t(basis))?;
+        map_set(&mut route, "knee", knee)?;
+        map_set(&mut sections, "route", route)?;
+        let sigs = signatures(signers, &sections, &env_local0)?;
+        out.push(Vector {
+            name,
+            raw: canon(&bundle_value(
+                env_local0.seq,
+                env_local0.channel,
+                env_local0.prev_hash,
+                env_local0.max_age,
+                sections,
+                sigs,
+                Value::Null,
+            ))?,
+            last_applied_seq: None,
+            tlog_head: None,
+            expect,
+        });
+    }
+
     // forged_inclusion_root_seq2 — the D-S kill shot UNDER a standing
     // last-known-good. Every other M1E-3003 vector is seq 1, so with any LKG
     // applied the seq check (`<= last`) fires first and the inclusion leg is

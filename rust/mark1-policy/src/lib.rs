@@ -36,9 +36,9 @@ pub use rotation::{
 };
 pub use types::{
     AgentMap, AgentMaps, AnchorEnable, Bundle, CorrelationGroup, CortexChannel, CortexSection,
-    CostBasis, CpvsRow, GatesSection, InjectionRule, KneeRow, KneeTable, Ladder, LearnedRanker,
-    MemorySection, Posterior4, RankerStage, RouteSection, Rung, Section, Signal3, TlogHead,
-    TlogInclusion, VerifierModel, VerifySection,
+    CostBasis, CpvsRow, GatesSection, InjectionRule, KneeBasis, KneeRow, KneeTable, Ladder,
+    LearnedRanker, MemorySection, Posterior4, RankerStage, RouteSection, Rung, Section, Signal3,
+    TlogHead, TlogInclusion, VerifierModel, VerifySection,
 };
 
 /// The closed `schema` value — anything else is a different contract

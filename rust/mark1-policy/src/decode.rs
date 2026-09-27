@@ -22,8 +22,9 @@ use ciborium::value::Value;
 
 use crate::types::{
     AgentMap, AgentMaps, AnchorEnable, CorrelationGroup, CortexChannel, CortexSection, CostBasis,
-    CpvsRow, GatesSection, InjectionRule, KneeRow, KneeTable, Ladder, LearnedRanker, MemorySection,
-    Posterior4, RankerStage, RouteSection, Rung, Signal3, VerifierModel, VerifySection,
+    CpvsRow, GatesSection, InjectionRule, KneeBasis, KneeRow, KneeTable, Ladder, LearnedRanker,
+    MemorySection, Posterior4, RankerStage, RouteSection, Rung, Signal3, VerifierModel,
+    VerifySection,
 };
 use crate::Reject;
 
@@ -447,7 +448,19 @@ pub(crate) fn decode_route(v: &Value) -> Result<RouteSection, Reject> {
 
     let kp = format!("{p}.knee");
     let km = map_of(m["knee"], &kp)?;
-    strict_keys(&km, &["cost_basis", "rows", "v_default"], &[], &kp)?;
+    strict_keys(&km, &["cost_basis", "rows", "v_default"], &["basis"], &kp)?;
+    let basis = match km.get("basis").map(|v| text(v, &kp)).transpose()? {
+        None => None,
+        Some("prior") => Some(KneeBasis::Prior),
+        Some("anchor_grounded") => Some(KneeBasis::AnchorGrounded),
+        Some("certified") => Some(KneeBasis::Certified),
+        Some(other) => {
+            return Err(schema(
+                &format!("{kp}.basis"),
+                format!("not a knee basis: {other}"),
+            ))
+        }
+    };
     let cost_basis = match text(km["cost_basis"], &kp)? {
         "usd" => CostBasis::Usd,
         "quota" => CostBasis::Quota,
@@ -509,6 +522,7 @@ pub(crate) fn decode_route(v: &Value) -> Result<RouteSection, Reject> {
         ladders,
         knee: KneeTable {
             cost_basis,
+            basis,
             rows,
             v_default,
         },

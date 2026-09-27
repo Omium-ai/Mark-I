@@ -179,7 +179,23 @@ type GuardDecision struct {
 	// "<tool>:<diagnostic_code> errors=N warnings=N files=N" per failing anchor,
 	// "; "-joined — the typed EvidenceRecord vocabulary, never a path, never an
 	// excerpt. Empty on an arrest. The app's feed shows it beside the block.
-	Evidence      string `protobuf:"bytes,7,opt,name=evidence,proto3" json:"evidence,omitempty"`
+	Evidence string `protobuf:"bytes,7,opt,name=evidence,proto3" json:"evidence,omitempty"`
+	// [P1] ADR-0012: where the knee's p(r) came from — "prior" (the bootstrap
+	// bundle's Paper I prior), "anchor_grounded" (fitted on anchor outcomes)
+	// or "certified" (fitted on certified attempts, 06 §10.3). ADR-0013: read
+	// from the applied bundle's route.knee.basis, never inferred; "unknown"
+	// when that bundle predates the key. Empty on a block and on a block-cap
+	// arrest. attempt (6) stays the attempt count n for the ledger; the knee
+	// itself reads the repair round r.
+	KneeBasis string `protobuf:"bytes,8,opt,name=knee_basis,json=kneeBasis,proto3" json:"knee_basis,omitempty"`
+	// [P1] The applied policy bundle's seq the decision was taken under;
+	// projected into m1p_events.bundle_seq (the interventions read).
+	BundleSeq uint64 `protobuf:"varint,9,opt,name=bundle_seq,json=bundleSeq,proto3" json:"bundle_seq,omitempty"`
+	// [P1] ADR-0013: the applied bundle's route.knee.cost_basis ("usd" |
+	// "quota") the decision was priced under, on every verify-plane decision.
+	// Empty from an edge that predates the field: savings reads it as an
+	// "unknown" basis, labelled and never counted as certified.
+	CostBasis     string `protobuf:"bytes,10,opt,name=cost_basis,json=costBasis,proto3" json:"cost_basis,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -259,6 +275,27 @@ func (x *GuardDecision) GetAttempt() uint32 {
 func (x *GuardDecision) GetEvidence() string {
 	if x != nil {
 		return x.Evidence
+	}
+	return ""
+}
+
+func (x *GuardDecision) GetKneeBasis() string {
+	if x != nil {
+		return x.KneeBasis
+	}
+	return ""
+}
+
+func (x *GuardDecision) GetBundleSeq() uint64 {
+	if x != nil {
+		return x.BundleSeq
+	}
+	return 0
+}
+
+func (x *GuardDecision) GetCostBasis() string {
+	if x != nil {
+		return x.CostBasis
 	}
 	return ""
 }
@@ -432,7 +469,7 @@ var File_m1p_v1_policy_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_policy_proto_rawDesc = "" +
 	"\n" +
-	"\x13m1p/v1/policy.proto\x12\x06m1p.v1\"\x96\x02\n" +
+	"\x13m1p/v1/policy.proto\x12\x06m1p.v1\"\xf3\x02\n" +
 	"\rGuardDecision\x12.\n" +
 	"\aoutcome\x18\x01 \x01(\x0e2\x14.m1p.v1.GuardOutcomeR\aoutcome\x12)\n" +
 	"\x10cred_fingerprint\x18\x02 \x01(\fR\x0fcredFingerprint\x12\x1f\n" +
@@ -442,7 +479,14 @@ const file_m1p_v1_policy_proto_rawDesc = "" +
 	"reasonCode\x122\n" +
 	"\x15tokens_saved_estimate\x18\x05 \x01(\x04R\x13tokensSavedEstimate\x12\x18\n" +
 	"\aattempt\x18\x06 \x01(\rR\aattempt\x12\x1a\n" +
-	"\bevidence\x18\a \x01(\tR\bevidence\"\xbc\x01\n" +
+	"\bevidence\x18\a \x01(\tR\bevidence\x12\x1d\n" +
+	"\n" +
+	"knee_basis\x18\b \x01(\tR\tkneeBasis\x12\x1d\n" +
+	"\n" +
+	"bundle_seq\x18\t \x01(\x04R\tbundleSeq\x12\x1d\n" +
+	"\n" +
+	"cost_basis\x18\n" +
+	" \x01(\tR\tcostBasis\"\xbc\x01\n" +
 	"\tBundleAck\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\tR\achannel\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1f\n" +

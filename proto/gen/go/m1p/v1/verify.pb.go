@@ -106,6 +106,57 @@ func (DiffClassification) EnumDescriptor() ([]byte, []int) {
 	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{0}
 }
 
+// What made a judge run on a task. 16 §Independence: a judge whose running
+// depends on another clique's vote (AMBIGUOUS) feeds fusion only.
+type JudgeTrigger int32
+
+const (
+	JudgeTrigger_JUDGE_TRIGGER_UNSPECIFIED JudgeTrigger = 0
+	JudgeTrigger_JUDGE_TRIGGER_ALWAYS      JudgeTrigger = 1 // ran on every task it could, independent of any vote
+	JudgeTrigger_JUDGE_TRIGGER_AMBIGUOUS   JudgeTrigger = 2 // dispatched because the fused verdict was ambiguous
+)
+
+// Enum value maps for JudgeTrigger.
+var (
+	JudgeTrigger_name = map[int32]string{
+		0: "JUDGE_TRIGGER_UNSPECIFIED",
+		1: "JUDGE_TRIGGER_ALWAYS",
+		2: "JUDGE_TRIGGER_AMBIGUOUS",
+	}
+	JudgeTrigger_value = map[string]int32{
+		"JUDGE_TRIGGER_UNSPECIFIED": 0,
+		"JUDGE_TRIGGER_ALWAYS":      1,
+		"JUDGE_TRIGGER_AMBIGUOUS":   2,
+	}
+)
+
+func (x JudgeTrigger) Enum() *JudgeTrigger {
+	p := new(JudgeTrigger)
+	*p = x
+	return p
+}
+
+func (x JudgeTrigger) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (JudgeTrigger) Descriptor() protoreflect.EnumDescriptor {
+	return file_m1p_v1_verify_proto_enumTypes[1].Descriptor()
+}
+
+func (JudgeTrigger) Type() protoreflect.EnumType {
+	return &file_m1p_v1_verify_proto_enumTypes[1]
+}
+
+func (x JudgeTrigger) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use JudgeTrigger.Descriptor instead.
+func (JudgeTrigger) EnumDescriptor() ([]byte, []int) {
+	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{1}
+}
+
 type JudgeLocus int32
 
 const (
@@ -139,11 +190,11 @@ func (x JudgeLocus) String() string {
 }
 
 func (JudgeLocus) Descriptor() protoreflect.EnumDescriptor {
-	return file_m1p_v1_verify_proto_enumTypes[1].Descriptor()
+	return file_m1p_v1_verify_proto_enumTypes[2].Descriptor()
 }
 
 func (JudgeLocus) Type() protoreflect.EnumType {
-	return &file_m1p_v1_verify_proto_enumTypes[1]
+	return &file_m1p_v1_verify_proto_enumTypes[2]
 }
 
 func (x JudgeLocus) Number() protoreflect.EnumNumber {
@@ -152,7 +203,7 @@ func (x JudgeLocus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use JudgeLocus.Descriptor instead.
 func (JudgeLocus) EnumDescriptor() ([]byte, []int) {
-	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{1}
+	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{2}
 }
 
 type VerdictStage int32
@@ -193,11 +244,11 @@ func (x VerdictStage) String() string {
 }
 
 func (VerdictStage) Descriptor() protoreflect.EnumDescriptor {
-	return file_m1p_v1_verify_proto_enumTypes[2].Descriptor()
+	return file_m1p_v1_verify_proto_enumTypes[3].Descriptor()
 }
 
 func (VerdictStage) Type() protoreflect.EnumType {
-	return &file_m1p_v1_verify_proto_enumTypes[2]
+	return &file_m1p_v1_verify_proto_enumTypes[3]
 }
 
 func (x VerdictStage) Number() protoreflect.EnumNumber {
@@ -206,7 +257,7 @@ func (x VerdictStage) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use VerdictStage.Descriptor instead.
 func (VerdictStage) EnumDescriptor() ([]byte, []int) {
-	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{2}
+	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{3}
 }
 
 // D-T. Degrades faster than it upgrades (06 §5): the WEAKEST input wins, so a
@@ -248,11 +299,11 @@ func (x CertificationStatus) String() string {
 }
 
 func (CertificationStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_m1p_v1_verify_proto_enumTypes[3].Descriptor()
+	return file_m1p_v1_verify_proto_enumTypes[4].Descriptor()
 }
 
 func (CertificationStatus) Type() protoreflect.EnumType {
-	return &file_m1p_v1_verify_proto_enumTypes[3]
+	return &file_m1p_v1_verify_proto_enumTypes[4]
 }
 
 func (x CertificationStatus) Number() protoreflect.EnumNumber {
@@ -261,7 +312,7 @@ func (x CertificationStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use CertificationStatus.Descriptor instead.
 func (CertificationStatus) EnumDescriptor() ([]byte, []int) {
-	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{3}
+	return file_m1p_v1_verify_proto_rawDescGZIP(), []int{4}
 }
 
 // One anchor's (T0 deterministic local verifier's) vote on a task attempt.
@@ -477,6 +528,7 @@ type JudgeVote struct {
 	TierUsed      EvidenceTier `protobuf:"varint,3,opt,name=tier_used,json=tierUsed,proto3,enum=m1p.v1.EvidenceTier" json:"tier_used,omitempty"` // [P0] what the judge actually saw
 	RubricHash    []byte       `protobuf:"bytes,4,opt,name=rubric_hash,json=rubricHash,proto3" json:"rubric_hash,omitempty"`                     // [P1] HMAC_tenant of the rubric prefix served
 	Locus         JudgeLocus   `protobuf:"varint,5,opt,name=locus,proto3,enum=m1p.v1.JudgeLocus" json:"locus,omitempty"`                         // [P0]
+	Trigger       JudgeTrigger `protobuf:"varint,6,opt,name=trigger,proto3,enum=m1p.v1.JudgeTrigger" json:"trigger,omitempty"`                   // [P0] why the judge ran; spectral estimation
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -544,6 +596,13 @@ func (x *JudgeVote) GetLocus() JudgeLocus {
 		return x.Locus
 	}
 	return JudgeLocus_JUDGE_LOCUS_UNSPECIFIED
+}
+
+func (x *JudgeVote) GetTrigger() JudgeTrigger {
+	if x != nil {
+		return x.Trigger
+	}
+	return JudgeTrigger_JUDGE_TRIGGER_UNSPECIFIED
 }
 
 // adjudicator-svc → mark1d, the client-side-first path (06 §6.2 step 2, ADR-0008):
@@ -672,8 +731,11 @@ func (x *JudgeRequest) GetLocus() JudgeLocus {
 type RmScore struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	ModelId            string                 `protobuf:"bytes,1,opt,name=model_id,json=modelId,proto3" json:"model_id,omitempty"`                                  // [P0] "rm:<name>@<version>"
-	Score              float64                `protobuf:"fixed64,2,opt,name=score,proto3" json:"score,omitempty"`                                                   // [P0] raw scalar
+	Score              float64                `protobuf:"fixed64,2,opt,name=score,proto3" json:"score,omitempty"`                                                   // [P0] uncalibrated P(yes) = sigmoid(logit(" yes") − logit(" no")) in [0,1]; calibration_version maps log(p/(1−p))
 	CalibrationVersion string                 `protobuf:"bytes,3,opt,name=calibration_version,json=calibrationVersion,proto3" json:"calibration_version,omitempty"` // [P0] mapping used to fold into the ensemble
+	ExecutionHash      []byte                 `protobuf:"bytes,4,opt,name=execution_hash,json=executionHash,proto3" json:"execution_hash,omitempty"`                // [P0] rm-exec/v1 BLAKE3(gguf ‖ 0x00 ‖ "llama.cpp b<build>" ‖ 0x00 ‖ template_sha hex) at CLIENT_SIDE
+	Signature          []byte                 `protobuf:"bytes,5,opt,name=signature,proto3" json:"signature,omitempty"`                                             // [P0] Ed25519 by the device origin key over canonical(RmScore, signature cleared), as AnchorVote
+	Locus              JudgeLocus             `protobuf:"varint,6,opt,name=locus,proto3,enum=m1p.v1.JudgeLocus" json:"locus,omitempty"`                             // [P0] CLIENT_SIDE (mark1-rm on the device) | CLOUD
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -727,6 +789,27 @@ func (x *RmScore) GetCalibrationVersion() string {
 		return x.CalibrationVersion
 	}
 	return ""
+}
+
+func (x *RmScore) GetExecutionHash() []byte {
+	if x != nil {
+		return x.ExecutionHash
+	}
+	return nil
+}
+
+func (x *RmScore) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+func (x *RmScore) GetLocus() JudgeLocus {
+	if x != nil {
+		return x.Locus
+	}
+	return JudgeLocus_JUDGE_LOCUS_UNSPECIFIED
 }
 
 // Escalation-scoped only (T3 runs and escalation events); excluded from
@@ -941,14 +1024,15 @@ const file_m1p_v1_verify_proto_rawDesc = "" +
 	"\x06tamper\x18\x06 \x01(\bR\x06tamper\x1aG\n" +
 	"\x19ResolvedBinaryHashesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\xc9\x01\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\xf9\x01\n" +
 	"\tJudgeVote\x12\x19\n" +
 	"\bjudge_id\x18\x01 \x01(\tR\ajudgeId\x12#\n" +
 	"\x04vote\x18\x02 \x01(\x0e2\x0f.m1p.v1.VerdictR\x04vote\x121\n" +
 	"\ttier_used\x18\x03 \x01(\x0e2\x14.m1p.v1.EvidenceTierR\btierUsed\x12\x1f\n" +
 	"\vrubric_hash\x18\x04 \x01(\fR\n" +
 	"rubricHash\x12(\n" +
-	"\x05locus\x18\x05 \x01(\x0e2\x12.m1p.v1.JudgeLocusR\x05locus\"\xbf\x02\n" +
+	"\x05locus\x18\x05 \x01(\x0e2\x12.m1p.v1.JudgeLocusR\x05locus\x12.\n" +
+	"\atrigger\x18\x06 \x01(\x0e2\x14.m1p.v1.JudgeTriggerR\atrigger\"\xbf\x02\n" +
 	"\fJudgeRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x19\n" +
@@ -962,11 +1046,14 @@ const file_m1p_v1_verify_proto_rawDesc = "" +
 	"\x05model\x18\b \x01(\tR\x05model\x12!\n" +
 	"\ftoken_budget\x18\t \x01(\rR\vtokenBudget\x12(\n" +
 	"\x05locus\x18\n" +
-	" \x01(\x0e2\x12.m1p.v1.JudgeLocusR\x05locus\"k\n" +
+	" \x01(\x0e2\x12.m1p.v1.JudgeLocusR\x05locus\"\xda\x01\n" +
 	"\aRmScore\x12\x19\n" +
 	"\bmodel_id\x18\x01 \x01(\tR\amodelId\x12\x14\n" +
 	"\x05score\x18\x02 \x01(\x01R\x05score\x12/\n" +
-	"\x13calibration_version\x18\x03 \x01(\tR\x12calibrationVersion\"\x80\x01\n" +
+	"\x13calibration_version\x18\x03 \x01(\tR\x12calibrationVersion\x12%\n" +
+	"\x0eexecution_hash\x18\x04 \x01(\fR\rexecutionHash\x12\x1c\n" +
+	"\tsignature\x18\x05 \x01(\fR\tsignature\x12(\n" +
+	"\x05locus\x18\x06 \x01(\x0e2\x12.m1p.v1.JudgeLocusR\x05locus\"\x80\x01\n" +
 	"\x0fConsistencyVote\x12#\n" +
 	"\x04vote\x18\x01 \x01(\x0e2\x0f.m1p.v1.VerdictR\x04vote\x12!\n" +
 	"\fsample_count\x18\x02 \x01(\rR\vsampleCount\x12%\n" +
@@ -987,7 +1074,11 @@ const file_m1p_v1_verify_proto_rawDesc = "" +
 	"\x1cDIFF_CLASSIFICATION_SRC_ONLY\x10\x02\x12$\n" +
 	" DIFF_CLASSIFICATION_TEST_TOUCHED\x10\x03\x12&\n" +
 	"\"DIFF_CLASSIFICATION_CONFIG_TOUCHED\x10\x04\x12+\n" +
-	"'DIFF_CLASSIFICATION_SUPPRESSION_TOUCHED\x10\x05*]\n" +
+	"'DIFF_CLASSIFICATION_SUPPRESSION_TOUCHED\x10\x05*d\n" +
+	"\fJudgeTrigger\x12\x1d\n" +
+	"\x19JUDGE_TRIGGER_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14JUDGE_TRIGGER_ALWAYS\x10\x01\x12\x1b\n" +
+	"\x17JUDGE_TRIGGER_AMBIGUOUS\x10\x02*]\n" +
 	"\n" +
 	"JudgeLocus\x12\x1b\n" +
 	"\x17JUDGE_LOCUS_UNSPECIFIED\x10\x00\x12\x1b\n" +
@@ -1018,45 +1109,48 @@ func file_m1p_v1_verify_proto_rawDescGZIP() []byte {
 	return file_m1p_v1_verify_proto_rawDescData
 }
 
-var file_m1p_v1_verify_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_m1p_v1_verify_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
 var file_m1p_v1_verify_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_m1p_v1_verify_proto_goTypes = []any{
 	(DiffClassification)(0),  // 0: m1p.v1.DiffClassification
-	(JudgeLocus)(0),          // 1: m1p.v1.JudgeLocus
-	(VerdictStage)(0),        // 2: m1p.v1.VerdictStage
-	(CertificationStatus)(0), // 3: m1p.v1.CertificationStatus
-	(*AnchorVote)(nil),       // 4: m1p.v1.AnchorVote
-	(*AnchorIntegrity)(nil),  // 5: m1p.v1.AnchorIntegrity
-	(*JudgeVote)(nil),        // 6: m1p.v1.JudgeVote
-	(*JudgeRequest)(nil),     // 7: m1p.v1.JudgeRequest
-	(*RmScore)(nil),          // 8: m1p.v1.RmScore
-	(*ConsistencyVote)(nil),  // 9: m1p.v1.ConsistencyVote
-	(*VerdictEvent)(nil),     // 10: m1p.v1.VerdictEvent
-	nil,                      // 11: m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
-	(Verdict)(0),             // 12: m1p.v1.Verdict
-	(*EvidenceRecord)(nil),   // 13: m1p.v1.EvidenceRecord
-	(EvidenceTier)(0),        // 14: m1p.v1.EvidenceTier
+	(JudgeTrigger)(0),        // 1: m1p.v1.JudgeTrigger
+	(JudgeLocus)(0),          // 2: m1p.v1.JudgeLocus
+	(VerdictStage)(0),        // 3: m1p.v1.VerdictStage
+	(CertificationStatus)(0), // 4: m1p.v1.CertificationStatus
+	(*AnchorVote)(nil),       // 5: m1p.v1.AnchorVote
+	(*AnchorIntegrity)(nil),  // 6: m1p.v1.AnchorIntegrity
+	(*JudgeVote)(nil),        // 7: m1p.v1.JudgeVote
+	(*JudgeRequest)(nil),     // 8: m1p.v1.JudgeRequest
+	(*RmScore)(nil),          // 9: m1p.v1.RmScore
+	(*ConsistencyVote)(nil),  // 10: m1p.v1.ConsistencyVote
+	(*VerdictEvent)(nil),     // 11: m1p.v1.VerdictEvent
+	nil,                      // 12: m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
+	(Verdict)(0),             // 13: m1p.v1.Verdict
+	(*EvidenceRecord)(nil),   // 14: m1p.v1.EvidenceRecord
+	(EvidenceTier)(0),        // 15: m1p.v1.EvidenceTier
 }
 var file_m1p_v1_verify_proto_depIdxs = []int32{
-	12, // 0: m1p.v1.AnchorVote.vote:type_name -> m1p.v1.Verdict
-	13, // 1: m1p.v1.AnchorVote.evidence:type_name -> m1p.v1.EvidenceRecord
-	5,  // 2: m1p.v1.AnchorVote.integrity:type_name -> m1p.v1.AnchorIntegrity
-	11, // 3: m1p.v1.AnchorIntegrity.resolved_binary_hashes:type_name -> m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
+	13, // 0: m1p.v1.AnchorVote.vote:type_name -> m1p.v1.Verdict
+	14, // 1: m1p.v1.AnchorVote.evidence:type_name -> m1p.v1.EvidenceRecord
+	6,  // 2: m1p.v1.AnchorVote.integrity:type_name -> m1p.v1.AnchorIntegrity
+	12, // 3: m1p.v1.AnchorIntegrity.resolved_binary_hashes:type_name -> m1p.v1.AnchorIntegrity.ResolvedBinaryHashesEntry
 	0,  // 4: m1p.v1.AnchorIntegrity.diff_classification:type_name -> m1p.v1.DiffClassification
-	12, // 5: m1p.v1.JudgeVote.vote:type_name -> m1p.v1.Verdict
-	14, // 6: m1p.v1.JudgeVote.tier_used:type_name -> m1p.v1.EvidenceTier
-	1,  // 7: m1p.v1.JudgeVote.locus:type_name -> m1p.v1.JudgeLocus
-	14, // 8: m1p.v1.JudgeRequest.tier:type_name -> m1p.v1.EvidenceTier
-	1,  // 9: m1p.v1.JudgeRequest.locus:type_name -> m1p.v1.JudgeLocus
-	12, // 10: m1p.v1.ConsistencyVote.vote:type_name -> m1p.v1.Verdict
-	2,  // 11: m1p.v1.VerdictEvent.stage:type_name -> m1p.v1.VerdictStage
-	12, // 12: m1p.v1.VerdictEvent.verdict:type_name -> m1p.v1.Verdict
-	3,  // 13: m1p.v1.VerdictEvent.certification:type_name -> m1p.v1.CertificationStatus
-	14, // [14:14] is the sub-list for method output_type
-	14, // [14:14] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	13, // 5: m1p.v1.JudgeVote.vote:type_name -> m1p.v1.Verdict
+	15, // 6: m1p.v1.JudgeVote.tier_used:type_name -> m1p.v1.EvidenceTier
+	2,  // 7: m1p.v1.JudgeVote.locus:type_name -> m1p.v1.JudgeLocus
+	1,  // 8: m1p.v1.JudgeVote.trigger:type_name -> m1p.v1.JudgeTrigger
+	15, // 9: m1p.v1.JudgeRequest.tier:type_name -> m1p.v1.EvidenceTier
+	2,  // 10: m1p.v1.JudgeRequest.locus:type_name -> m1p.v1.JudgeLocus
+	2,  // 11: m1p.v1.RmScore.locus:type_name -> m1p.v1.JudgeLocus
+	13, // 12: m1p.v1.ConsistencyVote.vote:type_name -> m1p.v1.Verdict
+	3,  // 13: m1p.v1.VerdictEvent.stage:type_name -> m1p.v1.VerdictStage
+	13, // 14: m1p.v1.VerdictEvent.verdict:type_name -> m1p.v1.Verdict
+	4,  // 15: m1p.v1.VerdictEvent.certification:type_name -> m1p.v1.CertificationStatus
+	16, // [16:16] is the sub-list for method output_type
+	16, // [16:16] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_verify_proto_init() }
@@ -1070,7 +1164,7 @@ func file_m1p_v1_verify_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_m1p_v1_verify_proto_rawDesc), len(file_m1p_v1_verify_proto_rawDesc)),
-			NumEnums:      4,
+			NumEnums:      5,
 			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
