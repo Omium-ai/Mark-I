@@ -143,6 +143,7 @@ impl Conn {
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             session_id: session_id.to_vec(),
+            host_correlation_id: String::new(),
             // the agent runs its hooks in the project root: the daemon turns this into SessionStart.workspace_id, the path itself stays on this socket
             cwd: std::env::current_dir()
                 .map(|p| p.to_string_lossy().into_owned())
@@ -462,6 +463,7 @@ mod tests {
                     accepted,
                     max_frame: m1p_wire::M1PL_MAX_FRAME,
                     want_ver: 1,
+                    session_id: Vec::new(),
                 })),
             },
             &mut out,

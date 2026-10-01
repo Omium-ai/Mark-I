@@ -169,11 +169,13 @@ fn frame_roundtrip_every_fabric_arm() {
             version: "0.1.0".into(),
             cwd: String::new(),
             session_id: vec![5u8; 16],
+            host_correlation_id: String::new(),
         }),
         Kind::HelloAck(pb::HelloAck {
             accepted: true,
             max_frame: m1p_wire::M1PL_MAX_FRAME,
             want_ver: 0,
+            session_id: Vec::new(),
         }),
         Kind::GateQuery(pb::GateQuery {
             task_id: vec![9u8; 16],

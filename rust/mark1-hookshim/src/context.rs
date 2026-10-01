@@ -415,6 +415,7 @@ mod tests {
                                                 accepted: true,
                                                 max_frame: m1p_wire::M1PL_MAX_FRAME,
                                                 want_ver: 0,
+                                                session_id: Vec::new(),
                                             },
                                         )),
                                     },

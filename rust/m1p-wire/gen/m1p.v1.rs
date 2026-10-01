@@ -2395,6 +2395,13 @@ pub struct Hello {
     /// dropped everything from, which is the failure D-AT exists to end. cortexd
     /// is not exempt — it has no session identity yet, so its pushes are refused
     /// and counted until the MCP surface carries one (D-AV).
+    ///
+    /// ONE exemption, ADR-0012: a writer whose component starts with "ext:" (a
+    /// third-party host that owns its own execution loop and cannot know a Mark 1
+    /// session id) MAY leave this empty. The daemon then MINTS the session and
+    /// returns it in HelloAck.session_id; every Event on that connection must
+    /// echo it or the daemon closes (M1E-4003). An "ext:" writer that does carry
+    /// a 16-byte id is bound to that id exactly like any other writer.
     #[prost(bytes="vec", tag="4")]
     pub session_id: ::prost::alloc::vec::Vec<u8>,
     /// The writer's working directory — the agent's project root for a hook
@@ -2403,9 +2410,16 @@ pub struct Hello {
     /// (the HMAC) from it. Empty when the writer has no meaningful cwd.
     #[prost(string, tag="5")]
     pub cwd: ::prost::alloc::string::String,
+    /// ADR-0012: the host's OWN reference for this session (its run id, thread
+    /// id, whatever it correlates by). Opaque, ≤ 256 bytes, \[P1\]: stored beside
+    /// the Mark 1 session for later receipt echo, NEVER used as the Mark 1
+    /// session id and never an admission criterion. Empty for first-party
+    /// writers, which have no second identity to correlate.
+    #[prost(string, tag="6")]
+    pub host_correlation_id: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HelloAck {
     #[prost(bool, tag="1")]
     pub accepted: bool,
@@ -2418,6 +2432,13 @@ pub struct HelloAck {
     /// speaks. Possible only mid-upgrade, and loud (08 §4.3 step 3).
     #[prost(uint32, tag="3")]
     pub want_ver: u32,
+    /// ADR-0012: the 16-byte session UUIDv7 the daemon MINTED for an "ext:"
+    /// writer whose Hello carried no session_id. Set ONLY in that case; every
+    /// other accepted Hello gets an empty field, because the writer already
+    /// knows its session. The writer echoes it in Event.session_id on every
+    /// frame of this connection.
+    #[prost(bytes="vec", tag="4")]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
 }
 /// hookshim → mark1d: read the cached VerdictEvent{PROVISIONAL} + knee state
 /// for a gate decision. THE GATE READS THE CACHE; IT NEVER COMPUTES — this

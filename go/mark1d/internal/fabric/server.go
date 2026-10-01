@@ -61,6 +61,12 @@ type Server struct {
 	Sync func() error
 	// OnHello observes each accepted handshake: the writer's session and cwd (Hello.cwd — a hook process runs in the agent's project root, which is how SessionStart.workspace_id gets stamped). nil is legal.
 	OnHello func(session [16]byte, cwd string)
+	// OnExtHello observes each accepted ADR-0012 external-writer handshake
+	// (component has ExtPrefix): the bound session — minted or writer-supplied
+	// — plus the component string and the host's own correlation id, which
+	// the daemon stores beside the session for later receipt echo and never
+	// uses as an identity. Runs after OnHello. nil is legal.
+	OnExtHello func(session [16]byte, component, hostCorrelationID string)
 
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}

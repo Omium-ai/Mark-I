@@ -6,14 +6,27 @@
 package fabric
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
+	"strings"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
+	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
+
+// ExtPrefix marks an external writer's Hello.component (ADR-0012): a
+// third-party host that owns its own execution loop. Only such a writer may
+// Hello without a session and be minted one; only such a connection has its
+// Events' session_id checked against the bound session.
+const ExtPrefix = "ext:"
+
+// maxHostCorrelationID bounds Hello.host_correlation_id (fabric.proto): an
+// opaque host reference, not a payload.
+const maxHostCorrelationID = 256
 
 // FabricFrame oneof field numbers (proto/m1p/v1/fabric.proto).
 const (
@@ -130,6 +143,73 @@ type session struct {
 	// empty GateQuery.task_id through. Never zero past the handshake: D-AT
 	// refuses a Hello that carries no session.
 	id [16]byte
+	// ext marks an ADR-0012 external-writer connection (Hello.component has
+	// ExtPrefix). Only here is every Event's session_id checked against id;
+	// first-party writers are deliberately not checked, so nothing on the
+	// hookshim/cortexd/proxy path changes.
+	ext bool
+}
+
+// hello runs the 08 §4.3 handshake on the first frame. A non-nil return
+// closes the connection.
+func (ss *session) hello(inner []byte) error {
+	h := &m1pv1.Hello{}
+	if err := proto.Unmarshal(inner, h); err != nil {
+		return fmt.Errorf("fabric: %s: undecodable Hello: %w", CodeHandshake, err)
+	}
+	ext := strings.HasPrefix(h.GetComponent(), ExtPrefix)
+	if sid := h.GetSessionId(); len(sid) == 16 {
+		copy(ss.id[:], sid)
+	}
+	var minted []byte
+	if ss.id == ([16]byte{}) && ext && len(h.GetSessionId()) == 0 {
+		// ADR-0012: an external host cannot know a Mark 1 session id, so the
+		// daemon mints one and tells the writer in HelloAck. Only on an EMPTY
+		// field: a wrong-length or all-zero id is still the D-AT refusal below.
+		id, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("fabric: %s: minting ext session: %w", CodeHandshake, err)
+		}
+		ss.id, minted = id, id[:]
+	}
+	if ss.id == ([16]byte{}) {
+		// D-AT: D-AL closed the all-zero session at every CONSUMER — capture
+		// quarantines, Observe segments nothing, TaskFor misses, Gate.resolve
+		// rejects before any counter is keyed. Entry was the last axis left
+		// open, so a Hello with a missing, wrong-length or explicitly zero
+		// session_id was accepted and then had everything it sent silently
+		// dropped. Refusing here is the only answer that is not a lie.
+		return fmt.Errorf("fabric: %s: Hello carries no session_id; the all-zero sentinel is not a session and everything under it is dropped (08 §4.3)", CodeHandshake)
+	}
+	if n := len(h.GetHostCorrelationId()); n > maxHostCorrelationID {
+		return fmt.Errorf("fabric: %s: host_correlation_id is %d bytes, over the %d-byte bound (ADR-0012)", CodeHandshake, n, maxHostCorrelationID)
+	}
+	ss.helloed, ss.ext = true, ext
+	if ss.s.OnHello != nil {
+		ss.s.OnHello(ss.id, h.GetCwd())
+	}
+	if ext && ss.s.OnExtHello != nil {
+		ss.s.OnExtHello(ss.id, h.GetComponent(), h.GetHostCorrelationId())
+	}
+	// max_frame is the symbol M1PL_MAX_FRAME, never a re-typed literal.
+	return ss.reply(&m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_HelloAck{
+		HelloAck: &m1pv1.HelloAck{Accepted: true, MaxFrame: MaxFrame, SessionId: minted},
+	}})
+}
+
+// boundSession is ADR-0012's echo rule for ext connections: a decodable Event
+// must name the bound session, else the connection closes. An undecodable
+// payload passes through to capture, which quarantines and accounts it
+// exactly as on every other connection.
+func (ss *session) boundSession(inner []byte) error {
+	ev := &m1pv1.Event{}
+	if proto.Unmarshal(inner, ev) != nil {
+		return nil
+	}
+	if !bytes.Equal(ev.GetSessionId(), ss.id[:]) {
+		return fmt.Errorf("fabric: %s: ext writer's Event names session %x, bound to %x (ADR-0012)", CodeHandshake, ev.GetSessionId(), ss.id)
+	}
+	return nil
 }
 
 // frame dispatches one decoded M1PL payload. A non-nil return closes the
@@ -143,33 +223,15 @@ func (ss *session) frame(ctx context.Context, payload []byte) error {
 		if field != frameHello {
 			return fmt.Errorf("fabric: %s: first frame is FabricFrame field %d, not Hello (08 §4.3)", CodeHandshake, field)
 		}
-		h := &m1pv1.Hello{}
-		if err := proto.Unmarshal(inner, h); err != nil {
-			return fmt.Errorf("fabric: %s: undecodable Hello: %w", CodeHandshake, err)
-		}
-		if sid := h.GetSessionId(); len(sid) == 16 {
-			copy(ss.id[:], sid)
-		}
-		if ss.id == ([16]byte{}) {
-			// D-AT: D-AL closed the all-zero session at every CONSUMER — capture
-			// quarantines, Observe segments nothing, TaskFor misses, Gate.resolve
-			// rejects before any counter is keyed. Entry was the last axis left
-			// open, so a Hello with a missing, wrong-length or explicitly zero
-			// session_id was accepted and then had everything it sent silently
-			// dropped. Refusing here is the only answer that is not a lie.
-			return fmt.Errorf("fabric: %s: Hello carries no session_id; the all-zero sentinel is not a session and everything under it is dropped (08 §4.3)", CodeHandshake)
-		}
-		ss.helloed = true
-		if ss.s.OnHello != nil {
-			ss.s.OnHello(ss.id, h.GetCwd())
-		}
-		// max_frame is the symbol M1PL_MAX_FRAME, never a re-typed literal.
-		return ss.reply(&m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_HelloAck{
-			HelloAck: &m1pv1.HelloAck{Accepted: true, MaxFrame: MaxFrame},
-		}})
+		return ss.hello(inner)
 	}
 	switch field {
 	case frameEvent:
+		if ss.ext {
+			if err := ss.boundSession(inner); err != nil {
+				return err
+			}
+		}
 		if herr := ss.s.handle(ctx, inner); herr != nil {
 			if ss.s.perEvent(herr) {
 				return nil // accounted loss; the connection lives on

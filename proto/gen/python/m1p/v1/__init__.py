@@ -1631,6 +1631,13 @@ class Hello(betterproto.Message):
      dropped everything from, which is the failure D-AT exists to end. cortexd
      is not exempt — it has no session identity yet, so its pushes are refused
      and counted until the MCP surface carries one (D-AV).
+    
+     ONE exemption, ADR-0012: a writer whose component starts with "ext:" (a
+     third-party host that owns its own execution loop and cannot know a Mark 1
+     session id) MAY leave this empty. The daemon then MINTS the session and
+     returns it in HelloAck.session_id; every Event on that connection must
+     echo it or the daemon closes (M1E-4003). An "ext:" writer that does carry
+     a 16-byte id is bound to that id exactly like any other writer.
     """
 
     cwd: str = betterproto.string_field(5)
@@ -1639,6 +1646,15 @@ class Hello(betterproto.Message):
      process. LOCAL FABRIC ONLY: it never enters an event or the uplink; the
      daemon maps it to an enabled workspace and stamps SessionStart.workspace_id
      (the HMAC) from it. Empty when the writer has no meaningful cwd.
+    """
+
+    host_correlation_id: str = betterproto.string_field(6)
+    """
+    ADR-0012: the host's OWN reference for this session (its run id, thread
+     id, whatever it correlates by). Opaque, ≤ 256 bytes, [P1]: stored beside
+     the Mark 1 session for later receipt echo, NEVER used as the Mark 1
+     session id and never an admission criterion. Empty for first-party
+     writers, which have no second identity to correlate.
     """
 
 
@@ -1656,6 +1672,15 @@ class HelloAck(betterproto.Message):
     """
     Set only when accepted = false: the single M1PL version this daemon
      speaks. Possible only mid-upgrade, and loud (08 §4.3 step 3).
+    """
+
+    session_id: bytes = betterproto.bytes_field(4)
+    """
+    ADR-0012: the 16-byte session UUIDv7 the daemon MINTED for an "ext:"
+     writer whose Hello carried no session_id. Set ONLY in that case; every
+     other accepted Hello gets an empty field, because the writer already
+     knows its session. The writer echoes it in Event.session_id on every
+     frame of this connection.
     """
 
 

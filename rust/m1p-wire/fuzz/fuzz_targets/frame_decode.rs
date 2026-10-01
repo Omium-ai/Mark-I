@@ -80,11 +80,13 @@ fuzz_target!(|data: &[u8]| {
             version: text.clone(),
             cwd: String::new(),
             session_id: data.to_vec(),
+            host_correlation_id: String::new(),
         }),
         pb::fabric_frame::Kind::HelloAck(pb::HelloAck {
             accepted: data.len() % 2 == 0,
             max_frame: m1p_wire::M1PL_MAX_FRAME,
             want_ver: data.first().copied().unwrap_or(0) as u32,
+            session_id: Vec::new(),
         }),
         pb::fabric_frame::Kind::GateQuery(pb::GateQuery {
             task_id: data.to_vec(),

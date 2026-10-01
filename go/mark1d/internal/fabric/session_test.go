@@ -351,3 +351,150 @@ func TestSessionedCortexHelloIsAdmitted(t *testing.T) {
 		t.Fatalf("admitted event is not the sessioned root push: %v", ev)
 	}
 }
+
+// ---- ADR-0012: external writers ------------------------------------------
+
+// startExtStub is startStub plus the OnExtHello observer, recording what the
+// daemon would store beside the session.
+func startExtStub(t *testing.T) (addr string, got *[][]byte, seen *[]string) {
+	t.Helper()
+	l := listenLoopback(t)
+	var payloads [][]byte
+	var hellos []string
+	srv := NewServer(func(_ context.Context, p []byte) error {
+		payloads = append(payloads, append([]byte(nil), p...))
+		return nil
+	}, nil)
+	srv.OnExtHello = func(session [16]byte, component, corr string) {
+		hellos = append(hellos, component+"|"+corr)
+	}
+	go func() { _ = srv.Serve(context.Background(), l) }()
+	t.Cleanup(func() { _ = l.Close(); srv.Close() })
+	return l.Addr().String(), &payloads, &hellos
+}
+
+func extHello(sid []byte) *m1pv1.FabricFrame {
+	return &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Hello{Hello: &m1pv1.Hello{
+		Component: "ext:acme/runner@1.2.3", Pid: 42, Version: "1.2.3", SessionId: sid, HostCorrelationId: "run-7781",
+	}}}
+}
+
+func eventFrame(sid []byte) *m1pv1.FabricFrame {
+	return &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Event{Event: &m1pv1.Event{
+		SessionId: sid,
+		Body:      &m1pv1.Event_Turn{Turn: &m1pv1.Turn{TurnIndex: 0, Initiator: m1pv1.Initiator_INITIATOR_HUMAN}},
+	}}}
+}
+
+// TestExtHelloWithoutSessionIsMintedAndEchoAdmits: an "ext:" writer with no
+// session_id is handed a minted UUIDv7 in HelloAck.session_id; an Event
+// echoing it reaches admission with the writer's exact bytes.
+func TestExtHelloWithoutSessionIsMintedAndEchoAdmits(t *testing.T) {
+	addr, got, seen := startExtStub(t)
+	c := dial(t, addr)
+	frameFabric(t, c, extHello(nil))
+	ack := readFrame(t, c).GetHelloAck()
+	if ack == nil || !ack.GetAccepted() {
+		t.Fatalf("ext Hello without a session was not accepted: %+v", ack)
+	}
+	sid := ack.GetSessionId()
+	if len(sid) != 16 || bytes.Equal(sid, make([]byte, 16)) {
+		t.Fatalf("HelloAck.session_id = %x, want a minted 16-byte non-zero id", sid)
+	}
+	if v := sid[6] >> 4; v != 7 {
+		t.Fatalf("minted session has UUID version %d, want 7", v)
+	}
+	frameFabric(t, c, eventFrame(sid))
+	frameFabric(t, c, &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Flush{Flush: &m1pv1.Flush{}}})
+	if d := readFrame(t, c).GetFlushAck().GetDrained(); d != 1 {
+		t.Fatalf("FlushAck drained %d, want 1", d)
+	}
+	if len(*got) != 1 {
+		t.Fatalf("%d payload(s) reached admission, want 1", len(*got))
+	}
+	ev := &m1pv1.Event{}
+	if err := proto.Unmarshal((*got)[0], ev); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(ev.GetSessionId(), sid) {
+		t.Fatalf("admitted event carries session %x, want the minted %x", ev.GetSessionId(), sid)
+	}
+	if len(*seen) != 1 || (*seen)[0] != "ext:acme/runner@1.2.3|run-7781" {
+		t.Fatalf("OnExtHello saw %q, want the component and host correlation id", *seen)
+	}
+}
+
+// TestExtWriterEchoingWrongSessionIsClosed: on an ext connection an Event
+// naming any session other than the bound one closes the connection before
+// admission (M1E-4003).
+func TestExtWriterEchoingWrongSessionIsClosed(t *testing.T) {
+	addr, got, _ := startExtStub(t)
+	c := dial(t, addr)
+	frameFabric(t, c, extHello(nil))
+	if ack := readFrame(t, c).GetHelloAck(); len(ack.GetSessionId()) != 16 {
+		t.Fatalf("no minted session: %+v", ack)
+	}
+	frameFabric(t, c, eventFrame(bytes.Repeat([]byte{0xEE}, 16)))
+	readClosed(t, c)
+	if len(*got) != 0 {
+		t.Fatal("an Event under the wrong session reached admission")
+	}
+}
+
+// TestExtHelloWithOwnSessionIsBoundNotMinted: an ext writer that already
+// carries a 16-byte id is bound to it like any writer — nothing is minted,
+// and the echo rule still applies to that id.
+func TestExtHelloWithOwnSessionIsBoundNotMinted(t *testing.T) {
+	addr, got, _ := startExtStub(t)
+	c := dial(t, addr)
+	own := bytes.Repeat([]byte{0xA5}, 16)
+	frameFabric(t, c, extHello(own))
+	ack := readFrame(t, c).GetHelloAck()
+	if !ack.GetAccepted() || len(ack.GetSessionId()) != 0 {
+		t.Fatalf("ext Hello with its own session: accepted=%v minted=%x, want accepted and nothing minted", ack.GetAccepted(), ack.GetSessionId())
+	}
+	frameFabric(t, c, eventFrame(own))
+	frameFabric(t, c, eventFrame(bytes.Repeat([]byte{0x5A}, 16)))
+	readClosed(t, c)
+	if len(*got) != 1 {
+		t.Fatalf("%d payload(s) admitted, want exactly the one under the bound session", len(*got))
+	}
+}
+
+// TestExtHelloWithMalformedSessionIsStillRejected: minting is for an EMPTY
+// field only. A wrong-length or all-zero id from an ext writer is the same
+// D-AT refusal every writer gets; nothing is silently repaired.
+func TestExtHelloWithMalformedSessionIsStillRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sid  []byte
+	}{
+		{"wrong length", bytes.Repeat([]byte{3}, 8)},
+		{"explicitly all-zero", make([]byte, 16)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, got, _ := startExtStub(t)
+			c := dial(t, addr)
+			frameFabric(t, c, extHello(tc.sid))
+			readClosed(t, c)
+			if len(*got) != 0 {
+				t.Fatal("a malformed-session ext connection reached admission")
+			}
+		})
+	}
+}
+
+// TestFirstPartyEventSessionIsNotCheckedAgainstHello pins ADR-0012's scope:
+// the echo rule is ext-only. A first-party writer whose Event names a session
+// other than its Hello's is admitted exactly as before this ADR.
+func TestFirstPartyEventSessionIsNotCheckedAgainstHello(t *testing.T) {
+	addr, got := startStub(t, nil)
+	c := dial(t, addr)
+	hello(t, c) // testSession
+	other := bytes.Repeat([]byte{0x77}, 16)
+	frameFabric(t, c, eventFrame(other))
+	frameFabric(t, c, &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Flush{Flush: &m1pv1.Flush{}}})
+	if d := readFrame(t, c).GetFlushAck().GetDrained(); d != 1 || len(*got) != 1 {
+		t.Fatalf("first-party event under a different session: drained=%d admitted=%d, want 1/1 (no new rule on this path)", d, len(*got))
+	}
+}

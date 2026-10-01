@@ -310,6 +310,7 @@ async fn deliver<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
                 // the record says agree.
                 cwd: String::new(),
                 session_id: sid.to_vec(),
+                host_correlation_id: String::new(),
             })),
         },
         &mut hello,
@@ -437,6 +438,7 @@ mod tests {
                                     accepted: true,
                                     max_frame: m1p_wire::M1PL_MAX_FRAME,
                                     want_ver: 1,
+                                    session_id: Vec::new(),
                                 })),
                             },
                             &mut ack,

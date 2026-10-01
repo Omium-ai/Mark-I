@@ -495,7 +495,7 @@ Control messages (defined in `m1p.v1`, doc 07; they never reach the spool or the
 
 | Message | Direction | Purpose |
 |---|---|---|
-| `Hello{component, pid, version, session_id, cwd}` | writer → mark1d | First frame on every connection. `cwd` (2026-09-20) is the writer's working directory — a hook process runs in the agent's project root — and stays on this socket: mark1d maps it to an enabled workspace and stamps `SessionStart.workspace_id` (the HMAC) from it; the path itself never enters an event. `mark1d` replies `HelloAck{accepted: true, max_frame: M1PL_MAX_FRAME}` or closes. The symbol, not a re-typed literal — §4.2 is the only place the value appears. `max_frame` is the daemon telling the writer which build it is talking to, **not a negotiated ceiling**: a writer that reads a smaller value may send smaller frames, never a larger bound than §4.2's. |
+| `Hello{component, pid, version, session_id, cwd, host_correlation_id}` | writer → mark1d | First frame on every connection. `cwd` (2026-09-20) is the writer's working directory — a hook process runs in the agent's project root — and stays on this socket: mark1d maps it to an enabled workspace and stamps `SessionStart.workspace_id` (the HMAC) from it; the path itself never enters an event. `host_correlation_id` (ADR-0012, 2026-10-02) is an external host's own session reference, ≤ 256 bytes, opaque: stored beside the Mark 1 session for later receipt echo, never used as a Mark 1 identity; empty from first-party writers. `mark1d` replies `HelloAck{accepted: true, max_frame: M1PL_MAX_FRAME, session_id}` or closes. The symbol, not a re-typed literal — §4.2 is the only place the value appears. `max_frame` is the daemon telling the writer which build it is talking to, **not a negotiated ceiling**: a writer that reads a smaller value may send smaller frames, never a larger bound than §4.2's. `HelloAck.session_id` is set only when the daemon minted the session for an `ext:` writer (§4.3 step 2a); empty otherwise. |
 | `GateQuery{task_id, gate: STOP\|TOOL, deadline_ms}` | hookshim → mark1d | Read the cached `VerdictEvent{PROVISIONAL}` and knee state for a gate decision. |
 | `GateVerdict{decision: ALLOW\|BLOCK, verdict, posterior[4], reason, evidence_ref}` | mark1d → hookshim | The reply. **The gate reads the cache; it never computes** — this round-trip is a map lookup, budgeted ≤ 5 ms. |
 | `Flush{}` / `FlushAck{drained: n}` | writer → mark1d → writer | Mandatory drain barrier on SessionEnd/shutdown. |
@@ -503,9 +503,11 @@ Control messages (defined in `m1p.v1`, doc 07; they never reach the spool or the
 ### 4.3 Handshake
 
 1. Writer connects; OS-level peer checks run (§4.1).
-2. Writer sends `Hello` as its first frame. Any other first frame ⇒ close (`M1E-4003`).
+2. Writer sends `Hello` as its first frame. Any other first frame ⇒ close (`M1E-4003`). `Hello.session_id` is REQUIRED, 16 bytes, non-zero (D-AT): a missing, wrong-length or all-zero id ⇒ close (`M1E-4003`).
+   - 2a. **External writers (ADR-0012).** A `Hello` whose `component` starts with `ext:` MAY carry an **empty** `session_id`. `mark1d` then mints a UUIDv7 session and returns it in `HelloAck.session_id`; the writer echoes it in `Event.session_id` on every frame of that connection. An `ext:` writer that sends a 16-byte id is bound to that id and nothing is minted. A wrong-length or all-zero id is the ordinary D-AT refusal — minting is for an empty field only, never a repair.
 3. `mark1d` replies `HelloAck`. Version negotiation is the single `ver` byte: `mark1d` accepts exactly the versions its release ships; a mismatch closes with `HelloAck{accepted:false, want_ver}` — possible only mid-upgrade, and loud.
 4. After `HelloAck`, the connection is a unidirectional event stream (plus `GateQuery`/`Flush` request-reply where the component uses them). Event frames are **fire-and-forget: no per-event ack.** Durability is the spool's job, not the fabric's.
+   - 4a. **Session echo, `ext:` connections only (ADR-0012).** On an `ext:` connection every decodable `Event` must carry `session_id` equal to the bound session; any other value ⇒ close (`M1E-4003`) before admission. First-party writers (hookshim, proxy, cortexd) and the §4.5 loopback door are **not** checked by this rule: their events are attributed by their own `session_id` exactly as before, and widening the rule is a separate decision (ADR-0012 §"Not decided here").
 
 ### 4.4 Backpressure and deadlines
 
@@ -1143,7 +1145,7 @@ Normative. Later documents (04, 05, 11, 12) cite these codes; they do not invent
 | policy | `M1E-3006` | bundle past `max_age`, control plane unreachable | local | keeps polling | status (`stale: true`) | fail-static → conservative built-in defaults; verdicts flagged `stale_cert` |
 | fabric | `M1E-4001` | socket path is a symlink / bad perms | local | no — daemon refuses start | yes | fail-closed (start refusal) |
 | fabric | `M1E-4002` | frame `len` outside `0 < len ≤ M1PL_MAX_FRAME` (§4.2) | local | no — connection closed | no | fail-open (writer spills) |
-| fabric | `M1E-4003` | first frame not `Hello` / version mismatch | local | no | no | fail-open |
+| fabric | `M1E-4003` | first frame not `Hello` / version mismatch / `Hello` without a session (D-AT) / an `ext:` writer's `Event` naming a session other than its bound one (ADR-0012, §4.3 step 4a) | local | no | no | fail-open |
 | fabric | `M1E-4004` | loopback `Host` not the bound literal | 403 | no | security event | **fail-closed** |
 | fabric | `M1E-4005` | loopback request carries `Origin` | 403 | no | security event | **fail-closed** |
 | gate | `M1E-5001` | gate query timeout / verdict cache unavailable | local | n/a | no | **fail-open — gate answers allow**; `Dropped{gate_timeout}` |

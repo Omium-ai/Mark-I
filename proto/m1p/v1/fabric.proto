@@ -100,12 +100,25 @@ message Hello {
   // dropped everything from, which is the failure D-AT exists to end. cortexd
   // is not exempt — it has no session identity yet, so its pushes are refused
   // and counted until the MCP surface carries one (D-AV).
+  //
+  // ONE exemption, ADR-0012: a writer whose component starts with "ext:" (a
+  // third-party host that owns its own execution loop and cannot know a Mark 1
+  // session id) MAY leave this empty. The daemon then MINTS the session and
+  // returns it in HelloAck.session_id; every Event on that connection must
+  // echo it or the daemon closes (M1E-4003). An "ext:" writer that does carry
+  // a 16-byte id is bound to that id exactly like any other writer.
   bytes session_id = 4;
   // The writer's working directory — the agent's project root for a hook
   // process. LOCAL FABRIC ONLY: it never enters an event or the uplink; the
   // daemon maps it to an enabled workspace and stamps SessionStart.workspace_id
   // (the HMAC) from it. Empty when the writer has no meaningful cwd.
   string cwd = 5;
+  // ADR-0012: the host's OWN reference for this session (its run id, thread
+  // id, whatever it correlates by). Opaque, ≤ 256 bytes, [P1]: stored beside
+  // the Mark 1 session for later receipt echo, NEVER used as the Mark 1
+  // session id and never an admission criterion. Empty for first-party
+  // writers, which have no second identity to correlate.
+  string host_correlation_id = 6;
 }
 
 message HelloAck {
@@ -117,6 +130,12 @@ message HelloAck {
   // Set only when accepted = false: the single M1PL version this daemon
   // speaks. Possible only mid-upgrade, and loud (08 §4.3 step 3).
   uint32 want_ver = 3;
+  // ADR-0012: the 16-byte session UUIDv7 the daemon MINTED for an "ext:"
+  // writer whose Hello carried no session_id. Set ONLY in that case; every
+  // other accepted Hello gets an empty field, because the writer already
+  // knows its session. The writer echoes it in Event.session_id on every
+  // frame of this connection.
+  bytes session_id = 4;
 }
 
 // hookshim → mark1d: read the cached VerdictEvent{PROVISIONAL} + knee state

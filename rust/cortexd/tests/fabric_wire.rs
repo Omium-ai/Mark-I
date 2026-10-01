@@ -108,6 +108,7 @@ fn serve(mut stream: UnixStream, out: &mpsc::Sender<Result<pb::FabricFrame, Stri
                         accepted: !refused,
                         max_frame: m1p_wire::M1PL_MAX_FRAME,
                         want_ver: u32::from(refused),
+                        session_id: Vec::new(),
                     })),
                 },
                 &mut ack,
