@@ -33,7 +33,6 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters"
@@ -903,53 +902,12 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		_ = sp.Close()
 		return err
 	}
-	srv := fabric.NewServer(func(ctx context.Context, payload []byte) error {
-		ev := &m1pv1.Event{}
-		if err := proto.Unmarshal(payload, ev); err != nil {
-			// Capture owns the quarantine ledger for an undecodable payload;
-			// re-entering through its own door keeps that accounting single-site.
-			return adm.AdmitBytes(ctx, payload)
-		}
-		// The cortex plane watches every decoded event: session start/end
-		// publishes or retires the session file cortexd Hellos with, and an
-		// admitted CortexInjection's root_hash reaches the anchor runner.
-		cx.Observe(ev)
-		// SessionStart.workspace_id (events.proto): the shim sends it empty — the tenant path key is the daemon's — and the daemon stamps it from the Hello's cwd when that cwd sits inside an enabled workspace; the app names the project from the same HMAC (GET /v1/projects). A session started outside every enabled root stays unattributed, honestly.
-		if ss := ev.GetSessionStart(); ss != nil && len(ss.GetWorkspaceId()) == 0 && len(ev.GetSessionId()) == 16 {
-			var sid [16]byte
-			copy(sid[:], ev.GetSessionId())
-			if cwd, ok := sessionCwd.Load(sid); ok {
-				if root, ok := enabledRootFor(cfg.stateDir, cfg.workspace, cwd.(string)); ok {
-					ss.WorkspaceId = cov.WorkspaceID(root)
-				}
-			}
-		}
-		// Segmentation runs BEFORE admission so a vote or gate query riding the
-		// same connection already resolves to the task this event opened, and
-		// TaskOpen precedes the event that opened it in the spool.
-		// ponytail: nil files — no wire body carries tool paths into the daemon
-		// (ToolUse has no path field), so R2's overlap predicate cannot fire yet.
-		for _, te := range seg.Observe(ev, nil) {
-			if err := adm.Admit(ctx, te); err != nil && !perEventLoss(err) {
-				return err
-			}
-		}
-		// The PostToolUse trigger (04 §2.2), keyed by the task the segmenter
-		// just resolved: a run whose vote could not be filed against a real
-		// task would be evidence D-AA drops on arrival, so an unresolved
-		// session schedules nothing rather than running an anchor for nobody.
-		if ev.GetToolUse() != nil && len(ev.GetSessionId()) == 16 {
-			var sid [16]byte
-			copy(sid[:], ev.GetSessionId())
-			if task, ok := seg.TaskFor(sid, [16]byte{}); ok {
-				sched.NoteToolUse(sid, task)
-			}
-		}
-		if ev.GetModelRequest() != nil {
-			return router.Emit(ctx, ev)
-		}
-		return votes.Admit(ctx, ev)
-	}, perEventLoss)
+	// The one admission door (admit.go): the socket enters here, and so does
+	// the loopback door through the same Server. A pure lift of the closure
+	// that lived here; TestSocketStreamGolden pins the stream across it.
+	admit := &admitPath{adm: adm, cx: cx, cov: cov, seg: seg, sched: sched, router: router, votes: votes,
+		sessionCwd: &sessionCwd, stateDir: cfg.stateDir, workspace: cfg.workspace}
+	srv := fabric.NewServer(admit.bytes, perEventLoss)
 	// The GateQuery route is constructed with eng.Reader() — a verdict.Reader,
 	// the only verdict surface with no method that computes (04 §2.3).
 	gate.Evidence = votes.Evidence // FR-VERIFY-011: evidence_ref on BLOCK
