@@ -3,6 +3,7 @@ package memory
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/hostprofile"
 )
 
 const (
@@ -64,6 +66,25 @@ type Config struct {
 	Now        func() time.Time
 	Poll       time.Duration
 	MaxAge     time.Duration
+
+	// Profiles is the ADR-0013 per-session host-profile registry; nil, or an
+	// unknown session, reads as hostprofile.Default. record reads it and
+	// logs it once per session; it decides nothing on it in this revision
+	// (Part 5 selects the memory sink from OwnsMemory).
+	Profiles *hostprofile.Registry
+}
+
+// ProfileFor is the session's host profile as memory sees it, logged at
+// debug the first time a session is asked for.
+func (c *Cache) ProfileFor(session [16]byte) hostprofile.Profile {
+	p := hostprofile.Default
+	if c.cfg.Profiles != nil {
+		p = c.cfg.Profiles.Get(session)
+	}
+	if _, seen := c.profileSeen.LoadOrStore(session, struct{}{}); !seen && c.cfg.Log != nil {
+		c.cfg.Log.Debug("memory: host profile", "session", hex.EncodeToString(session[:]), "host_id", p.HostID, "owns_memory", p.OwnsMemory, "default", p.IsDefault())
+	}
+	return p
 }
 
 type custody struct {
@@ -79,10 +100,11 @@ type taskState struct {
 }
 
 type Cache struct {
-	cfg  Config
-	dir  string
-	http *http.Client
-	now  func() time.Time
+	profileSeen sync.Map // session → struct{}: the ADR-0013 profile line is logged once
+	cfg         Config
+	dir         string
+	http        *http.Client
+	now         func() time.Time
 
 	mu    sync.Mutex
 	lkg   custody

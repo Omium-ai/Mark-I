@@ -10,16 +10,20 @@ package fabric
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/hostprofile"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/off"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/policy"
@@ -65,6 +69,13 @@ type Gate struct {
 	// is the compiled default (armed, subject to the local opt-in), so a gate
 	// that never saw a bundle behaves as it always did.
 	opened atomic.Bool
+	// Profiles is the ADR-0013 per-session host-profile registry; nil, or an
+	// unknown session, reads as hostprofile.Default. Answer reads it and logs
+	// it once per session; it decides nothing on it in this revision.
+	Profiles *hostprofile.Registry
+	// Log carries the once-per-session profile line; nil logs nothing.
+	Log         *slog.Logger
+	profileSeen sync.Map // session → struct{}: the debug line is printed once
 	// TaskFor is D-AA parts 2 and 3: the daemon's segmenter resolves the
 	// connection's session plus the query's (possibly empty) task_id to a real
 	// task, or misses. nil means no segmenter is wired, so every query misses —
@@ -250,7 +261,24 @@ func note(v *m1pv1.GateVerdict, unknown uint32) *m1pv1.GateVerdict {
 // Answer is the whole gate path: memory only (04 §8.3 — the off-check is one
 // file stat), budget ≤5 ms. session is the connection's authenticated Hello
 // session id (08 §4.3) — the channel D-AA resolves an empty task_id through.
+// ProfileFor is the session's ADR-0013 host profile as the gate sees it:
+// Default when no registry is wired or the session declared nothing. Logged
+// at debug the first time a session is asked for.
+func (g *Gate) ProfileFor(session [16]byte) hostprofile.Profile {
+	p := hostprofile.Default
+	if g.Profiles != nil {
+		p = g.Profiles.Get(session)
+	}
+	if _, seen := g.profileSeen.LoadOrStore(session, struct{}{}); !seen && g.Log != nil {
+		g.Log.Debug("gate: host profile", "session", hex.EncodeToString(session[:]), "host_id", p.HostID, "arrest_mode", string(p.ArrestMode), "default", p.IsDefault())
+	}
+	return p
+}
+
 func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdict) {
+	// ADR-0013: read and log the profile; nothing below decides on it yet.
+	// Part 4 selects the arrest sink from ArrestMode here.
+	_ = g.ProfileFor(session)
 	received := g.now()
 	// Named return + defer so the digest covers EVERY exit, including the
 	// fail-open ones: a gate that got slow only on its refusal paths would be

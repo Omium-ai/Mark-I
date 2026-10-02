@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/cursor"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/hostprofile"
 )
 
 // Names is every adapter this walk applies and reverts, in 08 §5 order.
@@ -26,6 +28,12 @@ type Options struct {
 	StateDir string
 	Only     []string // restricts the walk; nil is every adapter
 	Repair   bool     // rewrite a FRAGMENT-DAMAGED fence instead of refusing it (08 §8.3(d), the `doctor --fix` bit)
+	// Profile is the ADR-0013 host profile of the session this walk serves;
+	// nil is hostprofile.Default (a solo developer's daemon, `mark1 enable`,
+	// the control API today). Read and logged here; a later feature switches
+	// on OwnsConfigSurface.
+	Profile *hostprofile.Profile
+	Log     *slog.Logger // nil logs nothing
 }
 
 type Refusal struct {
@@ -41,6 +49,22 @@ type Result struct {
 	ProxyPointer      string // provisioned | not-eligible | M1E code; "" when claudecode was not walked
 	CopilotPointer    string
 	CopilotSourceLine string
+	// Profile is the host profile this walk resolved (ADR-0013): the
+	// Options.Profile or hostprofile.Default. Reported so a caller can see
+	// what provisioning read, before anything decides on it.
+	Profile hostprofile.Profile
+}
+
+// profileFor resolves and logs the walk's host profile (ADR-0013 §4).
+func profileFor(opts Options) hostprofile.Profile {
+	p := hostprofile.Default
+	if opts.Profile != nil {
+		p = *opts.Profile
+	}
+	if opts.Log != nil {
+		opts.Log.Debug("provision: host profile", "host_id", p.HostID, "owns_config_surface", p.OwnsConfigSurface, "default", p.IsDefault())
+	}
+	return p
 }
 
 type Reverted struct {
@@ -61,7 +85,7 @@ func installed(d adapters.Detection, _ error) bool { return d.Installed }
 
 // Apply walks the adapters: claudecode unconditionally, the rest only when installed, so no owned file is planted for an agent the user does not run and no fence refused for one they never configured.
 func Apply(opts Options) (Result, error) {
-	res := Result{Provisioned: []string{}}
+	res := Result{Provisioned: []string{}, Profile: profileFor(opts)}
 	for _, n := range opts.Only {
 		if !slices.Contains(Names, n) {
 			return res, fmt.Errorf("unknown agent %q", n)

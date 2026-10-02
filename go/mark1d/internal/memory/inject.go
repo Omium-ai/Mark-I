@@ -39,6 +39,8 @@ func idBytes(a Artifact) ([]byte, bool) {
 
 // record admits the MemoryInjection first; text is delivered only once the ledger holds the delivery.
 func (c *Cache) record(ctx context.Context, st *taskState, task [16]byte, ch m1pv1.InjectionChannel, chosen []Artifact, text string) string {
+	// ADR-0013: read and log the session profile; nothing here decides on it yet.
+	_ = c.ProfileFor(st.session)
 	ids := make([][]byte, 0, len(chosen))
 	for _, a := range chosen {
 		id, ok := idBytes(a)
