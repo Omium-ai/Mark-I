@@ -18,6 +18,7 @@ Claude Code hook and settings facts in §5.1 were verified against the vendor do
 | **config-stable** | Shape is versioned data distributed through PolicyBundle sections (`agent_maps`, verify matrices, knee tables) or fenced config fragments. | A format change is a **bundle push, not a release**. Edges skip-and-retain unknown sections/keys within a bundle major (§10.3). |
 | **internal** | Both ends ship in the same signed package and upgrade atomically (M1PL framing, spool segment layout, `mark1d`↔CLI local IPC). | May change on any release. Still versioned (frame `ver` byte, segment header) so a partially-upgraded host fails loudly, not silently. |
 | **externally-owned** | Defined by an agent vendor, not by us (hook payloads, transcript line format, settings file schemas). | We absorb drift: field maps and parser rules live in `agent_maps` bundle data; unrecognized shapes emit `Dropped{unsupported_agent_version}` and never fabricate values. |
+| **external writer** | The subset of the local fabric a third-party host integrates against (§4.6, ADR-0012, 2026-10-02): endpoint discovery, M1PL framing, `Hello`/`HelloAck` with `ext:` session binding, the `Event` envelope and the five-event minimum, the JSONL file-tail mode and its sidecar manifest. Consumed by binaries we do not ship. | **Public and versioned.** Additive only within `m1p.v1`: a new field, a new optional event, a new control arm. Nothing an integrated host sends today may stop being accepted within the major; a breaking change is `m1p.v2`, served in parallel. The M1PL `ver` byte and the sidecar `schema_version` are the two version carriers. `buf breaking` at `WIRE_JSON` and the `ext` conformance vectors (12 §3.4) gate it in CI. |
 
 ### 1.2 Inventory
 
@@ -39,6 +40,7 @@ Claude Code hook and settings facts in §5.1 were verified against the vendor do
 | I-14 | Error taxonomy (`M1E-*` codes) | everything → everything | wire-stable | §9 |
 | I-15 | Spool segment binary layout | `mark1d` → `mark1d` | internal | 07 §spool |
 | I-16 | Corpus export formats (Parquet + KTO JSONL/manifest) | `mark1-intel.corpus` → data-refinery | wire-stable within the estate | 07 §corpus |
+| I-17 | External-writer contract (socket + JSONL file-tail) | third-party hosts (`ext:` writers) → `mark1d` | external writer, **public** | §4.6; `docs/integrating-a-host.md` |
 
 ### 1.3 Deprecation policy per class
 
@@ -545,7 +547,86 @@ Responses: 204 (event accepted), 200 (gate verdict), 400 M1E-2001, 401 M1E-1002,
            403 M1E-4004/4005, 429 M1E-9001 (per-session rate cap).
 ```
 
-The loopback listener accepts events **only** for sessions whose token it issued; it is a constrained door into the same single-writer spool path, not a second fabric.
+The loopback listener accepts events **only** for sessions whose token it issued; it is a constrained door into the same single-writer spool path, not a second fabric. **It is not an external-writer transport** (§4.6): it has no `Hello`, so no `ext:` identity, no session binding and no `host_correlation_id`. A third-party host uses the socket or the file-tail mode.
+
+### 4.6 External writers — the `ext:` contract
+
+Class: **external writer** (§1.1) — public, versioned, additive-only within `m1p.v1`. ADR-0012 is the decision record; `docs/integrating-a-host.md` is the partner-facing walkthrough of exactly this section. An *external writer* is a third-party agent runtime that owns its own execution loop and hands Mark 1 events it did not harvest itself. Two transports carry the same contract; downstream of admission nothing can tell them apart.
+
+**Scope rule.** Everything below is additive to §4.1–§4.4. Nothing here changes what `mark1-hookshim`, `mark1-proxy`, `cortexd` or the transcript tailers send or receive; the `ext:` branches are keyed on the `component` prefix and are inert for every other writer.
+
+#### 4.6.1 Transport A — the socket
+
+| Item | Contract |
+|---|---|
+| Endpoint discovery | `$XDG_RUNTIME_DIR/omium-mark1/m1p.sock`, else `~/.omium/mark1/m1p.sock` (07 §5; `fabric.SocketPath`). Windows: `\\.\pipe\omium-mark1-<user-SID>` where the SID is the calling user's. Owner-only on both; a host runs as the same OS user as the daemon or it cannot connect, by design (§4.1). |
+| Framing | §4.2 verbatim: `M1PL` \| `ver=0x01` \| `len` (u32 LE, `0 < len ≤ M1PL_MAX_FRAME`) \| one serialized `m1p.v1.FabricFrame`. Reference codecs: `rust/m1p-wire/src/framing.rs`, `go/mark1d/internal/fabric/framing.go`; vectors in `conformance/vectors/m1pl/`. |
+| `Hello.component` | `ext:<vendor>/<product>@<version>`, e.g. `ext:acme/runner@1.2.3`. The `ext:` prefix is the switch for everything below; the rest is free text carried for `mark1 doctor`. |
+| Session binding | §4.3 step 2a: `session_id` empty ⇒ the daemon mints a UUIDv7 and returns it in `HelloAck.session_id`; the host echoes it in `Event.session_id` on every frame. A host that does hold a 16-byte id may send it and is bound to it. |
+| `Hello.host_correlation_id` | Optional, ≤ 256 bytes, the host's own run or thread reference. Stored beside the session; never a Mark 1 identity (ADR-0012 §3). |
+| `Hello.cwd` | Optional. When set to the project root the daemon stamps `SessionStart.workspace_id` from it exactly as for a hook process; the path never enters an event. |
+| Session echo | §4.3 step 4a: a decodable `Event` naming any session other than the bound one ⇒ close `M1E-4003`, before admission. |
+| Drain | `Flush`/`FlushAck` as §4.2: send `Flush` after `SessionEnd` and wait for the ack before exiting; `drained` counts this connection's admitted events. |
+| Not available to `ext:` writers | `GateQuery`, `ContextQuery`, `ContaminationAlert`. A host that owns its execution loop has nothing for the stop gate to gate; these arms answer exactly as for any writer but carry no contract for hosts. |
+
+#### 4.6.2 Transport B — the JSONL file-tail mode
+
+For integration and phase-one testing without a socket client. The host appends to a file; `mark1d` tails it through the **same admission door** the socket uses (`admitPath`, cmd/admit.go).
+
+```
+File:        <name>.jsonl            append-only; one m1p.v1.Event per line, protojson
+Sidecar:     <name>.manifest.json    written BEFORE the first event line; this is the file's Hello
+             {"component": "ext:acme/runner@1.2.3",
+              "host_correlation_id": "run-7781",         optional, ≤ 256 bytes
+              "schema_version": "m1p.v1"}                required, exactly "m1p.v1"
+Discovery:   mark1d --partner-events <path>[,<path>...]  explicit files, plus every *.jsonl under
+             <state-dir>/partner/                         (~/.omium/mark1/partner/, 0700)
+```
+
+- **Sidecar ≡ `Hello`.** The daemon reads the sidecar on first open and binds the file the way §4.3 step 2a binds a connection: `component` must carry the `ext:` prefix, the session is minted once, and the minted id is persisted in the file's tailer cursor so a daemon restart resumes the SAME session. A missing or unreadable sidecar, a non-`ext:` component or a `schema_version` outside the accepted set ⇒ the file is not tailed, logged once (`M1E-4003`, the same code as a refused `Hello`), re-checked on the next discovery tick.
+- **Lines.** `Event.session_id` is left empty (the host does not know the minted id) and the daemon stamps it; a line that names a different, non-empty session is quarantined and accounted (`Dropped{LOCAL_QUARANTINE}`) and the tail continues — the file analogue of §4.3 step 4a, where there is no connection to close. An undecodable line is quarantined and accounted the same way. Unknown fields are ignored, as protojson's `DiscardUnknown` permits within a major.
+- **Offsets, rotation, resume** follow the transcript tailers' rules (04 §2.1): the cursor is keyed by file identity, advances only over whole `\n`-terminated lines (a torn last line waits for the next poll), rotation drains the old inode then follows the new file from offset 0, and truncation re-scans from 0. **Set `event_id` yourself** (a UUIDv7 per line): ingest dedupes on it, so a re-scan is idempotent server-side; without it a truncation replay duplicates diagnostic-class events.
+
+#### 4.6.3 The `Event` envelope from an external writer (both transports)
+
+| Field | Rule |
+|---|---|
+| `event_id` | 16 bytes, UUIDv7, RECOMMENDED. Minted by the daemon when empty. |
+| `seq`, `session_epoch` | MUST be zero. Assigned at admission (07 §2); a non-zero value is overwritten, never trusted. |
+| `session_id` | Socket: the bound session, every frame. File: empty. |
+| `task_id` | SHOULD be empty. The daemon segments under `task_seg.v1` (ADR-0002) from your `Turn` events — see the minimum set. |
+| `occurred_at` | Your wall clock at the event. Display and skew analysis only; **lines/frames must be in causal order and `occurred_at` must be non-decreasing** within a session. `seq` is the daemon's, not yours. |
+| `tenant_id`, `device_id`, `received_at`, `clock_skew_ms` | MUST be unset (server-stamped band); cleared at admission. |
+| `Usage.idem_key` | **Stamped by the daemon** for every `ext:` session, per the events.proto recipe over `(session_id, message_id, request_id)`. A non-empty writer value is overwritten and the overwrite is logged once per session at debug (ADR-0012 §4). Send `message_id` and `request_id`; leave `idem_key` empty. |
+
+**Minimum event set** an external host emits, in the order they occur:
+
+| Event | When | Notes |
+|---|---|---|
+| `Turn{initiator: INITIATOR_HUMAN}` | each new user intent | **This is what opens a Mark 1 task** (task_seg.v1 R1). Emit one per intent; the daemon mints `TaskOpen`. |
+| `TaskOpen` | when your own loop opens a unit of work | Recorded as your declared boundary: `task_seg_version` is your string (e.g. `ext:acme/runner.v1`), `task_id` as you set it or empty. The daemon's receipted denominator remains the `task_seg.v1` task it mints from your `Turn`s; host-declared boundaries become authoritative only under a later host-profile feature. |
+| `Turn{initiator: INITIATOR_AGENT}` | each attempt your loop makes | counted into `TaskClose.turn_count`. |
+| `ToolUse` | each tool call, with `status` and `duration_ms` | optional but expected; built-in names pass literally, anything else is HMAC'd (events.proto). |
+| `Usage` | each model response, with `message_id`, `request_id`, `model`, token counts | billing-grade: blocks on a full spool, never shed. |
+| `ArtifactOutcome` | when you claim an outcome for the unit of work | `task_verdict` from the one `Verdict` vocabulary (artifacts.proto). |
+| `TaskClose` | when your loop closes the unit of work | as `TaskOpen`: your declared boundary, recorded. |
+| `SessionStart` / `SessionEnd` | lifecycle, first and last | RECOMMENDED. `SessionStart.agent` is your product name; `capture_paths` empty. `SessionEnd` closes the daemon's open task (`RESOLUTION_UNRESOLVED_SESSION_END` unless a verdict closed it) and triggers the drain. |
+
+The five-event floor `conformance/vectors/ext/` pins is `TaskOpen`, `TaskClose`, `Turn`, `Usage`, `ArtifactOutcome`; `mark1 validate-events` (§7.8) checks the ordering above on a file before you ever connect.
+
+#### 4.6.4 What the daemon does on bad input
+
+| Input | Socket | File-tail |
+|---|---|---|
+| Framing violation (`len` out of bound, bad magic) | close, `M1E-4002` (§4.2) | n/a |
+| Duplicate oneof arm, unknown arm, non-`Hello` first frame | close, `M1E-4003` | n/a |
+| `Hello` without `ext:` and without a session; malformed session; `host_correlation_id` > 256 bytes | close, `M1E-4003` | file not tailed, logged once |
+| `Event` naming the wrong session | close, `M1E-4003` | line quarantined, accounted, tail continues |
+| Undecodable `Event` payload / line | quarantined and accounted (`Dropped{LOCAL_QUARANTINE}`), connection lives | same |
+| Event over the 1 MiB admission bound (07 §6) | quarantined and accounted | same |
+| Billing-grade event under a full spool | the read stalls (backpressure, §4.4); the host's write blocks | the tail stalls at that line |
+
+A quarantine is never silent: it rides the next batch's `Dropped{}` (07 §3) and `mark1 doctor` counts it.
 
 ---
 

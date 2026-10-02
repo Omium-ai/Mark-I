@@ -814,7 +814,7 @@ offset  size  field
 - **The bound exists for the decoder, not the data.** No typed `m1p.v1` event approaches 4 MiB (excerpt payloads travel as HTTPS multipart attachments, never over the fabric), so the bound costs nothing — and it makes the maximum allocation from any single corrupt or hostile length byte provably 4 MiB instead of 4 GiB. The frame decoder in `m1p-wire` is a CI fuzz target; a bounded `len` is what makes that fuzzing meaningful memory-safety evidence rather than an OOM lottery.
 - Little-endian because it matches every target architecture's native order and the spool record framing (§6), so one codepath serves both.
 - **Transport and permissions.** Unix domain socket at `$XDG_RUNTIME_DIR/omium-mark1/m1p.sock` (fallback `~/.omium/mark1/m1p.sock`), created `0600` with a `0700` parent directory — only the enrolled OS user can connect; there is no group or world grant, ever. On Windows: named pipe `\\.\pipe\omium-mark1-<user-SID>` with a DACL granting access to the owning user's SID only (the SID in the name prevents squatting collisions between users; the DACL is the actual boundary).
-- **Who may write:** hookshim, proxy, cortexd, and the tailers. Anything else connecting can only be same-user code, which already owns the machine — the fabric's threat model is other users and accidents, not the owner.
+- **Who may write:** hookshim, proxy, cortexd, and the tailers — plus **external writers** (`Hello.component` prefixed `ext:`, ADR-0012, 08 §4.6): third-party hosts that own their execution loop. An `ext:` writer may `Hello` without a session and is minted one in `HelloAck.session_id`; its events must echo it. The same contract rides a second transport, the partner JSONL file-tail (`<name>.jsonl` beside `<name>.manifest.json`, "Local edge stores" below), which enters the identical admission path. Anything else connecting can only be same-user code, which already owns the machine — the fabric's threat model is other users and accidents, not the owner.
 - Where an agent cannot exec the shim, the loopback-HTTP fallback listener requires a per-session bearer token (0600 file), literal-loopback `Host` validation, and `Origin` rejection; it decodes into the same `Event` and enters `mark1d` through the same admission path — no second trust class exists.
 - **Control messages** (`Hello`/`HelloAck`, `GateQuery`/`GateVerdict`, `Flush`/`FlushAck`) are defined in `m1p/v1/fabric.proto` (D-N) with `08` §4.2's field sets, transcribed. They ride M1PL frames on the fabric ONLY — never the spool, never the wire, never `Event.body` — which is why none of them carries an `event_id`, a durability class, or anything from the server-stamped band. `08` §4.3 owns the handshake semantics; this document owns only the statement that the set exists and where it may travel.
 
@@ -3745,6 +3745,21 @@ PRAGMA journal_mode = WAL;                  -- single writer, concurrent readers
 ```
 
 Eviction policy, in priority order: (1) any row whose `grammar_rev`/`query_rev`/`indexer_rev` no longer matches the running toolchain — dead weight, evicted first; (2) LRU by `last_used_at` down to the 1 GiB per-machine cap; (3) `VACUUM` opportunistically when idle and file bloat exceeds 2× live bytes. Never evicted mid-session for entries touched this session (`last_used_at` bump on read makes this automatic).
+
+### Partner event files (external writers, file-tail mode)
+
+`~/.omium/mark1/partner/` (0700) is the well-known drop directory for the JSONL file-tail transport of 08 §4.6.2, beside whatever `mark1d --partner-events <path>[,…]` names explicitly. Two files per stream, same basename:
+
+```
+<name>.jsonl           append-only, one m1p.v1.Event per line in protojson; the host's event_id
+                       (UUIDv7) on every line is what makes a re-scan idempotent at ingest
+<name>.manifest.json   the file's Hello, written first:
+                       {"component": "ext:<vendor>/<product>@<version>",   REQUIRED, ext: prefix
+                        "host_correlation_id": "<host's own ref>",          optional, ≤ 256 bytes
+                        "schema_version": "m1p.v1"}                         REQUIRED, the accepted set is {"m1p.v1"}
+```
+
+The daemon tails these under the transcript tailers' cursor rules (04 §2.1: file-identity-keyed cursor under `<state>/tailers/`, whole-line offsets, rotation follow, truncation re-scan) with one addition: the cursor also carries `session_id_hex`, the session the daemon minted for the file on first read — the file-tail equivalent of `HelloAck.session_id` — so a restart resumes the SAME session rather than minting a second. Lines enter the one admission path (`admitPath`) with `session_id` stamped from the cursor; `Usage.idem_key` is stamped there too (ADR-0012 §4). Nothing in this directory is ever uploaded as a file: only the admitted events leave, through the spool.
 
 ### Encrypted spill rings
 
