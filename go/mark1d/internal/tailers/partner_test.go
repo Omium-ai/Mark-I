@@ -7,10 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
+
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/hostprofile"
 )
 
 // partnerRig is one Partner over a temp drop dir with a recording Emit.
@@ -22,6 +25,7 @@ type partnerRig struct {
 	got      []*m1pv1.Event
 	bound    []string
 	sessions [][16]byte
+	profiles []hostprofile.Profile
 	drops    int
 }
 
@@ -35,9 +39,10 @@ func newPartnerRig(t *testing.T, dir, state string) *partnerRig {
 			r.got = append(r.got, ev)
 			return nil
 		},
-		OnBind: func(session [16]byte, component, corr string) {
+		OnBind: func(session [16]byte, component, corr string, p hostprofile.Profile) {
 			r.bound = append(r.bound, component+"|"+corr)
 			r.sessions = append(r.sessions, session)
+			r.profiles = append(r.profiles, p)
 		},
 		Drop: func() { r.drops++ },
 	})
@@ -255,4 +260,47 @@ func TestPartnerExplicitPathsAndPollRun(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("Run emitted %d, want 1", len(got))
 	}
+}
+
+// TestPartnerSidecarHostManifestResolvesLikeTheSocket is FR-SPINE-034: the
+// sidecar's host_manifest block goes through hostprofile.FromManifest exactly
+// as Hello.host_manifest does, so the same input yields the same Profile; an
+// invalid block leaves the file untailed (M1E-4007), and no block is Default.
+func TestPartnerSidecarHostManifestResolvesLikeTheSocket(t *testing.T) {
+	manifest := `{"component":"ext:cem888/runner@2.0.1","host_correlation_id":"run-7781","schema_version":"m1p.v1",` +
+		`"host_manifest":{"hostId":"cem888","hostVersion":"2.0.1","ownsExecution":true,"ownsConfigSurface":true,"ownsMemory":true,"arrestMode":"ARREST_MODE_RECOMMEND","suppliesIdentity":true,"schemaVersion":"m1p.v1"}}`
+	dir, state := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(dir, "run.manifest.json"), manifest)
+	writeFile(t, filepath.Join(dir, "run.jsonl"), turnLine)
+	r := newPartnerRig(t, dir, state)
+	r.sweep()
+	want, err := hostprofile.FromManifest(&m1pv1.HostManifest{HostId: "cem888", HostVersion: "2.0.1", OwnsExecution: true, OwnsConfigSurface: true, OwnsMemory: true, ArrestMode: m1pv1.ArrestMode_ARREST_MODE_RECOMMEND, SuppliesIdentity: true, SchemaVersion: "m1p.v1"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.profiles) != 1 || r.profiles[0] != want {
+		t.Fatalf("sidecar profile %+v, want the socket's %+v", r.profiles, want)
+	}
+
+	t.Run("absent block is Default", func(t *testing.T) {
+		dir, state := t.TempDir(), t.TempDir()
+		writeFile(t, filepath.Join(dir, "run.manifest.json"), goodManifest)
+		writeFile(t, filepath.Join(dir, "run.jsonl"), turnLine)
+		r := newPartnerRig(t, dir, state)
+		r.sweep()
+		if len(r.profiles) != 1 || r.profiles[0] != hostprofile.Default {
+			t.Fatalf("profile %+v, want Default", r.profiles)
+		}
+	})
+	t.Run("invalid block is refused", func(t *testing.T) {
+		dir, state := t.TempDir(), t.TempDir()
+		bad := strings.Replace(manifest, `"ownsExecution":true`, `"ownsExecution":false`, 1)
+		writeFile(t, filepath.Join(dir, "run.manifest.json"), bad)
+		writeFile(t, filepath.Join(dir, "run.jsonl"), turnLine)
+		r := newPartnerRig(t, dir, state)
+		r.sweep()
+		if len(r.got) != 0 || len(r.bound) != 0 {
+			t.Fatal("a file with an invalid host_manifest was tailed")
+		}
+	})
 }

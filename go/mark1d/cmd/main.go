@@ -41,6 +41,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/copilot"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/gemini"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/opencode"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/admit"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/bundle"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/capture"
@@ -50,6 +51,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/evidence"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/harden"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/hostprofile"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/judge"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/memory"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
@@ -725,7 +727,9 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// reopened under the same id (R3) inherits its pre-close streak, and a streak
 	// at the cap short-circuits the next gate query to ALLOW *before* the cache
 	// read — the new attempt runs entirely ungated on the old attempt's state.
+	profiles := hostprofile.NewRegistry() // ADR-0013: per-session host profiles, Default when none was declared; filled by both transports at bind
 	mem, err := memory.New(memory.Config{
+		Profiles: profiles,
 		StateDir: cfg.stateDir, BaseURL: cfg.policyURL, Token: cfg.deviceToken, EdgeVersion: version, Log: log,
 		Admit: adm.Admit, TaskFor: seg.TaskFor, Verdict: seg.Verdict, PackTokensMax: bc.Memory().PackTokensMax,
 	})
@@ -786,6 +790,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	bc.ApplyRanker = cx.SetRanker
 	// The gate exists before Run so a bundle fetched after boot (enrollment) arms or opens it live; its other seams are wired below.
 	gate := fabric.NewGate(eng.Reader(), blocks, cfg.stateDir)
+	gate.Profiles, gate.Log = profiles, log // ADR-0013: read and logged in Answer; Part 4 selects the arrest sink from it
 	gate.AgentFor = ctl.Hub().AgentFor
 	if cfg.matrices == nil {
 		bc.ApplyGates = gate.ApplyGates
@@ -925,11 +930,16 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// The one admission door (admit.go): the socket enters here, and so does
 	// the loopback door through the same Server. A pure lift of the closure
 	// that lived here; TestSocketStreamGolden pins the stream across it.
-	admit := &admitPath{adm: adm, cx: cx, cov: cov, seg: seg, sched: sched, router: router, votes: votes,
-		sessionCwd: &sessionCwd, stateDir: cfg.stateDir, workspace: cfg.workspace,
-		ext: &sync.Map{}, idemKey: idemKey, log: log}
-	srv := fabric.NewServer(admit.bytes, perEventLoss)
-	srv.OnExtHello = admit.bindExt // ADR-0012: the socket's ext: sessions, for idem_key stamping and the host reference
+	door := &admit.Path{Adm: adm, Cx: cx, Cov: cov, Seg: seg, Sched: sched, Router: router, Votes: votes,
+		SessionCwd: &sessionCwd, EnabledRoot: func(cwd string) (string, bool) { return enabledRootFor(cfg.stateDir, cfg.workspace, cwd) },
+		IdemKey: idemKey, Profiles: profiles, PerEvent: perEventLoss, Log: log}
+	srv := fabric.NewServer(door.Bytes, perEventLoss)
+	srv.Log = log
+	// ADR-0012/0013: the socket's ext: sessions — identity, correlation id and
+	// profile — bound at the Hello, for idem_key stamping and the consumers.
+	srv.OnExtHello = func(session [16]byte, component, corr string, p hostprofile.Profile) {
+		door.Bind(admit.Session{ID: session, Component: component, HostCorrelationID: corr, Profile: p, Ext: true})
+	}
 	// The GateQuery route is constructed with eng.Reader() — a verdict.Reader,
 	// the only verdict surface with no method that computes (04 §2.3).
 	gate.Evidence = votes.Evidence // FR-VERIFY-011: evidence_ref on BLOCK
@@ -1147,10 +1157,12 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		Paths:    splitPaths(cfg.partnerEvents),
 		Dir:      filepath.Join(cfg.stateDir, "partner"),
 		StateDir: filepath.Join(cfg.stateDir, "cursors"),
-		Emit:     admit.event,
-		OnBind:   admit.bindExt,
-		Drop:     func() { adm.AccountDropped(dropLocalQuarantine, spool.ClassDiagnostic, 1) },
-		Log:      log,
+		Emit:     door.Event,
+		OnBind: func(session [16]byte, component, corr string, p hostprofile.Profile) {
+			door.Bind(admit.Session{ID: session, Component: component, HostCorrelationID: corr, Profile: p, Ext: true})
+		},
+		Drop: func() { adm.AccountDropped(dropLocalQuarantine, spool.ClassDiagnostic, 1) },
+		Log:  log,
 	}); err != nil {
 		log.Error("mark1d: partner file-tail not started", "err", err)
 		partnerDone <- nil

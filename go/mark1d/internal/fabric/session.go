@@ -16,6 +16,8 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/hostprofile"
 )
 
 // ExtPrefix marks an external writer's Hello.component (ADR-0012): a
@@ -148,7 +150,13 @@ type session struct {
 	// first-party writers are deliberately not checked, so nothing on the
 	// hookshim/cortexd/proxy path changes.
 	ext bool
+	// profile is the ADR-0013 host profile resolved at the handshake:
+	// hostprofile.Default for every connection that sent no manifest.
+	profile hostprofile.Profile
 }
+
+// HostProfile is the session's resolved host profile (ADR-0013).
+func (ss *session) HostProfile() hostprofile.Profile { return ss.profile }
 
 // hello runs the 08 §4.3 handshake on the first frame. A non-nil return
 // closes the connection.
@@ -184,12 +192,27 @@ func (ss *session) hello(inner []byte) error {
 	if n := len(h.GetHostCorrelationId()); n > maxHostCorrelationID {
 		return fmt.Errorf("fabric: %s: host_correlation_id is %d bytes, over the %d-byte bound (ADR-0012)", CodeHandshake, n, maxHostCorrelationID)
 	}
+	// ADR-0013 (08 §4.3 step 2b): absent ⇒ Default; present ⇒ validated, and
+	// refused from a non-ext: writer, which has none to send. One log line
+	// per refusal; the connection closes.
+	profile, err := hostprofile.FromManifest(h.GetHostManifest(), ext)
+	if err != nil {
+		return fmt.Errorf("fabric: %w (component %q)", err, h.GetComponent())
+	}
+	ss.profile = profile
+	if m := h.GetHostManifest(); m != nil && ss.s.Log != nil {
+		if known, ok := hostprofile.Lookup(m.GetHostId()); ok {
+			ss.s.Log.Info("fabric: known host declared a profile", "host", known.DisplayName, "host_id", m.GetHostId(), "host_version", m.GetHostVersion(), "profile", string(hostprofile.Canonical(profile)))
+		} else {
+			ss.s.Log.Info("fabric: unknown host declared a profile (not refused; ADR-0013 §5)", "host_id", m.GetHostId(), "host_version", m.GetHostVersion(), "profile", string(hostprofile.Canonical(profile)))
+		}
+	}
 	ss.helloed, ss.ext = true, ext
 	if ss.s.OnHello != nil {
 		ss.s.OnHello(ss.id, h.GetCwd())
 	}
 	if ext && ss.s.OnExtHello != nil {
-		ss.s.OnExtHello(ss.id, h.GetComponent(), h.GetHostCorrelationId())
+		ss.s.OnExtHello(ss.id, h.GetComponent(), h.GetHostCorrelationId(), profile)
 	}
 	// max_frame is the symbol M1PL_MAX_FRAME, never a re-typed literal.
 	return ss.reply(&m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_HelloAck{

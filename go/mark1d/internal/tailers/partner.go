@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/hostprofile"
 )
 
 // The partner JSONL file-tail transport (08 §4.6.2, 07 "Partner event files"):
@@ -40,6 +41,12 @@ type Manifest struct {
 	Component         string `json:"component"`
 	HostCorrelationID string `json:"host_correlation_id,omitempty"`
 	SchemaVersion     string `json:"schema_version"`
+	// HostManifest is the optional ADR-0013 block: one m1p.v1.HostManifest in
+	// protojson, exactly Hello.host_manifest. Profile is what it resolved to
+	// (hostprofile.Default when absent), through the same validator the
+	// socket uses, so the two transports cannot disagree.
+	HostManifest json.RawMessage     `json:"host_manifest,omitempty"`
+	Profile      hostprofile.Profile `json:"-"`
 }
 
 // maxHostCorrelationID mirrors fabric's bound on Hello.host_correlation_id.
@@ -67,6 +74,18 @@ func ReadManifest(path string) (Manifest, error) {
 	if !slices.Contains(AcceptedSchemaVersions, m.SchemaVersion) {
 		return m, fmt.Errorf("%s: schema_version %q not in the accepted set %v", fabric.CodeHandshake, m.SchemaVersion, AcceptedSchemaVersions)
 	}
+	var hm *m1pv1.HostManifest
+	if len(m.HostManifest) != 0 && string(m.HostManifest) != "null" {
+		hm = &m1pv1.HostManifest{}
+		if err := protojson.Unmarshal(m.HostManifest, hm); err != nil {
+			return m, fmt.Errorf("%s: host_manifest is not a m1p.v1.HostManifest: %w", hostprofile.CodeInvalid, err)
+		}
+	}
+	p, err := hostprofile.FromManifest(hm, true)
+	if err != nil {
+		return m, err
+	}
+	m.Profile = p
 	return m, nil
 }
 
@@ -82,7 +101,7 @@ type PartnerConfig struct {
 	// resumed from the cursor), component and host correlation id — the
 	// same signature as fabric.Server.OnExtHello, so one daemon hook serves
 	// both transports. nil is legal.
-	OnBind func(session [16]byte, component, hostCorrelationID string)
+	OnBind func(session [16]byte, component, hostCorrelationID string, profile hostprofile.Profile)
 	// Drop accounts one quarantined line (undecodable, or naming a foreign
 	// session): the file analogue of 08 §4.3 step 4a, where there is no
 	// connection to close. nil is legal.
@@ -250,9 +269,9 @@ func (p *Partner) open(path string) {
 	}
 	delete(p.warned, path)
 	p.ts[path] = t
-	p.cfg.Log.Info("partner: file bound", "path", path, "component", m.Component, "session", t.sessionHex)
+	p.cfg.Log.Info("partner: file bound", "path", path, "component", m.Component, "session", t.sessionHex, "profile", string(hostprofile.Canonical(m.Profile)))
 	if p.cfg.OnBind != nil {
-		p.cfg.OnBind(sid, m.Component, m.HostCorrelationID)
+		p.cfg.OnBind(sid, m.Component, m.HostCorrelationID, m.Profile)
 	}
 }
 

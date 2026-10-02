@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/hostprofile"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/verdict"
 )
@@ -354,6 +355,10 @@ func TestSessionedCortexHelloIsAdmitted(t *testing.T) {
 
 // ---- ADR-0012: external writers ------------------------------------------
 
+// extProfiles is what the last startExtStub's OnExtHello saw, in order:
+// the ADR-0013 profile each accepted ext: Hello resolved to.
+var extProfiles []hostprofile.Profile
+
 // startExtStub is startStub plus the OnExtHello observer, recording what the
 // daemon would store beside the session.
 func startExtStub(t *testing.T) (addr string, got *[][]byte, seen *[]string) {
@@ -361,12 +366,14 @@ func startExtStub(t *testing.T) (addr string, got *[][]byte, seen *[]string) {
 	l := listenLoopback(t)
 	var payloads [][]byte
 	var hellos []string
+	extProfiles = nil
 	srv := NewServer(func(_ context.Context, p []byte) error {
 		payloads = append(payloads, append([]byte(nil), p...))
 		return nil
 	}, nil)
-	srv.OnExtHello = func(session [16]byte, component, corr string) {
+	srv.OnExtHello = func(session [16]byte, component, corr string, p hostprofile.Profile) {
 		hellos = append(hellos, component+"|"+corr)
+		extProfiles = append(extProfiles, p)
 	}
 	go func() { _ = srv.Serve(context.Background(), l) }()
 	t.Cleanup(func() { _ = l.Close(); srv.Close() })
@@ -496,5 +503,91 @@ func TestFirstPartyEventSessionIsNotCheckedAgainstHello(t *testing.T) {
 	frameFabric(t, c, &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Flush{Flush: &m1pv1.Flush{}}})
 	if d := readFrame(t, c).GetFlushAck().GetDrained(); d != 1 || len(*got) != 1 {
 		t.Fatalf("first-party event under a different session: drained=%d admitted=%d, want 1/1 (no new rule on this path)", d, len(*got))
+	}
+}
+
+// ---- ADR-0013: host profile manifest ------------------------------------
+
+func cemManifest() *m1pv1.HostManifest {
+	return &m1pv1.HostManifest{
+		HostId: "cem888", HostVersion: "2.0.1",
+		OwnsExecution: true, OwnsConfigSurface: true, OwnsMemory: true,
+		ArrestMode: m1pv1.ArrestMode_ARREST_MODE_RECOMMEND, SuppliesIdentity: true, SchemaVersion: "m1p.v1",
+	}
+}
+
+func extHelloWith(m *m1pv1.HostManifest) *m1pv1.FabricFrame {
+	return &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Hello{Hello: &m1pv1.Hello{
+		Component: "ext:cem888/runner@2.0.1", Pid: 42, Version: "2.0.1", HostCorrelationId: "run-7781", HostManifest: m,
+	}}}
+}
+
+// TestHostManifestIsResolvedAndStored: a valid manifest on an ext: Hello is
+// accepted, resolved and handed to OnExtHello as the session's profile.
+func TestHostManifestIsResolvedAndStored(t *testing.T) {
+	addr, _, _ := startExtStub(t)
+	c := dial(t, addr)
+	frameFabric(t, c, extHelloWith(cemManifest()))
+	if ack := readFrame(t, c).GetHelloAck(); !ack.GetAccepted() || len(ack.GetSessionId()) != 16 {
+		t.Fatalf("Hello with a valid manifest not accepted: %+v", ack)
+	}
+	want := hostprofile.Profile{HostID: "cem888", HostVersion: "2.0.1", OwnsExecution: true, OwnsConfigSurface: true, OwnsMemory: true, ArrestMode: hostprofile.Recommend, SuppliesIdentity: true, SchemaVersion: "m1p.v1"}
+	if len(extProfiles) != 1 || extProfiles[0] != want {
+		t.Fatalf("stored profile %+v, want %+v", extProfiles, want)
+	}
+}
+
+// TestAbsentHostManifestIsDefault: an ext: Hello without a manifest resolves
+// to exactly hostprofile.Default — today's behaviour for every writer.
+func TestAbsentHostManifestIsDefault(t *testing.T) {
+	addr, _, _ := startExtStub(t)
+	c := dial(t, addr)
+	frameFabric(t, c, extHello(nil))
+	if !readFrame(t, c).GetHelloAck().GetAccepted() {
+		t.Fatal("ext Hello without a manifest refused")
+	}
+	if len(extProfiles) != 1 || extProfiles[0] != hostprofile.Default {
+		t.Fatalf("profile %+v, want hostprofile.Default", extProfiles)
+	}
+}
+
+// TestInvalidHostManifestIsRefused: every 08 §4.3 step 2b rule closes the
+// connection (M1E-4007) before any event can be admitted.
+func TestInvalidHostManifestIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mut  func(*m1pv1.HostManifest)
+	}{
+		{"arrest_mode unspecified", func(m *m1pv1.HostManifest) { m.ArrestMode = m1pv1.ArrestMode_ARREST_MODE_UNSPECIFIED }},
+		{"owns_execution false", func(m *m1pv1.HostManifest) { m.OwnsExecution = false }},
+		{"schema_version unknown", func(m *m1pv1.HostManifest) { m.SchemaVersion = "m1p.v9" }},
+		{"host_id empty", func(m *m1pv1.HostManifest) { m.HostId = "" }},
+		{"host_version empty", func(m *m1pv1.HostManifest) { m.HostVersion = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, got, _ := startExtStub(t)
+			c := dial(t, addr)
+			m := cemManifest()
+			tc.mut(m)
+			frameFabric(t, c, extHelloWith(m))
+			readClosed(t, c)
+			if len(*got) != 0 || len(extProfiles) != 0 {
+				t.Fatal("a refused manifest bound a session")
+			}
+		})
+	}
+}
+
+// TestHostManifestOnAFirstPartyHelloIsRefused: hookshim and cortexd never
+// send one; a manifest on a non-ext: connection is a bug and closes it.
+func TestHostManifestOnAFirstPartyHelloIsRefused(t *testing.T) {
+	addr, got := startStub(t, nil)
+	c := dial(t, addr)
+	frameFabric(t, c, &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Hello{Hello: &m1pv1.Hello{
+		Component: "mark1-hookshim", Pid: 1, Version: "1.0.0", SessionId: testSession[:], HostManifest: cemManifest(),
+	}}})
+	readClosed(t, c)
+	if len(*got) != 0 {
+		t.Fatal("a first-party Hello carrying a manifest was admitted")
 	}
 }

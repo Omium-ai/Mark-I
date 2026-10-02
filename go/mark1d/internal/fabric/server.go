@@ -14,10 +14,12 @@ package fabric
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/hostprofile"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 )
 
@@ -63,10 +65,14 @@ type Server struct {
 	OnHello func(session [16]byte, cwd string)
 	// OnExtHello observes each accepted ADR-0012 external-writer handshake
 	// (component has ExtPrefix): the bound session — minted or writer-supplied
-	// — plus the component string and the host's own correlation id, which
-	// the daemon stores beside the session for later receipt echo and never
-	// uses as an identity. Runs after OnHello. nil is legal.
-	OnExtHello func(session [16]byte, component, hostCorrelationID string)
+	// — plus the component string, the host's own correlation id (stored
+	// beside the session for later receipt echo, never an identity) and the
+	// ADR-0013 host profile the Hello resolved to (hostprofile.Default when
+	// it carried no manifest). Runs after OnHello. nil is legal.
+	OnExtHello func(session [16]byte, component, hostCorrelationID string, profile hostprofile.Profile)
+	// Log carries the handshake's informational lines (ADR-0013 §5 known /
+	// unknown host). nil logs nothing.
+	Log *slog.Logger
 
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
