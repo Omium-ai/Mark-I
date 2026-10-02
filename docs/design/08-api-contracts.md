@@ -1078,6 +1078,33 @@ Exit: 0 chain valid; 5 any defect (defects are enumerated, never summarized away
   2 usage; 1 I/O.
 ```
 
+### 7.8 `mark1 validate-events`
+
+```
+mark1 validate-events [<file.jsonl> | -] [--json]
+Checks a JSONL file of m1p.v1 Events (one protojson Event per line — the file-tail
+format of §4.6.2, and what a socket host would frame) against the external-writer
+contract BEFORE the host connects. Pure: no daemon, no network, no state dir; reads
+stdin with "-" or no argument.
+Checks, per line and per session (session_id, or the one empty session of a file):
+  parses as an m1p.v1.Event with exactly one body arm; event_id 16 bytes or empty
+  (empty is a WARNING: the daemon mints one, but a re-scan then duplicates at ingest);
+  session_id 16 bytes or empty; seq and session_epoch zero; the server-stamped band
+  unset; Usage carries message_id and request_id (idem_key set is a WARNING: the
+  daemon overwrites it, ADR-0012 §4); occurred_at present and non-decreasing;
+  causal order — TaskClose only after its TaskOpen, no nested TaskOpen, Turn only
+  inside an open task, Usage and ArtifactOutcome only after a Turn in that task;
+  SessionEnd with a task still open is a WARNING.
+  Unknown fields are WARNINGS, never errors (§1.1 external writer: additive within
+  the major). seq is deliberately NOT checked: it is the daemon's (07 §2).
+stdout (--json): { "ok": true|false, "lines": N,
+  "errors":   [ {"line": n, "message": "…"} ],
+  "warnings": [ {"line": n, "message": "…"} ] }
+  Human form: one "line n: error|warning: …" per finding, then a summary line.
+Exit: 0 valid (warnings allowed); 5 any error, M1E-4006, after the report is printed
+  (findings are enumerated, never summarized away); 2 unreadable path; 1 I/O.
+```
+
 ---
 
 ## 8. Agent configuration provisioning
@@ -1229,6 +1256,7 @@ Normative. Later documents (04, 05, 11, 12) cite these codes; they do not invent
 | fabric | `M1E-4003` | first frame not `Hello` / version mismatch / `Hello` without a session (D-AT) / an `ext:` writer's `Event` naming a session other than its bound one (ADR-0012, §4.3 step 4a) | local | no | no | fail-open |
 | fabric | `M1E-4004` | loopback `Host` not the bound literal | 403 | no | security event | **fail-closed** |
 | fabric | `M1E-4005` | loopback request carries `Origin` | 403 | no | security event | **fail-closed** |
+| fabric | `M1E-4006` | `mark1 validate-events` found an error in an external writer's JSONL (§7.8): a line that the daemon would quarantine or an ordering the contract forbids (§4.6.3) | CLI exit 5 | n/a | no | n/a — a pre-connect check; the file is the host's to fix |
 | gate | `M1E-5001` | gate query timeout / verdict cache unavailable | local | n/a | no | **fail-open — gate answers allow**; `Dropped{gate_timeout}` |
 | gate | `M1E-5002` | local hard cap hit (≤3 consecutive blocks, hourly ceiling) | local | n/a | transcript feedback | fail-open (stop allowed) |
 | gate | `M1E-5003` | verdict is `uncertified/bootstrapping` where certification required | local/API | n/a | labeled honestly | refusal to gate memory/corpus, never a fake cert |

@@ -26,6 +26,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/selfupdate"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/service"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/status"
+	"github.com/Omium-ai/omium-mark1/go/mark1/internal/validateevents"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/verifyreceipts"
 	"github.com/Omium-ai/omium-mark1/go/mark1/internal/verifyrelease"
 )
@@ -179,6 +180,19 @@ func main() {
 	verifyCmd.Flags().StringVar(&vrOpts.Keys, "keys", "", "local key-manifest snapshot (default: fetched from /api/v1/receipts/keys)")
 	verifyCmd.Flags().StringVar(&vrOpts.Witness, "witness", "", "local witness snapshot file")
 
+	validateCmd := &cobra.Command{
+		Use:   "validate-events [file.jsonl|-]",
+		Short: "Check a JSONL file of m1p.v1 Events against the external-writer contract (08 §7.8)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var opts validateevents.Options
+			if len(args) == 1 {
+				opts.Path = args[0]
+			}
+			return validateevents.Run(ctx, env, opts)
+		},
+	}
+
 	var corpusOpts corpus.Options
 	corpusRecordCmd := &cobra.Command{
 		Use:   "record",
@@ -241,7 +255,7 @@ func main() {
 	updateCmd.Flags().StringVar(&updOpts.InstallDir, "install-dir", "", "where the edge binaries live (default: this executable's directory)")
 	updateCmd.Flags().StringVar(&updOpts.Ring, "ring", "", "manifest ring (default: the enrollment channel, else stable)")
 
-	root.AddCommand(enrollCmd, enableCmd, statusCmd, doctorCmd, reportCmd, offCmd, onCmd, verifyCmd, corpusCmd, verifyReleaseCmd, serviceCmd, updateCmd)
+	root.AddCommand(enrollCmd, enableCmd, statusCmd, doctorCmd, reportCmd, offCmd, onCmd, verifyCmd, validateCmd, corpusCmd, verifyReleaseCmd, serviceCmd, updateCmd)
 
 	if err := root.Execute(); err != nil {
 		var ee *cli.ExitError
