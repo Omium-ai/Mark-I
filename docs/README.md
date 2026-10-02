@@ -63,6 +63,7 @@ Read `01` first regardless of who you are. After that, follow the row that descr
 | [`13-repo-scaffold.md`](design/13-repo-scaffold.md) | File-by-file scaffold, build tooling, lint/format, versioning, release, CODEOWNERS | starting the first commit |
 | [`14-delivery-plan.md`](design/14-delivery-plan.md) | Workstreams, dependency graph, milestones, gate checklists, risk register | sequencing the build |
 | `adr/` | Architecture decision records | before changing anything a record decided |
+| [`integrating-a-host.md`](integrating-a-host.md) | The partner-facing walkthrough of 08 §4.6: endpoint, framing, `Hello` and session binding, the JSONL file-tail mode, the event list, `validate-events`, the conformance checklist | integrating a third-party agent runtime as an external writer |
 | [`RECONCILIATION.md`](history/RECONCILIATION.md) | Every contradiction found across the set, with severity and owner | signing off the design phase, or wondering why two documents disagree |
 
 ---
