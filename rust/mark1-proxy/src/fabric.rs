@@ -164,6 +164,7 @@ async fn deliver<S: AsyncRead + AsyncWrite + Unpin>(
                 cwd: String::new(),
                 session_id: session_id.to_vec(),
                 host_correlation_id: String::new(),
+                host_manifest: None,
             })),
         },
         &mut hello,

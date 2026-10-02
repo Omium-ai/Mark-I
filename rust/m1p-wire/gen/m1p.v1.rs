@@ -2417,6 +2417,47 @@ pub struct Hello {
     /// writers, which have no second identity to correlate.
     #[prost(string, tag="6")]
     pub host_correlation_id: ::prost::alloc::string::String,
+    /// ADR-0013: what the host owns and how it wants arrests handled. OPTIONAL
+    /// and ext:-only: absent ⇒ the daemon resolves the session to
+    /// hostprofile.Default (today's behaviour, exactly); present on an ext:
+    /// connection ⇒ validated (08 §4.3 step 2b) and stored per session; present
+    /// from any other writer ⇒ M1E-4007, because no first-party writer has one
+    /// to send. The file-tail sidecar carries the same message as its
+    /// host_manifest block.
+    #[prost(message, optional, tag="7")]
+    pub host_manifest: ::core::option::Option<HostManifest>,
+}
+/// A host's declaration of ownership (ADR-0013). \[P0\] throughout: identifiers
+/// and flags, nothing derived from content. The daemon stores the resolved
+/// profile per session and exposes it to provisioning, the gate and memory;
+/// which of them switch on it is decided feature by feature, never here.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HostManifest {
+    /// stable host identifier, e.g. "cem888"; non-empty
+    #[prost(string, tag="1")]
+    pub host_id: ::prost::alloc::string::String,
+    /// the host's own version string; non-empty
+    #[prost(string, tag="2")]
+    pub host_version: ::prost::alloc::string::String,
+    /// the host runs the agent loop (ext: writers: must be true)
+    #[prost(bool, tag="3")]
+    pub owns_execution: bool,
+    /// the host writes the agent's config; provisioning must not
+    #[prost(bool, tag="4")]
+    pub owns_config_surface: bool,
+    /// the host holds the memory the agent sees; the daemon must not inject
+    #[prost(bool, tag="5")]
+    pub owns_memory: bool,
+    /// ACT or RECOMMEND; UNSPECIFIED refused
+    #[prost(enumeration="ArrestMode", tag="6")]
+    pub arrest_mode: i32,
+    /// the host's correlation id is authoritative for the session's identity
+    #[prost(bool, tag="7")]
+    pub supplies_identity: bool,
+    /// the manifest's revision; accepted set is {"m1p.v1"}
+    #[prost(string, tag="8")]
+    pub schema_version: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2534,6 +2575,39 @@ pub struct ContaminationAlert {
     /// can state why a fragment reverted — a silent rollback is unexplainable.
     #[prost(string, tag="3")]
     pub reason_code: ::prost::alloc::string::String,
+}
+/// How a host wants a knee arrest handled (ADR-0013, 04 §2.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ArrestMode {
+    /// an error when a manifest is present: a host must choose
+    Unspecified = 0,
+    /// Mark 1 enforces the arrest (today's BLOCK)
+    Act = 1,
+    /// Mark 1 reports it; the host's own loop decides
+    Recommend = 2,
+}
+impl ArrestMode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            ArrestMode::Unspecified => "ARREST_MODE_UNSPECIFIED",
+            ArrestMode::Act => "ARREST_MODE_ACT",
+            ArrestMode::Recommend => "ARREST_MODE_RECOMMEND",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ARREST_MODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "ARREST_MODE_ACT" => Some(Self::Act),
+            "ARREST_MODE_RECOMMEND" => Some(Self::Recommend),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

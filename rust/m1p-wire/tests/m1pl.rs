@@ -170,6 +170,7 @@ fn frame_roundtrip_every_fabric_arm() {
             cwd: String::new(),
             session_id: vec![5u8; 16],
             host_correlation_id: String::new(),
+            host_manifest: None,
         }),
         Kind::HelloAck(pb::HelloAck {
             accepted: true,

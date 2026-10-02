@@ -144,6 +144,7 @@ impl Conn {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             session_id: session_id.to_vec(),
             host_correlation_id: String::new(),
+            host_manifest: None,
             // the agent runs its hooks in the project root: the daemon turns this into SessionStart.workspace_id, the path itself stays on this socket
             cwd: std::env::current_dir()
                 .map(|p| p.to_string_lossy().into_owned())

@@ -40,6 +40,56 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// How a host wants a knee arrest handled (ADR-0013, 04 §2.3).
+type ArrestMode int32
+
+const (
+	ArrestMode_ARREST_MODE_UNSPECIFIED ArrestMode = 0 // an error when a manifest is present: a host must choose
+	ArrestMode_ARREST_MODE_ACT         ArrestMode = 1 // Mark 1 enforces the arrest (today's BLOCK)
+	ArrestMode_ARREST_MODE_RECOMMEND   ArrestMode = 2 // Mark 1 reports it; the host's own loop decides
+)
+
+// Enum value maps for ArrestMode.
+var (
+	ArrestMode_name = map[int32]string{
+		0: "ARREST_MODE_UNSPECIFIED",
+		1: "ARREST_MODE_ACT",
+		2: "ARREST_MODE_RECOMMEND",
+	}
+	ArrestMode_value = map[string]int32{
+		"ARREST_MODE_UNSPECIFIED": 0,
+		"ARREST_MODE_ACT":         1,
+		"ARREST_MODE_RECOMMEND":   2,
+	}
+)
+
+func (x ArrestMode) Enum() *ArrestMode {
+	p := new(ArrestMode)
+	*p = x
+	return p
+}
+
+func (x ArrestMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ArrestMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_m1p_v1_fabric_proto_enumTypes[0].Descriptor()
+}
+
+func (ArrestMode) Type() protoreflect.EnumType {
+	return &file_m1p_v1_fabric_proto_enumTypes[0]
+}
+
+func (x ArrestMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ArrestMode.Descriptor instead.
+func (ArrestMode) EnumDescriptor() ([]byte, []int) {
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{0}
+}
+
 type GateKind int32
 
 const (
@@ -73,11 +123,11 @@ func (x GateKind) String() string {
 }
 
 func (GateKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_m1p_v1_fabric_proto_enumTypes[0].Descriptor()
+	return file_m1p_v1_fabric_proto_enumTypes[1].Descriptor()
 }
 
 func (GateKind) Type() protoreflect.EnumType {
-	return &file_m1p_v1_fabric_proto_enumTypes[0]
+	return &file_m1p_v1_fabric_proto_enumTypes[1]
 }
 
 func (x GateKind) Number() protoreflect.EnumNumber {
@@ -86,7 +136,7 @@ func (x GateKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use GateKind.Descriptor instead.
 func (GateKind) EnumDescriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{0}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{1}
 }
 
 type GateDecision int32
@@ -122,11 +172,11 @@ func (x GateDecision) String() string {
 }
 
 func (GateDecision) Descriptor() protoreflect.EnumDescriptor {
-	return file_m1p_v1_fabric_proto_enumTypes[1].Descriptor()
+	return file_m1p_v1_fabric_proto_enumTypes[2].Descriptor()
 }
 
 func (GateDecision) Type() protoreflect.EnumType {
-	return &file_m1p_v1_fabric_proto_enumTypes[1]
+	return &file_m1p_v1_fabric_proto_enumTypes[2]
 }
 
 func (x GateDecision) Number() protoreflect.EnumNumber {
@@ -135,7 +185,7 @@ func (x GateDecision) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use GateDecision.Descriptor instead.
 func (GateDecision) EnumDescriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{1}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{2}
 }
 
 // DECISION D-U (lead, binding). The payload of EVERY M1PL frame is one
@@ -536,8 +586,16 @@ type Hello struct {
 	// session id and never an admission criterion. Empty for first-party
 	// writers, which have no second identity to correlate.
 	HostCorrelationId string `protobuf:"bytes,6,opt,name=host_correlation_id,json=hostCorrelationId,proto3" json:"host_correlation_id,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// ADR-0013: what the host owns and how it wants arrests handled. OPTIONAL
+	// and ext:-only: absent ⇒ the daemon resolves the session to
+	// hostprofile.Default (today's behaviour, exactly); present on an ext:
+	// connection ⇒ validated (08 §4.3 step 2b) and stored per session; present
+	// from any other writer ⇒ M1E-4007, because no first-party writer has one
+	// to send. The file-tail sidecar carries the same message as its
+	// host_manifest block.
+	HostManifest  *HostManifest `protobuf:"bytes,7,opt,name=host_manifest,json=hostManifest,proto3" json:"host_manifest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Hello) Reset() {
@@ -612,6 +670,117 @@ func (x *Hello) GetHostCorrelationId() string {
 	return ""
 }
 
+func (x *Hello) GetHostManifest() *HostManifest {
+	if x != nil {
+		return x.HostManifest
+	}
+	return nil
+}
+
+// A host's declaration of ownership (ADR-0013). [P0] throughout: identifiers
+// and flags, nothing derived from content. The daemon stores the resolved
+// profile per session and exposes it to provisioning, the gate and memory;
+// which of them switch on it is decided feature by feature, never here.
+type HostManifest struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	HostId            string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`                                     // stable host identifier, e.g. "cem888"; non-empty
+	HostVersion       string                 `protobuf:"bytes,2,opt,name=host_version,json=hostVersion,proto3" json:"host_version,omitempty"`                      // the host's own version string; non-empty
+	OwnsExecution     bool                   `protobuf:"varint,3,opt,name=owns_execution,json=ownsExecution,proto3" json:"owns_execution,omitempty"`               // the host runs the agent loop (ext: writers: must be true)
+	OwnsConfigSurface bool                   `protobuf:"varint,4,opt,name=owns_config_surface,json=ownsConfigSurface,proto3" json:"owns_config_surface,omitempty"` // the host writes the agent's config; provisioning must not
+	OwnsMemory        bool                   `protobuf:"varint,5,opt,name=owns_memory,json=ownsMemory,proto3" json:"owns_memory,omitempty"`                        // the host holds the memory the agent sees; the daemon must not inject
+	ArrestMode        ArrestMode             `protobuf:"varint,6,opt,name=arrest_mode,json=arrestMode,proto3,enum=m1p.v1.ArrestMode" json:"arrest_mode,omitempty"` // ACT or RECOMMEND; UNSPECIFIED refused
+	SuppliesIdentity  bool                   `protobuf:"varint,7,opt,name=supplies_identity,json=suppliesIdentity,proto3" json:"supplies_identity,omitempty"`      // the host's correlation id is authoritative for the session's identity
+	SchemaVersion     string                 `protobuf:"bytes,8,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`                // the manifest's revision; accepted set is {"m1p.v1"}
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *HostManifest) Reset() {
+	*x = HostManifest{}
+	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostManifest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostManifest) ProtoMessage() {}
+
+func (x *HostManifest) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostManifest.ProtoReflect.Descriptor instead.
+func (*HostManifest) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *HostManifest) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *HostManifest) GetHostVersion() string {
+	if x != nil {
+		return x.HostVersion
+	}
+	return ""
+}
+
+func (x *HostManifest) GetOwnsExecution() bool {
+	if x != nil {
+		return x.OwnsExecution
+	}
+	return false
+}
+
+func (x *HostManifest) GetOwnsConfigSurface() bool {
+	if x != nil {
+		return x.OwnsConfigSurface
+	}
+	return false
+}
+
+func (x *HostManifest) GetOwnsMemory() bool {
+	if x != nil {
+		return x.OwnsMemory
+	}
+	return false
+}
+
+func (x *HostManifest) GetArrestMode() ArrestMode {
+	if x != nil {
+		return x.ArrestMode
+	}
+	return ArrestMode_ARREST_MODE_UNSPECIFIED
+}
+
+func (x *HostManifest) GetSuppliesIdentity() bool {
+	if x != nil {
+		return x.SuppliesIdentity
+	}
+	return false
+}
+
+func (x *HostManifest) GetSchemaVersion() string {
+	if x != nil {
+		return x.SchemaVersion
+	}
+	return ""
+}
+
 type HelloAck struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Accepted bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
@@ -634,7 +803,7 @@ type HelloAck struct {
 
 func (x *HelloAck) Reset() {
 	*x = HelloAck{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -646,7 +815,7 @@ func (x *HelloAck) String() string {
 func (*HelloAck) ProtoMessage() {}
 
 func (x *HelloAck) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[4]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -659,7 +828,7 @@ func (x *HelloAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HelloAck.ProtoReflect.Descriptor instead.
 func (*HelloAck) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{4}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *HelloAck) GetAccepted() bool {
@@ -709,7 +878,7 @@ type GateQuery struct {
 
 func (x *GateQuery) Reset() {
 	*x = GateQuery{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -721,7 +890,7 @@ func (x *GateQuery) String() string {
 func (*GateQuery) ProtoMessage() {}
 
 func (x *GateQuery) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[5]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -734,7 +903,7 @@ func (x *GateQuery) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateQuery.ProtoReflect.Descriptor instead.
 func (*GateQuery) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{5}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GateQuery) GetTaskId() []byte {
@@ -782,7 +951,7 @@ type GateVerdict struct {
 
 func (x *GateVerdict) Reset() {
 	*x = GateVerdict{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[6]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -794,7 +963,7 @@ func (x *GateVerdict) String() string {
 func (*GateVerdict) ProtoMessage() {}
 
 func (x *GateVerdict) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[6]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -807,7 +976,7 @@ func (x *GateVerdict) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateVerdict.ProtoReflect.Descriptor instead.
 func (*GateVerdict) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{6}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GateVerdict) GetDecision() GateDecision {
@@ -864,7 +1033,7 @@ type Flush struct {
 
 func (x *Flush) Reset() {
 	*x = Flush{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[7]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -876,7 +1045,7 @@ func (x *Flush) String() string {
 func (*Flush) ProtoMessage() {}
 
 func (x *Flush) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[7]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -889,7 +1058,7 @@ func (x *Flush) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Flush.ProtoReflect.Descriptor instead.
 func (*Flush) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{7}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{8}
 }
 
 type FlushAck struct {
@@ -903,7 +1072,7 @@ type FlushAck struct {
 
 func (x *FlushAck) Reset() {
 	*x = FlushAck{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[8]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -915,7 +1084,7 @@ func (x *FlushAck) String() string {
 func (*FlushAck) ProtoMessage() {}
 
 func (x *FlushAck) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[8]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -928,7 +1097,7 @@ func (x *FlushAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FlushAck.ProtoReflect.Descriptor instead.
 func (*FlushAck) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{8}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *FlushAck) GetDrained() uint64 {
@@ -974,7 +1143,7 @@ type ContaminationAlert struct {
 
 func (x *ContaminationAlert) Reset() {
 	*x = ContaminationAlert{}
-	mi := &file_m1p_v1_fabric_proto_msgTypes[9]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -986,7 +1155,7 @@ func (x *ContaminationAlert) String() string {
 func (*ContaminationAlert) ProtoMessage() {}
 
 func (x *ContaminationAlert) ProtoReflect() protoreflect.Message {
-	mi := &file_m1p_v1_fabric_proto_msgTypes[9]
+	mi := &file_m1p_v1_fabric_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -999,7 +1168,7 @@ func (x *ContaminationAlert) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContaminationAlert.ProtoReflect.Descriptor instead.
 func (*ContaminationAlert) Descriptor() ([]byte, []int) {
-	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{9}
+	return file_m1p_v1_fabric_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ContaminationAlert) GetSessionId() []byte {
@@ -1050,7 +1219,7 @@ const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"deadlineMs\x12!\n" +
 	"\fis_interrupt\x18\x05 \x01(\bR\visInterrupt\"=\n" +
 	"\fContextReply\x12-\n" +
-	"\x12additional_context\x18\x01 \x01(\tR\x11additionalContext\"\xb2\x01\n" +
+	"\x12additional_context\x18\x01 \x01(\tR\x11additionalContext\"\xed\x01\n" +
 	"\x05Hello\x12\x1c\n" +
 	"\tcomponent\x18\x01 \x01(\tR\tcomponent\x12\x10\n" +
 	"\x03pid\x18\x02 \x01(\rR\x03pid\x12\x18\n" +
@@ -1058,7 +1227,19 @@ const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x04 \x01(\fR\tsessionId\x12\x10\n" +
 	"\x03cwd\x18\x05 \x01(\tR\x03cwd\x12.\n" +
-	"\x13host_correlation_id\x18\x06 \x01(\tR\x11hostCorrelationId\"}\n" +
+	"\x13host_correlation_id\x18\x06 \x01(\tR\x11hostCorrelationId\x129\n" +
+	"\rhost_manifest\x18\a \x01(\v2\x14.m1p.v1.HostManifestR\fhostManifest\"\xcb\x02\n" +
+	"\fHostManifest\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12!\n" +
+	"\fhost_version\x18\x02 \x01(\tR\vhostVersion\x12%\n" +
+	"\x0eowns_execution\x18\x03 \x01(\bR\rownsExecution\x12.\n" +
+	"\x13owns_config_surface\x18\x04 \x01(\bR\x11ownsConfigSurface\x12\x1f\n" +
+	"\vowns_memory\x18\x05 \x01(\bR\n" +
+	"ownsMemory\x123\n" +
+	"\varrest_mode\x18\x06 \x01(\x0e2\x12.m1p.v1.ArrestModeR\n" +
+	"arrestMode\x12+\n" +
+	"\x11supplies_identity\x18\a \x01(\bR\x10suppliesIdentity\x12%\n" +
+	"\x0eschema_version\x18\b \x01(\tR\rschemaVersion\"}\n" +
 	"\bHelloAck\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x1b\n" +
 	"\tmax_frame\x18\x02 \x01(\rR\bmaxFrame\x12\x19\n" +
@@ -1085,7 +1266,12 @@ const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"session_id\x18\x01 \x01(\fR\tsessionId\x12\x19\n" +
 	"\bcred_ref\x18\x02 \x01(\tR\acredRef\x12\x1f\n" +
 	"\vreason_code\x18\x03 \x01(\tR\n" +
-	"reasonCode*M\n" +
+	"reasonCode*Y\n" +
+	"\n" +
+	"ArrestMode\x12\x1b\n" +
+	"\x17ARREST_MODE_UNSPECIFIED\x10\x00\x12\x13\n" +
+	"\x0fARREST_MODE_ACT\x10\x01\x12\x19\n" +
+	"\x15ARREST_MODE_RECOMMEND\x10\x02*M\n" +
 	"\bGateKind\x12\x19\n" +
 	"\x15GATE_KIND_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eGATE_KIND_STOP\x10\x01\x12\x12\n" +
@@ -1109,45 +1295,49 @@ func file_m1p_v1_fabric_proto_rawDescGZIP() []byte {
 	return file_m1p_v1_fabric_proto_rawDescData
 }
 
-var file_m1p_v1_fabric_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_m1p_v1_fabric_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_m1p_v1_fabric_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_m1p_v1_fabric_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_m1p_v1_fabric_proto_goTypes = []any{
-	(GateKind)(0),              // 0: m1p.v1.GateKind
-	(GateDecision)(0),          // 1: m1p.v1.GateDecision
-	(*FabricFrame)(nil),        // 2: m1p.v1.FabricFrame
-	(*ContextQuery)(nil),       // 3: m1p.v1.ContextQuery
-	(*ContextReply)(nil),       // 4: m1p.v1.ContextReply
-	(*Hello)(nil),              // 5: m1p.v1.Hello
-	(*HelloAck)(nil),           // 6: m1p.v1.HelloAck
-	(*GateQuery)(nil),          // 7: m1p.v1.GateQuery
-	(*GateVerdict)(nil),        // 8: m1p.v1.GateVerdict
-	(*Flush)(nil),              // 9: m1p.v1.Flush
-	(*FlushAck)(nil),           // 10: m1p.v1.FlushAck
-	(*ContaminationAlert)(nil), // 11: m1p.v1.ContaminationAlert
-	(*Event)(nil),              // 12: m1p.v1.Event
-	(InjectionChannel)(0),      // 13: m1p.v1.InjectionChannel
-	(Verdict)(0),               // 14: m1p.v1.Verdict
+	(ArrestMode)(0),            // 0: m1p.v1.ArrestMode
+	(GateKind)(0),              // 1: m1p.v1.GateKind
+	(GateDecision)(0),          // 2: m1p.v1.GateDecision
+	(*FabricFrame)(nil),        // 3: m1p.v1.FabricFrame
+	(*ContextQuery)(nil),       // 4: m1p.v1.ContextQuery
+	(*ContextReply)(nil),       // 5: m1p.v1.ContextReply
+	(*Hello)(nil),              // 6: m1p.v1.Hello
+	(*HostManifest)(nil),       // 7: m1p.v1.HostManifest
+	(*HelloAck)(nil),           // 8: m1p.v1.HelloAck
+	(*GateQuery)(nil),          // 9: m1p.v1.GateQuery
+	(*GateVerdict)(nil),        // 10: m1p.v1.GateVerdict
+	(*Flush)(nil),              // 11: m1p.v1.Flush
+	(*FlushAck)(nil),           // 12: m1p.v1.FlushAck
+	(*ContaminationAlert)(nil), // 13: m1p.v1.ContaminationAlert
+	(*Event)(nil),              // 14: m1p.v1.Event
+	(InjectionChannel)(0),      // 15: m1p.v1.InjectionChannel
+	(Verdict)(0),               // 16: m1p.v1.Verdict
 }
 var file_m1p_v1_fabric_proto_depIdxs = []int32{
-	12, // 0: m1p.v1.FabricFrame.event:type_name -> m1p.v1.Event
-	5,  // 1: m1p.v1.FabricFrame.hello:type_name -> m1p.v1.Hello
-	6,  // 2: m1p.v1.FabricFrame.hello_ack:type_name -> m1p.v1.HelloAck
-	7,  // 3: m1p.v1.FabricFrame.gate_query:type_name -> m1p.v1.GateQuery
-	8,  // 4: m1p.v1.FabricFrame.gate_verdict:type_name -> m1p.v1.GateVerdict
-	9,  // 5: m1p.v1.FabricFrame.flush:type_name -> m1p.v1.Flush
-	10, // 6: m1p.v1.FabricFrame.flush_ack:type_name -> m1p.v1.FlushAck
-	3,  // 7: m1p.v1.FabricFrame.context_query:type_name -> m1p.v1.ContextQuery
-	4,  // 8: m1p.v1.FabricFrame.context_reply:type_name -> m1p.v1.ContextReply
-	11, // 9: m1p.v1.FabricFrame.contamination_alert:type_name -> m1p.v1.ContaminationAlert
-	13, // 10: m1p.v1.ContextQuery.channel:type_name -> m1p.v1.InjectionChannel
-	0,  // 11: m1p.v1.GateQuery.gate:type_name -> m1p.v1.GateKind
-	1,  // 12: m1p.v1.GateVerdict.decision:type_name -> m1p.v1.GateDecision
-	14, // 13: m1p.v1.GateVerdict.verdict:type_name -> m1p.v1.Verdict
-	14, // [14:14] is the sub-list for method output_type
-	14, // [14:14] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	14, // 0: m1p.v1.FabricFrame.event:type_name -> m1p.v1.Event
+	6,  // 1: m1p.v1.FabricFrame.hello:type_name -> m1p.v1.Hello
+	8,  // 2: m1p.v1.FabricFrame.hello_ack:type_name -> m1p.v1.HelloAck
+	9,  // 3: m1p.v1.FabricFrame.gate_query:type_name -> m1p.v1.GateQuery
+	10, // 4: m1p.v1.FabricFrame.gate_verdict:type_name -> m1p.v1.GateVerdict
+	11, // 5: m1p.v1.FabricFrame.flush:type_name -> m1p.v1.Flush
+	12, // 6: m1p.v1.FabricFrame.flush_ack:type_name -> m1p.v1.FlushAck
+	4,  // 7: m1p.v1.FabricFrame.context_query:type_name -> m1p.v1.ContextQuery
+	5,  // 8: m1p.v1.FabricFrame.context_reply:type_name -> m1p.v1.ContextReply
+	13, // 9: m1p.v1.FabricFrame.contamination_alert:type_name -> m1p.v1.ContaminationAlert
+	15, // 10: m1p.v1.ContextQuery.channel:type_name -> m1p.v1.InjectionChannel
+	7,  // 11: m1p.v1.Hello.host_manifest:type_name -> m1p.v1.HostManifest
+	0,  // 12: m1p.v1.HostManifest.arrest_mode:type_name -> m1p.v1.ArrestMode
+	1,  // 13: m1p.v1.GateQuery.gate:type_name -> m1p.v1.GateKind
+	2,  // 14: m1p.v1.GateVerdict.decision:type_name -> m1p.v1.GateDecision
+	16, // 15: m1p.v1.GateVerdict.verdict:type_name -> m1p.v1.Verdict
+	16, // [16:16] is the sub-list for method output_type
+	16, // [16:16] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_fabric_proto_init() }
@@ -1175,8 +1365,8 @@ func file_m1p_v1_fabric_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_m1p_v1_fabric_proto_rawDesc), len(file_m1p_v1_fabric_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   10,
+			NumEnums:      3,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

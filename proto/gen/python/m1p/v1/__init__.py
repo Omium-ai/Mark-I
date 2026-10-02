@@ -304,6 +304,14 @@ class DropReason(betterproto.Enum):
     """
 
 
+class ArrestMode(betterproto.Enum):
+    """How a host wants a knee arrest handled (ADR-0013, 04 §2.3)."""
+
+    UNSPECIFIED = 0
+    ACT = 1
+    RECOMMEND = 2
+
+
 class GateKind(betterproto.Enum):
     UNSPECIFIED = 0
     STOP = 1
@@ -1656,6 +1664,36 @@ class Hello(betterproto.Message):
      session id and never an admission criterion. Empty for first-party
      writers, which have no second identity to correlate.
     """
+
+    host_manifest: "HostManifest" = betterproto.message_field(7)
+    """
+    ADR-0013: what the host owns and how it wants arrests handled. OPTIONAL
+     and ext:-only: absent ⇒ the daemon resolves the session to
+     hostprofile.Default (today's behaviour, exactly); present on an ext:
+     connection ⇒ validated (08 §4.3 step 2b) and stored per session; present
+     from any other writer ⇒ M1E-4007, because no first-party writer has one
+     to send. The file-tail sidecar carries the same message as its
+     host_manifest block.
+    """
+
+
+@dataclass(eq=False, repr=False)
+class HostManifest(betterproto.Message):
+    """
+    A host's declaration of ownership (ADR-0013). [P0] throughout: identifiers
+     and flags, nothing derived from content. The daemon stores the resolved
+     profile per session and exposes it to provisioning, the gate and memory;
+     which of them switch on it is decided feature by feature, never here.
+    """
+
+    host_id: str = betterproto.string_field(1)
+    host_version: str = betterproto.string_field(2)
+    owns_execution: bool = betterproto.bool_field(3)
+    owns_config_surface: bool = betterproto.bool_field(4)
+    owns_memory: bool = betterproto.bool_field(5)
+    arrest_mode: "ArrestMode" = betterproto.enum_field(6)
+    supplies_identity: bool = betterproto.bool_field(7)
+    schema_version: str = betterproto.string_field(8)
 
 
 @dataclass(eq=False, repr=False)

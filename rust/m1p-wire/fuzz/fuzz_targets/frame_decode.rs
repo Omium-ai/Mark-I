@@ -81,6 +81,7 @@ fuzz_target!(|data: &[u8]| {
             cwd: String::new(),
             session_id: data.to_vec(),
             host_correlation_id: String::new(),
+            host_manifest: None,
         }),
         pb::fabric_frame::Kind::HelloAck(pb::HelloAck {
             accepted: data.len() % 2 == 0,

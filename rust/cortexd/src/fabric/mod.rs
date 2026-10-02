@@ -311,6 +311,7 @@ async fn deliver<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
                 cwd: String::new(),
                 session_id: sid.to_vec(),
                 host_correlation_id: String::new(),
+                host_manifest: None,
             })),
         },
         &mut hello,
