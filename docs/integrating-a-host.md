@@ -148,3 +148,48 @@ every error, first one first.
 What is not for you: the loopback HTTP door (`08` §4.5) has no `Hello` and so no
 identity or session binding; `GateQuery`/`ContextQuery` exist for first-party shims
 whose execution Mark 1 gates — a host that owns its loop has nothing to gate.
+
+## 8. Declare what you own
+
+A host that owns more than its loop says so once, at the handshake, with a
+`HostManifest` (`proto/m1p/v1/fabric.proto`, ADR-0013). On the socket it rides
+`Hello.host_manifest`; in the file-tail mode it is the sidecar's `host_manifest`
+block, in protojson. Same message, same validation, same result.
+
+| Field | Meaning | cem888 |
+|---|---|---|
+| `host_id` | your stable identifier; non-empty | `cem888` |
+| `host_version` | your version string; non-empty | `2.0.1` |
+| `owns_execution` | you run the agent loop — must be `true` for an `ext:` writer | `true` |
+| `owns_config_surface` | you write the agent's config; Mark 1's provisioning must not | `true` |
+| `owns_memory` | you hold the memory the agent sees; Mark 1 must not inject | `true` |
+| `arrest_mode` | `ARREST_MODE_ACT`: Mark 1 enforces an arrest; `ARREST_MODE_RECOMMEND`: Mark 1 reports it and your loop decides | `ARREST_MODE_RECOMMEND` |
+| `supplies_identity` | your `host_correlation_id` is authoritative for the session's identity | `true` |
+| `schema_version` | the manifest's revision; must be `m1p.v1` | `m1p.v1` |
+
+The sidecar form, exactly as `conformance/vectors/extmanifest/sample.manifest.json`:
+
+```json
+{"component":"ext:omium/reference-emitter@0.1.0","host_correlation_id":"sample-run-0001","schema_version":"m1p.v1",
+ "host_manifest":{"hostId":"cem888","hostVersion":"2.0.1","ownsExecution":true,"ownsConfigSurface":true,
+                  "ownsMemory":true,"arrestMode":"ARREST_MODE_RECOMMEND","suppliesIdentity":true,"schemaVersion":"m1p.v1"}}
+```
+
+`mark1-emitter -manifest …` and `python emit.py --manifest …` produce it.
+
+**If you omit it**, your session is Mark 1's default posture: Mark 1 provisions the
+agent's config, injects memory, and acts on an arrest. Nothing you send is treated
+differently; the daemon simply has nothing to yield on.
+
+**If it is invalid** — an empty `host_id` or `host_version`, `arrest_mode` left
+unspecified, `owns_execution` false, a `schema_version` other than `m1p.v1` — the
+connection closes (or the file is not tailed) with `M1E-4007`, logged once. A manifest
+on a connection whose `component` does not start with `ext:` is refused with the same
+code.
+
+What the daemon does with it today: validates it, stores it per session, exposes it to
+provisioning, the gate and memory, and logs whether `host_id` is a known host. Known
+hosts are listed in `go/mark1d/internal/hostprofile/hosts.json` (cem888 is the first);
+being unlisted refuses nothing. The decisions those consumers take on your declaration
+— not writing your config, recommending instead of blocking, not injecting — arrive as
+their own features and are described in the sections that follow when they land.

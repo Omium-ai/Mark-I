@@ -1,0 +1,1 @@
+{"component":"ext:omium/reference-emitter@0.1.0","host_correlation_id":"sample-run-0001","schema_version":"m1p.v1","host_manifest":{"hostId":"cem888","hostVersion":"2.0.1","ownsExecution":true,"ownsConfigSurface":true,"ownsMemory":true,"arrestMode":"ARREST_MODE_RECOMMEND","suppliesIdentity":true,"schemaVersion":"m1p.v1"}}

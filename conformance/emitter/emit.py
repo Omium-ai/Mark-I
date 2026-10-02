@@ -57,22 +57,38 @@ def jsonl() -> bytes:
     return "".join(json.dumps(ev, sort_keys=True, separators=(",", ":")) + "\n" for ev in session()).encode("utf-8")
 
 
-def manifest() -> bytes:
-    return (
-        json.dumps(
-            {"component": COMPONENT, "host_correlation_id": HOST_CORRELATION_ID, "schema_version": SCHEMA_VERSION},
-            separators=(",", ":"),
-        )
-        + "\n"
-    ).encode("utf-8")
+HOST_MANIFEST = {
+    "hostId": "cem888",
+    "hostVersion": "2.0.1",
+    "ownsExecution": True,
+    "ownsConfigSurface": True,
+    "ownsMemory": True,
+    "arrestMode": "ARREST_MODE_RECOMMEND",
+    "suppliesIdentity": True,
+    "schemaVersion": "m1p.v1",
+}
+
+
+def manifest(with_host_manifest: bool = False) -> bytes:
+    """The sidecar; with_host_manifest adds the ADR-0013 block (the extmanifest family).
+
+    The block is one m1p.v1.HostManifest in protojson, key order as the Go emitter
+    renders it (field order of the message), so both copies stay byte-identical.
+    """
+    doc = {"component": COMPONENT, "host_correlation_id": HOST_CORRELATION_ID, "schema_version": SCHEMA_VERSION}
+    if with_host_manifest:
+        doc["host_manifest"] = HOST_MANIFEST
+    return (json.dumps(doc, separators=(",", ":")) + "\n").encode("utf-8")
 
 
 def main(argv: list[str]) -> int:
+    with_manifest = "--manifest" in argv
+    argv = [a for a in argv if a != "--manifest"]
     if len(argv) > 1:
         out = Path(argv[1])
         out.mkdir(parents=True, exist_ok=True)
         # Sidecar first (08 §4.6.2): the daemon binds the file from it before it reads a line.
-        (out / "sample.manifest.json").write_bytes(manifest())
+        (out / "sample.manifest.json").write_bytes(manifest(with_manifest))
         (out / "sample.jsonl").write_bytes(jsonl())
         return 0
     sys.stdout.buffer.write(jsonl())

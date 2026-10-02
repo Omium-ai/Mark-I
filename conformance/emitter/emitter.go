@@ -121,13 +121,36 @@ func Manifest() []byte {
 	return []byte(fmt.Sprintf("{\"component\":%q,\"host_correlation_id\":%q,\"schema_version\":%q}\n", Component, HostCorrelationID, SchemaVersion))
 }
 
+// HostManifest is the ADR-0013 declaration the sample host makes when asked
+// to (the extmanifest vector family): the cem888 profile of hosts.json.
+func HostManifest() *m1pv1.HostManifest {
+	return &m1pv1.HostManifest{
+		HostId: "cem888", HostVersion: "2.0.1",
+		OwnsExecution: true, OwnsConfigSurface: true, OwnsMemory: true,
+		ArrestMode: m1pv1.ArrestMode_ARREST_MODE_RECOMMEND, SuppliesIdentity: true,
+		SchemaVersion: "m1p.v1",
+	}
+}
+
+// ManifestWithHost is the sidecar carrying the host_manifest block, rendered
+// in the message's field order so emit.py reproduces it byte for byte.
+func ManifestWithHost() []byte {
+	hm := HostManifest()
+	block := fmt.Sprintf("{\"hostId\":%q,\"hostVersion\":%q,\"ownsExecution\":%t,\"ownsConfigSurface\":%t,\"ownsMemory\":%t,\"arrestMode\":%q,\"suppliesIdentity\":%t,\"schemaVersion\":%q}",
+		hm.GetHostId(), hm.GetHostVersion(), hm.GetOwnsExecution(), hm.GetOwnsConfigSurface(), hm.GetOwnsMemory(), hm.GetArrestMode().String(), hm.GetSuppliesIdentity(), hm.GetSchemaVersion())
+	return []byte(fmt.Sprintf("{\"component\":%q,\"host_correlation_id\":%q,\"schema_version\":%q,\"host_manifest\":%s}\n", Component, HostCorrelationID, SchemaVersion, block))
+}
+
 // Push plays the sample over an open fabric connection as a socket writer
 // (08 §4.6.1): Hello without a session, the minted id echoed on every
 // Event, then Flush and its ack. Returns the minted session.
-func Push(conn io.ReadWriter) ([16]byte, error) {
+func Push(conn io.ReadWriter) ([16]byte, error) { return PushWithManifest(conn, nil) }
+
+// PushWithManifest is Push with Hello.host_manifest set (ADR-0013); nil is Push.
+func PushWithManifest(conn io.ReadWriter, hm *m1pv1.HostManifest) ([16]byte, error) {
 	var sid [16]byte
 	if err := writeFrame(conn, &m1pv1.FabricFrame{Kind: &m1pv1.FabricFrame_Hello{Hello: &m1pv1.Hello{
-		Component: Component, Pid: 1, Version: "0.1.0", HostCorrelationId: HostCorrelationID,
+		Component: Component, Pid: 1, Version: "0.1.0", HostCorrelationId: HostCorrelationID, HostManifest: hm,
 	}}}); err != nil {
 		return sid, err
 	}
