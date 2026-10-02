@@ -138,7 +138,7 @@ done
 # would be theatre. Matching is on the `conf_vectors_<family>` token, which is why the test
 # module is named test_conf_vectors_fusion.py. coverage is the band family (Go querychoke +
 # Python intel, the SQL fold in between — NFR-OPERABILITY-001). ----
-PY_REQUIRED="receipt fusion coverage"
+PY_REQUIRED="receipt fusion coverage ext"
 for fam in $PY_REQUIRED; do
   # $EXPECTED is newline-separated, so a `case " $EXPECTED "` glob would never match.
   printf '%s\n' "$EXPECTED" | grep -qx "$fam" || continue

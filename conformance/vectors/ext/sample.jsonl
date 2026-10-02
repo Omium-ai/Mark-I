@@ -1,0 +1,9 @@
+{"eventId":"AZmfxAAAcACAAAAAAAAAAA==","occurredAt":"2026-10-02T12:00:00Z","sessionStart":{"agent":"acme-runner","agentVersion":"1.2.3"}}
+{"eventId":"AZmfxAAAcACAAAAAAAAAAQ==","occurredAt":"2026-10-02T12:00:01Z","taskOpen":{"taskClass":"*","taskSegVersion":"ext:acme/runner.v1"}}
+{"eventId":"AZmfxAAAcACAAAAAAAAAAg==","occurredAt":"2026-10-02T12:00:02Z","turn":{"initiator":"INITIATOR_HUMAN"}}
+{"eventId":"AZmfxAAAcACAAAAAAAAAAw==","occurredAt":"2026-10-02T12:00:03Z","turn":{"initiator":"INITIATOR_AGENT","turnIndex":1}}
+{"eventId":"AZmfxAAAcACAAAAAAAAABA==","occurredAt":"2026-10-02T12:00:04Z","toolUse":{"durationMs":"42","status":"TOOL_STATUS_OK","toolName":"Bash","toolUseId":"toolu_01"}}
+{"eventId":"AZmfxAAAcACAAAAAAAAABQ==","occurredAt":"2026-10-02T12:00:05Z","usage":{"inputTokens":"120","messageId":"msg_01","model":"claude-fable-5-1","outputTokens":"30","requestId":"req_01"}}
+{"artifactOutcome":{"artifactFollowed":true,"artifactId":"p6enp6enp6enp6enp6enpw==","taskVerdict":"VERDICT_SATISFIED"},"eventId":"AZmfxAAAcACAAAAAAAAABg==","occurredAt":"2026-10-02T12:00:06Z"}
+{"eventId":"AZmfxAAAcACAAAAAAAAABw==","occurredAt":"2026-10-02T12:00:07Z","taskClose":{"resolution":"RESOLUTION_VERDICT","turnCount":2}}
+{"eventId":"AZmfxAAAcACAAAAAAAAACA==","occurredAt":"2026-10-02T12:00:08Z","sessionEnd":{"drained":true,"durationMs":"8000","reason":"END_REASON_EXIT"}}

@@ -14,6 +14,12 @@ require (
 	lukechampine.com/blake3 v1.4.1 // checkpoint Merkle (04 §7.2 names BLAKE3; stdlib has none — pure Go, cgo-free)
 )
 
+require github.com/Omium-ai/omium-mark1/conformance/emitter v0.0.0
+
 require github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 
 replace github.com/Omium-ai/omium-mark1/proto/gen/go => ../../proto/gen/go
+
+// The reference external writer, imported by the ext conformance test (cmd/) so the
+// socket and file-tail transports are driven from the one pinned sample session.
+replace github.com/Omium-ai/omium-mark1/conformance/emitter => ../../conformance/emitter

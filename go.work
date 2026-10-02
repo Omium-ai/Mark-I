@@ -1,6 +1,7 @@
 go 1.25.14
 
 use (
+	./conformance/emitter
 	./go/controld
 	./go/mark1
 	./go/mark1d
