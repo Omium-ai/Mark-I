@@ -106,6 +106,7 @@ type Manifest struct {
 	PreImageHash     string `json:"pre_image_hash"`
 	PreImage         string `json:"pre_image"`
 	PostImageHash    string `json:"post_image_hash"`
+	PostImage        string `json:"post_image,omitempty"` // ADR-0014: the bytes we wrote, zstd+base64; absent in pre-ADR manifests
 	FragmentChecksum string `json:"fragment_checksum"`
 	AppliedAt        string `json:"applied_at"`
 	AppliedBy        string `json:"applied_by"`
@@ -625,12 +626,17 @@ func writeManifest(target, stateDir, fragment string, pre, post []byte, fragment
 		}
 		preImage, preHash = base64.StdEncoding.EncodeToString(z), sum(pre)
 	}
+	postImage, err := encodeImage(post)
+	if err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(Manifest{
 		TargetPath:       target,
 		Mechanism:        "B",
 		PreImageHash:     preHash,
 		PreImage:         preImage,
 		PostImageHash:    sum(post),
+		PostImage:        postImage,
 		FragmentChecksum: fragmentChecksum,
 		AppliedAt:        time.Now().UTC().Format(time.RFC3339),
 		AppliedBy:        "mark1d",

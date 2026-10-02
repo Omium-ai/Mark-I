@@ -76,6 +76,7 @@ type Manifest struct {
 	PreImageHash     string   `json:"pre_image_hash"`
 	PreImage         string   `json:"pre_image"`
 	PostImageHash    string   `json:"post_image_hash"`
+	PostImage        string   `json:"post_image,omitempty"` // ADR-0014: the bytes we wrote, zstd+base64; absent in pre-ADR manifests
 	FragmentChecksum string   `json:"fragment_checksum"`
 	Pointers         []string `json:"pointers"`
 	AppliedAt        string   `json:"applied_at"`
@@ -329,8 +330,13 @@ func apply(hooksPath, stateDir, shim string, force bool) (ApplyResult, error) {
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	postImage, err := encodeImage(post)
+	if err != nil {
+		return ApplyResult{}, err
+	}
 	m := Manifest{
 		TargetPath: hooksPath, Mechanism: mechanism, PostImageHash: sum(post),
+		PostImage:        postImage,
 		FragmentChecksum: desired, Pointers: pointers,
 		AppliedAt: time.Now().UTC().Format(time.RFC3339), AppliedBy: "mark1d",
 	}

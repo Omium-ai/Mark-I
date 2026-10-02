@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/Omium-ai/omium-mark1/go/mark1d/adapters/fence"
 )
 
 // State is 08 §7.4's vocabulary, verbatim.
@@ -157,6 +159,24 @@ func Revert(stateDir string) (RevertResult, error) {
 	case m.Mechanism == "B" && sum(cur) == m.PreImageHash:
 		res.Kind, res.ByteEquality = "verbatim", true
 	default:
+		// ADR-0014: classify drift against the recorded post-apply image. A
+		// reformat-only change (DriftNone by structure: CRLF, indentation, a
+		// trailing newline) is not an edit, so the original bytes go back
+		// verbatim; outside-fence, inside-fence and missing take the path they
+		// always took. A pre-ADR manifest has no post_image and skips this.
+		if post, perr := RestorePostImage(m); perr == nil {
+			if d, _ := fence.Classify(nil, post, cur); d == fence.DriftNone {
+				pre, err := RestorePreImage(m)
+				if err != nil {
+					return res, err
+				}
+				if err := writeAtomic(m.TargetPath, pre, 0o600); err != nil {
+					return res, err
+				}
+				res.Kind, res.ByteEquality = "verbatim", true
+				break
+			}
+		}
 		if err := surgical(m, cur); err != nil {
 			return res, err
 		}
