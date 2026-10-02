@@ -18,6 +18,11 @@ type Cursor struct {
 	FileID  FileID    `json:"file_id"`
 	Offset  int64     `json:"offset"`
 	SavedAt time.Time `json:"saved_at"`
+	// SessionIDHex is the partner file-tail's minted session (08 §4.6.2, 07
+	// "Partner event files"): the file's HelloAck.session_id, persisted so a
+	// restart resumes the SAME session. Empty for vendor transcripts, whose
+	// session is the file name.
+	SessionIDHex string `json:"session_id_hex,omitempty"`
 }
 
 func cursorPath(stateDir string, id FileID) string {

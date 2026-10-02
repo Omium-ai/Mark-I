@@ -203,6 +203,9 @@ func (s *stream) historyImport() *m1pv1.Event {
 	}
 }
 
+// idle is lineSource's cursor gate: nothing pending.
+func (s *stream) idle() bool { return len(s.pending) == 0 }
+
 // quiet flushes iff the stream has been line-silent past the 2 s debounce.
 func (s *stream) quiet(now time.Time) []*m1pv1.Event {
 	if len(s.pending) == 0 || now.Sub(s.lastLineAt) < quiesce {

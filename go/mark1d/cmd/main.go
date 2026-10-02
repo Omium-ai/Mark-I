@@ -105,11 +105,30 @@ const dropE1ConsentAbsent spool.DropReason = 4
 // coverage bypass 04 §10 F-12 pairs with this row, which is still owed.
 const dropUnsupportedAgentVersion spool.DropReason = 3
 
+// dropLocalQuarantine is DROP_REASON_LOCAL_QUARANTINE (envelope.proto): the
+// partner file-tail's accounting for a line it could not admit (08 §4.6.4),
+// the same reason capture books an undecodable payload under.
+const dropLocalQuarantine spool.DropReason = 4
+
+// splitPaths parses a comma-separated path flag, dropping empties.
+func splitPaths(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 type config struct {
 	stateDir string
 	flags    identityFlags // the flag-set identity, kept so a re-read of the enrollment document overrides only what flags did not
 	flagsSet bool
-	spoolDir string
+	// partnerEvents is --partner-events: explicit partner JSONL files for the
+	// file-tail transport (08 §4.6.2), beside <state-dir>/partner/*.jsonl.
+	partnerEvents string
+	spoolDir      string
 	// spoolCap is 07 §6's spool byte cap (spool.DefaultCap, ~2 GiB); zero
 	// takes the spool's default. The only operator-visible spool limit: past
 	// it diagnostics shed (accounted DROP_REASON_SPOOL_SHED, FR-SPINE-007)
@@ -184,6 +203,7 @@ func main() {
 	flag.Int64Var(&cfg.spoolCap, "spool-cap", spool.DefaultCap, "spool byte cap (07 §6): past it diagnostics shed, accounted, and billing-grade blocks; below one 64 MiB segment the spool can never free space")
 	flag.StringVar(&cfg.socket, "socket", "", "fabric endpoint (07 §5): unix socket path, default $XDG_RUNTIME_DIR/omium-mark1/m1p.sock else ~/.omium/mark1/m1p.sock; on Windows the named pipe \\\\.\\pipe\\omium-mark1-<user-SID>")
 	flag.StringVar(&cfg.workspace, "workspace", "", "additive workspace root to tail besides <state-dir>/workspaces.json (mark1 enable writes the file)")
+	flag.StringVar(&cfg.partnerEvents, "partner-events", "", "comma-separated partner JSONL files to tail (08 §4.6.2), besides every *.jsonl under <state-dir>/partner/; each needs its <name>.manifest.json sidecar")
 	flag.DurationVar(&cfg.backfillWindow, "backfill-window", tailers.BackfillWindow, "how much transcript history a never-tailed file imports, receipted as a history_import window; 0 imports everything")
 	flag.StringVar(&cfg.saltHex, "tenant-salt", "", "hex tenant HMAC root for Usage idem_key derivation; DEV SEAM — overrides enrollment.json's tenant_root_hex (04 §2.9)")
 	flag.StringVar(&cfg.ingestURL, "ingest-url", "", "full URL of POST /m1p/v1/ingest; overrides enrollment.json's endpoints.ingest; empty with no document leaves the uplink off (capture-local-only)")
@@ -906,8 +926,10 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// the loopback door through the same Server. A pure lift of the closure
 	// that lived here; TestSocketStreamGolden pins the stream across it.
 	admit := &admitPath{adm: adm, cx: cx, cov: cov, seg: seg, sched: sched, router: router, votes: votes,
-		sessionCwd: &sessionCwd, stateDir: cfg.stateDir, workspace: cfg.workspace}
+		sessionCwd: &sessionCwd, stateDir: cfg.stateDir, workspace: cfg.workspace,
+		ext: &sync.Map{}, idemKey: idemKey, log: log}
 	srv := fabric.NewServer(admit.bytes, perEventLoss)
+	srv.OnExtHello = admit.bindExt // ADR-0012: the socket's ext: sessions, for idem_key stamping and the host reference
 	// The GateQuery route is constructed with eng.Reader() — a verdict.Reader,
 	// the only verdict surface with no method that computes (04 §2.3).
 	gate.Evidence = votes.Evidence // FR-VERIFY-011: evidence_ref on BLOCK
@@ -1115,6 +1137,26 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		}
 		tailDone <- nil
 	}
+	// The partner file-tail transport (08 §4.6.2): every explicit
+	// --partner-events file and every *.jsonl under <state>/partner/, each
+	// bound by its sidecar and entering admit.event — the same door the
+	// socket's decoded events reach. Unlike the transcript tailers it needs
+	// no idem key of its own: the door stamps idem_key (ADR-0012 §4).
+	partnerDone := make(chan error, 1)
+	if partner, err := tailers.NewPartner(tailers.PartnerConfig{
+		Paths:    splitPaths(cfg.partnerEvents),
+		Dir:      filepath.Join(cfg.stateDir, "partner"),
+		StateDir: filepath.Join(cfg.stateDir, "cursors"),
+		Emit:     admit.event,
+		OnBind:   admit.bindExt,
+		Drop:     func() { adm.AccountDropped(dropLocalQuarantine, spool.ClassDiagnostic, 1) },
+		Log:      log,
+	}); err != nil {
+		log.Error("mark1d: partner file-tail not started", "err", err)
+		partnerDone <- nil
+	} else {
+		go func() { partnerDone <- partner.Run(ctx) }()
+	}
 
 	<-ctx.Done()
 	// Shutdown drain, 07 §6: stop intake, flush pending tails, force the
@@ -1127,6 +1169,9 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	<-serveDone
 	if err := <-tailDone; err != nil {
 		log.Error("tail drain", "err", err)
+	}
+	if err := <-partnerDone; err != nil {
+		log.Error("partner tail drain", "err", err)
 	}
 	<-drainDone  // ctx is done; the ring drain stops before its spool closes
 	<-engDone    // the fusion goroutine holds no resource; joined so it cannot outlive the session

@@ -24,11 +24,28 @@ type Tailer struct {
 	path     string
 	stateDir string
 	str      stream
+	// src turns lines into events: &str for a vendor transcript (the Usage
+	// dedupe), a partnerSource for an ext JSONL file (08 §4.6.2). The file
+	// following above it — cursor, rotation, torn tail — is shared.
+	src lineSource
+	// sessionHex rides the cursor for a partner file (Cursor.SessionIDHex);
+	// empty for vendor transcripts.
+	sessionHex string
 
 	f    *os.File
 	id   FileID
 	off  int64 // first unconsumed byte: always a fully-emitted line boundary
 	gone bool  // path vanished (vendor retention sweep); drained and done
+}
+
+// lineSource is the per-line consumer a Tailer drives (readLines, poll,
+// flushAndSave). idle reports nothing pending, which is when the cursor may
+// land: the saved offset must never point past an unemitted event.
+type lineSource interface {
+	consume(line []byte, now time.Time) []*m1pv1.Event
+	quiet(now time.Time) []*m1pv1.Event
+	flush() []*m1pv1.Event
+	idle() bool
 }
 
 // newTailer opens a stream. window > 0 bounds a FIRST tail (no cursor) to that much history: an untouched-for-longer file starts at EOF, an in-window file drops lines older than the window and marks the rest as imported (stream.historyImport).
@@ -48,6 +65,7 @@ func newTailer(path, stateDir string, str stream, now time.Time, window time.Dur
 		return nil, errors.New("tailers: no file identity on this platform")
 	}
 	t := &Tailer{path: path, stateDir: stateDir, str: str, f: f, id: id}
+	t.src = &t.str
 	// Resume-after-restart (04 §2.1): a matching-identity cursor resumes;
 	// a shrunken file re-scans from 0 — replays are safe, so the cheap
 	// response is the correct one.
@@ -120,7 +138,7 @@ func (t *Tailer) poll(now time.Time, emit func([]*m1pv1.Event) error) error {
 	if err := t.readLines(now, emit); err != nil {
 		return err
 	}
-	if evs := t.str.quiet(now); len(evs) > 0 {
+	if evs := t.src.quiet(now); len(evs) > 0 {
 		if err := emit(evs); err != nil {
 			return err
 		}
@@ -132,7 +150,7 @@ func (t *Tailer) poll(now time.Time, emit func([]*m1pv1.Event) error) error {
 // flushAndSave is the Stop/shutdown drain: everything pending emits now
 // (04 §2.1 emission trigger 3), then the cursor lands at the drained offset.
 func (t *Tailer) flushAndSave(emit func([]*m1pv1.Event) error) error {
-	if evs := t.str.flush(); len(evs) > 0 {
+	if evs := t.src.flush(); len(evs) > 0 {
 		if err := emit(evs); err != nil {
 			return err
 		}
@@ -141,7 +159,7 @@ func (t *Tailer) flushAndSave(emit func([]*m1pv1.Event) error) error {
 }
 
 func (t *Tailer) save(now time.Time) error {
-	return saveCursor(t.stateDir, Cursor{Path: t.path, FileID: t.id, Offset: t.off, SavedAt: now})
+	return saveCursor(t.stateDir, Cursor{Path: t.path, FileID: t.id, Offset: t.off, SavedAt: now, SessionIDHex: t.sessionHex})
 }
 
 func (t *Tailer) close() {
@@ -176,7 +194,7 @@ scan:
 		case err == nil: // complete line
 			t.off += lineLen
 			if len(line) <= maxLine {
-				if evs := t.str.consume(line, now); len(evs) > 0 {
+				if evs := t.src.consume(line, now); len(evs) > 0 {
 					if err := emit(evs); err != nil {
 						return err
 					}
@@ -193,7 +211,7 @@ scan:
 			return err
 		}
 	}
-	if emitted && len(t.str.pending) == 0 {
+	if emitted && t.src.idle() {
 		return t.save(now)
 	}
 	return nil

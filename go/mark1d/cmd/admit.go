@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
+	"log/slog"
 	"sync"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
+	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/anchors"
@@ -12,6 +15,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/cortex"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/coverage"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/route"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/tailers"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/taskseg"
 )
 
@@ -35,6 +39,49 @@ type admitPath struct {
 	sessionCwd *sync.Map
 	stateDir   string
 	workspace  string
+
+	// ext is session → extHost for every ADR-0012 external-writer session on
+	// either transport (fabric.Server.OnExtHello, tailers.Partner.OnBind):
+	// the set that gets Usage.idem_key stamped here, and the host reference
+	// stored beside the session for later receipt echo.
+	ext *sync.Map
+	// idemKey is the tenant usage-idem key (tailers.DeriveUsageIdemKey); it
+	// never leaves the daemon, which is why the daemon stamps for ext writers.
+	idemKey []byte
+	log     *slog.Logger
+}
+
+// extHost is what an ext: Hello (or sidecar) declared, kept beside the session.
+type extHost struct {
+	component, hostCorrelationID string
+	idemWarned                   bool
+}
+
+// bindExt records an external-writer session. It is the fabric's OnExtHello
+// and the partner tailer's OnBind: one hook, two transports.
+func (p *admitPath) bindExt(session [16]byte, component, hostCorrelationID string) {
+	p.ext.Store(session, &extHost{component: component, hostCorrelationID: hostCorrelationID})
+}
+
+// stampIdemKey is ADR-0012 §4: for an ext: session the daemon computes
+// Usage.idem_key per the events.proto recipe, overwriting any writer value
+// and saying so once per session at debug.
+func (p *admitPath) stampIdemKey(ev *m1pv1.Event) {
+	u := ev.GetUsage()
+	if u == nil || len(ev.GetSessionId()) != 16 || len(p.idemKey) == 0 {
+		return
+	}
+	var sid [16]byte
+	copy(sid[:], ev.GetSessionId())
+	h, ok := p.ext.Load(sid)
+	if !ok {
+		return
+	}
+	if host := h.(*extHost); len(u.GetIdemKey()) != 0 && !host.idemWarned {
+		host.idemWarned = true
+		p.log.Debug("ext writer sent Usage.idem_key; overwritten with the daemon's (ADR-0012 §4)", "session", hex.EncodeToString(sid[:]), "component", host.component)
+	}
+	u.IdemKey = tailers.IdemKey(p.idemKey, uuid.UUID(sid), u.GetMessageId(), u.GetRequestId())
 }
 
 // bytes is the fabric.Server handle shape: the INNER Event bytes of one
@@ -52,6 +99,10 @@ func (p *admitPath) bytes(ctx context.Context, payload []byte) error {
 // event admits one decoded Event: cortex observation, workspace stamp,
 // segmentation, the PostToolUse trigger, then the route or verdict door.
 func (p *admitPath) event(ctx context.Context, ev *m1pv1.Event) error {
+	// ADR-0012 §4 first: the idem_key must be the daemon's before anything
+	// downstream (segmentation, the ledger) reads the Usage. A no-op for
+	// every non-ext session, so first-party streams are untouched.
+	p.stampIdemKey(ev)
 	// The cortex plane watches every decoded event: session start/end
 	// publishes or retires the session file cortexd Hellos with, and an
 	// admitted CortexInjection's root_hash reaches the anchor runner.

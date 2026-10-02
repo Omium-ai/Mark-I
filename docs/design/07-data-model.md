@@ -3759,7 +3759,7 @@ Eviction policy, in priority order: (1) any row whose `grammar_rev`/`query_rev`/
                         "schema_version": "m1p.v1"}                         REQUIRED, the accepted set is {"m1p.v1"}
 ```
 
-The daemon tails these under the transcript tailers' cursor rules (04 §2.1: file-identity-keyed cursor under `<state>/tailers/`, whole-line offsets, rotation follow, truncation re-scan) with one addition: the cursor also carries `session_id_hex`, the session the daemon minted for the file on first read — the file-tail equivalent of `HelloAck.session_id` — so a restart resumes the SAME session rather than minting a second. Lines enter the one admission path (`admitPath`) with `session_id` stamped from the cursor; `Usage.idem_key` is stamped there too (ADR-0012 §4). Nothing in this directory is ever uploaded as a file: only the admitted events leave, through the spool.
+The daemon tails these under the transcript tailers' cursor rules (04 §2.1: file-identity-keyed cursor under `<state>/cursors/`, whole-line offsets, rotation follow, truncation re-scan) with one addition: the cursor also carries `session_id_hex`, the session the daemon minted for the file on first read — the file-tail equivalent of `HelloAck.session_id` — so a restart resumes the SAME session rather than minting a second. Lines enter the one admission path (`admitPath`) with `session_id` stamped from the cursor; `Usage.idem_key` is stamped there too (ADR-0012 §4). Nothing in this directory is ever uploaded as a file: only the admitted events leave, through the spool.
 
 ### Encrypted spill rings
 
