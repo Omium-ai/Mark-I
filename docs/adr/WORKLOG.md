@@ -77,3 +77,33 @@ session context (id, component, correlation id, profile), under the same golden 
   Final Go suites: only the known environment failures, plus one flaky run of
   TestSocketStreamGolden inside the full cmd package (passed standalone, passed on the
   next full run; an eight-run hunt is logged under Part 2). WORKLOG.md starts here.
+
+### Part 2 (host profile manifest) — what landed, in commit order
+
+- 2.1 docs: ADR-0013; 02 §9.2 FR-SPINE-033..038 (Phase 2 in flight); 08 §4.3 step 2b and
+  §9 M1E-4007; 07 sidecar `host_manifest`; traceability rows.
+- 2.2 proto: `ArrestMode`, `HostManifest`, `Hello.host_manifest = 7`; `just gen`; every Rust
+  `Hello` literal gains `host_manifest: None`; the proxy `deliver` sink fingerprint re-pinned.
+- 2.3 `go/mark1d/internal/hostprofile`: `Profile`, `FromManifest`, `Default` (once),
+  `Canonical` (golden-pinned), `Registry`, and — folded in from 2.6 because the handshake
+  of 2.4 logs known/unknown through it — the embedded `hosts.json` with `Lookup`.
+- 2.4 handshake + sidecar + admit package: `fabric/session.go` reads the manifest after
+  binding (absent ⇒ Default, invalid or non-ext ⇒ M1E-4007), stores it on the session
+  (`HostProfile()`), hands it to `Server.OnExtHello`, logs known/unknown host with the
+  canonical profile; `tailers/partner.go` reads the sidecar block through the same
+  `FromManifest`; the admit path moved from `cmd/admit.go` to `internal/admit` with an
+  explicit `Session` context (id, component, correlation id, profile, ext) and a
+  `Registry`; `TestSocketStreamGolden` unchanged and green across the move.
+- 2.5 plumbing: `provision.Apply` (Options.Profile → Result.Profile, debug log),
+  `fabric.Gate.ProfileFor` called from `Answer`, `memory.Cache.ProfileFor` called from
+  `record`; one reachability test per package; no decision changes.
+- 2.6 registry: see 2.3; the handshake's known/unknown line is 2.4's.
+- 2.7 conformance: emitter `-manifest` (Go) / `--manifest` (Python), the `extmanifest`
+  family (events identical to `ext`, sidecar with the cem888 block) in EXPECTED and
+  PY_REQUIRED, `TestConfVectorsExtmanifestTransportsAgree` comparing the canonical
+  profile each daemon logged at bind; `integrating-a-host.md` §8 "Declare what you own".
+  Rows re-tagged Phase 1 once the suite ran.
+
+Environment note for Part 2's runs: the Rust proxy test
+`rewritten_request_streams_the_response_untouched` failed once and passed on re-run
+(port/timing); recorded as flaky, not as a regression.
