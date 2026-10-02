@@ -32,6 +32,11 @@ type Options struct {
 	// blocking (FR-POLICY-006). NoStopGate is --no-stop-gate: remove the opt-in.
 	StopGate   bool
 	NoStopGate bool
+	// Profile is the ADR-0013 host profile of the session this enable acts for;
+	// nil is provision.DefaultProfile (the daemon-down CLI has no session). A
+	// declared host that owns the config surface is refused per adapter
+	// with M1E-7105 (ADR-0014 §4) and rendered as NOT PROVISIONED.
+	Profile *provision.Profile
 	// Exploration is --exploration: D-EF's local half of ε>0 consent;
 	// NoExploration is --no-exploration.
 	Exploration   bool
@@ -142,7 +147,7 @@ func Run(env *cli.Env, opts Options) error {
 	// It runs BEFORE the root lands in the allow-list so the consent record
 	// below can name what was provisioned, and so a provisioning I/O failure
 	// (exit 1) leaves nothing half-enabled for the re-run to skip.
-	pr, err := provision.Apply(provision.Options{Home: opts.Home, StateDir: env.StateDir})
+	pr, err := provision.Apply(provision.Options{Home: opts.Home, StateDir: env.StateDir, Profile: opts.Profile})
 	if err != nil {
 		return cli.Failf(cli.ExitRuntime, "", "%v", err)
 	}

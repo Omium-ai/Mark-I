@@ -28,6 +28,11 @@ type Options struct {
 	// once per second; 5s is five chances before we call it partial).
 	Socket       string
 	ObserveGrace time.Duration
+	// Profile is the ADR-0013 host profile of the session this off acts for; nil
+	// is provision.DefaultProfile. A declared host that owns the config surface has
+	// nothing of ours to revert: reported as HostOwned (M1E-7105), not as a
+	// partial off.
+	Profile *provision.Profile
 }
 
 // Result is §7.6's --json shape. coverage_receipt_seq is minted by the
@@ -44,6 +49,10 @@ type Result struct {
 	// verbatim deserves to know which file and why, not just `false`.
 	Reverted    []Reverted `json:"reverted,omitempty"`
 	NotReverted []string   `json:"not_reverted,omitempty"`
+	// HostOwned is the M1E-7105 reason when the session's declared host owns the
+	// config surface (ADR-0014 §4): nothing was reverted because nothing of
+	// ours is there.
+	HostOwned string `json:"host_owned,omitempty"`
 	// StopGate: removed | not_opted_in | opted_in (removal failed, listed in NotReverted).
 	StopGate string `json:"stop_gate"`
 }
@@ -106,7 +115,11 @@ func Run(env *cli.Env, opts Options) error {
 	// not the off mechanism: the shim hits the marker check and no-ops
 	// regardless (08 §8.4 note), which is why a failed revert does not stop
 	// the marker from landing above.
-	res.Reverted, res.NotReverted = provision.Revert(env.StateDir)
+	profile := provision.DefaultProfile
+	if opts.Profile != nil {
+		profile = *opts.Profile
+	}
+	res.Reverted, res.NotReverted, res.HostOwned = provision.RevertUnless(profile, env.StateDir)
 	// FR-POLICY-006: a paused install must not block; the exploration sibling (D-EF) is a contract, not an arming, and stays.
 	res.StopGate = "not_opted_in"
 	was := env.ReadOptIn().StopGate
@@ -147,6 +160,9 @@ func Run(env *cli.Env, opts Options) error {
 		}
 		for _, p := range res.NotReverted {
 			_, _ = fmt.Fprintf(w, "NOT REVERTED: %s (run `mark1 doctor`)\n", p)
+		}
+		if res.HostOwned != "" {
+			_, _ = fmt.Fprintf(w, "host          %s\n", res.HostOwned)
 		}
 		if res.StopGate == "removed" {
 			_, _ = fmt.Fprintln(w, "stop gate     opt-in removed; re-arm with `mark1 enable --stop-gate`")

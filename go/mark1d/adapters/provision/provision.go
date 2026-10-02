@@ -55,6 +55,41 @@ type Result struct {
 	Profile hostprofile.Profile
 }
 
+// Profile and DefaultProfile re-export the ADR-0013 host profile for the
+// CLI module, which may import adapters/ but never mark1d/internal/.
+type Profile = hostprofile.Profile
+
+var DefaultProfile = hostprofile.Default
+
+// CodeHostOwnsSurface is 08 §9's row for ADR-0014 §4: a declared host owns
+// the agent's config surface, so provisioning writes nothing into it.
+const CodeHostOwnsSurface = "M1E-7105"
+
+// HostOwnsSurface reports whether p is a DECLARED host (host_id set) that
+// owns the config surface. hostprofile.Default describes Mark 1's own posture,
+// so its OwnsConfigSurface reads "the surface's owner — Mark 1 — owns it"
+// and never refuses; only a declared host can be the other party.
+func HostOwnsSurface(p hostprofile.Profile) bool {
+	return p.HostID != "" && p.OwnsConfigSurface
+}
+
+// RefusalHostOwnsSurface is the one-line explanation every CLI surface prints
+// for M1E-7105 (08 §8.3 step 0).
+func RefusalHostOwnsSurface(p hostprofile.Profile) string {
+	return fmt.Sprintf("%s: host owns config surface — %s %s owns its own configuration; Mark 1 is attached through the fabric and writes nothing here", CodeHostOwnsSurface, p.HostID, p.HostVersion)
+}
+
+// RevertUnless is Revert for a caller that knows the session's profile: when
+// a declared host owns the surface there is nothing of ours in it, so revert
+// is a no-op reported with the same reason (ADR-0014 §4); otherwise Revert.
+func RevertUnless(p hostprofile.Profile, stateDir string, only ...string) (done []Reverted, notReverted []string, refused string) {
+	if HostOwnsSurface(p) {
+		return nil, nil, RefusalHostOwnsSurface(p)
+	}
+	done, notReverted = Revert(stateDir, only...)
+	return done, notReverted, ""
+}
+
 // profileFor resolves and logs the walk's host profile (ADR-0013 §4).
 func profileFor(opts Options) hostprofile.Profile {
 	p := hostprofile.Default
@@ -92,6 +127,18 @@ func Apply(opts Options) (Result, error) {
 		}
 	}
 	walk := func(name string) bool { return opts.Only == nil || slices.Contains(opts.Only, name) }
+	// ADR-0014 §4 (08 §8.3 step 0): a declared host that owns the config
+	// surface gets nothing written — every adapter in the walk is refused
+	// with M1E-7105 naming it. hostprofile.Default is Mark 1's own posture
+	// and never trips this.
+	if HostOwnsSurface(res.Profile) {
+		for _, name := range Names {
+			if walk(name) {
+				res.Refused = append(res.Refused, Refusal{name, CodeHostOwnsSurface, RefusalHostOwnsSurface(res.Profile)})
+			}
+		}
+		return res, nil
+	}
 	note := func(name string, changed bool, err error, refusalCode func(error) string) error {
 		var syntax *json.SyntaxError
 		switch code := refusalCode(err); {
