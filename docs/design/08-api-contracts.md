@@ -1169,17 +1169,21 @@ Every apply records, in `~/.omium/mark1/provisioned/<agent>/<fragment>.manifest.
 { "target_path": "/home/u/.claude/settings.json",
   "mechanism": "A|B",
   "pre_image_hash": "blake3:…",  "pre_image": "<zstd+base64 of the ORIGINAL bytes>",
-  "post_image_hash": "blake3:…",
+  "post_image_hash": "blake3:…", "post_image": "<zstd+base64 of the bytes WE WROTE (ADR-0014)>",
   "fragment_checksum": "blake3:…",
   "applied_at": "…", "applied_by": "mark1d/1.4.2" }
 ```
 
-Storing the original bytes, not just their hash, is what makes byte-equality restoration a guarantee rather than a hope.
+Storing the original bytes, not just their hash, is what makes byte-equality restoration a guarantee rather than a hope. Storing the bytes we wrote (`post_image`, additive, ADR-0014) is what lets §8.4 tell a reformat from an edit and an edit outside our fence from one inside it; a manifest without it reverts under the pre-ADR-0014 rule (whole-file hash equal ⇒ verbatim, else surgical).
 
 ### 8.3 Idempotent apply
 
 ```
 apply(target, fragment):
+  0. if the session's host profile (ADR-0013) is a DECLARED host (host_id set) with
+     owns_config_surface = true → refuse the whole walk, every adapter: M1E-7105
+     "host owns config surface" naming host_id; write nothing (ADR-0014 §4).
+     hostprofile.Default is Mark 1's own posture and never refuses.
   1. read target (missing file: mechanism A creates; mechanism B refuses — we do not
      invent a user file to fence into. M1E-7101).
   2. locate an existing MARK1 block/pointer set.
@@ -1203,23 +1207,37 @@ is the idempotence contract, and CI asserts it (apply ∘ apply ≡ apply).
 ### 8.4 Revert — and how `mark1 off` restores byte-equality
 
 ```
-revert(target, manifest):
-  1. read target.
-  2. if blake3(target) == manifest.post_image_hash:
-       → the file is exactly as we left it: restore manifest.pre_image VERBATIM
-         (atomic write). Result is byte-identical to the pre-Mark1 file. Report
-         byte_equality: true.
-  3. else (the user edited the file after we did — their bytes, their ownership):
-       → surgical removal: delete exactly our block (B: markers inclusive, plus the
-         one trailing newline we added; JSON: remove exactly manifest.pointers and
-         the _mark1_managed object, touching nothing else).
-       → report byte_equality: "surgical" with a diff summary; doctor retains it.
-     3b. UNLESS the block itself no longer verifies (the recorded checksum does not
-         describe what is at the pointers, or the _mark1_managed object is gone):
-         → write NOTHING. Report kind `fragment-damaged` and list, in `retained`,
-           which of our pointers are still set. §7.4 already fixes this reading:
-           what we cannot verify is FRAGMENT-DAMAGED, and the safe response to
-           "I cannot tell what is in there" is the one that refuses to write.
+revert(target, manifest):                                          (drift-aware, ADR-0014)
+  0. if the session's host profile is a DECLARED host with owns_config_surface = true
+     → no-op, reason M1E-7105: nothing of ours is in a surface the host owns.
+  1. read target. Classify drift with ONE shared pure function,
+     fence.Classify(pre_image, post_image, current) — for strict JSON "outside the
+     fence" is the document with our keys removed and "inside" is our entries
+     (array elements tagged "_mark1", the _mark1_managed object), both compared
+     STRUCTURALLY, so a reformat (CRLF, indentation, trailing newline) is not drift:
+       DriftNone          current is what we wrote, structurally
+       DriftOutsideFence  our entries intact; something else in the document changed
+                          (a second writer before or after our entries, a key of theirs)
+       DriftInsideFence   our entries present but not what we wrote
+       FenceMissing       none of our entries present
+     A manifest with no post_image (pre-ADR-0014) classifies by whole-file hash:
+     equal ⇒ DriftNone, else DriftOutsideFence.
+  2. DriftNone → restore manifest.pre_image VERBATIM (atomic write). Result is
+     byte-identical to the pre-Mark1 file. Report kind `verbatim`, byte_equality: true.
+     (Also when blake3(target) == pre_image_hash: a previous run restored it and
+     died before step 4.)
+  3. DriftOutsideFence → surgical removal: delete exactly our entries (JSON: the
+     "_mark1"-tagged entries and the _mark1_managed object; a key we created that is
+     now empty goes too, a key they had stays), write atomically, preserving
+     everything else — their entries, their order, their line endings. Report kind
+     `surgical`; doctor retains the diff summary. The pre-image is NOT restored:
+     it would delete a second writer's lines.
+     3b. DriftInsideFence, FenceMissing → the existing §7.4 handling, unchanged:
+         what we cannot verify is FRAGMENT-DAMAGED / MISSING. Where the block no
+         longer verifies against its own checksum → write NOTHING, report kind
+         `fragment-damaged` and list, in `retained`, which of our pointers are still
+         set; the safe response to "I cannot tell what is in there" is the one
+         that refuses to write.
   4. delete manifest last (so a crash mid-revert is re-runnable: revert is also
      idempotent — a target with no block and no manifest is a successful no-op),
      and NOT AT ALL when step 3b retained anything.
@@ -1280,6 +1298,7 @@ Normative. Later documents (04, 05, 11, 12) cite these codes; they do not invent
 | provision | `M1E-7101` | fence target absent (mechanism B) | local | no | doctor | refusal — we do not create user files |
 | provision | `M1E-7102` | user edit inside our fence (checksum broken) | local | via `doctor --fix` only | doctor | refusal — no silent overwrite |
 | provision | `M1E-7103` | duplicate key in the settings object | local | no | doctor | refusal — legal JSON that every decoder collapses differently, so a rewrite would silently delete one of the user's values |
+| provision | `M1E-7105` | host owns config surface (ADR-0014 §4, §8.3 step 0): the session's declared host set `owns_config_surface`, so provisioning writes nothing and revert is a no-op; `enable`/`off`/`doctor` say the active host owns its own configuration and Mark 1 is attached through the fabric | local | no | enable/off/doctor | refusal — never a write into a surface another party owns |
 | provision | `M1E-7104` | provisioning manifest unreadable | local | no | doctor | refusal — the manifest's `pre_image` is the only byte-equality revert target, so apply refuses rather than re-snapshot over an unknown prior state |
 | provision | `M1E-7105` | base-URL fragment requested without a detected API-key credential | local | no | doctor | **fail-closed — the CON-001 boundary.** Every non-affirmative answer collapses here (no key, a subscription credential, a detection that errored, no proxy listening): on this path "I could not tell" and "no" must be the same answer, and there is no force path |
 | provision | `M1E-7106` | the agent's settings already set this variable | local | no | doctor | refusal — Mark 1 never overwrites a base URL or header the user set |
