@@ -107,3 +107,36 @@ session context (id, component, correlation id, profile), under the same golden 
 Environment note for Part 2's runs: the Rust proxy test
 `rewritten_request_streams_the_response_untouched` failed once and passed on re-run
 (port/timing); recorded as flaky, not as a regression.
+
+### Part 3 (collision-safe config writing) — what landed
+
+- 3.1 The four fenced states as the tree defines them (`claudecode.State`, mirrored in
+  codex/gemini/cursor): `OK` (post-image hash matches), `USER-EDITED` (our entries intact,
+  the rest changed), `FRAGMENT-DAMAGED` (edit inside our entries — "edited inside the
+  fence" is this one), `MISSING`. Every fence in the tree is strict JSON with `_mark1`
+  tags (claudecode also `_mark1_managed`); copilot and opencode are mechanism A. There is
+  no comment-style fence anywhere, so the CRLF/newline cases are JSON reformat cases.
+- 3.2 ADR-0014; 02 §9.2 FR-SPINE-039..042; 08 §8.2 (`post_image`), §8.3 step 0
+  (M1E-7105), §8.4 rewritten drift-aware, §9 row; traceability.
+- 3.3 `go/mark1d/adapters/fence`: `Classify(pre, post, cur)` → `DriftNone |
+  DriftOutsideFence | DriftInsideFence | FenceMissing`, structural for strict JSON with
+  `Split` (ours = tagged array elements + the managed object), sorted-key traversal so the
+  verdict is deterministic; table tests incl. CRLF, trailing newline, reindent, a second
+  writer before/after, inside edits, removal, unparseable.
+- 3.4 Each JSON-fence adapter's manifest gains `post_image` (`postimage.go`:
+  `encodeImage`, `RestorePostImage`, `ErrNoPostImage`); each `Revert`'s default branch
+  classifies first — `DriftNone` restores the pre-image verbatim, everything else takes
+  exactly the path it took before; a legacy manifest without `post_image` skips the
+  classifier. Generated per-adapter `drift_test.go` (one template, four seeds):
+  none → verbatim, reformat → verbatim (new), neighbour after/before → surgical with
+  theirs surviving, legacy manifest → old rule. `consent_test.go` unchanged.
+- 3.5 `provision.Apply` refuses every walked adapter with M1E-7105 when a DECLARED host
+  owns the surface (`HostOwnsSurface`: `HostID != "" && OwnsConfigSurface` — `Default`
+  describes Mark 1's own posture and never refuses; recorded in ADR-0014 §4);
+  `RevertUnless` is the matching no-op. The CLI module cannot import
+  `mark1d/internal/hostprofile`, so `provision.Profile`/`DefaultProfile` re-export the
+  type; `enable`, `off` and `doctor` take `Options.Profile` (nil = Default, the
+  daemon-down CLI has no session) and render the one line (`NOT PROVISIONED … M1E-7105 …`
+  in enable's existing style, `host          M1E-7105 …` in off and doctor; `host_owned`
+  in their --json). Tests per verb.
+- 3.6 integrating-a-host.md §8.1. Rows re-tagged Phase 1 after the suite.

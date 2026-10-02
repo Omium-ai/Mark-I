@@ -193,3 +193,19 @@ hosts are listed in `go/mark1d/internal/hostprofile/hosts.json` (cem888 is the f
 being unlisted refuses nothing. The decisions those consumers take on your declaration
 — not writing your config, recommending instead of blocking, not injecting — arrive as
 their own features and are described in the sections that follow when they land.
+
+### 8.1 If you own the config surface
+
+Declare `owns_config_surface: true` and Mark 1's provisioning never writes into your
+agent's configuration: `mark1 enable`, the control API and `mark1 off` refuse every
+adapter for your session with `M1E-7105` ("host owns config surface", naming your
+`host_id`), write nothing, and say so in one line — the active host owns its own
+configuration; Mark 1 is attached through the fabric. Nothing of Mark 1's is in your
+files, so there is nothing to detach either. The fence you would otherwise get
+(08 §8.1) is yours to install, or not, by your own means.
+
+For everyone else, detach is drift-aware (ADR-0014): if your file is exactly what
+Mark 1 wrote, or merely reformatted, the original bytes come back verbatim; if a
+second writer added entries before or after Mark 1's, exactly Mark 1's entries are
+removed and theirs survive; an edit inside Mark 1's entries is left alone and
+reported, never silently overwritten.
