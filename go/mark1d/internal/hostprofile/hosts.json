@@ -1,0 +1,18 @@
+{
+  "_readme": "ADR-0013 §5: the informational host registry. Known hosts and the manifest each is expected to declare; the handshake logs known/unknown and enforces nothing. host_version here is the version the expectation was recorded against, never a pin.",
+  "hosts": [
+    {
+      "host_id": "cem888",
+      "display_name": "CEM888",
+      "expected_manifest": {
+        "host_version": "2.0.1",
+        "owns_execution": true,
+        "owns_config_surface": true,
+        "owns_memory": true,
+        "arrest_mode": "recommend",
+        "supplies_identity": true,
+        "schema_version": "m1p.v1"
+      }
+    }
+  ]
+}
