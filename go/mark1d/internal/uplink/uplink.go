@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 )
@@ -84,7 +85,7 @@ type Config struct {
 	// legal and is the posture whenever the device has no enrolled key or
 	// identity — an unsealed uplink uploads exactly as it did before receipts
 	// existed.
-	Checkpoint func(ctx context.Context, eventIDs [][]byte)
+	Checkpoint func(ctx context.Context, eventIDs [][]byte, facts identity.BatchFacts)
 
 	// Origin signs quarantine-deletion receipts (retention.go); nil ⇒ unsigned, the same posture as a nil Checkpoint.
 	Origin *Origin
@@ -114,7 +115,7 @@ type Uplink struct {
 	quarantineDir string
 	seal          func([]byte) ([]byte, error)
 	netChange     <-chan struct{}
-	checkpoint    func(context.Context, [][]byte)
+	checkpoint    func(context.Context, [][]byte, identity.BatchFacts)
 	origin        *Origin
 	admit         func(context.Context, *m1pv1.Event) error
 	health        *obs.Health
@@ -316,7 +317,7 @@ func (u *Uplink) ackSealed(ctx context.Context, b *outBatch) error {
 		return err
 	}
 	if u.checkpoint != nil {
-		u.checkpoint(ctx, batchLeaves(b.recs))
+		u.checkpoint(ctx, batchLeaves(b.recs), batchFacts(b.recs))
 	}
 	return nil
 }

@@ -41,6 +41,9 @@ type Session struct {
 	Component         string
 	HostCorrelationID string
 	Profile           hostprofile.Profile
+	// Transport is how the session reached the door: "fabric" (socket
+	// Hello) or "jsonl" (file-tail manifest); ADR-0017's receipts carry it.
+	Transport string
 	// Ext marks an external-writer session (component has fabric.ExtPrefix):
 	// the set that gets Usage.idem_key stamped here.
 	Ext bool

@@ -171,7 +171,7 @@ func leaf(b byte) []byte {
 func TestSealVerifiesAsControldWould(t *testing.T) {
 	h := newHarness(t, nil)
 	leaves := [][]byte{leaf(1), leaf(2), leaf(3)}
-	h.sealer.Seal(context.Background(), leaves)
+	h.sealer.Seal(context.Background(), leaves, identity.BatchFacts{})
 
 	cps := h.checkpoints(t)
 	if len(cps) != 1 {
@@ -236,7 +236,7 @@ func TestSealVerifiesAsControldWould(t *testing.T) {
 // as no leaves at all. Nothing over nothing: no seal, and no head GET either.
 func TestSealTerminates(t *testing.T) {
 	h := newHarness(t, nil)
-	h.sealer.Seal(context.Background(), nil)
+	h.sealer.Seal(context.Background(), nil, identity.BatchFacts{})
 	if got := len(h.checkpoints(t)); got != 0 {
 		t.Fatalf("an empty batch sealed %d checkpoints — the chain does not terminate", got)
 	}
@@ -259,8 +259,8 @@ func TestSealerDoesNotReMintACheckpointSeqAfterAStaleHead(t *testing.T) {
 	h := newHarness(t, nil)
 	ctx := context.Background()
 
-	h.sealer.Seal(ctx, [][]byte{leaf(1)})
-	h.sealer.Seal(ctx, [][]byte{leaf(2)})
+	h.sealer.Seal(ctx, [][]byte{leaf(1)}, identity.BatchFacts{})
+	h.sealer.Seal(ctx, [][]byte{leaf(2)}, identity.BatchFacts{})
 	cps := h.checkpoints(t)
 	if len(cps) != 2 {
 		t.Fatalf("sealed %d checkpoints, want 2", len(cps))
@@ -283,7 +283,7 @@ func TestSealerDoesNotReMintACheckpointSeqAfterAStaleHead(t *testing.T) {
 	// A head at or past our own is the server's newer truth (our checkpoint
 	// applied, or another device's seal outran it) and wins outright.
 	h.sealer.last = chainHead{seq: 1, checkpointSeq: headCkpt - 1}
-	h.sealer.Seal(ctx, [][]byte{leaf(3)})
+	h.sealer.Seal(ctx, [][]byte{leaf(3)}, identity.BatchFacts{})
 	cps = h.checkpoints(t)
 	if got := cps[2].GetReceiptCheckpoint().GetCheckpointSeq(); got != uint64(headCkpt+1) {
 		t.Errorf("third checkpoint_seq %d, want %d — a fresh head that is not stale must be followed", got, headCkpt+1)
@@ -340,14 +340,14 @@ func TestSealerLastHeadSurvivesRestart(t *testing.T) {
 	h := newHarness(t, nil)
 	ctx := context.Background()
 
-	h.sealer.Seal(ctx, [][]byte{leaf(1)})
+	h.sealer.Seal(ctx, [][]byte{leaf(1)}, identity.BatchFacts{})
 	if fi, err := os.Stat(h.sealer.lastPath); err != nil {
 		t.Fatalf("last-head not written after the first seal: %v", err)
 	} else if got := fi.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
 		t.Errorf("last-head mode %04o, want 0600 (NFR-SECURITY-007: state files owner-only)", got)
 	}
 	h.restart(t)
-	h.sealer.Seal(ctx, [][]byte{leaf(2)})
+	h.sealer.Seal(ctx, [][]byte{leaf(2)}, identity.BatchFacts{})
 
 	cps := h.checkpoints(t)
 	if len(cps) != 2 {
@@ -373,7 +373,7 @@ func TestSealerIgnoresACorruptLastHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.restart(t)
-	h.sealer.Seal(context.Background(), [][]byte{leaf(1)})
+	h.sealer.Seal(context.Background(), [][]byte{leaf(1)}, identity.BatchFacts{})
 	cps := h.checkpoints(t)
 	if len(cps) != 1 {
 		t.Fatalf("sealed %d checkpoints, want 1", len(cps))
@@ -394,7 +394,7 @@ func TestSealRefusesHeadWithoutCheckpointSeq(t *testing.T) {
 			"chain_head": map[string]any{"seq": headSeq, "hash": headHashHex},
 		})
 	})
-	h.sealer.Seal(context.Background(), [][]byte{leaf(1)})
+	h.sealer.Seal(context.Background(), [][]byte{leaf(1)}, identity.BatchFacts{})
 	if h.heads != 1 {
 		t.Fatalf("chain head fetched %d times, want 1", h.heads)
 	}
@@ -409,8 +409,8 @@ func TestSealRefusesHeadWithoutCheckpointSeq(t *testing.T) {
 func TestSealFetchesHeadEveryTime(t *testing.T) {
 	h := newHarness(t, nil)
 	ctx := context.Background()
-	h.sealer.Seal(ctx, [][]byte{leaf(1)})
-	h.sealer.Seal(ctx, [][]byte{leaf(2)})
+	h.sealer.Seal(ctx, [][]byte{leaf(1)}, identity.BatchFacts{})
+	h.sealer.Seal(ctx, [][]byte{leaf(2)}, identity.BatchFacts{})
 	if h.heads != 2 {
 		t.Fatalf("chain head fetched %d times for 2 seals, want 2", h.heads)
 	}
@@ -426,7 +426,7 @@ func TestSealFetchesHeadEveryTime(t *testing.T) {
 // read, because the quarantined checkpoint never becomes a record.
 func TestSealAdmitsTheCheckpointDeviceScoped(t *testing.T) {
 	h := newHarness(t, nil)
-	h.sealer.Seal(context.Background(), [][]byte{leaf(1)})
+	h.sealer.Seal(context.Background(), [][]byte{leaf(1)}, identity.BatchFacts{})
 	cps := h.checkpoints(t)
 	if len(cps) != 1 {
 		t.Fatalf("sealed %d checkpoints, want 1", len(cps))
@@ -458,12 +458,12 @@ func TestSealCarriesRefusedLeavesIntoTheNextSeal(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	h.sealer.Seal(ctx, [][]byte{leaf(1)})
+	h.sealer.Seal(ctx, [][]byte{leaf(1)}, identity.BatchFacts{})
 	if got := len(h.checkpoints(t)); got != 0 {
 		t.Fatalf("sealed %d checkpoints against a failed head fetch, want 0", got)
 	}
 
-	h.sealer.Seal(ctx, [][]byte{leaf(2), leaf(3)})
+	h.sealer.Seal(ctx, [][]byte{leaf(2), leaf(3)}, identity.BatchFacts{})
 	cps := h.checkpoints(t)
 	if len(cps) != 1 {
 		t.Fatalf("sealed %d checkpoints after the head recovered, want 1", len(cps))
@@ -488,7 +488,7 @@ func TestSealCarriesRefusedLeavesIntoTheNextSeal(t *testing.T) {
 	}
 
 	// And the carry-forward set is cleared, or the next seal double-counts.
-	h.sealer.Seal(ctx, [][]byte{leaf(4)})
+	h.sealer.Seal(ctx, [][]byte{leaf(4)}, identity.BatchFacts{})
 	cps = h.checkpoints(t)
 	if len(cps) != 2 {
 		t.Fatalf("sealed %d checkpoints total, want 2", len(cps))
@@ -507,7 +507,7 @@ func TestSealDropsALeafItCanNeverPlace(t *testing.T) {
 	h := newHarness(t, nil)
 	ctx := context.Background()
 
-	h.sealer.Seal(ctx, [][]byte{{1, 2, 3}})
+	h.sealer.Seal(ctx, [][]byte{{1, 2, 3}}, identity.BatchFacts{})
 	if got := len(h.checkpoints(t)); got != 0 {
 		t.Fatalf("sealed %d checkpoints over a malformed leaf, want 0", got)
 	}
@@ -515,7 +515,7 @@ func TestSealDropsALeafItCanNeverPlace(t *testing.T) {
 		t.Errorf("chain head fetched %d times, want 0 — the tree is built before the GET", h.heads)
 	}
 
-	h.sealer.Seal(ctx, [][]byte{leaf(1)})
+	h.sealer.Seal(ctx, [][]byte{leaf(1)}, identity.BatchFacts{})
 	cps := h.checkpoints(t)
 	if len(cps) != 1 {
 		t.Fatalf("sealed %d checkpoints after a malformed batch, want 1 — the bad leaf stalled the chain", len(cps))
@@ -537,7 +537,7 @@ func TestCarryForwardIsCapped(t *testing.T) {
 		l[0], l[1], l[2] = byte(i), byte(i>>8), byte(i>>16)
 		big[i] = l
 	}
-	h.sealer.Seal(context.Background(), big)
+	h.sealer.Seal(context.Background(), big, identity.BatchFacts{})
 
 	if got := len(h.sealer.pending); got != maxPendingLeaves {
 		t.Fatalf("carried %d leaves, want the cap %d", got, maxPendingLeaves)
@@ -564,13 +564,13 @@ func TestSealerRechainsToTheServerHeadOnceTheRaceIsOver(t *testing.T) {
 	h := newHarness(t, nil) // the fake server's head never moves: checkpoint_seq headCkpt
 	clock := time.Unix(1767225600, 0)
 	h.sealer.now = func() time.Time { return clock }
-	h.sealer.Seal(ctx, [][]byte{leaf(1)})
+	h.sealer.Seal(ctx, [][]byte{leaf(1)}, identity.BatchFacts{})
 	first := h.sealer.last.checkpointSeq
 	if first != headCkpt+1 {
 		t.Fatalf("first seal claims %d, want %d", first, headCkpt+1)
 	}
 	clock = clock.Add(headRace / 2)
-	h.sealer.Seal(ctx, [][]byte{leaf(2)})
+	h.sealer.Seal(ctx, [][]byte{leaf(2)}, identity.BatchFacts{})
 	if got := h.sealer.last.checkpointSeq; got != first+1 {
 		t.Fatalf("inside the race the edge chains to its own last seal: got %d, want %d", got, first+1)
 	}
@@ -578,7 +578,7 @@ func TestSealerRechainsToTheServerHeadOnceTheRaceIsOver(t *testing.T) {
 	var claims []int64
 	for i := 0; i < 4; i++ {
 		clock = clock.Add(headRace / 3)
-		h.sealer.Seal(ctx, [][]byte{leaf(byte(10 + i))})
+		h.sealer.Seal(ctx, [][]byte{leaf(byte(10 + i))}, identity.BatchFacts{})
 		claims = append(claims, h.sealer.last.checkpointSeq)
 	}
 	rechained := false

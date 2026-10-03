@@ -26,6 +26,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 )
 
@@ -1425,7 +1426,7 @@ func TestCheckpointSealsExactlyTheAckedBatch(t *testing.T) {
 		writeAck(w, http.StatusOK, bid, nil)
 	}}
 	u, _, _ := newTestUplink(t, sp, ingest, func(c *Config) {
-		c.Checkpoint = func(_ context.Context, leaves [][]byte) {
+		c.Checkpoint = func(_ context.Context, leaves [][]byte, _ identity.BatchFacts) {
 			calls = append(calls, sealCall{leaves: leaves})
 		}
 	})
@@ -1471,7 +1472,7 @@ func TestFlushSealsItsAck(t *testing.T) {
 		writeAck(w, http.StatusOK, bid, nil)
 	}}
 	u, _, _ := newTestUplink(t, sp, ingest, func(c *Config) {
-		c.Checkpoint = func(_ context.Context, leaves [][]byte) {
+		c.Checkpoint = func(_ context.Context, leaves [][]byte, _ identity.BatchFacts) {
 			calls = append(calls, sealCall{leaves: leaves})
 		}
 	})
@@ -1515,7 +1516,7 @@ func TestCheckpointRecordsAreNeverLeaves(t *testing.T) {
 		writeAck(w, http.StatusOK, bid, nil)
 	}}
 	u, _, _ := newTestUplink(t, sp, ingest, func(c *Config) {
-		c.Checkpoint = func(_ context.Context, leaves [][]byte) {
+		c.Checkpoint = func(_ context.Context, leaves [][]byte, _ identity.BatchFacts) {
 			calls = append(calls, sealCall{leaves: leaves})
 		}
 	})

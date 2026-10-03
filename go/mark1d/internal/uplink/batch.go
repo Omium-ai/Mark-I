@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/spool"
 )
 
@@ -39,6 +40,11 @@ const (
 	eventSessionIDField = 3
 	// Event.body's receipt_checkpoint arm is field 21 (envelope.proto).
 	eventReceiptCheckpointField = 21
+
+	// ADR-0017 batch facts: the envelope's task and the two arrest bodies.
+	eventTaskIDField               = 4
+	eventGuardDecisionField        = 20
+	eventArrestRecommendationField = 24
 	// Batch.events is field 5 of the Batch envelope (envelope.proto).
 	batchEventsField = 5
 )
@@ -364,4 +370,34 @@ func uuidV7Time(id uuid.UUID) time.Time {
 	//nolint:gosec // G115: >>16 leaves 48 bits, which always fits in int64.
 	ms := int64(binary.BigEndian.Uint64(id[0:8]) >> 16)
 	return time.UnixMilli(ms)
+}
+
+// batchFacts is the checkpoint's ADR-0017 facts over the same leaf set
+// batchLeaves yields: each leaf's session and task, and the batch's arrests —
+// acted (a GuardDecision with a task, querychoke's own definition) and
+// recommended (an ArrestRecommendation) — by the same tag scan, never a decode.
+func batchFacts(recs []spool.Record) identity.BatchFacts {
+	var f identity.BatchFacts
+	for _, r := range recs {
+		if isCheckpoint(r.Payload) {
+			continue
+		}
+		var session, task [16]byte
+		sid, ok := topLevelBytes(r.Payload, eventSessionIDField)
+		if !ok || len(sid) != 16 {
+			continue
+		}
+		copy(session[:], sid)
+		if tid, ok := topLevelBytes(r.Payload, eventTaskIDField); ok && len(tid) == 16 {
+			copy(task[:], tid)
+		}
+		f.Note(session, task)
+		if _, ok := topLevelBytes(r.Payload, eventGuardDecisionField); ok && task != ([16]byte{}) {
+			f.ArrestsActed++
+		}
+		if _, ok := topLevelBytes(r.Payload, eventArrestRecommendationField); ok {
+			f.ArrestsRecommended++
+		}
+	}
+	return f
 }

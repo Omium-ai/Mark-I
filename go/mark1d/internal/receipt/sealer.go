@@ -56,6 +56,9 @@ type Config struct {
 	HeadURL string
 	Token   func(context.Context) (string, error)
 	Admit   func(context.Context, *m1pv1.Event) error
+	// Session resolves a session to its host binding for ADR-0017's v2
+	// payload; nil, or a batch with no bound session, seals the v1 payload.
+	Session func(session [16]byte) identity.SessionBinding
 	// StateDir is mark1d's state root; `last` is persisted under it (see
 	// Sealer.lastPath) so the head race Seal reconciles does not re-open across
 	// a restart with a pre-restart checkpoint still in the spool. Empty ⇒
@@ -115,7 +118,9 @@ type Sealer struct {
 
 	// pending holds leaves whose seal was refused by an I/O path that can clear.
 	// See retain. Capped at maxPendingLeaves.
-	pending [][]byte
+	pending      [][]byte
+	pendingFacts identity.BatchFacts // the pending leaves' facts, merged into the next seal
+	session      func([16]byte) identity.SessionBinding
 }
 
 // New validates the wiring. It does not touch the network.
@@ -144,7 +149,7 @@ func New(cfg Config) (*Sealer, error) {
 	s := &Sealer{
 		key: cfg.Key, keyID: cfg.Key.KeyID(),
 		tenantID: cfg.TenantID, deviceID: cfg.DeviceID,
-		headURL: cfg.HeadURL, token: cfg.Token, admit: cfg.Admit,
+		headURL: cfg.HeadURL, token: cfg.Token, admit: cfg.Admit, session: cfg.Session,
 		client: cfg.HTTPClient, log: cfg.Log, now: cfg.Now,
 	}
 	if cfg.StateDir == "" {
@@ -199,10 +204,11 @@ func HeadURL(ingestURL string) (string, error) {
 // No error return, deliberately: nothing upstream can act on a failed seal —
 // the batch has already landed and the spool cursor has already moved. A
 // refusal is either carried into the next seal (retain) or reported orphaned.
-func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
+func (s *Sealer) Seal(ctx context.Context, leaves [][]byte, facts identity.BatchFacts) {
 	// Leaves a previous seal could not place come first: they are older, so this
 	// keeps first_event_id/last_event_id a true range over the combined tree.
 	leaves = append(s.pending, leaves...)
+	facts = s.pendingFacts.Merge(facts)
 	if len(leaves) == 0 {
 		return
 	}
@@ -211,13 +217,13 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 		// PERMANENT. A leaf that is not LeafSize will not be next time either,
 		// and carrying it would fail every future seal at this same line — one
 		// malformed leaf would end the device's chain outright. Drop the set.
-		s.pending = nil
+		s.pending, s.pendingFacts = nil, identity.BatchFacts{}
 		s.orphaned(leaves, err)
 		return
 	}
 	head, err := s.head(ctx)
 	if err != nil {
-		s.retain(leaves, err)
+		s.retain(leaves, facts, err)
 		return
 	}
 	if head.checkpointSeq < s.last.checkpointSeq && !s.raceOver(head) {
@@ -260,12 +266,14 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 		CheckpointSeq:   head.checkpointSeq + 1,
 		MerkleRoot:      root,
 		LeafCount:       len(leaves),
+		// ADR-0017: nil Hosts (no lookup, or no bound session in the batch) keeps v1.
+		Hosts: facts.Bind(s.session), ArrestsActed: facts.ArrestsActed, ArrestsRecommended: facts.ArrestsRecommended,
 	}
 	signed, err := identity.OriginSign(s.key, cp.Payload(s.keyID))
 	if err != nil {
 		// PERMANENT for the same reason: the key is the key. A signer that
 		// cannot sign this payload cannot sign a larger one either.
-		s.pending = nil
+		s.pending, s.pendingFacts = nil, identity.BatchFacts{}
 		s.orphaned(leaves, err)
 		return
 	}
@@ -283,14 +291,19 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 			KeyId:           s.keyID,
 		}},
 	}
+	if cp.Hosts != nil {
+		rc := ev.GetReceiptCheckpoint()
+		rc.PayloadVersion, rc.Hosts = 2, hostsProto(cp.Hosts)
+		rc.ArrestsActed, rc.ArrestsRecommended = cp.ArrestsActed, cp.ArrestsRecommended
+	}
 	if err := s.admit(ctx, ev); err != nil {
 		// The event is well-formed by construction here, so the reachable cause
 		// is the spool refusing the write — transient. If it is not, pending
 		// grows to the cap and sheds, which is the old behaviour with a ceiling.
-		s.retain(leaves, err)
+		s.retain(leaves, facts, err)
 		return
 	}
-	s.pending = nil
+	s.pending, s.pendingFacts = nil, identity.BatchFacts{}
 	s.last = chainHead{seq: cp.Seq, hash: signed.ReceiptHash, checkpointSeq: cp.CheckpointSeq}
 	s.lastAt = s.now()
 	if err := s.saveLast(); err != nil {
@@ -318,12 +331,12 @@ func (s *Sealer) Seal(ctx context.Context, leaves [][]byte) {
 // STILL OPEN: a checkpoint the SERVER refuses — a stale head, if another device
 // in the tenant sealed between our GET and ingest — is refused asynchronously
 // and is invisible from here. Nothing re-seals that. This closes the local half.
-func (s *Sealer) retain(leaves [][]byte, err error) {
+func (s *Sealer) retain(leaves [][]byte, facts identity.BatchFacts, err error) {
 	if drop := len(leaves) - maxPendingLeaves; drop > 0 {
 		s.orphaned(leaves[:drop], fmt.Errorf("carry-forward set full at %d leaves: %w", maxPendingLeaves, err))
 		leaves = leaves[drop:]
 	}
-	s.pending = leaves
+	s.pending, s.pendingFacts = leaves, facts
 	s.log.Warn("receipt: batch not sealed, leaves carried into the next seal",
 		"leaves", len(leaves), "err", err)
 }
@@ -484,4 +497,18 @@ func (s *Sealer) head(ctx context.Context) (chainHead, error) {
 		return chainHead{}, fmt.Errorf("receipt: chain_head.hash %q is not a 32-byte hex hash", body.ChainHead.Hash)
 	}
 	return chainHead{seq: body.ChainHead.Seq, hash: [32]byte(raw), checkpointSeq: *body.ChainHead.CheckpointSeq}, nil
+}
+
+// hostsProto is the payload's host block on the wire (ReceiptCheckpoint.hosts),
+// field for field, so controld rebuilds the same v2 bytes.
+func hostsProto(hs []identity.HostBinding) []*m1pv1.HostBinding {
+	out := make([]*m1pv1.HostBinding, 0, len(hs))
+	for _, h := range hs {
+		pb := &m1pv1.HostBinding{SessionId: h.SessionID[:], Transport: h.Transport, HostId: h.HostID, HostVersion: h.HostVersion, ProfileHash: h.ProfileHash[:], HostCorrelationId: h.HostCorrelationID}
+		for _, t := range h.Tasks {
+			pb.Tasks = append(pb.Tasks, &m1pv1.TaskBinding{TaskId: t.TaskID[:], IdentityHash: t.IdentityHash})
+		}
+		out = append(out, pb)
+	}
+	return out
 }

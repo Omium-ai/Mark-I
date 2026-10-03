@@ -52,6 +52,7 @@ import (
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/fabric"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/harden"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/hostprofile"
+	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/identity"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/judge"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/memory"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
@@ -938,7 +939,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// ADR-0012/0013: the socket's ext: sessions — identity, correlation id and
 	// profile — bound at the Hello, for idem_key stamping and the consumers.
 	srv.OnExtHello = func(session [16]byte, component, corr string, p hostprofile.Profile) {
-		door.Bind(admit.Session{ID: session, Component: component, HostCorrelationID: corr, Profile: p, Ext: true})
+		door.Bind(admit.Session{ID: session, Component: component, HostCorrelationID: corr, Profile: p, Ext: true, Transport: "fabric"})
 	}
 	// The GateQuery route is constructed with eng.Reader() — a verdict.Reader,
 	// the only verdict surface with no method that computes (04 §2.3).
@@ -1052,7 +1053,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		// is the other case entirely: an explicit operator ask that cannot be
 		// honored fails the boot, exactly as --workspace does above.
 		keyPath := filepath.Join(cfg.stateDir, "device.key")
-		var checkpoint func(context.Context, [][]byte)
+		var checkpoint func(context.Context, [][]byte, identity.BatchFacts)
 		var origin *uplink.Origin
 		switch key, kerr := receipt.OpenKey(keyPath); {
 		case cfg.tenantID == "" || cfg.deviceID == "":
@@ -1079,6 +1080,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 				HeadURL:  headURL,
 				Token:    tokens.Token,
 				Admit:    adm.Admit,
+				Session:  sessionBinding(door), // ADR-0017
 				Log:      log,
 				StateDir: cfg.stateDir,
 			})
@@ -1171,7 +1173,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		StateDir: filepath.Join(cfg.stateDir, "cursors"),
 		Emit:     door.Event,
 		OnBind: func(session [16]byte, component, corr string, p hostprofile.Profile) {
-			door.Bind(admit.Session{ID: session, Component: component, HostCorrelationID: corr, Profile: p, Ext: true})
+			door.Bind(admit.Session{ID: session, Component: component, HostCorrelationID: corr, Profile: p, Ext: true, Transport: "jsonl"})
 		},
 		Drop: func() { adm.AccountDropped(dropLocalQuarantine, spool.ClassDiagnostic, 1) },
 		Log:  log,
