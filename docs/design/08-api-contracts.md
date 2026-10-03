@@ -375,6 +375,8 @@ Errors: 404 M1E-2009 (event not yet checkpointed — retry after next checkpoint
 
 Receipt payloads are returned as the exact canonical text that was signed (`text`, not re-serialized JSON — the vendored `canonical.py` discipline) so the verifier checks bytes, not interpretations.
 
+**Checkpoint payload v2 (ADR-0017, host-bound receipts).** A checkpoint payload is `v` 1 — the eleven keys the receipt vectors freeze — unless the sealed batch holds a leaf of a bound `ext:` session (§4.3 step 2b), in which case it is `v` 2: the same eleven keys plus `hosts` (one entry per session in the batch, sorted by `session_id`: `transport` `fabric`|`jsonl`|`native`, `host_id`, `host_version`, `profile_hash` = sha256 of the ADR-0013 canonical profile, `host_correlation_id`, `tasks[]` of `task_id` with `identity_hash` iff the host declared `supplies_identity`), `arrests_acted` (task-bearing `GuardDecision` leaves — the ACT-only count of §3.3) and `arrests_recommended` (`ArrestRecommendation` leaves). All of it is inside the signed text: the device sends the same facts on `ReceiptCheckpoint.hosts` with `payload_version = 2`, controld rebuilds exactly these bytes to verify the origin signature and countersigns them, and `m1_090` restates the block as `host_bindings`/`arrests_acted`/`arrests_recommended` columns. Verifiers read payload keys by name and hash the stored text, so a v1 verifier accepts a v2 chain; `conformance/vectors/hostchain` locks the bytes across Go, Rust and Python.
+
 ### 3.5 Public, unauthenticated-by-design endpoints
 
 ```
@@ -1096,6 +1098,9 @@ Validates: hash-chain continuity (per-tenant gap-free seq), both signatures per
   or the customer's object-lock bucket. --offline requires a local key-manifest and
   witness snapshot and touches no network — the "Omium's servers are unreachable"
   guarantee, executable.
+  Accepts checkpoint payload v1 and v2 alike (ADR-0017): the host block is verified as
+  signed bytes and carried in the row, never interpreted — judging a host is the
+  auditor's job; conformance/vectors/hostchain runs through it end to end.
 stdout (--json): { "ok": true|false, "checked": {receipts, checkpoints, leaves_sampled},
   "intact_prefix_seq": 5121, "last_good_seq": 5121,
   "defects": [ {"seq": …, "kind": "hash_mismatch|sig_invalid|gap|fork|witness_mismatch",

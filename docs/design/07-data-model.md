@@ -483,7 +483,16 @@ message ReceiptCheckpoint {
   bytes origin_signature = 6;  // [P0] 64 bytes, Ed25519 device key over the
                                //      domain-prefixed root ("mark1-label-v1\0")
   string key_id = 7;           // [P0] "ed25519:" + sha256(pub)[:16]
+  // ADR-0017 host-bound receipts (checkpoint payload v2), additive:
+  uint32 payload_version = 8;            // 0/1 = v1 (no host block), 2 = v2
+  repeated HostBinding hosts = 9;        // the payload's "hosts", sorted by session_id
+  uint32 arrests_acted = 10;             // task-bearing GuardDecision leaves (ACT)
+  uint32 arrests_recommended = 11;       // ArrestRecommendation leaves (ADR-0015)
 }
+// message HostBinding{session_id, transport, host_id, host_version, profile_hash,
+// host_correlation_id, tasks: TaskBinding{task_id, identity_hash}} — ADDED under
+// ADR-0017; transcribed in artifacts.proto. controld rebuilds the signed payload from
+// these iff payload_version == 2, else the v1 shape; m1_090 restates them as columns.
 
 // Loss accounting. Exactly three fields by design: what, which durability
 // class, how many. Every shed, CRC loss, quarantine, ring eviction, ring
@@ -961,6 +970,7 @@ Every migration in this document obeys the platform house style, stated once her
 |---|---|
 | `m1_001_tenancy_devices.sql` | tenants, organizations, devices, enrollments, device keys |
 | `m1_002_receipt_chain.sql` | `m1_receipts`, `m1_receipt_chain_head`, server signing keys, append-only enforcement |
+| `m1_090_receipt_host_bindings.sql` | ADR-0017: `m1_receipts.host_bindings jsonb`, `arrests_acted`, `arrests_recommended` — the v2 checkpoint payload's host block and counters restated as query columns (NULL on v1 rows; the payload text stays the signed truth) |
 | `m1_003_witness_heads.sql` | hourly witnessed chain heads + external publication record |
 | `m1_004_verifier_registry.sql` | verifier/anchor catalog, effective-execution hashes, per-workspace consent |
 | `m1_005…` | certificates, memory, artifacts, bundles, coverage, ε-ledger — companion part |

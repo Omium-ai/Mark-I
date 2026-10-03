@@ -1,0 +1,29 @@
+# ADR-0017 — Host-bound receipts: checkpoint payload v2
+
+- **Status:** accepted
+- **Date:** 2026-10-03
+- **Scope:** the checkpoint receipt payload (07 §checkpoint-model, 08 §3.4), its four builders (mark1d `identity`, controld `receipts`, `rust/mark1-receipt`, `python/shared/mark1_receipts`), controld's countersign reconstruction, both offline verifiers, the receipt conformance lock.
+- **Reversibility:** cheap for readers — every verifier already reads payload keys by name and hashes the stored text, so a v1-only verifier verifies a v2 chain unchanged. Expensive for the claim: once a host's identity is inside the signed bytes it cannot be removed from history, which is the point.
+
+## Context
+
+ADR-0012/0013 let an external host run the agent loop and declare who it is; ADR-0015/0016 let the daemon recommend instead of act and propose instead of inject. None of that reaches the receipt chain: a checkpoint says *these event ids were sealed by this device*, and nothing about which host the sessions ran under, whether the host supplied its own identity, or how many of the batch's arrests were acted versus merely recommended. An auditor holding only the chain cannot tell a cem888 batch from a Claude Code batch, and the savings guarantee's ACT-only count (ADR-0015 §4) has no receipted witness.
+
+## Decision
+
+1. **Payload v2.** The checkpoint payload gains three keys and bumps `v` to 2:
+   - `hosts`: one entry per session with a leaf in the batch, sorted by `session_id`:
+     `{"session_id", "transport", "host_id", "host_version", "profile_hash", "host_correlation_id", "tasks": [{"task_id", "identity_hash"?}]}` — every key present, hashes hex, tasks sorted by `task_id`. `transport` is `fabric` (socket Hello), `jsonl` (file-tail manifest) or `native` (a first-party session, which has no manifest: `host_id`/`host_version`/`host_correlation_id` empty, `profile_hash` of `hostprofile.Default`). `profile_hash` is sha256 over `hostprofile.Canonical(profile)` — the bytes `mark1d` logs at the Hello — so a payload can be checked against a host's manifest with nothing but the manifest. `identity_hash` is present iff the host declared `supplies_identity`: sha256(`"m1p.v1/host-identity\0"` ‖ host_id ‖ `\0` ‖ host_correlation_id ‖ `\0` ‖ task_id hex) — the host's authoritative correlation id bound to each task it ran.
+   - `arrests_acted`: `GuardDecision` leaves with a task (querychoke's own definition of an arrest, 08 §3.3); `arrests_recommended`: `ArrestRecommendation` leaves. Two counters because the two can never be summed (ADR-0015 §4).
+   The v1 keys are unchanged in name, type and value. Canonical JSON (vectors README "Canonical bytes") already covers nested objects and arrays; nothing new is serialised.
+2. **v1 stays the solo developer's payload.** The sealer emits v2 only when at least one session in the batch is a *bound* one (an `ext:` session bound at its Hello or manifest — `admit.Session`). A batch of only native sessions seals exactly the v1 bytes it sealed before this ADR, and a sealer with no session lookup (tests, older daemons) always emits v1. "Additive otherwise": a mixed batch lists its native sessions too, so a v2 payload attests the batch's whole session set.
+3. **Lock-step.** The same v2 bytes come out of all four builders: mark1d `identity.Checkpoint.Payload` (v2 iff `Hosts != nil`), controld `receipts.Checkpoint.Payload` (same rule), Rust `CheckpointPayload::to_value_bound(hosts, acted, recommended)` beside the unchanged `to_value`, Python `build_checkpoint_payload(..., hosts=, arrests_acted=, arrests_recommended=)` (v2 iff `hosts is not None`). The `hostchain` vector family (`conformance/vectors/hostchain`, armed in `EXPECTED` and `PY_REQUIRED`) freezes a v1→v2→v2 chain, the profile hashes, the identity hashes and three negatives, driven by Go (mark1d identity and controld), Rust (mark1-receipt and the offline verifier) and Python.
+4. **Wire and store.** `ReceiptCheckpoint` (artifacts.proto) gains `payload_version = 8`, `hosts = 9` (`HostBinding{session_id, transport, host_id, host_version, profile_hash, host_correlation_id, tasks: TaskBinding{task_id, identity_hash}}`), `arrests_acted = 10`, `arrests_recommended = 11` — additive. controld rebuilds the payload it verifies the origin signature over from the event: v2 iff `payload_version == 2`, else the v1 reconstruction unchanged, so a device that sends v2 fields under `payload_version` 1 fails `bad_signature` rather than being silently re-shaped. `m1_090_receipt_host_bindings.sql` adds `m1_receipts.host_bindings jsonb` (the `hosts` array as stored, a query column — the payload text stays the signed truth) and the two counters; the three keys join `reservedPayloadKeys` so no server record class can shadow them.
+5. **Verifiers.** `rust/verifier` and `mark1 verify-receipts` (its wrapper) accept v1 and v2 rows: the chain walk hashes the stored text and reads `type`/`merkle_root`/`leaf_count` by name; the hostchain vectors run through `verify()` end to end. Neither verifier interprets the host block beyond carrying it — judging a host is the auditor's job, the verifier's is to prove the bytes were signed.
+
+## Consequences
+
+- A receipt chain now witnesses which host each session ran under and the ACT-only arrest count, inside the signed bytes; forging either is `payload_mismatch` or `bad_signature`.
+- Solo developers' receipts are byte-identical to before: `TestSealVerifiesAsControldWould` and the receipt family pass unchanged.
+- The uplink hands the sealer the batch's facts (`identity.BatchFacts`: sessions → tasks, the two counters) computed from the batch's own records by the same tag scan `batchLeaves` uses — no decode, no new dependency. Facts of leaves carried into the next seal merge into it.
+- Not done: a `hosts` summary on `GET /api/v1/receipts/checkpoints/{seq}` — the stored column exists; the endpoint shape is unchanged until a consumer asks.

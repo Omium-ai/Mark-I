@@ -139,3 +139,8 @@ Rust `conf_vectors_*`, Go `TestConfVectors*`, Python `*conf_vectors*`.
   `gen_vectors.py` path first (byte-stable); the new code appends one top-level key and
   every pre-existing family is byte-identical. Python does not drive `rotation` (no
   Python verifier holds a key manifest).
+- **2026-10-03 — `hostchain` family (ADR-0017) added as a sibling directory, not here.**
+  The checkpoint payload gains a v2 shape (`hosts`, `arrests_acted`, `arrests_recommended`);
+  every vector in THIS family stays v1 and byte-identical. `conformance/vectors/hostchain/`
+  freezes the v2 bytes, the profile hash and the per-task identity hash across the same
+  three languages, driven by the same test-name filters.
