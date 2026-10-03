@@ -19,6 +19,9 @@ import (
 	"sync"
 	"time"
 
+	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/hostprofile"
 	"github.com/Omium-ai/omium-mark1/go/mark1d/internal/obs"
 )
@@ -75,15 +78,40 @@ type Server struct {
 	Log *slog.Logger
 
 	mu     sync.Mutex
-	conns  map[net.Conn]struct{}
+	conns  map[net.Conn]*session // the session a connection bound at its Hello; nil until then
 	closed bool
+}
+
+// Push writes one frame to every ext: connection bound to session (ADR-0015:
+// the only unsolicited daemon→writer frame). It returns how many connections
+// received it; zero is normal for a file-tail or departed session.
+func (s *Server) Push(sid [16]byte, f *m1pv1.FabricFrame) int {
+	b, err := proto.Marshal(f)
+	if err != nil {
+		return 0
+	}
+	s.mu.Lock()
+	var targets []*session
+	for _, ss := range s.conns {
+		if ss != nil && ss.helloed && ss.ext && ss.id == sid {
+			targets = append(targets, ss)
+		}
+	}
+	s.mu.Unlock()
+	n := 0
+	for _, ss := range targets {
+		if ss.write(b) == nil {
+			n++
+		}
+	}
+	return n
 }
 
 func NewServer(handle func(ctx context.Context, payload []byte) error, perEvent func(error) bool) *Server {
 	if perEvent == nil {
 		perEvent = func(error) bool { return false }
 	}
-	return &Server{handle: handle, perEvent: perEvent, conns: map[net.Conn]struct{}{}}
+	return &Server{handle: handle, perEvent: perEvent, conns: map[net.Conn]*session{}}
 }
 
 // SetGate wires the GateQuery handler; call before Serve.
@@ -112,7 +140,7 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 			_ = c.Close()
 			return nil
 		}
-		s.conns[c] = struct{}{}
+		s.conns[c] = nil
 		s.mu.Unlock()
 		go s.serveConn(ctx, c)
 	}
@@ -127,7 +155,7 @@ func (s *Server) Close() {
 	for c := range s.conns {
 		_ = c.Close()
 	}
-	s.conns = map[net.Conn]struct{}{}
+	s.conns = map[net.Conn]*session{}
 }
 
 func (s *Server) serveConn(ctx context.Context, c net.Conn) {
@@ -139,6 +167,9 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 	}()
 	dec := &Decoder{}
 	sess := &session{s: s, c: c}
+	s.mu.Lock()
+	s.conns[c] = sess // Push finds the connection by the session it binds
+	s.mu.Unlock()
 	buf := make([]byte, 64<<10)
 
 	// The handshake gets a deadline; an established session does not. 08 §4.3

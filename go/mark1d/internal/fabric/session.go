@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 
 	m1pv1 "github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1"
 	"github.com/google/uuid"
@@ -153,6 +154,17 @@ type session struct {
 	// profile is the ADR-0013 host profile resolved at the handshake:
 	// hostprofile.Default for every connection that sent no manifest.
 	profile hostprofile.Profile
+	// wmu serializes writes: replies come from the reader goroutine, a
+	// Server.Push (ADR-0015) from another, and a frame must never interleave
+	// with a foreign payload.
+	wmu sync.Mutex
+}
+
+// write frames one encoded FabricFrame onto the connection under wmu.
+func (ss *session) write(b []byte) error {
+	ss.wmu.Lock()
+	defer ss.wmu.Unlock()
+	return WriteFrame(ss.c, b)
 }
 
 // HostProfile is the session's resolved host profile (ADR-0013).
@@ -287,7 +299,7 @@ func (ss *session) frame(ctx context.Context, payload []byte) error {
 		if h := ss.s.context; h != nil {
 			text = h.Context(ctx, q, ss.id)
 		}
-		return WriteFrame(ss.c, encodeContextReply(text))
+		return ss.write(encodeContextReply(text))
 	case frameFlush:
 		// Drain before ack (NFR-DURABILITY-004): the shim sends Flush after
 		// SessionEnd on the same connection and treats the ack as its only
@@ -339,5 +351,5 @@ func (ss *session) reply(f *m1pv1.FabricFrame) error {
 	if err != nil {
 		return err
 	}
-	return WriteFrame(ss.c, b)
+	return ss.write(b)
 }

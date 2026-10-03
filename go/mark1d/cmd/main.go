@@ -970,6 +970,17 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 		ctl.Hub().Arrest(session, task, verdict.KneeState{N: int(blocks)}, evidenceRef)
 		decided(session, task, m1pv1.GuardOutcome_GUARD_OUTCOME_ARRESTED, "block_cap", blocks, ctl.Hub().EstimateArrest(task, blocks), evidenceRef)
 	}
+	// ADR-0015: the RECOMMEND sink (cmd/recommend.go) — ledger event, fabric
+	// push to the bound ext: connection, the recommendations file; the
+	// control API hears it through the hub's tap on the ledger. The projected
+	// cost is the same estimate an acted arrest would have recorded as saved.
+	gate.OnRecommend = recommendSink(cfg.stateDir, adm.Admit, srv.Push, log)
+	gate.ProjectedCost = func(session, task [16]byte, attempts uint32, kind string) uint64 {
+		if kind == "stop_gate_block" {
+			return ctl.Hub().EstimateBlock(session)
+		}
+		return ctl.Hub().EstimateArrest(task, attempts)
+	}
 	if cfg.matrices == nil {
 		gate.ApplyGates(bc.Gates())
 	}

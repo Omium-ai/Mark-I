@@ -110,6 +110,17 @@ type Gate struct {
 	OnCap func(session, task [16]byte, blocks uint32, evidenceRef string)
 	// OnBlock observes every BLOCK the gate answered (the ledger's GuardDecision row); nil is legal.
 	OnBlock func(session, task [16]byte, k verdict.KneeState, evidenceRef string)
+	// OnRecommend is ADR-0015's RECOMMEND sink: every judgement the gate would
+	// have enforced for an ACT session, handed to the daemon as an
+	// ArrestRecommendation for a session whose profile says RECOMMEND. The
+	// daemon fans it out (ledger, fabric push, file, control API); the gate
+	// only decides and reports. nil drops the recommendation (tests).
+	OnRecommend func(session, task [16]byte, rec *m1pv1.ArrestRecommendation)
+	// ProjectedCost estimates the tokens the next attempt would spend — what
+	// an acted arrest would have saved — for a recommendation; nil ⇒ 0.
+	// kind is the judgement ("stop_gate_block" | "knee_arrest" | "block_cap"),
+	// because a block and an arrest are estimated differently.
+	ProjectedCost func(session, task [16]byte, attempts uint32, kind string) uint64
 }
 
 func NewGate(r verdict.Reader, blocks *verdict.Blocks, stateDir string) *Gate {
@@ -275,10 +286,29 @@ func (g *Gate) ProfileFor(session [16]byte) hostprofile.Profile {
 	return p
 }
 
+// recommend is ADR-0015's RECOMMEND sink at the gate: the judgement ACT would
+// have enforced, as an ArrestRecommendation on the verdict and to OnRecommend.
+// The decision is left ALLOW by the caller; nothing is counted as an arrest.
+func (g *Gate) recommend(v *m1pv1.GateVerdict, session, task [16]byte, kind, reason, evidence string, attempts uint32) {
+	var cost uint64
+	if g.ProjectedCost != nil {
+		cost = g.ProjectedCost(session, task, attempts, kind)
+	}
+	rec := &m1pv1.ArrestRecommendation{
+		Kind: kind, Reason: reason, KStarEstimate: attempts, ProjectedCost: cost,
+		TaskId: task[:], SessionId: session[:], EvidenceRef: evidence,
+	}
+	v.Recommendation = rec
+	if g.OnRecommend != nil {
+		g.OnRecommend(session, task, rec)
+	}
+}
+
 func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdict) {
-	// ADR-0013: read and log the profile; nothing below decides on it yet.
-	// Part 4 selects the arrest sink from ArrestMode here.
-	_ = g.ProfileFor(session)
+	// ADR-0013/ADR-0015: the profile's ArrestMode selects what happens AFTER
+	// the judgement below — ACT is the path that always existed, RECOMMEND
+	// reports it instead of enforcing it. Detection itself is mode-blind.
+	recommend := g.ProfileFor(session).ArrestMode == hostprofile.Recommend
 	received := g.now()
 	// Named return + defer so the digest covers EVERY exit, including the
 	// fail-open ones: a gate that got slow only on its refusal paths would be
@@ -317,10 +347,16 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		v := allow(CodeGateCap + " consecutive block cap")
 		if e, ok := g.reader.Get(task); ok && e.Verdict.GetVerdict() == m1pv1.Verdict_VERDICT_VIOLATED {
 			ev := g.evidence(task)
-			v.SystemMessage = fmt.Sprintf("mark1 stop-gate: retry loop stopped after %d blocks — the verdict is still violated; a person should look", ctr.Consecutive)
+			capMsg := fmt.Sprintf("mark1 stop-gate: retry loop stopped after %d blocks — the verdict is still violated; a person should look", ctr.Consecutive)
 			if ev != "" {
-				v.SystemMessage += "; evidence: " + ev
+				capMsg += "; evidence: " + ev
 			}
+			if recommend {
+				// ADR-0015: the cap is reported to the host's loop, not told to the human.
+				g.recommend(v, session, task, "block_cap", capMsg, ev, ctr.Consecutive)
+				return v
+			}
+			v.SystemMessage = capMsg
 			if g.OnCap != nil {
 				g.OnCap(session, task, ctr.Consecutive, ev)
 			}
@@ -391,6 +427,25 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 			v.Reason = CodeGateCap + " stop gate not opted in locally"
 			return note(v, e.UnknownVoters)
 		}
+		// D-AN(c): !Stop is also how "no knee table", "n below the first row"
+		// (D-Y(b)) and "no p_lcb on the row" (D-Z) arrive here. Printing the
+		// inequality then states a false one (0.000 · V > c) and reads as
+		// certainly-hopeless — the reading D-Z forbids. Not evaluable ⇒ no
+		// numbers.
+		var blockReason string
+		if e.Knee.Evaluable {
+			blockReason = fmt.Sprintf("verdict violated below the knee (attempt %d): p̂_LCB %.3f · V %.2f > c(n) %.2f", e.Knee.N, e.Knee.PLCB, e.Knee.VTask, e.Knee.CostN)
+		} else {
+			blockReason = fmt.Sprintf("verdict violated; the knee is not evaluable at attempt %d, so continuation is not arrested", e.Knee.N)
+		}
+		if recommend {
+			// ADR-0015: no BLOCK, no counter, no GuardDecision — the judgement
+			// rides to the host as a recommendation and the decision stays ALLOW.
+			g.blocks.RecordAllow(task)
+			g.recommend(v, session, task, "stop_gate_block", blockReason, g.evidence(task), uint32(e.Knee.N)) //nolint:gosec // G115: attempts are small
+			v.Reason = blockReason
+			return note(v, e.UnknownVoters)
+		}
 		g.blocks.RecordBlock(session, task, received)
 		v.Decision = m1pv1.GateDecision_GATE_DECISION_BLOCK
 		// FR-VERIFY-011: below the knee the failure evidence IS the
@@ -400,16 +455,7 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		if g.OnBlock != nil {
 			g.OnBlock(session, task, e.Knee, v.EvidenceRef)
 		}
-		// D-AN(c): !Stop is also how "no knee table", "n below the first row"
-		// (D-Y(b)) and "no p_lcb on the row" (D-Z) arrive here. Printing the
-		// inequality then states a false one (0.000 · V > c) and reads as
-		// certainly-hopeless — the reading D-Z forbids. Not evaluable ⇒ no
-		// numbers.
-		if e.Knee.Evaluable {
-			v.Reason = fmt.Sprintf("verdict violated below the knee (attempt %d): p̂_LCB %.3f · V %.2f > c(n) %.2f", e.Knee.N, e.Knee.PLCB, e.Knee.VTask, e.Knee.CostN)
-		} else {
-			v.Reason = fmt.Sprintf("verdict violated; the knee is not evaluable at attempt %d, so continuation is not arrested", e.Knee.N)
-		}
+		v.Reason = blockReason
 		return note(v, e.UnknownVoters)
 	}
 	g.blocks.RecordAllow(task)
@@ -417,11 +463,17 @@ func (g *Gate) Answer(q *m1pv1.GateQuery, session [16]byte) (v *m1pv1.GateVerdic
 		v.Reason = fmt.Sprintf("knee governor: stop at attempt %d — p̂_LCB %.3f · V %.2f ≤ c(n) %.2f under %s", e.Knee.N, e.Knee.PLCB, e.Knee.VTask, e.Knee.CostN, e.Knee.CostBasis)
 		// 08 §5.1 Stop row at the knee: the human is told, never the model — and only where a BLOCK was otherwise due.
 		if e.Verdict.GetVerdict() == m1pv1.Verdict_VERDICT_VIOLATED && g.armed() {
-			v.SystemMessage = "mark1 stop-gate: retry loop arrested at the knee — verdict violated; " + v.Reason
+			msg := "mark1 stop-gate: retry loop arrested at the knee — verdict violated; " + v.Reason
 			ev := g.evidence(task)
 			if ev != "" {
-				v.SystemMessage += "; evidence: " + ev
+				msg += "; evidence: " + ev
 			}
+			if recommend {
+				// ADR-0015: the knee stop goes to the host's loop, not the human.
+				g.recommend(v, session, task, "knee_arrest", msg, ev, uint32(e.Knee.N)) //nolint:gosec // G115: attempts are small
+				return note(v, e.UnknownVoters)
+			}
+			v.SystemMessage = msg
 			if g.OnArrest != nil {
 				g.OnArrest(session, task, e.Knee, ev)
 			}
