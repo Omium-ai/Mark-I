@@ -33,6 +33,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -95,6 +96,12 @@ type CheckpointEvent struct {
 	FirstEventID uuid.UUID
 	LastEventID  uuid.UUID
 	OriginSig    []byte
+	// ADR-0017: PayloadVersion 2 makes the reconstruction a v2 payload carrying
+	// Hosts and the two counters; anything else rebuilds v1 exactly as before.
+	PayloadVersion     uint32
+	Hosts              []HostBinding
+	ArrestsActed       uint32
+	ArrestsRecommended uint32
 	// IssuedAt is the envelope's device-stamped occurred_at. The payload's
 	// issued_at string is its RFC 3339 UTC seconds rendering — pinned here
 	// because the device must produce the identical bytes when it signs.
@@ -234,6 +241,13 @@ func (s *Store) AppendCheckpoint(ctx context.Context, tenant querychoke.TenantID
 			MerkleRoot:      ev.MerkleRoot,
 			LeafCount:       ev.LeafCount,
 		}
+		if ev.PayloadVersion == 2 {
+			cp.Hosts = ev.Hosts
+			if cp.Hosts == nil {
+				cp.Hosts = []HostBinding{}
+			}
+			cp.ArrestsActed, cp.ArrestsRecommended = ev.ArrestsActed, ev.ArrestsRecommended
+		}
 		text, err := CanonicalJSON(cp.Payload(ev.DeviceKeyID))
 		if err != nil {
 			return err
@@ -258,14 +272,14 @@ func (s *Store) AppendCheckpoint(ctx context.Context, tenant querychoke.TenantID
 			INSERT INTO m1_receipts
 			  (tenant_id, seq, prev_receipt_hash, receipt_hash, payload, record_type, issued_at,
 			   server_key_id, server_signature, device_key_id, device_signature,
-			   checkpoint_seq, merkle_root, event_count)
-			VALUES ($1, $2, $3, $4, $5, 'checkpoint', $6, $7, $8, $9, $10, $11, $12, $13)
+			   checkpoint_seq, merkle_root, event_count, host_bindings, arrests_acted, arrests_recommended)
+			VALUES ($1, $2, $3, $4, $5, 'checkpoint', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 			RETURNING id`,
 			// issued_at column = the payload's issued_at, verbatim to the
 			// second (estate rule: the column restates the signed claim).
 			tenant.UUID(), seq, headHash, hash[:], text, ev.IssuedAt.UTC().Truncate(time.Second),
 			s.signer.KeyID(), serverSig, ev.DeviceKeyID, ev.OriginSig,
-			ckptSeq, ev.MerkleRoot[:], ev.LeafCount).Scan(&receiptID); err != nil {
+			ckptSeq, ev.MerkleRoot[:], ev.LeafCount, hostBindingsColumn(cp), arrestsColumn(cp, cp.ArrestsActed), arrestsColumn(cp, cp.ArrestsRecommended)).Scan(&receiptID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
@@ -379,4 +393,25 @@ func RegisterSuccessorKey(ctx context.Context, db Execer, retiring, successor Si
 	_, err = db.Exec(ctx, `UPDATE m1_server_signing_keys SET retired_at = now()
 		 WHERE key_id = $1 AND retired_at IS NULL`, retiring.KeyID())
 	return err
+}
+
+// hostBindingsColumn is m1_090's host_bindings: the payload's "hosts" array
+// (as JSON text for the jsonb column) on a v2 row, NULL on v1.
+func hostBindingsColumn(cp Checkpoint) any {
+	if cp.Hosts == nil {
+		return nil
+	}
+	b, err := json.Marshal(hostsValue(cp.Hosts))
+	if err != nil {
+		return nil
+	}
+	return string(b)
+}
+
+// arrestsColumn restates one counter on a v2 row, NULL on v1.
+func arrestsColumn(cp Checkpoint, n uint32) any {
+	if cp.Hosts == nil {
+		return nil
+	}
+	return int64(n)
 }

@@ -190,6 +190,10 @@ func EffectsFromBatch(b *m1pv1.Batch, fallbackAt time.Time) []Effect {
 				LeafCount:            int(cp.GetLeafCount()),
 				OriginSig:            cp.GetOriginSignature(),
 				IssuedAt:             occurred,
+				PayloadVersion:       cp.GetPayloadVersion(),
+				Hosts:                hostBindings(cp.GetHosts()),
+				ArrestsActed:         cp.GetArrestsActed(),
+				ArrestsRecommended:   cp.GetArrestsRecommended(),
 			}
 		case *m1pv1.Event_CoverageTransition:
 			ct := body.CoverageTransition
@@ -758,4 +762,28 @@ func (s *Sidefx) Close() {
 		}
 	})
 	s.wg.Wait()
+}
+
+// hostBindings maps ReceiptCheckpoint.hosts (ADR-0017) onto the receipts
+// package's payload shape; nil when the event carries none (a v1 seal).
+func hostBindings(in []*m1pv1.HostBinding) []receipts.HostBinding {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]receipts.HostBinding, 0, len(in))
+	for _, h := range in {
+		hb := receipts.HostBinding{Transport: h.GetTransport(), HostID: h.GetHostId(), HostVersion: h.GetHostVersion(), HostCorrelationID: h.GetHostCorrelationId()}
+		copy(hb.SessionID[:], h.GetSessionId())
+		copy(hb.ProfileHash[:], h.GetProfileHash())
+		for _, t := range h.GetTasks() {
+			tb := receipts.TaskBinding{}
+			copy(tb.TaskID[:], t.GetTaskId())
+			if len(t.GetIdentityHash()) > 0 {
+				tb.IdentityHash = append([]byte(nil), t.GetIdentityHash()...)
+			}
+			hb.Tasks = append(hb.Tasks, tb)
+		}
+		out = append(out, hb)
+	}
+	return out
 }

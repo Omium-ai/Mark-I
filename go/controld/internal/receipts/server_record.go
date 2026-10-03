@@ -46,6 +46,7 @@ var ServerRecordTypes = map[string]bool{
 var reservedPayloadKeys = map[string]bool{
 	"v": true, "type": true, "tenant_id": true, "seq": true,
 	"prev_receipt_hash": true, "issued_at": true, "subject_id": true,
+	"hosts": true, "arrests_acted": true, "arrests_recommended": true, // ADR-0017
 }
 
 // ServerRecord is one server act to be receipted. Fields carries the
