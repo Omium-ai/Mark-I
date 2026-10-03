@@ -975,6 +975,7 @@ func session(parent context.Context, log *slog.Logger, cfg config, ctl *control.
 	// control API hears it through the hub's tap on the ledger. The projected
 	// cost is the same estimate an acted arrest would have recorded as saved.
 	gate.OnRecommend = recommendSink(cfg.stateDir, adm.Admit, srv.Push, log)
+	mem.SetOnPropose(proposeSink(cfg.stateDir, adm.Admit, srv.Push, log)) // ADR-0016
 	gate.ProjectedCost = func(session, task [16]byte, attempts uint32, kind string) uint64 {
 		if kind == "stop_gate_block" {
 			return ctl.Hub().EstimateBlock(session)

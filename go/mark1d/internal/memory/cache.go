@@ -109,6 +109,9 @@ type Cache struct {
 	mu    sync.Mutex
 	lkg   custody
 	tasks map[[16]byte]*taskState
+
+	// onPropose is ADR-0016 PROPOSE mode's sink (propose.go); nil drops.
+	onPropose func(session, task [16]byte, p *m1pv1.MemoryProposal)
 }
 
 // CustodyPath is the synced artifact file cortexd's memory_recall reads (--memory-file).
@@ -277,6 +280,10 @@ func (c *Cache) Context(ctx context.Context, q fabric.ContextQuery, session [16]
 	task, ok := c.cfg.TaskFor(session, [16]byte{})
 	if !ok || task == ([16]byte{}) {
 		return ""
+	}
+	// ADR-0016: a declared host that owns memory gets proposals, never text.
+	if ProposeMode(c.ProfileFor(session)) {
+		return c.propose(ctx, q, session, task)
 	}
 	switch q.Channel {
 	case uint32(m1pv1.InjectionChannel_INJECTION_CHANNEL_HOOK_CONTEXT):

@@ -160,6 +160,8 @@ func family(ev *m1pv1.Event) string {
 		return "coverage_transition"
 	case *m1pv1.Event_ArrestRecommendation:
 		return "recommendation" // ADR-0015: the RECOMMEND sink's row, never an arrest
+	case *m1pv1.Event_MemoryProposal:
+		return "proposal" // ADR-0016: the PROPOSE sink's row, never an injection
 	case *m1pv1.Event_AnchorVote:
 		if ev.GetAnchorVote().GetIntegrity().GetTamper() {
 			return "tamper"
@@ -189,6 +191,9 @@ func (h *Hub) Publish(ev *m1pv1.Event) {
 	case "recommendation":
 		r := ev.GetArrestRecommendation()
 		h.verifyRow(ev, "recommendation", map[string]any{"kind": r.GetKind(), "attempt": r.GetKStarEstimate(), "projected_cost": r.GetProjectedCost(), "reason": r.GetReason(), "evidence_ref": nullable(r.GetEvidenceRef())})
+	case "proposal":
+		p := ev.GetMemoryProposal()
+		h.verifyRow(ev, "proposal", map[string]any{"category": p.GetCategory().String(), "artifact_id": hex.EncodeToString(p.GetArtifactId()), "evidence": p.GetEvidence(), "channel": p.GetChannel().String()})
 	}
 	data, err := frameJSON(ev)
 	if err != nil {

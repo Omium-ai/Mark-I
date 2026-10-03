@@ -59,10 +59,15 @@ func recommendSink(stateDir string, admit func(context.Context, *m1pv1.Event) er
 	}
 }
 
-// appendRecommendation writes one protojson line to the session's file,
-// creating the directory 0700 and the file 0600 on first use.
+// appendRecommendation writes one protojson line to the session's file.
 func appendRecommendation(stateDir string, session [16]byte, ev *m1pv1.Event) error {
-	dir := RecommendationsDir(stateDir)
+	return appendSessionLine(RecommendationsDir(stateDir), session, ev)
+}
+
+// appendSessionLine appends one protojson Event line to <dir>/<session-hex>.jsonl,
+// creating the directory 0700 and the file 0600 on first use. Shared by the
+// recommendations (ADR-0015) and proposals (ADR-0016) files.
+func appendSessionLine(dir string, session [16]byte, ev *m1pv1.Event) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
