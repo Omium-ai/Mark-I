@@ -499,7 +499,8 @@ Control messages (defined in `m1p.v1`, doc 07; they never reach the spool or the
 |---|---|---|
 | `Hello{component, pid, version, session_id, cwd, host_correlation_id}` | writer → mark1d | First frame on every connection. `cwd` (2026-09-20) is the writer's working directory — a hook process runs in the agent's project root — and stays on this socket: mark1d maps it to an enabled workspace and stamps `SessionStart.workspace_id` (the HMAC) from it; the path itself never enters an event. `host_correlation_id` (ADR-0012, 2026-10-02) is an external host's own session reference, ≤ 256 bytes, opaque: stored beside the Mark 1 session for later receipt echo, never used as a Mark 1 identity; empty from first-party writers. `mark1d` replies `HelloAck{accepted: true, max_frame: M1PL_MAX_FRAME, session_id}` or closes. The symbol, not a re-typed literal — §4.2 is the only place the value appears. `max_frame` is the daemon telling the writer which build it is talking to, **not a negotiated ceiling**: a writer that reads a smaller value may send smaller frames, never a larger bound than §4.2's. `HelloAck.session_id` is set only when the daemon minted the session for an `ext:` writer (§4.3 step 2a); empty otherwise. |
 | `GateQuery{task_id, gate: STOP\|TOOL, deadline_ms}` | hookshim → mark1d | Read the cached `VerdictEvent{PROVISIONAL}` and knee state for a gate decision. |
-| `GateVerdict{decision: ALLOW\|BLOCK, verdict, posterior[4], reason, evidence_ref}` | mark1d → hookshim | The reply. **The gate reads the cache; it never computes** — this round-trip is a map lookup, budgeted ≤ 5 ms. |
+| `GateVerdict{decision: ALLOW\|BLOCK, verdict, posterior[4], reason, evidence_ref, system_message, recommendation}` | mark1d → hookshim / `ext:` writer | The reply. **The gate reads the cache; it never computes** — this round-trip is a map lookup, budgeted ≤ 5 ms. `recommendation` (ADR-0015, §4.7) is set only for a session in `ARREST_MODE_RECOMMEND` where ACT would have blocked or arrested; the decision is then `ALLOW`. |
+| `ArrestRecommendation{kind, reason, k_star_estimate, projected_cost, task_id, turn, session_id, evidence_ref}` | mark1d → `ext:` writer | ADR-0015, §4.7. The one unsolicited daemon→writer frame: pushed to the bound `ext:` connection of a session in `ARREST_MODE_RECOMMEND` when the gate's judgement would have acted. Never sent to a first-party writer. The same message is the `Event.body.arrest_recommendation` family in the ledger. |
 | `Flush{}` / `FlushAck{drained: n}` | writer → mark1d → writer | Mandatory drain barrier on SessionEnd/shutdown. |
 
 ### 4.3 Handshake
@@ -576,7 +577,7 @@ Class: **external writer** (§1.1) — public, versioned, additive-only within `
 | `Hello.cwd` | Optional. When set to the project root the daemon stamps `SessionStart.workspace_id` from it exactly as for a hook process; the path never enters an event. |
 | Session echo | §4.3 step 4a: a decodable `Event` naming any session other than the bound one ⇒ close `M1E-4003`, before admission. |
 | Drain | `Flush`/`FlushAck` as §4.2: send `Flush` after `SessionEnd` and wait for the ack before exiting; `drained` counts this connection's admitted events. |
-| Not available to `ext:` writers | `GateQuery`, `ContextQuery`, `ContaminationAlert`. A host that owns its execution loop has nothing for the stop gate to gate; these arms answer exactly as for any writer but carry no contract for hosts. |
+| Not available to `ext:` writers | `ContextQuery`, `ContaminationAlert`. These arms answer exactly as for any writer but carry no contract for hosts. `GateQuery` IS available to an `ext:` session in `ARREST_MODE_RECOMMEND` (§4.7, ADR-0015): the reply's `recommendation` is the gate's judgement for the host's own loop; in `ARREST_MODE_ACT` a host that queries is gated like a shim. |
 
 #### 4.6.2 Transport B — the JSONL file-tail mode
 
@@ -636,6 +637,19 @@ The five-event floor `conformance/vectors/ext/` pins is `TaskOpen`, `TaskClose`,
 | Billing-grade event under a full spool | the read stalls (backpressure, §4.4); the host's write blocks | the tail stalls at that line |
 
 A quarantine is never silent: it rides the next batch's `Dropped{}` (07 §3) and `mark1 doctor` counts it.
+
+### 4.7 Arrest modes (ADR-0015)
+
+The session's host profile (§4.3 step 2b) selects what happens **after** the gate's judgement. Detection — task resolution, the cached verdict, the knee state — is the same in both modes.
+
+| Mode | Who | At a block / cap / knee stop |
+|---|---|---|
+| `ARREST_MODE_ACT` | every session that declared nothing (`hostprofile.Default`: hookshim, cortexd, tailers, loopback) and any `ext:` session that chose it | today's path, unchanged: `GateVerdict.decision = BLOCK` below the knee and at the cap; the knee stop's `system_message` to the human; `GuardDecision{BLOCKED \| ARRESTED}` in the ledger; the control API's `arrest` row and SSE event. |
+| `ARREST_MODE_RECOMMEND` | an `ext:` session that declared it | `decision` stays `ALLOW` and **no `GuardDecision` is recorded**. One `ArrestRecommendation` (`kind`: `stop_gate_block` \| `knee_arrest` \| `block_cap`; `reason`; `k_star_estimate`; `projected_cost`; `task_id`; `turn`; `session_id`; `evidence_ref`) is delivered on four paths: the `GateVerdict.recommendation` reply, a `FabricFrame{arrest_recommendation}` pushed to the bound `ext:` connection, one protojson `Event` line appended to `<state-dir>/run/recommendations/<session-hex>.jsonl` (for file-tail hosts), and the control API's SSE stream (`event: recommendation`) — and it is admitted as a ledger `Event` (`Event.body.arrest_recommendation`, diagnostic class). |
+
+**Counting.** The arrest and block counts and the `tokens_saved` sum behind receipts, §3.3 reports and the desktop session row read `GuardDecision` rows and therefore count ACT only. Recommendations are counted from their own family: the edge's verify ring (`type: recommendation`) and `mark1.arrest_recommendations` (migration `m1_ch_003`), a materialized view over `m1p_events` rows of that type. A recommendation the host ignored saved nothing and claims nothing.
+
+**projected_cost** is the daemon's estimate of what the next attempt would spend — the same figure an acted arrest records as `tokens_saved_estimate` — so a host can weigh the recommendation in the daemon's own units.
 
 ---
 

@@ -523,6 +523,12 @@ enum DurabilityClass {
 // Edge fleet health — the one family this document does not transcribe
 // ---------------------------------------------------------------------------
 //
+// message ArrestRecommendation — ADDED under ADR-0015 as Event.body field 24, diagnostic
+// class: the gate's judgement (kind, reason, k_star_estimate, projected_cost, task_id,
+// turn, session_id, evidence_ref) for a session whose host profile says RECOMMEND,
+// recorded INSTEAD OF a GuardDecision so acted arrests and recommendations are
+// counted from different families (08 §4.7). Transcribed in events.proto.
+
 // message EdgeHealth — RATIFIED into m1p.v1 as Event.body field 22, diagnostic
 // durability class, rate-limited to one per 15 minutes per device. Its field
 // set, cadence and normative privacy rule are specified once, in 11 §2.3, and
