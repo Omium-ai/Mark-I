@@ -88,3 +88,14 @@ possible. CI runs on Linux and sees none of them. No FR row is held at Phase 2 b
   change: `just --shell <git-bash> --shell-arg -c gen` followed by
   `git status --porcelain proto/gen rust/m1p-wire/gen` prints nothing.
 - **Believed fix:** none needed on Linux CI.
+
+## 9. `raw_credential_gate.sh`, `posture_gate.sh`, `crush_reserved_gate.sh` — stopped by the host
+
+- **What happened:** the fourteen gate scripts were run one after another (`just gates`
+  cannot run here, §8). Eleven completed; while `raw_credential_gate.sh` was scanning, the
+  machine ran critically low on memory and the session's background shell was stopped.
+  `raw_credential_gate.sh` had reported only ALLOWLISTED hits before the stop; `posture_gate.sh`
+  and `crush_reserved_gate.sh` never started. Not restarted on this machine by instruction.
+- **Believed fix:** run `just gates` on CI (Linux, enough memory); nothing this work adds
+  touches credentials, posture files or the crush-reserved set, but the gates are the proof,
+  and these three have none from this machine.
