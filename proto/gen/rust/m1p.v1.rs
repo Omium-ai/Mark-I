@@ -794,6 +794,42 @@ pub struct DialectRev {
     #[prost(string, tag="2")]
     pub rev: ::prost::alloc::string::String,
 }
+// ---------------------------------------------------------------------------
+// Arrest recommendation — ADR-0015. What the gate WOULD have stopped, for a
+// host whose profile says ARREST_MODE_RECOMMEND (ADR-0013). Produced instead
+// of a GuardDecision, never beside one: the acted arrests and their savings
+// are counted from GuardDecision rows, recommendations from this family, so
+// the guarantee counts ACT only by construction. Diagnostic class (07 §6).
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ArrestRecommendation {
+    /// \[P0\] "stop_gate_block" | "knee_arrest" | "block_cap" — the judgement ACT would have enforced
+    #[prost(string, tag="1")]
+    pub kind: ::prost::alloc::string::String,
+    /// \[P0\] the same text an acted arrest carries (the knee inequality, the cap)
+    #[prost(string, tag="2")]
+    pub reason: ::prost::alloc::string::String,
+    /// \[P0\] the attempt index the governor evaluated at (KneeState.N)
+    #[prost(uint32, tag="3")]
+    pub k_star_estimate: u32,
+    /// \[P0\] tokens the daemon estimates the next attempt would spend — what acting would have saved
+    #[prost(uint64, tag="4")]
+    pub projected_cost: u64,
+    /// \[P1\] 16 bytes; the task the judgement names (also the envelope's task_id)
+    #[prost(bytes="vec", tag="5")]
+    pub task_id: ::prost::alloc::vec::Vec<u8>,
+    /// \[P0\] the session's turn counter at the judgement
+    #[prost(uint32, tag="6")]
+    pub turn: u32,
+    /// \[P1\] 16 bytes; the bound session (also the envelope's)
+    #[prost(bytes="vec", tag="7")]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    /// \[P0\] local evidence-store reference, resolvable on this device only (as GateVerdict.evidence_ref)
+    #[prost(string, tag="8")]
+    pub evidence_ref: ::prost::alloc::string::String,
+}
 /// Which capture surface produced events for a session. 07 §3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -2081,7 +2117,7 @@ pub struct Event {
     #[prost(sint64, tag="903")]
     pub clock_skew_ms: i64,
     /// ---- Body (exactly one) -------------------------------------------------
-    #[prost(oneof="event::Body", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39")]
+    #[prost(oneof="event::Body", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39")]
     pub body: ::core::option::Option<event::Body>,
 }
 /// Nested message and enum types in `Event`.
@@ -2124,6 +2160,10 @@ pub mod event {
         /// diagnostic class; NFR-OPERABILITY-003
         #[prost(message, tag="23")]
         QuarantineDeletion(super::QuarantineDeletion),
+        /// ADR-0015: the gate's judgement for a RECOMMEND host, recorded instead of
+        /// a GuardDecision. Diagnostic class.
+        #[prost(message, tag="24")]
+        ArrestRecommendation(super::ArrestRecommendation),
         /// intelligence.proto families (30–49)
         #[prost(message, tag="30")]
         AnchorVote(super::AnchorVote),
@@ -2306,11 +2346,14 @@ impl DropReason {
 /// carry, because admission takes the Event, not the frame.
 /// TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
 /// next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
-/// memory/cortex pull — fields below), 10 = ContaminationAlert (defined below).
+/// memory/cortex pull — fields below), 10 = ContaminationAlert (defined below),
+/// 11 = ArrestRecommendation (ADR-0015: the ONE daemon→writer frame that is
+/// not a reply — pushed only to an ext: connection whose profile says
+/// ARREST_MODE_RECOMMEND; first-party writers never receive it).
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FabricFrame {
-    #[prost(oneof="fabric_frame::Kind", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
+    #[prost(oneof="fabric_frame::Kind", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
     pub kind: ::core::option::Option<fabric_frame::Kind>,
 }
 /// Nested message and enum types in `FabricFrame`.
@@ -2338,6 +2381,8 @@ pub mod fabric_frame {
         ContextReply(super::ContextReply),
         #[prost(message, tag="10")]
         ContaminationAlert(super::ContaminationAlert),
+        #[prost(message, tag="11")]
+        ArrestRecommendation(super::ArrestRecommendation),
     }
 }
 /// The shim's pull for injected context (D-AE): the session rides the Hello
@@ -2524,6 +2569,12 @@ pub struct GateVerdict {
     /// knee and on ALLOW.
     #[prost(string, tag="6")]
     pub system_message: ::prost::alloc::string::String,
+    /// ADR-0015: set ONLY when the session's host profile says
+    /// ARREST_MODE_RECOMMEND and the gate would otherwise have blocked or
+    /// arrested. decision stays ALLOW; the judgement rides here for the host's
+    /// own loop. Never set for a first-party writer, whose mode is ACT.
+    #[prost(message, optional, tag="7")]
+    pub recommendation: ::core::option::Option<ArrestRecommendation>,
 }
 /// Mandatory drain barrier on SessionEnd/shutdown (08 §4.2): the writer sends
 /// Flush and MUST wait for FlushAck before exiting its drain path — the one

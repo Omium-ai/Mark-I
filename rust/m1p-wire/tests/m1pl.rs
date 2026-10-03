@@ -190,6 +190,7 @@ fn frame_roundtrip_every_fabric_arm() {
             reason: "two anchors report the build is broken".into(),
             evidence_ref: "evidence/abc".into(),
             system_message: String::new(),
+            recommendation: None,
         }),
         Kind::Flush(pb::Flush {}),
         Kind::FlushAck(pb::FlushAck { drained: 17 }),

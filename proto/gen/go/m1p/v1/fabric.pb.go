@@ -205,7 +205,10 @@ func (GateDecision) EnumDescriptor() ([]byte, []int) {
 // carry, because admission takes the Event, not the frame.
 // TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
 // next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
-// memory/cortex pull — fields below), 10 = ContaminationAlert (defined below).
+// memory/cortex pull — fields below), 10 = ContaminationAlert (defined below),
+// 11 = ArrestRecommendation (ADR-0015: the ONE daemon→writer frame that is
+// not a reply — pushed only to an ext: connection whose profile says
+// ARREST_MODE_RECOMMEND; first-party writers never receive it).
 type FabricFrame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Kind:
@@ -220,6 +223,7 @@ type FabricFrame struct {
 	//	*FabricFrame_ContextQuery
 	//	*FabricFrame_ContextReply
 	//	*FabricFrame_ContaminationAlert
+	//	*FabricFrame_ArrestRecommendation
 	Kind          isFabricFrame_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -352,6 +356,15 @@ func (x *FabricFrame) GetContaminationAlert() *ContaminationAlert {
 	return nil
 }
 
+func (x *FabricFrame) GetArrestRecommendation() *ArrestRecommendation {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_ArrestRecommendation); ok {
+			return x.ArrestRecommendation
+		}
+	}
+	return nil
+}
+
 type isFabricFrame_Kind interface {
 	isFabricFrame_Kind()
 }
@@ -396,6 +409,10 @@ type FabricFrame_ContaminationAlert struct {
 	ContaminationAlert *ContaminationAlert `protobuf:"bytes,10,opt,name=contamination_alert,json=contaminationAlert,proto3,oneof"`
 }
 
+type FabricFrame_ArrestRecommendation struct {
+	ArrestRecommendation *ArrestRecommendation `protobuf:"bytes,11,opt,name=arrest_recommendation,json=arrestRecommendation,proto3,oneof"`
+}
+
 func (*FabricFrame_Event) isFabricFrame_Kind() {}
 
 func (*FabricFrame_Hello) isFabricFrame_Kind() {}
@@ -415,6 +432,8 @@ func (*FabricFrame_ContextQuery) isFabricFrame_Kind() {}
 func (*FabricFrame_ContextReply) isFabricFrame_Kind() {}
 
 func (*FabricFrame_ContaminationAlert) isFabricFrame_Kind() {}
+
+func (*FabricFrame_ArrestRecommendation) isFabricFrame_Kind() {}
 
 // The shim's pull for injected context (D-AE): the session rides the Hello
 // that bound this connection, exactly as GateQuery. The daemon answers from
@@ -945,8 +964,13 @@ type GateVerdict struct {
 	// human, never for the model (founder ruling 2026-09-16). Empty below the
 	// knee and on ALLOW.
 	SystemMessage string `protobuf:"bytes,6,opt,name=system_message,json=systemMessage,proto3" json:"system_message,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// ADR-0015: set ONLY when the session's host profile says
+	// ARREST_MODE_RECOMMEND and the gate would otherwise have blocked or
+	// arrested. decision stays ALLOW; the judgement rides here for the host's
+	// own loop. Never set for a first-party writer, whose mode is ACT.
+	Recommendation *ArrestRecommendation `protobuf:"bytes,7,opt,name=recommendation,proto3" json:"recommendation,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *GateVerdict) Reset() {
@@ -1019,6 +1043,13 @@ func (x *GateVerdict) GetSystemMessage() string {
 		return x.SystemMessage
 	}
 	return ""
+}
+
+func (x *GateVerdict) GetRecommendation() *ArrestRecommendation {
+	if x != nil {
+		return x.Recommendation
+	}
+	return nil
 }
 
 // Mandatory drain barrier on SessionEnd/shutdown (08 §4.2): the writer sends
@@ -1196,7 +1227,7 @@ var File_m1p_v1_fabric_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"\n" +
-	"\x13m1p/v1/fabric.proto\x12\x06m1p.v1\x1a\x16m1p/v1/artifacts.proto\x1a\x15m1p/v1/envelope.proto\x1a\x19m1p/v1/intelligence.proto\"\xa3\x04\n" +
+	"\x13m1p/v1/fabric.proto\x12\x06m1p.v1\x1a\x16m1p/v1/artifacts.proto\x1a\x15m1p/v1/envelope.proto\x1a\x13m1p/v1/events.proto\x1a\x19m1p/v1/intelligence.proto\"\xf8\x04\n" +
 	"\vFabricFrame\x12%\n" +
 	"\x05event\x18\x01 \x01(\v2\r.m1p.v1.EventH\x00R\x05event\x12%\n" +
 	"\x05hello\x18\x02 \x01(\v2\r.m1p.v1.HelloH\x00R\x05hello\x12/\n" +
@@ -1209,7 +1240,8 @@ const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"\rcontext_query\x18\b \x01(\v2\x14.m1p.v1.ContextQueryH\x00R\fcontextQuery\x12;\n" +
 	"\rcontext_reply\x18\t \x01(\v2\x14.m1p.v1.ContextReplyH\x00R\fcontextReply\x12M\n" +
 	"\x13contamination_alert\x18\n" +
-	" \x01(\v2\x1a.m1p.v1.ContaminationAlertH\x00R\x12contaminationAlertB\x06\n" +
+	" \x01(\v2\x1a.m1p.v1.ContaminationAlertH\x00R\x12contaminationAlert\x12S\n" +
+	"\x15arrest_recommendation\x18\v \x01(\v2\x1c.m1p.v1.ArrestRecommendationH\x00R\x14arrestRecommendationB\x06\n" +
 	"\x04kind\"\xb9\x01\n" +
 	"\fContextQuery\x122\n" +
 	"\achannel\x18\x01 \x01(\x0e2\x18.m1p.v1.InjectionChannelR\achannel\x12\x1b\n" +
@@ -1250,14 +1282,15 @@ const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"\atask_id\x18\x01 \x01(\fR\x06taskId\x12$\n" +
 	"\x04gate\x18\x02 \x01(\x0e2\x10.m1p.v1.GateKindR\x04gate\x12\x1f\n" +
 	"\vdeadline_ms\x18\x03 \x01(\rR\n" +
-	"deadlineMs\"\xea\x01\n" +
+	"deadlineMs\"\xb0\x02\n" +
 	"\vGateVerdict\x120\n" +
 	"\bdecision\x18\x01 \x01(\x0e2\x14.m1p.v1.GateDecisionR\bdecision\x12)\n" +
 	"\averdict\x18\x02 \x01(\x0e2\x0f.m1p.v1.VerdictR\averdict\x12\x1c\n" +
 	"\tposterior\x18\x03 \x03(\x01R\tposterior\x12\x16\n" +
 	"\x06reason\x18\x04 \x01(\tR\x06reason\x12!\n" +
 	"\fevidence_ref\x18\x05 \x01(\tR\vevidenceRef\x12%\n" +
-	"\x0esystem_message\x18\x06 \x01(\tR\rsystemMessage\"\a\n" +
+	"\x0esystem_message\x18\x06 \x01(\tR\rsystemMessage\x12D\n" +
+	"\x0erecommendation\x18\a \x01(\v2\x1c.m1p.v1.ArrestRecommendationR\x0erecommendation\"\a\n" +
 	"\x05Flush\"$\n" +
 	"\bFlushAck\x12\x18\n" +
 	"\adrained\x18\x01 \x01(\x04R\adrained\"o\n" +
@@ -1298,23 +1331,24 @@ func file_m1p_v1_fabric_proto_rawDescGZIP() []byte {
 var file_m1p_v1_fabric_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_m1p_v1_fabric_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_m1p_v1_fabric_proto_goTypes = []any{
-	(ArrestMode)(0),            // 0: m1p.v1.ArrestMode
-	(GateKind)(0),              // 1: m1p.v1.GateKind
-	(GateDecision)(0),          // 2: m1p.v1.GateDecision
-	(*FabricFrame)(nil),        // 3: m1p.v1.FabricFrame
-	(*ContextQuery)(nil),       // 4: m1p.v1.ContextQuery
-	(*ContextReply)(nil),       // 5: m1p.v1.ContextReply
-	(*Hello)(nil),              // 6: m1p.v1.Hello
-	(*HostManifest)(nil),       // 7: m1p.v1.HostManifest
-	(*HelloAck)(nil),           // 8: m1p.v1.HelloAck
-	(*GateQuery)(nil),          // 9: m1p.v1.GateQuery
-	(*GateVerdict)(nil),        // 10: m1p.v1.GateVerdict
-	(*Flush)(nil),              // 11: m1p.v1.Flush
-	(*FlushAck)(nil),           // 12: m1p.v1.FlushAck
-	(*ContaminationAlert)(nil), // 13: m1p.v1.ContaminationAlert
-	(*Event)(nil),              // 14: m1p.v1.Event
-	(InjectionChannel)(0),      // 15: m1p.v1.InjectionChannel
-	(Verdict)(0),               // 16: m1p.v1.Verdict
+	(ArrestMode)(0),              // 0: m1p.v1.ArrestMode
+	(GateKind)(0),                // 1: m1p.v1.GateKind
+	(GateDecision)(0),            // 2: m1p.v1.GateDecision
+	(*FabricFrame)(nil),          // 3: m1p.v1.FabricFrame
+	(*ContextQuery)(nil),         // 4: m1p.v1.ContextQuery
+	(*ContextReply)(nil),         // 5: m1p.v1.ContextReply
+	(*Hello)(nil),                // 6: m1p.v1.Hello
+	(*HostManifest)(nil),         // 7: m1p.v1.HostManifest
+	(*HelloAck)(nil),             // 8: m1p.v1.HelloAck
+	(*GateQuery)(nil),            // 9: m1p.v1.GateQuery
+	(*GateVerdict)(nil),          // 10: m1p.v1.GateVerdict
+	(*Flush)(nil),                // 11: m1p.v1.Flush
+	(*FlushAck)(nil),             // 12: m1p.v1.FlushAck
+	(*ContaminationAlert)(nil),   // 13: m1p.v1.ContaminationAlert
+	(*Event)(nil),                // 14: m1p.v1.Event
+	(*ArrestRecommendation)(nil), // 15: m1p.v1.ArrestRecommendation
+	(InjectionChannel)(0),        // 16: m1p.v1.InjectionChannel
+	(Verdict)(0),                 // 17: m1p.v1.Verdict
 }
 var file_m1p_v1_fabric_proto_depIdxs = []int32{
 	14, // 0: m1p.v1.FabricFrame.event:type_name -> m1p.v1.Event
@@ -1327,17 +1361,19 @@ var file_m1p_v1_fabric_proto_depIdxs = []int32{
 	4,  // 7: m1p.v1.FabricFrame.context_query:type_name -> m1p.v1.ContextQuery
 	5,  // 8: m1p.v1.FabricFrame.context_reply:type_name -> m1p.v1.ContextReply
 	13, // 9: m1p.v1.FabricFrame.contamination_alert:type_name -> m1p.v1.ContaminationAlert
-	15, // 10: m1p.v1.ContextQuery.channel:type_name -> m1p.v1.InjectionChannel
-	7,  // 11: m1p.v1.Hello.host_manifest:type_name -> m1p.v1.HostManifest
-	0,  // 12: m1p.v1.HostManifest.arrest_mode:type_name -> m1p.v1.ArrestMode
-	1,  // 13: m1p.v1.GateQuery.gate:type_name -> m1p.v1.GateKind
-	2,  // 14: m1p.v1.GateVerdict.decision:type_name -> m1p.v1.GateDecision
-	16, // 15: m1p.v1.GateVerdict.verdict:type_name -> m1p.v1.Verdict
-	16, // [16:16] is the sub-list for method output_type
-	16, // [16:16] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	15, // 10: m1p.v1.FabricFrame.arrest_recommendation:type_name -> m1p.v1.ArrestRecommendation
+	16, // 11: m1p.v1.ContextQuery.channel:type_name -> m1p.v1.InjectionChannel
+	7,  // 12: m1p.v1.Hello.host_manifest:type_name -> m1p.v1.HostManifest
+	0,  // 13: m1p.v1.HostManifest.arrest_mode:type_name -> m1p.v1.ArrestMode
+	1,  // 14: m1p.v1.GateQuery.gate:type_name -> m1p.v1.GateKind
+	2,  // 15: m1p.v1.GateVerdict.decision:type_name -> m1p.v1.GateDecision
+	17, // 16: m1p.v1.GateVerdict.verdict:type_name -> m1p.v1.Verdict
+	15, // 17: m1p.v1.GateVerdict.recommendation:type_name -> m1p.v1.ArrestRecommendation
+	18, // [18:18] is the sub-list for method output_type
+	18, // [18:18] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_fabric_proto_init() }
@@ -1347,6 +1383,7 @@ func file_m1p_v1_fabric_proto_init() {
 	}
 	file_m1p_v1_artifacts_proto_init()
 	file_m1p_v1_envelope_proto_init()
+	file_m1p_v1_events_proto_init()
 	file_m1p_v1_intelligence_proto_init()
 	file_m1p_v1_fabric_proto_msgTypes[0].OneofWrappers = []any{
 		(*FabricFrame_Event)(nil),
@@ -1359,6 +1396,7 @@ func file_m1p_v1_fabric_proto_init() {
 		(*FabricFrame_ContextQuery)(nil),
 		(*FabricFrame_ContextReply)(nil),
 		(*FabricFrame_ContaminationAlert)(nil),
+		(*FabricFrame_ArrestRecommendation)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

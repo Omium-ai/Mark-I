@@ -470,6 +470,7 @@ type Event struct {
 	//	*Event_ReceiptCheckpoint
 	//	*Event_EdgeHealth
 	//	*Event_QuarantineDeletion
+	//	*Event_ArrestRecommendation
 	//	*Event_AnchorVote
 	//	*Event_JudgeVote
 	//	*Event_RmScore
@@ -704,6 +705,15 @@ func (x *Event) GetQuarantineDeletion() *QuarantineDeletion {
 	return nil
 }
 
+func (x *Event) GetArrestRecommendation() *ArrestRecommendation {
+	if x != nil {
+		if x, ok := x.Body.(*Event_ArrestRecommendation); ok {
+			return x.ArrestRecommendation
+		}
+	}
+	return nil
+}
+
 func (x *Event) GetAnchorVote() *AnchorVote {
 	if x != nil {
 		if x, ok := x.Body.(*Event_AnchorVote); ok {
@@ -887,6 +897,12 @@ type Event_QuarantineDeletion struct {
 	QuarantineDeletion *QuarantineDeletion `protobuf:"bytes,23,opt,name=quarantine_deletion,json=quarantineDeletion,proto3,oneof"` // diagnostic class; NFR-OPERABILITY-003
 }
 
+type Event_ArrestRecommendation struct {
+	// ADR-0015: the gate's judgement for a RECOMMEND host, recorded instead of
+	// a GuardDecision. Diagnostic class.
+	ArrestRecommendation *ArrestRecommendation `protobuf:"bytes,24,opt,name=arrest_recommendation,json=arrestRecommendation,proto3,oneof"`
+}
+
 type Event_AnchorVote struct {
 	// intelligence.proto families (30–49)
 	AnchorVote *AnchorVote `protobuf:"bytes,30,opt,name=anchor_vote,json=anchorVote,proto3,oneof"`
@@ -955,6 +971,8 @@ func (*Event_ReceiptCheckpoint) isEvent_Body() {}
 func (*Event_EdgeHealth) isEvent_Body() {}
 
 func (*Event_QuarantineDeletion) isEvent_Body() {}
+
+func (*Event_ArrestRecommendation) isEvent_Body() {}
 
 func (*Event_AnchorVote) isEvent_Body() {}
 
@@ -1066,7 +1084,7 @@ const file_m1p_v1_envelope_proto_rawDesc = "" +
 	"\x02os\x18\x03 \x01(\tR\x02os\x12\x12\n" +
 	"\x04arch\x18\x04 \x01(\tR\x04arch\x12\x14\n" +
 	"\x05agent\x18\x05 \x01(\tR\x05agent\x12#\n" +
-	"\ragent_version\x18\x06 \x01(\tR\fagentVersion\"\x99\x0e\n" +
+	"\ragent_version\x18\x06 \x01(\tR\fagentVersion\"\xee\x0e\n" +
 	"\x05Event\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\fR\aeventId\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1d\n" +
@@ -1093,7 +1111,8 @@ const file_m1p_v1_envelope_proto_rawDesc = "" +
 	"\x12receipt_checkpoint\x18\x15 \x01(\v2\x19.m1p.v1.ReceiptCheckpointH\x00R\x11receiptCheckpoint\x125\n" +
 	"\vedge_health\x18\x16 \x01(\v2\x12.m1p.v1.EdgeHealthH\x00R\n" +
 	"edgeHealth\x12M\n" +
-	"\x13quarantine_deletion\x18\x17 \x01(\v2\x1a.m1p.v1.QuarantineDeletionH\x00R\x12quarantineDeletion\x125\n" +
+	"\x13quarantine_deletion\x18\x17 \x01(\v2\x1a.m1p.v1.QuarantineDeletionH\x00R\x12quarantineDeletion\x12S\n" +
+	"\x15arrest_recommendation\x18\x18 \x01(\v2\x1c.m1p.v1.ArrestRecommendationH\x00R\x14arrestRecommendation\x125\n" +
 	"\vanchor_vote\x18\x1e \x01(\v2\x12.m1p.v1.AnchorVoteH\x00R\n" +
 	"anchorVote\x122\n" +
 	"\n" +
@@ -1173,16 +1192,17 @@ var file_m1p_v1_envelope_proto_goTypes = []any{
 	(*ReceiptCheckpoint)(nil),     // 18: m1p.v1.ReceiptCheckpoint
 	(*EdgeHealth)(nil),            // 19: m1p.v1.EdgeHealth
 	(*QuarantineDeletion)(nil),    // 20: m1p.v1.QuarantineDeletion
-	(*AnchorVote)(nil),            // 21: m1p.v1.AnchorVote
-	(*JudgeVote)(nil),             // 22: m1p.v1.JudgeVote
-	(*RmScore)(nil),               // 23: m1p.v1.RmScore
-	(*ConsistencyVote)(nil),       // 24: m1p.v1.ConsistencyVote
-	(*VerdictEvent)(nil),          // 25: m1p.v1.VerdictEvent
-	(*CortexInjection)(nil),       // 26: m1p.v1.CortexInjection
-	(*MemoryInjection)(nil),       // 27: m1p.v1.MemoryInjection
-	(*ArtifactOutcome)(nil),       // 28: m1p.v1.ArtifactOutcome
-	(*RouteDecision)(nil),         // 29: m1p.v1.RouteDecision
-	(*EvidenceExcerpt)(nil),       // 30: m1p.v1.EvidenceExcerpt
+	(*ArrestRecommendation)(nil),  // 21: m1p.v1.ArrestRecommendation
+	(*AnchorVote)(nil),            // 22: m1p.v1.AnchorVote
+	(*JudgeVote)(nil),             // 23: m1p.v1.JudgeVote
+	(*RmScore)(nil),               // 24: m1p.v1.RmScore
+	(*ConsistencyVote)(nil),       // 25: m1p.v1.ConsistencyVote
+	(*VerdictEvent)(nil),          // 26: m1p.v1.VerdictEvent
+	(*CortexInjection)(nil),       // 27: m1p.v1.CortexInjection
+	(*MemoryInjection)(nil),       // 28: m1p.v1.MemoryInjection
+	(*ArtifactOutcome)(nil),       // 29: m1p.v1.ArtifactOutcome
+	(*RouteDecision)(nil),         // 30: m1p.v1.RouteDecision
+	(*EvidenceExcerpt)(nil),       // 31: m1p.v1.EvidenceExcerpt
 }
 var file_m1p_v1_envelope_proto_depIdxs = []int32{
 	3,  // 0: m1p.v1.Batch.sdk:type_name -> m1p.v1.SdkInfo
@@ -1204,24 +1224,25 @@ var file_m1p_v1_envelope_proto_depIdxs = []int32{
 	18, // 16: m1p.v1.Event.receipt_checkpoint:type_name -> m1p.v1.ReceiptCheckpoint
 	19, // 17: m1p.v1.Event.edge_health:type_name -> m1p.v1.EdgeHealth
 	20, // 18: m1p.v1.Event.quarantine_deletion:type_name -> m1p.v1.QuarantineDeletion
-	21, // 19: m1p.v1.Event.anchor_vote:type_name -> m1p.v1.AnchorVote
-	22, // 20: m1p.v1.Event.judge_vote:type_name -> m1p.v1.JudgeVote
-	23, // 21: m1p.v1.Event.rm_score:type_name -> m1p.v1.RmScore
-	24, // 22: m1p.v1.Event.consistency_vote:type_name -> m1p.v1.ConsistencyVote
-	25, // 23: m1p.v1.Event.verdict_event:type_name -> m1p.v1.VerdictEvent
-	26, // 24: m1p.v1.Event.cortex_injection:type_name -> m1p.v1.CortexInjection
-	27, // 25: m1p.v1.Event.memory_injection:type_name -> m1p.v1.MemoryInjection
-	28, // 26: m1p.v1.Event.artifact_outcome:type_name -> m1p.v1.ArtifactOutcome
-	29, // 27: m1p.v1.Event.route_decision:type_name -> m1p.v1.RouteDecision
-	30, // 28: m1p.v1.Event.evidence_excerpt:type_name -> m1p.v1.EvidenceExcerpt
-	6,  // 29: m1p.v1.Event.received_at:type_name -> google.protobuf.Timestamp
-	1,  // 30: m1p.v1.Dropped.reason:type_name -> m1p.v1.DropReason
-	0,  // 31: m1p.v1.Dropped.durability_class:type_name -> m1p.v1.DurabilityClass
-	32, // [32:32] is the sub-list for method output_type
-	32, // [32:32] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	21, // 19: m1p.v1.Event.arrest_recommendation:type_name -> m1p.v1.ArrestRecommendation
+	22, // 20: m1p.v1.Event.anchor_vote:type_name -> m1p.v1.AnchorVote
+	23, // 21: m1p.v1.Event.judge_vote:type_name -> m1p.v1.JudgeVote
+	24, // 22: m1p.v1.Event.rm_score:type_name -> m1p.v1.RmScore
+	25, // 23: m1p.v1.Event.consistency_vote:type_name -> m1p.v1.ConsistencyVote
+	26, // 24: m1p.v1.Event.verdict_event:type_name -> m1p.v1.VerdictEvent
+	27, // 25: m1p.v1.Event.cortex_injection:type_name -> m1p.v1.CortexInjection
+	28, // 26: m1p.v1.Event.memory_injection:type_name -> m1p.v1.MemoryInjection
+	29, // 27: m1p.v1.Event.artifact_outcome:type_name -> m1p.v1.ArtifactOutcome
+	30, // 28: m1p.v1.Event.route_decision:type_name -> m1p.v1.RouteDecision
+	31, // 29: m1p.v1.Event.evidence_excerpt:type_name -> m1p.v1.EvidenceExcerpt
+	6,  // 30: m1p.v1.Event.received_at:type_name -> google.protobuf.Timestamp
+	1,  // 31: m1p.v1.Dropped.reason:type_name -> m1p.v1.DropReason
+	0,  // 32: m1p.v1.Dropped.durability_class:type_name -> m1p.v1.DurabilityClass
+	33, // [33:33] is the sub-list for method output_type
+	33, // [33:33] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_envelope_proto_init() }
@@ -1249,6 +1270,7 @@ func file_m1p_v1_envelope_proto_init() {
 		(*Event_ReceiptCheckpoint)(nil),
 		(*Event_EdgeHealth)(nil),
 		(*Event_QuarantineDeletion)(nil),
+		(*Event_ArrestRecommendation)(nil),
 		(*Event_AnchorVote)(nil),
 		(*Event_JudgeVote)(nil),
 		(*Event_RmScore)(nil),

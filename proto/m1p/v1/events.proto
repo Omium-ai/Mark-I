@@ -386,3 +386,22 @@ enum Dialect {
   DIALECT_GEMINI = 4;
   DIALECT_BEDROCK_EVENTSTREAM = 5;
 }
+
+// ---------------------------------------------------------------------------
+// Arrest recommendation — ADR-0015. What the gate WOULD have stopped, for a
+// host whose profile says ARREST_MODE_RECOMMEND (ADR-0013). Produced instead
+// of a GuardDecision, never beside one: the acted arrests and their savings
+// are counted from GuardDecision rows, recommendations from this family, so
+// the guarantee counts ACT only by construction. Diagnostic class (07 §6).
+// ---------------------------------------------------------------------------
+
+message ArrestRecommendation {
+  string kind = 1;              // [P0] "stop_gate_block" | "knee_arrest" | "block_cap" — the judgement ACT would have enforced
+  string reason = 2;            // [P0] the same text an acted arrest carries (the knee inequality, the cap)
+  uint32 k_star_estimate = 3;   // [P0] the attempt index the governor evaluated at (KneeState.N)
+  uint64 projected_cost = 4;    // [P0] tokens the daemon estimates the next attempt would spend — what acting would have saved
+  bytes task_id = 5;            // [P1] 16 bytes; the task the judgement names (also the envelope's task_id)
+  uint32 turn = 6;              // [P0] the session's turn counter at the judgement
+  bytes session_id = 7;         // [P1] 16 bytes; the bound session (also the envelope's)
+  string evidence_ref = 8;      // [P0] local evidence-store reference, resolvable on this device only (as GateVerdict.evidence_ref)
+}

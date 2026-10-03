@@ -809,6 +809,18 @@ class DialectRev(betterproto.Message):
 
 
 @dataclass(eq=False, repr=False)
+class ArrestRecommendation(betterproto.Message):
+    kind: str = betterproto.string_field(1)
+    reason: str = betterproto.string_field(2)
+    k_star_estimate: int = betterproto.uint32_field(3)
+    projected_cost: int = betterproto.uint64_field(4)
+    task_id: bytes = betterproto.bytes_field(5)
+    turn: int = betterproto.uint32_field(6)
+    session_id: bytes = betterproto.bytes_field(7)
+    evidence_ref: str = betterproto.string_field(8)
+
+
+@dataclass(eq=False, repr=False)
 class CortexInjection(betterproto.Message):
     """
     Emitted on every cortex map serve (04 §6.7). The map is assembled at index
@@ -1486,6 +1498,14 @@ class Event(betterproto.Message):
     quarantine_deletion: "QuarantineDeletion" = betterproto.message_field(
         23, group="body"
     )
+    arrest_recommendation: "ArrestRecommendation" = betterproto.message_field(
+        24, group="body"
+    )
+    """
+    ADR-0015: the gate's judgement for a RECOMMEND host, recorded instead of
+     a GuardDecision. Diagnostic class.
+    """
+
     anchor_vote: "AnchorVote" = betterproto.message_field(30, group="body")
     """intelligence.proto families (30–49)"""
 
@@ -1558,7 +1578,10 @@ class FabricFrame(betterproto.Message):
      carry, because admission takes the Event, not the frame.
      TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
      next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
-     memory/cortex pull — fields below), 10 = ContaminationAlert (defined below).
+     memory/cortex pull — fields below), 10 = ContaminationAlert (defined below),
+     11 = ArrestRecommendation (ADR-0015: the ONE daemon→writer frame that is
+     not a reply — pushed only to an ext: connection whose profile says
+     ARREST_MODE_RECOMMEND; first-party writers never receive it).
     """
 
     event: "Event" = betterproto.message_field(1, group="kind")
@@ -1572,6 +1595,9 @@ class FabricFrame(betterproto.Message):
     context_reply: "ContextReply" = betterproto.message_field(9, group="kind")
     contamination_alert: "ContaminationAlert" = betterproto.message_field(
         10, group="kind"
+    )
+    arrest_recommendation: "ArrestRecommendation" = betterproto.message_field(
+        11, group="kind"
     )
 
 
@@ -1773,6 +1799,14 @@ class GateVerdict(betterproto.Message):
      surfaces this as the hook's systemMessage — verdict plus evidence for the
      human, never for the model (founder ruling 2026-09-16). Empty below the
      knee and on ALLOW.
+    """
+
+    recommendation: "ArrestRecommendation" = betterproto.message_field(7)
+    """
+    ADR-0015: set ONLY when the session's host profile says
+     ARREST_MODE_RECOMMEND and the gate would otherwise have blocked or
+     arrested. decision stays ALLOW; the judgement rides here for the host's
+     own loop. Never set for a first-party writer, whose mode is ACT.
     """
 
 

@@ -23,6 +23,7 @@ package m1p.v1;
 
 import "m1p/v1/artifacts.proto";
 import "m1p/v1/envelope.proto";
+import "m1p/v1/events.proto";
 import "m1p/v1/intelligence.proto";
 
 // DECISION D-U (lead, binding). The payload of EVERY M1PL frame is one
@@ -42,7 +43,10 @@ import "m1p/v1/intelligence.proto";
 // carry, because admission takes the Event, not the frame.
 // TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
 // next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
-// memory/cortex pull — fields below), 10 = ContaminationAlert (defined below).
+// memory/cortex pull — fields below), 10 = ContaminationAlert (defined below),
+// 11 = ArrestRecommendation (ADR-0015: the ONE daemon→writer frame that is
+// not a reply — pushed only to an ext: connection whose profile says
+// ARREST_MODE_RECOMMEND; first-party writers never receive it).
 message FabricFrame {
   oneof kind {
     Event event = 1;
@@ -55,6 +59,7 @@ message FabricFrame {
     ContextQuery context_query = 8;
     ContextReply context_reply = 9;
     ContaminationAlert contamination_alert = 10;
+    ArrestRecommendation arrest_recommendation = 11;
   }
 }
 
@@ -205,6 +210,11 @@ message GateVerdict {
   // human, never for the model (founder ruling 2026-09-16). Empty below the
   // knee and on ALLOW.
   string system_message = 6;
+  // ADR-0015: set ONLY when the session's host profile says
+  // ARREST_MODE_RECOMMEND and the gate would otherwise have blocked or
+  // arrested. decision stays ALLOW; the judgement rides here for the host's
+  // own loop. Never set for a first-party writer, whose mode is ACT.
+  ArrestRecommendation recommendation = 7;
 }
 
 enum GateDecision {

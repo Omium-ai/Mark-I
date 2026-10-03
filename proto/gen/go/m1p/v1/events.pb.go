@@ -1944,6 +1944,106 @@ func (x *DialectRev) GetRev() string {
 	return ""
 }
 
+type ArrestRecommendation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`                                           // [P0] "stop_gate_block" | "knee_arrest" | "block_cap" — the judgement ACT would have enforced
+	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`                                       // [P0] the same text an acted arrest carries (the knee inequality, the cap)
+	KStarEstimate uint32                 `protobuf:"varint,3,opt,name=k_star_estimate,json=kStarEstimate,proto3" json:"k_star_estimate,omitempty"` // [P0] the attempt index the governor evaluated at (KneeState.N)
+	ProjectedCost uint64                 `protobuf:"varint,4,opt,name=projected_cost,json=projectedCost,proto3" json:"projected_cost,omitempty"`   // [P0] tokens the daemon estimates the next attempt would spend — what acting would have saved
+	TaskId        []byte                 `protobuf:"bytes,5,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`                         // [P1] 16 bytes; the task the judgement names (also the envelope's task_id)
+	Turn          uint32                 `protobuf:"varint,6,opt,name=turn,proto3" json:"turn,omitempty"`                                          // [P0] the session's turn counter at the judgement
+	SessionId     []byte                 `protobuf:"bytes,7,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`                // [P1] 16 bytes; the bound session (also the envelope's)
+	EvidenceRef   string                 `protobuf:"bytes,8,opt,name=evidence_ref,json=evidenceRef,proto3" json:"evidence_ref,omitempty"`          // [P0] local evidence-store reference, resolvable on this device only (as GateVerdict.evidence_ref)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ArrestRecommendation) Reset() {
+	*x = ArrestRecommendation{}
+	mi := &file_m1p_v1_events_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ArrestRecommendation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ArrestRecommendation) ProtoMessage() {}
+
+func (x *ArrestRecommendation) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_events_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ArrestRecommendation.ProtoReflect.Descriptor instead.
+func (*ArrestRecommendation) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_events_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ArrestRecommendation) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ArrestRecommendation) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *ArrestRecommendation) GetKStarEstimate() uint32 {
+	if x != nil {
+		return x.KStarEstimate
+	}
+	return 0
+}
+
+func (x *ArrestRecommendation) GetProjectedCost() uint64 {
+	if x != nil {
+		return x.ProjectedCost
+	}
+	return 0
+}
+
+func (x *ArrestRecommendation) GetTaskId() []byte {
+	if x != nil {
+		return x.TaskId
+	}
+	return nil
+}
+
+func (x *ArrestRecommendation) GetTurn() uint32 {
+	if x != nil {
+		return x.Turn
+	}
+	return 0
+}
+
+func (x *ArrestRecommendation) GetSessionId() []byte {
+	if x != nil {
+		return x.SessionId
+	}
+	return nil
+}
+
+func (x *ArrestRecommendation) GetEvidenceRef() string {
+	if x != nil {
+		return x.EvidenceRef
+	}
+	return ""
+}
+
 var File_m1p_v1_events_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_events_proto_rawDesc = "" +
@@ -2078,7 +2178,17 @@ const file_m1p_v1_events_proto_rawDesc = "" +
 	"\n" +
 	"DialectRev\x12)\n" +
 	"\adialect\x18\x01 \x01(\x0e2\x0f.m1p.v1.DialectR\adialect\x12\x10\n" +
-	"\x03rev\x18\x02 \x01(\tR\x03rev*x\n" +
+	"\x03rev\x18\x02 \x01(\tR\x03rev\"\x80\x02\n" +
+	"\x14ArrestRecommendation\x12\x12\n" +
+	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\x12&\n" +
+	"\x0fk_star_estimate\x18\x03 \x01(\rR\rkStarEstimate\x12%\n" +
+	"\x0eprojected_cost\x18\x04 \x01(\x04R\rprojectedCost\x12\x17\n" +
+	"\atask_id\x18\x05 \x01(\fR\x06taskId\x12\x12\n" +
+	"\x04turn\x18\x06 \x01(\rR\x04turn\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\a \x01(\fR\tsessionId\x12!\n" +
+	"\fevidence_ref\x18\b \x01(\tR\vevidenceRef*x\n" +
 	"\vCapturePath\x12\x1c\n" +
 	"\x18CAPTURE_PATH_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12CAPTURE_PATH_HOOKS\x10\x01\x12\x1b\n" +
@@ -2134,35 +2244,36 @@ func file_m1p_v1_events_proto_rawDescGZIP() []byte {
 }
 
 var file_m1p_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
-var file_m1p_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_m1p_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_m1p_v1_events_proto_goTypes = []any{
-	(CapturePath)(0),           // 0: m1p.v1.CapturePath
-	(EndReason)(0),             // 1: m1p.v1.EndReason
-	(Resolution)(0),            // 2: m1p.v1.Resolution
-	(Initiator)(0),             // 3: m1p.v1.Initiator
-	(ToolStatus)(0),            // 4: m1p.v1.ToolStatus
-	(UsageSource)(0),           // 5: m1p.v1.UsageSource
-	(Dialect)(0),               // 6: m1p.v1.Dialect
-	(*SessionStart)(nil),       // 7: m1p.v1.SessionStart
-	(*SessionEnd)(nil),         // 8: m1p.v1.SessionEnd
-	(*TaskOpen)(nil),           // 9: m1p.v1.TaskOpen
-	(*TaskClose)(nil),          // 10: m1p.v1.TaskClose
-	(*Turn)(nil),               // 11: m1p.v1.Turn
-	(*ToolUse)(nil),            // 12: m1p.v1.ToolUse
-	(*ModelRequest)(nil),       // 13: m1p.v1.ModelRequest
-	(*ModelResponse)(nil),      // 14: m1p.v1.ModelResponse
-	(*Usage)(nil),              // 15: m1p.v1.Usage
-	(*QuarantineDeletion)(nil), // 16: m1p.v1.QuarantineDeletion
-	(*EdgeHealth)(nil),         // 17: m1p.v1.EdgeHealth
-	(*ProcessHealth)(nil),      // 18: m1p.v1.ProcessHealth
-	(*SpoolHealth)(nil),        // 19: m1p.v1.SpoolHealth
-	(*UplinkHealth)(nil),       // 20: m1p.v1.UplinkHealth
-	(*BundleHealth)(nil),       // 21: m1p.v1.BundleHealth
-	(*GateHealth)(nil),         // 22: m1p.v1.GateHealth
-	(*ProxyLatency)(nil),       // 23: m1p.v1.ProxyLatency
-	(*ShimHealth)(nil),         // 24: m1p.v1.ShimHealth
-	(*CortexHealth)(nil),       // 25: m1p.v1.CortexHealth
-	(*DialectRev)(nil),         // 26: m1p.v1.DialectRev
+	(CapturePath)(0),             // 0: m1p.v1.CapturePath
+	(EndReason)(0),               // 1: m1p.v1.EndReason
+	(Resolution)(0),              // 2: m1p.v1.Resolution
+	(Initiator)(0),               // 3: m1p.v1.Initiator
+	(ToolStatus)(0),              // 4: m1p.v1.ToolStatus
+	(UsageSource)(0),             // 5: m1p.v1.UsageSource
+	(Dialect)(0),                 // 6: m1p.v1.Dialect
+	(*SessionStart)(nil),         // 7: m1p.v1.SessionStart
+	(*SessionEnd)(nil),           // 8: m1p.v1.SessionEnd
+	(*TaskOpen)(nil),             // 9: m1p.v1.TaskOpen
+	(*TaskClose)(nil),            // 10: m1p.v1.TaskClose
+	(*Turn)(nil),                 // 11: m1p.v1.Turn
+	(*ToolUse)(nil),              // 12: m1p.v1.ToolUse
+	(*ModelRequest)(nil),         // 13: m1p.v1.ModelRequest
+	(*ModelResponse)(nil),        // 14: m1p.v1.ModelResponse
+	(*Usage)(nil),                // 15: m1p.v1.Usage
+	(*QuarantineDeletion)(nil),   // 16: m1p.v1.QuarantineDeletion
+	(*EdgeHealth)(nil),           // 17: m1p.v1.EdgeHealth
+	(*ProcessHealth)(nil),        // 18: m1p.v1.ProcessHealth
+	(*SpoolHealth)(nil),          // 19: m1p.v1.SpoolHealth
+	(*UplinkHealth)(nil),         // 20: m1p.v1.UplinkHealth
+	(*BundleHealth)(nil),         // 21: m1p.v1.BundleHealth
+	(*GateHealth)(nil),           // 22: m1p.v1.GateHealth
+	(*ProxyLatency)(nil),         // 23: m1p.v1.ProxyLatency
+	(*ShimHealth)(nil),           // 24: m1p.v1.ShimHealth
+	(*CortexHealth)(nil),         // 25: m1p.v1.CortexHealth
+	(*DialectRev)(nil),           // 26: m1p.v1.DialectRev
+	(*ArrestRecommendation)(nil), // 27: m1p.v1.ArrestRecommendation
 }
 var file_m1p_v1_events_proto_depIdxs = []int32{
 	0,  // 0: m1p.v1.SessionStart.capture_paths:type_name -> m1p.v1.CapturePath
@@ -2201,7 +2312,7 @@ func file_m1p_v1_events_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_m1p_v1_events_proto_rawDesc), len(file_m1p_v1_events_proto_rawDesc)),
 			NumEnums:      7,
-			NumMessages:   20,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

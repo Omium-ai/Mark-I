@@ -101,6 +101,7 @@ fuzz_target!(|data: &[u8]| {
             reason: text.clone(),
             evidence_ref: text.clone(),
             system_message: text,
+            recommendation: None,
         }),
         pb::fabric_frame::Kind::Flush(pb::Flush {}),
         pb::fabric_frame::Kind::FlushAck(pb::FlushAck {

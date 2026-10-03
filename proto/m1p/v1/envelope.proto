@@ -167,6 +167,9 @@ message Event {
     // EdgeHealth in events.proto.
     EdgeHealth edge_health = 22;
     QuarantineDeletion quarantine_deletion = 23;  // diagnostic class; NFR-OPERABILITY-003
+    // ADR-0015: the gate's judgement for a RECOMMEND host, recorded instead of
+    // a GuardDecision. Diagnostic class.
+    ArrestRecommendation arrest_recommendation = 24;
 
     // intelligence.proto families (30–49)
     AnchorVote anchor_vote = 30;
