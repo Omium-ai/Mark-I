@@ -218,6 +218,61 @@ func (CoverageKind) EnumDescriptor() ([]byte, []int) {
 	return file_m1p_v1_intelligence_proto_rawDescGZIP(), []int{2}
 }
 
+type ProposalCategory int32
+
+const (
+	ProposalCategory_PROPOSAL_CATEGORY_UNSPECIFIED   ProposalCategory = 0
+	ProposalCategory_PROPOSAL_CATEGORY_CONVENTION    ProposalCategory = 1 // an invariant artifact
+	ProposalCategory_PROPOSAL_CATEGORY_PITFALL       ProposalCategory = 2 // a pitfall artifact
+	ProposalCategory_PROPOSAL_CATEGORY_DECISION      ProposalCategory = 3 // reserved: a decision record (no edge producer yet)
+	ProposalCategory_PROPOSAL_CATEGORY_TOOL_GUIDANCE ProposalCategory = 4 // a fix_pattern artifact
+)
+
+// Enum value maps for ProposalCategory.
+var (
+	ProposalCategory_name = map[int32]string{
+		0: "PROPOSAL_CATEGORY_UNSPECIFIED",
+		1: "PROPOSAL_CATEGORY_CONVENTION",
+		2: "PROPOSAL_CATEGORY_PITFALL",
+		3: "PROPOSAL_CATEGORY_DECISION",
+		4: "PROPOSAL_CATEGORY_TOOL_GUIDANCE",
+	}
+	ProposalCategory_value = map[string]int32{
+		"PROPOSAL_CATEGORY_UNSPECIFIED":   0,
+		"PROPOSAL_CATEGORY_CONVENTION":    1,
+		"PROPOSAL_CATEGORY_PITFALL":       2,
+		"PROPOSAL_CATEGORY_DECISION":      3,
+		"PROPOSAL_CATEGORY_TOOL_GUIDANCE": 4,
+	}
+)
+
+func (x ProposalCategory) Enum() *ProposalCategory {
+	p := new(ProposalCategory)
+	*p = x
+	return p
+}
+
+func (x ProposalCategory) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ProposalCategory) Descriptor() protoreflect.EnumDescriptor {
+	return file_m1p_v1_intelligence_proto_enumTypes[3].Descriptor()
+}
+
+func (ProposalCategory) Type() protoreflect.EnumType {
+	return &file_m1p_v1_intelligence_proto_enumTypes[3]
+}
+
+func (x ProposalCategory) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ProposalCategory.Descriptor instead.
+func (ProposalCategory) EnumDescriptor() ([]byte, []int) {
+	return file_m1p_v1_intelligence_proto_rawDescGZIP(), []int{3}
+}
+
 // Emitted on every cortex map serve (04 §6.7). The map is assembled at index
 // settle, not at query time: PPR over L2 seeded by the live recent-edit set,
 // files ranked, per-file symbol signatures emitted richest-first, then a binary
@@ -561,6 +616,106 @@ func (x *CoverageTransition) GetAgent() string {
 	return ""
 }
 
+type MemoryProposal struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	ArtifactId        []byte                 `protobuf:"bytes,1,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`                      // [P1] the admitted artifact the candidate came from
+	Category          ProposalCategory       `protobuf:"varint,2,opt,name=category,proto3,enum=m1p.v1.ProposalCategory" json:"category,omitempty"`              // [P0]
+	CandidateTrigger  string                 `protobuf:"bytes,3,opt,name=candidate_trigger,json=candidateTrigger,proto3" json:"candidate_trigger,omitempty"`    // [P0] the artifact's trigger text, as the host would see it
+	CandidateGuidance string                 `protobuf:"bytes,4,opt,name=candidate_guidance,json=candidateGuidance,proto3" json:"candidate_guidance,omitempty"` // [P0] the artifact's guidance text
+	Evidence          string                 `protobuf:"bytes,5,opt,name=evidence,proto3" json:"evidence,omitempty"`                                            // [P0] why it was selected: the normalized error signature digest (reactive) or "pack" (hook context)
+	Channel           InjectionChannel       `protobuf:"varint,6,opt,name=channel,proto3,enum=m1p.v1.InjectionChannel" json:"channel,omitempty"`                // [P0] the channel it would have ridden
+	SessionId         []byte                 `protobuf:"bytes,7,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`                         // [P1] 16 bytes; the bound session (also the envelope's)
+	TaskId            []byte                 `protobuf:"bytes,8,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`                                  // [P1] 16 bytes; the task (also the envelope's)
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *MemoryProposal) Reset() {
+	*x = MemoryProposal{}
+	mi := &file_m1p_v1_intelligence_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemoryProposal) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemoryProposal) ProtoMessage() {}
+
+func (x *MemoryProposal) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_intelligence_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemoryProposal.ProtoReflect.Descriptor instead.
+func (*MemoryProposal) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_intelligence_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *MemoryProposal) GetArtifactId() []byte {
+	if x != nil {
+		return x.ArtifactId
+	}
+	return nil
+}
+
+func (x *MemoryProposal) GetCategory() ProposalCategory {
+	if x != nil {
+		return x.Category
+	}
+	return ProposalCategory_PROPOSAL_CATEGORY_UNSPECIFIED
+}
+
+func (x *MemoryProposal) GetCandidateTrigger() string {
+	if x != nil {
+		return x.CandidateTrigger
+	}
+	return ""
+}
+
+func (x *MemoryProposal) GetCandidateGuidance() string {
+	if x != nil {
+		return x.CandidateGuidance
+	}
+	return ""
+}
+
+func (x *MemoryProposal) GetEvidence() string {
+	if x != nil {
+		return x.Evidence
+	}
+	return ""
+}
+
+func (x *MemoryProposal) GetChannel() InjectionChannel {
+	if x != nil {
+		return x.Channel
+	}
+	return InjectionChannel_INJECTION_CHANNEL_UNSPECIFIED
+}
+
+func (x *MemoryProposal) GetSessionId() []byte {
+	if x != nil {
+		return x.SessionId
+	}
+	return nil
+}
+
+func (x *MemoryProposal) GetTaskId() []byte {
+	if x != nil {
+		return x.TaskId
+	}
+	return nil
+}
+
 var File_m1p_v1_intelligence_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_intelligence_proto_rawDesc = "" +
@@ -599,7 +754,18 @@ const file_m1p_v1_intelligence_proto_rawDesc = "" +
 	"durationMs\x12\x1f\n" +
 	"\vreason_code\x18\x04 \x01(\tR\n" +
 	"reasonCode\x12\x14\n" +
-	"\x05agent\x18\x05 \x01(\tR\x05agent*\xe8\x01\n" +
+	"\x05agent\x18\x05 \x01(\tR\x05agent\"\xcb\x02\n" +
+	"\x0eMemoryProposal\x12\x1f\n" +
+	"\vartifact_id\x18\x01 \x01(\fR\n" +
+	"artifactId\x124\n" +
+	"\bcategory\x18\x02 \x01(\x0e2\x18.m1p.v1.ProposalCategoryR\bcategory\x12+\n" +
+	"\x11candidate_trigger\x18\x03 \x01(\tR\x10candidateTrigger\x12-\n" +
+	"\x12candidate_guidance\x18\x04 \x01(\tR\x11candidateGuidance\x12\x1a\n" +
+	"\bevidence\x18\x05 \x01(\tR\bevidence\x122\n" +
+	"\achannel\x18\x06 \x01(\x0e2\x18.m1p.v1.InjectionChannelR\achannel\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\a \x01(\fR\tsessionId\x12\x17\n" +
+	"\atask_id\x18\b \x01(\fR\x06taskId*\xe8\x01\n" +
 	"\x10InjectionChannel\x12!\n" +
 	"\x1dINJECTION_CHANNEL_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fINJECTION_CHANNEL_SESSION_START\x10\x01\x12\"\n" +
@@ -616,7 +782,13 @@ const file_m1p_v1_intelligence_proto_rawDesc = "" +
 	"\x19COVERAGE_KIND_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14COVERAGE_KIND_ENABLE\x10\x01\x12\x19\n" +
 	"\x15COVERAGE_KIND_DISABLE\x10\x02\x12\x18\n" +
-	"\x14COVERAGE_KIND_BYPASS\x10\x03B\x93\x01\n" +
+	"\x14COVERAGE_KIND_BYPASS\x10\x03*\xbb\x01\n" +
+	"\x10ProposalCategory\x12!\n" +
+	"\x1dPROPOSAL_CATEGORY_UNSPECIFIED\x10\x00\x12 \n" +
+	"\x1cPROPOSAL_CATEGORY_CONVENTION\x10\x01\x12\x1d\n" +
+	"\x19PROPOSAL_CATEGORY_PITFALL\x10\x02\x12\x1e\n" +
+	"\x1aPROPOSAL_CATEGORY_DECISION\x10\x03\x12#\n" +
+	"\x1fPROPOSAL_CATEGORY_TOOL_GUIDANCE\x10\x04B\x93\x01\n" +
 	"\n" +
 	"com.m1p.v1B\x11IntelligenceProtoP\x01Z9github.com/Omium-ai/omium-mark1/proto/gen/go/m1p/v1;m1pv1\xa2\x02\x03MXX\xaa\x02\x06M1p.V1\xca\x02\x06M1p\\V1\xe2\x02\x12M1p\\V1\\GPBMetadata\xea\x02\aM1p::V1b\x06proto3"
 
@@ -632,27 +804,31 @@ func file_m1p_v1_intelligence_proto_rawDescGZIP() []byte {
 	return file_m1p_v1_intelligence_proto_rawDescData
 }
 
-var file_m1p_v1_intelligence_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_m1p_v1_intelligence_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_m1p_v1_intelligence_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_m1p_v1_intelligence_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_m1p_v1_intelligence_proto_goTypes = []any{
 	(InjectionChannel)(0),      // 0: m1p.v1.InjectionChannel
 	(RouteFidelity)(0),         // 1: m1p.v1.RouteFidelity
 	(CoverageKind)(0),          // 2: m1p.v1.CoverageKind
-	(*CortexInjection)(nil),    // 3: m1p.v1.CortexInjection
-	(*MemoryInjection)(nil),    // 4: m1p.v1.MemoryInjection
-	(*RouteDecision)(nil),      // 5: m1p.v1.RouteDecision
-	(*CoverageTransition)(nil), // 6: m1p.v1.CoverageTransition
+	(ProposalCategory)(0),      // 3: m1p.v1.ProposalCategory
+	(*CortexInjection)(nil),    // 4: m1p.v1.CortexInjection
+	(*MemoryInjection)(nil),    // 5: m1p.v1.MemoryInjection
+	(*RouteDecision)(nil),      // 6: m1p.v1.RouteDecision
+	(*CoverageTransition)(nil), // 7: m1p.v1.CoverageTransition
+	(*MemoryProposal)(nil),     // 8: m1p.v1.MemoryProposal
 }
 var file_m1p_v1_intelligence_proto_depIdxs = []int32{
 	0, // 0: m1p.v1.CortexInjection.channel:type_name -> m1p.v1.InjectionChannel
 	0, // 1: m1p.v1.MemoryInjection.channel:type_name -> m1p.v1.InjectionChannel
 	1, // 2: m1p.v1.RouteDecision.fidelity:type_name -> m1p.v1.RouteFidelity
 	2, // 3: m1p.v1.CoverageTransition.kind:type_name -> m1p.v1.CoverageKind
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	3, // 4: m1p.v1.MemoryProposal.category:type_name -> m1p.v1.ProposalCategory
+	0, // 5: m1p.v1.MemoryProposal.channel:type_name -> m1p.v1.InjectionChannel
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_intelligence_proto_init() }
@@ -665,8 +841,8 @@ func file_m1p_v1_intelligence_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_m1p_v1_intelligence_proto_rawDesc), len(file_m1p_v1_intelligence_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   4,
+			NumEnums:      4,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

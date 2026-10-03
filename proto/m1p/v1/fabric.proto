@@ -44,9 +44,10 @@ import "m1p/v1/intelligence.proto";
 // TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
 // next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
 // memory/cortex pull — fields below), 10 = ContaminationAlert (defined below),
-// 11 = ArrestRecommendation (ADR-0015: the ONE daemon→writer frame that is
-// not a reply — pushed only to an ext: connection whose profile says
-// ARREST_MODE_RECOMMEND; first-party writers never receive it).
+// 11 = ArrestRecommendation (ADR-0015) and 12 = MemoryProposal (ADR-0016): the
+// two daemon→writer frames that are not replies — pushed only to an ext:
+// connection whose profile asks for them; first-party writers never receive
+// either.
 message FabricFrame {
   oneof kind {
     Event event = 1;
@@ -60,6 +61,7 @@ message FabricFrame {
     ContextReply context_reply = 9;
     ContaminationAlert contamination_alert = 10;
     ArrestRecommendation arrest_recommendation = 11;
+    MemoryProposal memory_proposal = 12;
   }
 }
 

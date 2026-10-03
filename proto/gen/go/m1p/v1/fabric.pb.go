@@ -206,9 +206,10 @@ func (GateDecision) EnumDescriptor() ([]byte, []int) {
 // TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
 // next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
 // memory/cortex pull — fields below), 10 = ContaminationAlert (defined below),
-// 11 = ArrestRecommendation (ADR-0015: the ONE daemon→writer frame that is
-// not a reply — pushed only to an ext: connection whose profile says
-// ARREST_MODE_RECOMMEND; first-party writers never receive it).
+// 11 = ArrestRecommendation (ADR-0015) and 12 = MemoryProposal (ADR-0016): the
+// two daemon→writer frames that are not replies — pushed only to an ext:
+// connection whose profile asks for them; first-party writers never receive
+// either.
 type FabricFrame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Kind:
@@ -224,6 +225,7 @@ type FabricFrame struct {
 	//	*FabricFrame_ContextReply
 	//	*FabricFrame_ContaminationAlert
 	//	*FabricFrame_ArrestRecommendation
+	//	*FabricFrame_MemoryProposal
 	Kind          isFabricFrame_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -365,6 +367,15 @@ func (x *FabricFrame) GetArrestRecommendation() *ArrestRecommendation {
 	return nil
 }
 
+func (x *FabricFrame) GetMemoryProposal() *MemoryProposal {
+	if x != nil {
+		if x, ok := x.Kind.(*FabricFrame_MemoryProposal); ok {
+			return x.MemoryProposal
+		}
+	}
+	return nil
+}
+
 type isFabricFrame_Kind interface {
 	isFabricFrame_Kind()
 }
@@ -413,6 +424,10 @@ type FabricFrame_ArrestRecommendation struct {
 	ArrestRecommendation *ArrestRecommendation `protobuf:"bytes,11,opt,name=arrest_recommendation,json=arrestRecommendation,proto3,oneof"`
 }
 
+type FabricFrame_MemoryProposal struct {
+	MemoryProposal *MemoryProposal `protobuf:"bytes,12,opt,name=memory_proposal,json=memoryProposal,proto3,oneof"`
+}
+
 func (*FabricFrame_Event) isFabricFrame_Kind() {}
 
 func (*FabricFrame_Hello) isFabricFrame_Kind() {}
@@ -434,6 +449,8 @@ func (*FabricFrame_ContextReply) isFabricFrame_Kind() {}
 func (*FabricFrame_ContaminationAlert) isFabricFrame_Kind() {}
 
 func (*FabricFrame_ArrestRecommendation) isFabricFrame_Kind() {}
+
+func (*FabricFrame_MemoryProposal) isFabricFrame_Kind() {}
 
 // The shim's pull for injected context (D-AE): the session rides the Hello
 // that bound this connection, exactly as GateQuery. The daemon answers from
@@ -1227,7 +1244,7 @@ var File_m1p_v1_fabric_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"\n" +
-	"\x13m1p/v1/fabric.proto\x12\x06m1p.v1\x1a\x16m1p/v1/artifacts.proto\x1a\x15m1p/v1/envelope.proto\x1a\x13m1p/v1/events.proto\x1a\x19m1p/v1/intelligence.proto\"\xf8\x04\n" +
+	"\x13m1p/v1/fabric.proto\x12\x06m1p.v1\x1a\x16m1p/v1/artifacts.proto\x1a\x15m1p/v1/envelope.proto\x1a\x13m1p/v1/events.proto\x1a\x19m1p/v1/intelligence.proto\"\xbb\x05\n" +
 	"\vFabricFrame\x12%\n" +
 	"\x05event\x18\x01 \x01(\v2\r.m1p.v1.EventH\x00R\x05event\x12%\n" +
 	"\x05hello\x18\x02 \x01(\v2\r.m1p.v1.HelloH\x00R\x05hello\x12/\n" +
@@ -1241,7 +1258,8 @@ const file_m1p_v1_fabric_proto_rawDesc = "" +
 	"\rcontext_reply\x18\t \x01(\v2\x14.m1p.v1.ContextReplyH\x00R\fcontextReply\x12M\n" +
 	"\x13contamination_alert\x18\n" +
 	" \x01(\v2\x1a.m1p.v1.ContaminationAlertH\x00R\x12contaminationAlert\x12S\n" +
-	"\x15arrest_recommendation\x18\v \x01(\v2\x1c.m1p.v1.ArrestRecommendationH\x00R\x14arrestRecommendationB\x06\n" +
+	"\x15arrest_recommendation\x18\v \x01(\v2\x1c.m1p.v1.ArrestRecommendationH\x00R\x14arrestRecommendation\x12A\n" +
+	"\x0fmemory_proposal\x18\f \x01(\v2\x16.m1p.v1.MemoryProposalH\x00R\x0ememoryProposalB\x06\n" +
 	"\x04kind\"\xb9\x01\n" +
 	"\fContextQuery\x122\n" +
 	"\achannel\x18\x01 \x01(\x0e2\x18.m1p.v1.InjectionChannelR\achannel\x12\x1b\n" +
@@ -1347,8 +1365,9 @@ var file_m1p_v1_fabric_proto_goTypes = []any{
 	(*ContaminationAlert)(nil),   // 13: m1p.v1.ContaminationAlert
 	(*Event)(nil),                // 14: m1p.v1.Event
 	(*ArrestRecommendation)(nil), // 15: m1p.v1.ArrestRecommendation
-	(InjectionChannel)(0),        // 16: m1p.v1.InjectionChannel
-	(Verdict)(0),                 // 17: m1p.v1.Verdict
+	(*MemoryProposal)(nil),       // 16: m1p.v1.MemoryProposal
+	(InjectionChannel)(0),        // 17: m1p.v1.InjectionChannel
+	(Verdict)(0),                 // 18: m1p.v1.Verdict
 }
 var file_m1p_v1_fabric_proto_depIdxs = []int32{
 	14, // 0: m1p.v1.FabricFrame.event:type_name -> m1p.v1.Event
@@ -1362,18 +1381,19 @@ var file_m1p_v1_fabric_proto_depIdxs = []int32{
 	5,  // 8: m1p.v1.FabricFrame.context_reply:type_name -> m1p.v1.ContextReply
 	13, // 9: m1p.v1.FabricFrame.contamination_alert:type_name -> m1p.v1.ContaminationAlert
 	15, // 10: m1p.v1.FabricFrame.arrest_recommendation:type_name -> m1p.v1.ArrestRecommendation
-	16, // 11: m1p.v1.ContextQuery.channel:type_name -> m1p.v1.InjectionChannel
-	7,  // 12: m1p.v1.Hello.host_manifest:type_name -> m1p.v1.HostManifest
-	0,  // 13: m1p.v1.HostManifest.arrest_mode:type_name -> m1p.v1.ArrestMode
-	1,  // 14: m1p.v1.GateQuery.gate:type_name -> m1p.v1.GateKind
-	2,  // 15: m1p.v1.GateVerdict.decision:type_name -> m1p.v1.GateDecision
-	17, // 16: m1p.v1.GateVerdict.verdict:type_name -> m1p.v1.Verdict
-	15, // 17: m1p.v1.GateVerdict.recommendation:type_name -> m1p.v1.ArrestRecommendation
-	18, // [18:18] is the sub-list for method output_type
-	18, // [18:18] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	16, // 11: m1p.v1.FabricFrame.memory_proposal:type_name -> m1p.v1.MemoryProposal
+	17, // 12: m1p.v1.ContextQuery.channel:type_name -> m1p.v1.InjectionChannel
+	7,  // 13: m1p.v1.Hello.host_manifest:type_name -> m1p.v1.HostManifest
+	0,  // 14: m1p.v1.HostManifest.arrest_mode:type_name -> m1p.v1.ArrestMode
+	1,  // 15: m1p.v1.GateQuery.gate:type_name -> m1p.v1.GateKind
+	2,  // 16: m1p.v1.GateVerdict.decision:type_name -> m1p.v1.GateDecision
+	18, // 17: m1p.v1.GateVerdict.verdict:type_name -> m1p.v1.Verdict
+	15, // 18: m1p.v1.GateVerdict.recommendation:type_name -> m1p.v1.ArrestRecommendation
+	19, // [19:19] is the sub-list for method output_type
+	19, // [19:19] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_fabric_proto_init() }
@@ -1397,6 +1417,7 @@ func file_m1p_v1_fabric_proto_init() {
 		(*FabricFrame_ContextReply)(nil),
 		(*FabricFrame_ContaminationAlert)(nil),
 		(*FabricFrame_ArrestRecommendation)(nil),
+		(*FabricFrame_MemoryProposal)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

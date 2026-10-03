@@ -182,6 +182,9 @@ message Event {
     ArtifactOutcome artifact_outcome = 37;
     RouteDecision route_decision = 38;
     EvidenceExcerpt evidence_excerpt = 39;  // opt-in tiers only (E1/E2)
+    // ADR-0016: memory's candidate for a host that owns memory, recorded instead
+    // of a MemoryInjection. Diagnostic class.
+    MemoryProposal memory_proposal = 40;
   }
 
   // ---- SERVER-STAMPED band (900–999) --------------------------------------

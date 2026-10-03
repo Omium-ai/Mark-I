@@ -1220,6 +1220,34 @@ pub struct CoverageTransition {
     #[prost(string, tag="5")]
     pub agent: ::prost::alloc::string::String,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MemoryProposal {
+    /// \[P1\] the admitted artifact the candidate came from
+    #[prost(bytes="vec", tag="1")]
+    pub artifact_id: ::prost::alloc::vec::Vec<u8>,
+    /// \[P0\]
+    #[prost(enumeration="ProposalCategory", tag="2")]
+    pub category: i32,
+    /// \[P0\] the artifact's trigger text, as the host would see it
+    #[prost(string, tag="3")]
+    pub candidate_trigger: ::prost::alloc::string::String,
+    /// \[P0\] the artifact's guidance text
+    #[prost(string, tag="4")]
+    pub candidate_guidance: ::prost::alloc::string::String,
+    /// \[P0\] why it was selected: the normalized error signature digest (reactive) or "pack" (hook context)
+    #[prost(string, tag="5")]
+    pub evidence: ::prost::alloc::string::String,
+    /// \[P0\] the channel it would have ridden
+    #[prost(enumeration="InjectionChannel", tag="6")]
+    pub channel: i32,
+    /// \[P1\] 16 bytes; the bound session (also the envelope's)
+    #[prost(bytes="vec", tag="7")]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    /// \[P1\] 16 bytes; the task (also the envelope's)
+    #[prost(bytes="vec", tag="8")]
+    pub task_id: ::prost::alloc::vec::Vec<u8>,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum InjectionChannel {
@@ -1334,6 +1362,53 @@ impl CoverageKind {
             "COVERAGE_KIND_ENABLE" => Some(Self::Enable),
             "COVERAGE_KIND_DISABLE" => Some(Self::Disable),
             "COVERAGE_KIND_BYPASS" => Some(Self::Bypass),
+            _ => None,
+        }
+    }
+}
+// ---------------------------------------------------------------------------
+// Memory proposal — ADR-0016. What memory WOULD have injected, for a host
+// whose profile says it owns memory (ADR-0013 owns_memory, a declared host).
+// Produced instead of a MemoryInjection, never beside one: the store is not
+// written, nothing is injected, the intel admission path is not called for
+// that session. Diagnostic class (07 §6).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ProposalCategory {
+    Unspecified = 0,
+    /// an invariant artifact
+    Convention = 1,
+    /// a pitfall artifact
+    Pitfall = 2,
+    /// reserved: a decision record (no edge producer yet)
+    Decision = 3,
+    /// a fix_pattern artifact
+    ToolGuidance = 4,
+}
+impl ProposalCategory {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            ProposalCategory::Unspecified => "PROPOSAL_CATEGORY_UNSPECIFIED",
+            ProposalCategory::Convention => "PROPOSAL_CATEGORY_CONVENTION",
+            ProposalCategory::Pitfall => "PROPOSAL_CATEGORY_PITFALL",
+            ProposalCategory::Decision => "PROPOSAL_CATEGORY_DECISION",
+            ProposalCategory::ToolGuidance => "PROPOSAL_CATEGORY_TOOL_GUIDANCE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PROPOSAL_CATEGORY_UNSPECIFIED" => Some(Self::Unspecified),
+            "PROPOSAL_CATEGORY_CONVENTION" => Some(Self::Convention),
+            "PROPOSAL_CATEGORY_PITFALL" => Some(Self::Pitfall),
+            "PROPOSAL_CATEGORY_DECISION" => Some(Self::Decision),
+            "PROPOSAL_CATEGORY_TOOL_GUIDANCE" => Some(Self::ToolGuidance),
             _ => None,
         }
     }
@@ -2117,7 +2192,7 @@ pub struct Event {
     #[prost(sint64, tag="903")]
     pub clock_skew_ms: i64,
     /// ---- Body (exactly one) -------------------------------------------------
-    #[prost(oneof="event::Body", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39")]
+    #[prost(oneof="event::Body", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40")]
     pub body: ::core::option::Option<event::Body>,
 }
 /// Nested message and enum types in `Event`.
@@ -2186,6 +2261,10 @@ pub mod event {
         /// opt-in tiers only (E1/E2)
         #[prost(message, tag="39")]
         EvidenceExcerpt(super::EvidenceExcerpt),
+        /// ADR-0016: memory's candidate for a host that owns memory, recorded instead
+        /// of a MemoryInjection. Diagnostic class.
+        #[prost(message, tag="40")]
+        MemoryProposal(super::MemoryProposal),
     }
 }
 /// Loss accounting. Exactly three fields by design: what, which class, how
@@ -2347,13 +2426,14 @@ impl DropReason {
 /// TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
 /// next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
 /// memory/cortex pull — fields below), 10 = ContaminationAlert (defined below),
-/// 11 = ArrestRecommendation (ADR-0015: the ONE daemon→writer frame that is
-/// not a reply — pushed only to an ext: connection whose profile says
-/// ARREST_MODE_RECOMMEND; first-party writers never receive it).
+/// 11 = ArrestRecommendation (ADR-0015) and 12 = MemoryProposal (ADR-0016): the
+/// two daemon→writer frames that are not replies — pushed only to an ext:
+/// connection whose profile asks for them; first-party writers never receive
+/// either.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FabricFrame {
-    #[prost(oneof="fabric_frame::Kind", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
+    #[prost(oneof="fabric_frame::Kind", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12")]
     pub kind: ::core::option::Option<fabric_frame::Kind>,
 }
 /// Nested message and enum types in `FabricFrame`.
@@ -2383,6 +2463,8 @@ pub mod fabric_frame {
         ContaminationAlert(super::ContaminationAlert),
         #[prost(message, tag="11")]
         ArrestRecommendation(super::ArrestRecommendation),
+        #[prost(message, tag="12")]
+        MemoryProposal(super::MemoryProposal),
     }
 }
 /// The shim's pull for injected context (D-AE): the session rides the Hello

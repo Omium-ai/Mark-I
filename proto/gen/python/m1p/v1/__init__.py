@@ -199,6 +199,14 @@ class CoverageKind(betterproto.Enum):
     BYPASS = 3
 
 
+class ProposalCategory(betterproto.Enum):
+    UNSPECIFIED = 0
+    CONVENTION = 1
+    PITFALL = 2
+    DECISION = 3
+    TOOL_GUIDANCE = 4
+
+
 class GuardOutcome(betterproto.Enum):
     """07 §3, verbatim, plus the verify plane's two outcomes."""
 
@@ -925,6 +933,18 @@ class CoverageTransition(betterproto.Message):
 
 
 @dataclass(eq=False, repr=False)
+class MemoryProposal(betterproto.Message):
+    artifact_id: bytes = betterproto.bytes_field(1)
+    category: "ProposalCategory" = betterproto.enum_field(2)
+    candidate_trigger: str = betterproto.string_field(3)
+    candidate_guidance: str = betterproto.string_field(4)
+    evidence: str = betterproto.string_field(5)
+    channel: "InjectionChannel" = betterproto.enum_field(6)
+    session_id: bytes = betterproto.bytes_field(7)
+    task_id: bytes = betterproto.bytes_field(8)
+
+
+@dataclass(eq=False, repr=False)
 class GuardDecision(betterproto.Message):
     """
     Sampled record of the OAuth-provenance guard. Reproduced from 07 §3
@@ -1518,6 +1538,12 @@ class Event(betterproto.Message):
     artifact_outcome: "ArtifactOutcome" = betterproto.message_field(37, group="body")
     route_decision: "RouteDecision" = betterproto.message_field(38, group="body")
     evidence_excerpt: "EvidenceExcerpt" = betterproto.message_field(39, group="body")
+    memory_proposal: "MemoryProposal" = betterproto.message_field(40, group="body")
+    """
+    ADR-0016: memory's candidate for a host that owns memory, recorded instead
+     of a MemoryInjection. Diagnostic class.
+    """
+
     tenant_id: bytes = betterproto.bytes_field(900)
     """
     ---- SERVER-STAMPED band (900–999) --------------------------------------
@@ -1579,9 +1605,10 @@ class FabricFrame(betterproto.Message):
      TAG ALLOCATION, recorded here so a later wave cannot collide by picking the
      next free number (D-AI): 8 = ContextQuery, 9 = ContextReply (D-AE, the
      memory/cortex pull — fields below), 10 = ContaminationAlert (defined below),
-     11 = ArrestRecommendation (ADR-0015: the ONE daemon→writer frame that is
-     not a reply — pushed only to an ext: connection whose profile says
-     ARREST_MODE_RECOMMEND; first-party writers never receive it).
+     11 = ArrestRecommendation (ADR-0015) and 12 = MemoryProposal (ADR-0016): the
+     two daemon→writer frames that are not replies — pushed only to an ext:
+     connection whose profile asks for them; first-party writers never receive
+     either.
     """
 
     event: "Event" = betterproto.message_field(1, group="kind")
@@ -1599,6 +1626,7 @@ class FabricFrame(betterproto.Message):
     arrest_recommendation: "ArrestRecommendation" = betterproto.message_field(
         11, group="kind"
     )
+    memory_proposal: "MemoryProposal" = betterproto.message_field(12, group="kind")
 
 
 @dataclass(eq=False, repr=False)

@@ -152,3 +152,30 @@ enum CoverageKind {
   COVERAGE_KIND_DISABLE = 2;
   COVERAGE_KIND_BYPASS = 3;  // capture degraded (e.g. proxy auto-bypass)
 }
+
+// ---------------------------------------------------------------------------
+// Memory proposal — ADR-0016. What memory WOULD have injected, for a host
+// whose profile says it owns memory (ADR-0013 owns_memory, a declared host).
+// Produced instead of a MemoryInjection, never beside one: the store is not
+// written, nothing is injected, the intel admission path is not called for
+// that session. Diagnostic class (07 §6).
+// ---------------------------------------------------------------------------
+
+enum ProposalCategory {
+  PROPOSAL_CATEGORY_UNSPECIFIED = 0;
+  PROPOSAL_CATEGORY_CONVENTION = 1;     // an invariant artifact
+  PROPOSAL_CATEGORY_PITFALL = 2;        // a pitfall artifact
+  PROPOSAL_CATEGORY_DECISION = 3;       // reserved: a decision record (no edge producer yet)
+  PROPOSAL_CATEGORY_TOOL_GUIDANCE = 4;  // a fix_pattern artifact
+}
+
+message MemoryProposal {
+  bytes artifact_id = 1;               // [P1] the admitted artifact the candidate came from
+  ProposalCategory category = 2;       // [P0]
+  string candidate_trigger = 3;        // [P0] the artifact's trigger text, as the host would see it
+  string candidate_guidance = 4;       // [P0] the artifact's guidance text
+  string evidence = 5;                 // [P0] why it was selected: the normalized error signature digest (reactive) or "pack" (hook context)
+  InjectionChannel channel = 6;        // [P0] the channel it would have ridden
+  bytes session_id = 7;                // [P1] 16 bytes; the bound session (also the envelope's)
+  bytes task_id = 8;                   // [P1] 16 bytes; the task (also the envelope's)
+}
