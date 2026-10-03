@@ -290,55 +290,113 @@ async fn open_pipe(
     }
 }
 
-/// Hello → HelloAck → event on one connection (08 §4.3 steps 2-4).
+/// Hello → HelloAck → event on one connection (08 §4.3 steps 2-4): cortexd's
+/// own first-party Hello, unchanged, over the shared `exchange`.
 async fn deliver<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
-    mut stream: S,
+    stream: S,
     sid: [u8; 16],
     event_frame: &[u8],
 ) -> Result<(), PushError> {
+    let hello = pb::Hello {
+        component: "cortexd".to_owned(),
+        pid: std::process::id(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        // The daemon-published live session (D-AT): the same id the
+        // event carries, so what the connection attributes and what
+        // the record says agree.
+        cwd: String::new(),
+        session_id: sid.to_vec(),
+        host_correlation_id: String::new(),
+        host_manifest: None,
+    };
+    exchange(stream, hello, std::slice::from_ref(&event_frame.to_vec()))
+        .await
+        .map(|_| ())
+}
+
+/// ADR-0018: the Hello of an MCP client acting as an external writer
+/// (component `ext:mcp/<client>`). `session` None asks the daemon to mint one
+/// (ADR-0012: an `ext:` Hello with no session_id); Some presents the minted
+/// id so the daemon binds the same session again.
+pub fn ext_hello(
+    component: &str,
+    session: Option<[u8; 16]>,
+    manifest: Option<pb::HostManifest>,
+    host_correlation_id: &str,
+) -> pb::Hello {
+    pb::Hello {
+        component: component.to_owned(),
+        pid: std::process::id(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        cwd: String::new(),
+        session_id: session.map(|s| s.to_vec()).unwrap_or_default(),
+        host_correlation_id: host_correlation_id.to_owned(),
+        host_manifest: manifest,
+    }
+}
+
+/// Hello → HelloAck → frames on one fresh connection to the daemon's
+/// endpoint, under the same budget a push has. Returns the bound session:
+/// the daemon-minted id from the HelloAck when the Hello carried none, else
+/// the one presented. Nothing is retried: a refusal is the daemon's answer.
+pub async fn ext_exchange(hello: pb::Hello, frames: &[Vec<u8>]) -> Result<[u8; 16], PushError> {
+    let stream = connect().await?;
+    tokio::time::timeout(WRITE_DEADLINE, exchange(stream, hello, frames))
+        .await
+        .unwrap_or_else(|_| Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into()))
+}
+
+/// The one handshake both paths share: write the Hello, read the HelloAck,
+/// then write the frames. 0 bytes before an ack is mark1d's close (M1E-4003 /
+/// M1E-4007) reaching us as EOF — the refusal carries no frame, so EOF IS the
+/// answer, and it must never look like a delivery.
+async fn exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    mut stream: S,
+    hello: pb::Hello,
+    frames: &[Vec<u8>],
+) -> Result<[u8; 16], PushError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let mut hello = Vec::new();
+    let presented = hello.session_id.clone();
+    let mut hello_frame = Vec::new();
     m1p_wire::encode_control(
         &pb::FabricFrame {
-            kind: Some(pb::fabric_frame::Kind::Hello(pb::Hello {
-                component: "cortexd".to_owned(),
-                pid: std::process::id(),
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-                // The daemon-published live session (D-AT): the same id the
-                // event carries, so what the connection attributes and what
-                // the record says agree.
-                cwd: String::new(),
-                session_id: sid.to_vec(),
-                host_correlation_id: String::new(),
-                host_manifest: None,
-            })),
+            kind: Some(pb::fabric_frame::Kind::Hello(hello)),
         },
-        &mut hello,
+        &mut hello_frame,
     )
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    stream.write_all(&hello).await?;
+    stream.write_all(&hello_frame).await?;
 
     let mut dec = m1p_wire::FrameDecoder::new();
-    // A HelloAck frames to ~20 bytes; nothing else arrives before it.
-    let mut buf = [0u8; 64];
+    // A HelloAck frames to tens of bytes; nothing else arrives before it.
+    let mut buf = [0u8; 256];
     loop {
-        // 0 bytes is mark1d's M1E-4003 close reaching us as EOF (08 §4.3
-        // step 2) — the refusal carries no frame, so EOF IS the answer, and
-        // it must never look like a delivery.
         let n = match stream.read(&mut buf).await? {
             0 => return Err(PushError::HandshakeRefused),
             n => n,
         };
-        let frames = dec
+        let got = dec
             .feed_frames(&buf[..n])
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        let Some(f) = frames.into_iter().next() else {
+        let Some(f) = got.into_iter().next() else {
             continue;
         };
         return match f.kind {
             Some(pb::fabric_frame::Kind::HelloAck(ack)) if ack.accepted => {
-                stream.write_all(event_frame).await.map_err(PushError::from)
+                let bound = if ack.session_id.len() == 16 {
+                    ack.session_id
+                } else {
+                    presented
+                };
+                let sid: [u8; 16] = bound
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| PushError::HandshakeRefused)?;
+                for frame in frames {
+                    stream.write_all(frame).await?;
+                }
+                Ok(sid)
             }
             // accepted = false is 08 §4.3 step 3's mid-upgrade version refusal.
             Some(pb::fabric_frame::Kind::HelloAck(_)) => Err(PushError::HandshakeRefused),
@@ -464,6 +522,152 @@ mod tests {
         assert!(
             matches!(&got[1].kind, Some(pb::fabric_frame::Kind::Event(e)) if e.event_id == ev.event_id)
         );
+    }
+
+    /// ADR-0018: an external-writer Hello with no session gets the daemon's
+    /// minted id back from the HelloAck, and the frames follow on the same
+    /// connection — the bytes a socket host sends, from the MCP surface.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn ext_exchange_binds_the_minted_session_on_a_named_pipe() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let name = format!(r"\\.\pipe\omium-mark1-test-{}", uuid::Uuid::now_v7());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        let srv = tokio::spawn(async move {
+            server.connect().await.unwrap();
+            let mut server = server;
+            let mut dec = m1p_wire::FrameDecoder::new();
+            let mut buf = [0u8; 1024];
+            let mut got = Vec::new();
+            while got.len() < 2 {
+                let n = server.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0);
+                for f in dec.feed_frames(&buf[..n]).unwrap() {
+                    got.push(f);
+                    if got.len() == 1 {
+                        let mut ack = Vec::new();
+                        m1p_wire::encode_control(
+                            &pb::FabricFrame {
+                                kind: Some(pb::fabric_frame::Kind::HelloAck(pb::HelloAck {
+                                    accepted: true,
+                                    max_frame: m1p_wire::M1PL_MAX_FRAME,
+                                    want_ver: 1,
+                                    session_id: vec![7u8; 16],
+                                })),
+                            },
+                            &mut ack,
+                        )
+                        .unwrap();
+                        server.write_all(&ack).await.unwrap();
+                    }
+                }
+            }
+            got
+        });
+        let manifest = pb::HostManifest {
+            host_id: "cem888".into(),
+            host_version: "2.0.1".into(),
+            owns_execution: true,
+            owns_config_surface: true,
+            owns_memory: true,
+            arrest_mode: pb::ArrestMode::Recommend as i32,
+            supplies_identity: true,
+            schema_version: "m1p.v1".into(),
+        };
+        let mut ev = cortex_injection_event([4u8; 32], 9, 2000, 10, pb::InjectionChannel::McpPull);
+        ev.session_id = vec![7u8; 16];
+        let mut frame = Vec::new();
+        m1p_wire::encode_frame(&ev, &mut frame).unwrap();
+        let hello = ext_hello("ext:mcp/cem888", None, Some(manifest), "run-7");
+        let sid = exchange(open_pipe(&name).await.unwrap(), hello, &[frame])
+            .await
+            .unwrap();
+        assert_eq!(sid, [7u8; 16]);
+        let got = srv.await.unwrap();
+        assert!(
+            matches!(&got[0].kind, Some(pb::fabric_frame::Kind::Hello(h))
+            if h.component == "ext:mcp/cem888" && h.session_id.is_empty() && h.host_correlation_id == "run-7"
+                && h.host_manifest.as_ref().map(|m| m.host_id.as_str()) == Some("cem888"))
+        );
+        assert!(
+            matches!(&got[1].kind, Some(pb::fabric_frame::Kind::Event(e)) if e.session_id == vec![7u8; 16])
+        );
+    }
+
+    /// ADR-0018, unix: the same exchange over a socket; the daemon's EOF
+    /// before an ack is the refusal, never a delivery.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ext_exchange_binds_the_minted_session_on_a_socket() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{UnixListener, UnixStream};
+
+        let dir = std::env::temp_dir().join(format!("m1-ext-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("m1p.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let srv = tokio::spawn(async move {
+            let (mut server, _) = listener.accept().await.unwrap();
+            let mut dec = m1p_wire::FrameDecoder::new();
+            let mut buf = [0u8; 1024];
+            let mut got = Vec::new();
+            while got.len() < 2 {
+                let n = server.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0);
+                for f in dec.feed_frames(&buf[..n]).unwrap() {
+                    got.push(f);
+                    if got.len() == 1 {
+                        let mut ack = Vec::new();
+                        m1p_wire::encode_control(
+                            &pb::FabricFrame {
+                                kind: Some(pb::fabric_frame::Kind::HelloAck(pb::HelloAck {
+                                    accepted: true,
+                                    max_frame: m1p_wire::M1PL_MAX_FRAME,
+                                    want_ver: 1,
+                                    session_id: vec![7u8; 16],
+                                })),
+                            },
+                            &mut ack,
+                        )
+                        .unwrap();
+                        server.write_all(&ack).await.unwrap();
+                    }
+                }
+            }
+            // A second connection is refused before any ack: EOF.
+            let (server2, _) = listener.accept().await.unwrap();
+            drop(server2);
+            got
+        });
+        let mut ev = cortex_injection_event([4u8; 32], 9, 2000, 10, pb::InjectionChannel::McpPull);
+        ev.session_id = vec![7u8; 16];
+        let mut frame = Vec::new();
+        m1p_wire::encode_frame(&ev, &mut frame).unwrap();
+        let hello = ext_hello("ext:mcp/cem888", None, None, "");
+        let sid = exchange(UnixStream::connect(&path).await.unwrap(), hello, &[frame])
+            .await
+            .unwrap();
+        assert_eq!(sid, [7u8; 16]);
+        let refused = exchange(
+            UnixStream::connect(&path).await.unwrap(),
+            ext_hello("ext:mcp/cem888", Some([7u8; 16]), None, ""),
+            &[],
+        )
+        .await;
+        assert!(matches!(refused, Err(PushError::HandshakeRefused)));
+        let got = srv.await.unwrap();
+        assert!(
+            matches!(&got[0].kind, Some(pb::fabric_frame::Kind::Hello(h)) if h.component == "ext:mcp/cem888")
+        );
+        assert!(
+            matches!(&got[1].kind, Some(pb::fabric_frame::Kind::Event(e)) if e.session_id == vec![7u8; 16])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Nobody listening on the pipe is Unavailable within the budget, the counted drop.

@@ -9,6 +9,8 @@
 //! Tool-level failures are NOT errors: they are the 08 §6 refusal envelope,
 //! a schema-conforming success — refusal beats fabrication.
 
+pub mod mark1;
+
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -182,7 +184,14 @@ async fn handle(State(st): State<Arc<McpState>>, headers: HeaderMap, body: Bytes
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            match call_tool(&st.shared, name, &args) {
+            // ADR-0018: the mark1.* surface is transport to the daemon, not an
+            // index query — no stale/broken gate, no budget, no injection event.
+            let outcome = if name.starts_with(mark1::PREFIX) {
+                mark1::call(&st.shared, name, &args).await
+            } else {
+                call_tool(&st.shared, name, &args)
+            };
+            match outcome {
                 Ok(result) => {
                     // MCP result: one text content item; the JSON inside is the
                     // 08 §6 wire truth (refusals included — they are successes).
@@ -808,7 +817,7 @@ fn memory_recall(shared: &Arc<Shared>, args: &Value, budget: u32) -> Result<Valu
 
 /// Schemas verbatim from 08 §6 — the wire truth in any implementation language.
 fn tool_list() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         json!({
             "name": "repo_map",
             "description": "Ranked, budgeted repository map computed from the local cortexd L2 graph (personalized PageRank); serves no network call.",
@@ -891,5 +900,7 @@ fn tool_list() -> Vec<Value> {
                 "required": ["query"], "additionalProperties": false
             }
         }),
-    ]
+    ];
+    tools.extend(mark1::tool_list());
+    tools
 }

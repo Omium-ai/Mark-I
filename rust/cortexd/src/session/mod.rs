@@ -75,6 +75,9 @@ pub struct Shared {
     /// accounting). A held push is NOT a drop: it lands on the next flush
     /// once the daemon publishes a session. Bounded — see `hold`.
     pub pending: Mutex<Vec<pb::Event>>,
+    /// ADR-0018: the MCP surface's external-writer sessions, one per client
+    /// name, bound by the daemon at the first `mark1.*` Hello.
+    pub ext_sessions: Mutex<crate::mcp::mark1::ExtSessions>,
     /// L1 CAS probe accounting (04 §6.1: a hit skips the parse). What makes
     /// "a key bump invalidates exactly the affected entries" a number.
     pub cas_hits: AtomicU64,
@@ -114,6 +117,7 @@ impl Shared {
             fabric_handshake_refused: AtomicU64::new(0),
             session_file: OnceLock::new(),
             pending: Mutex::new(Vec::new()),
+            ext_sessions: Mutex::new(Default::default()),
             cas_hits: AtomicU64::new(0),
             cas_misses: AtomicU64::new(0),
             memory_file: OnceLock::new(),
