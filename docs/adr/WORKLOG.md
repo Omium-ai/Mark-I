@@ -140,3 +140,40 @@ Environment note for Part 2's runs: the Rust proxy test
   in enable's existing style, `host          M1E-7105 …` in off and doctor; `host_owned`
   in their --json). Tests per verb.
 - 3.6 integrating-a-host.md §8.1. Rows re-tagged Phase 1 after the suite.
+
+### Part 4 (arrest modes) — what landed
+
+- 4.1 ADR-0015; 02 §9.2 FR-SPINE-043..046; 08 §4.2 (GateVerdict.recommendation, the
+  daemon→writer ArrestRecommendation arm), §4.6.1 (GateQuery available to RECOMMEND hosts),
+  new §4.7; 07 §3 note; traceability.
+- 4.2 proto: `ArrestRecommendation` (events.proto), `Event.arrest_recommendation = 24`,
+  `GateVerdict.recommendation = 7`, `FabricFrame.arrest_recommendation = 11`;
+  fabric.proto imports events.proto; `just gen`; Rust GateVerdict literals gain
+  `recommendation: None`.
+- 4.3 gate.go: detection untouched; `recommend := ProfileFor(session).ArrestMode ==
+  Recommend` selects the sink at the three sites (below-the-knee block, consecutive-block
+  cap, knee stop): RECOMMEND leaves ALLOW, records an allow instead of a block, sets
+  `GateVerdict.recommendation` and calls `OnRecommend`; `ProjectedCost(session, task,
+  attempts, kind)` is the daemon's estimate. fabric.Server keeps each connection's
+  session (`conns map[net.Conn]*session`) and `Push(sid, frame)` writes to the bound ext:
+  connection(s) under a per-session write mutex. cmd/recommend.go `recommendSink` fans out:
+  fabric push, `<state>/run/recommendations/<session-hex>.jsonl`, the ledger Event (which
+  the hub republishes as SSE family `recommendation` and files as a verify-ring row).
+- 4.4 controld: no code change — the reflection-driven projector already emits
+  `event_type = "ArrestRecommendation"`, class diagnostic, payload in proto field names;
+  `migrations/m1_ch_003_arrest_recommendations.sql` adds `mark1.arrest_recommendations` +
+  `mv_arrest_recommendations`. `TestArrestRecommendationProjects` pins the row shape.
+- 4.5 Count separation by construction: a recommendation records no GuardDecision, so the
+  querychoke session row's arrests/blocks/tokens_saved (reason-code and GuardDecision
+  filters, untouched) count ACT only; recommendations have their own family, verify-ring
+  row and ClickHouse view. The receipt payload is untouched (Part 6).
+- 4.6 Tests: `TestActModeIsUnchangedByTheRegistry` + the existing gate suite (ACT identical),
+  `TestRecommendModeNeverBlocks`, `TestRecommendModeAtTheKnee`,
+  `TestPushReachesTheBoundExtConnection`, `TestRecommendSinkFansOutOnEveryPath`,
+  `TestRecommendationReachesTheControlAPI`, `TestArrestRecommendationProjects`;
+  `TestSocketStreamGolden` unchanged.
+
+Environment note (Part 4 runs): `controld/internal/querychoke TestTVOReportContract` fails
+identically on the pre-Part-4 commit b7ee1fc in a scratch worktree (calendar-sensitive:
+its 7-day window has moved past the fixture's rollup days) — listed with the other
+pre-existing failures, not a regression.
