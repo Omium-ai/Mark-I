@@ -227,3 +227,99 @@ pub fn dual_sign(
         server_signature: server.sign(&signing_input),
     })
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0017 host-bound receipts: checkpoint payload v2. The host block rides
+// INSIDE the signed bytes; `to_value` stays the v1 payload byte for byte.
+// ---------------------------------------------------------------------------
+
+/// Domain tag of the per-task identity hash (ADR-0017 §1).
+pub const HOST_IDENTITY_DOMAIN: &[u8] = b"m1p.v1/host-identity\0";
+
+/// One task under a host; `identity_hash` is present iff the host supplies
+/// identity (ADR-0013 `supplies_identity`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskBinding {
+    pub task_id: [u8; 16],
+    pub identity_hash: Option<[u8; 32]>,
+}
+
+/// One session's host as a v2 checkpoint payload attests it, in the exact
+/// shape the hostchain vectors freeze (every key present, hashes hex).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBinding {
+    pub session_id: [u8; 16],
+    /// "fabric" | "jsonl" | "native"
+    pub transport: String,
+    pub host_id: String,
+    pub host_version: String,
+    /// sha256 over the host profile's canonical JSON (ADR-0013 §4).
+    pub profile_hash: [u8; 32],
+    pub host_correlation_id: String,
+    /// Sorted by task_id.
+    pub tasks: Vec<TaskBinding>,
+}
+
+impl HostBinding {
+    pub fn to_value(&self) -> Value {
+        let tasks: Vec<Value> = self
+            .tasks
+            .iter()
+            .map(|t| {
+                let mut v = json!({ "task_id": hex::encode(&t.task_id) });
+                if let Some(h) = &t.identity_hash {
+                    v["identity_hash"] = Value::String(hex::encode(h));
+                }
+                v
+            })
+            .collect();
+        json!({
+            "session_id": hex::encode(&self.session_id),
+            "transport": self.transport,
+            "host_id": self.host_id,
+            "host_version": self.host_version,
+            "profile_hash": hex::encode(&self.profile_hash),
+            "host_correlation_id": self.host_correlation_id,
+            "tasks": tasks,
+        })
+    }
+}
+
+/// sha256 over a host profile's canonical JSON — the payload's `profile_hash`.
+pub fn profile_hash(canonical_profile: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(canonical_profile).into()
+}
+
+/// The per-task identity hash: sha256(domain ‖ host_id ‖ 0 ‖
+/// host_correlation_id ‖ 0 ‖ task_id hex) (ADR-0017 §1).
+pub fn identity_hash(host_id: &str, host_correlation_id: &str, task_id: &[u8; 16]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(HOST_IDENTITY_DOMAIN);
+    h.update(host_id.as_bytes());
+    h.update([0u8]);
+    h.update(host_correlation_id.as_bytes());
+    h.update([0u8]);
+    h.update(hex::encode(task_id).as_bytes());
+    h.finalize().into()
+}
+
+impl CheckpointPayload<'_> {
+    /// The v2 payload (ADR-0017): `to_value` plus `hosts` and the two arrest
+    /// counters, `v` = 2. `hosts` may be empty — a bound batch with no tasks is
+    /// still a v2 claim; the v1 shape is `to_value`, never this with no hosts.
+    pub fn to_value_bound(
+        &self,
+        hosts: &[HostBinding],
+        arrests_acted: u64,
+        arrests_recommended: u64,
+    ) -> Value {
+        let mut v = self.to_value();
+        v["v"] = json!(2);
+        v["hosts"] = Value::Array(hosts.iter().map(HostBinding::to_value).collect());
+        v["arrests_acted"] = json!(arrests_acted);
+        v["arrests_recommended"] = json!(arrests_recommended);
+        v
+    }
+}

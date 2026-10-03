@@ -26,6 +26,7 @@ leaves, not millions. Memoise subtree roots if batch sizes ever grow past ~10^5.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -134,6 +135,9 @@ def build_checkpoint_payload(
     checkpoint_seq: int,
     merkle_root_hash: bytes,
     leaf_count: int,
+    hosts: Sequence[Mapping[str, Any]] | None = None,
+    arrests_acted: int = 0,
+    arrests_recommended: int = 0,
 ) -> dict[str, Any]:
     """The checkpoint record's signed payload — field set frozen by the chain vectors.
 
@@ -142,7 +146,7 @@ def build_checkpoint_payload(
     input (vectors README "Signatures"). ``prev_receipt_hash`` is inside for ro_012's
     reason: signing the link is what makes position part of the claim.
     """
-    return {
+    payload: dict[str, Any] = {
         "v": canonical.PAYLOAD_VERSION,
         "type": "checkpoint",
         "tenant_id": tenant_id,
@@ -155,6 +159,14 @@ def build_checkpoint_payload(
         "merkle_root": merkle_root_hash.hex(),
         "leaf_count": int(leaf_count),
     }
+    if hosts is not None:
+        # ADR-0017 payload v2: the host block and the two arrest counters ride INSIDE
+        # the signed bytes. ``hosts`` is None for v1 — today's bytes, unchanged.
+        payload["v"] = 2
+        payload["hosts"] = [dict(h) for h in hosts]
+        payload["arrests_acted"] = int(arrests_acted)
+        payload["arrests_recommended"] = int(arrests_recommended)
+    return payload
 
 
 def dual_sign(payload: Mapping[str, Any], device: Signer, server: Signer) -> dict[str, Any]:
@@ -174,4 +186,59 @@ def dual_sign(payload: Mapping[str, Any], device: Signer, server: Signer) -> dic
         "device_signature": device.sign(message),
         "server_key_id": server.key_id,
         "server_signature": server.sign(message),
+    }
+
+
+HOST_IDENTITY_DOMAIN = b"m1p.v1/host-identity\x00"
+
+
+def profile_hash(canonical_profile: bytes) -> bytes:
+    """sha256 over a host profile's canonical JSON (ADR-0013 §4) — the payload's profile_hash."""
+    return hashlib.sha256(canonical_profile).digest()
+
+
+def identity_hash(host_id: str, host_correlation_id: str, task_id: bytes) -> bytes:
+    """ADR-0017 per-task identity hash.
+
+    sha256(domain ‖ host_id ‖ 0 ‖ host_correlation_id ‖ 0 ‖ task_id hex).
+    """
+    h = hashlib.sha256()
+    h.update(HOST_IDENTITY_DOMAIN)
+    h.update(host_id.encode())
+    h.update(b"\x00")
+    h.update(host_correlation_id.encode())
+    h.update(b"\x00")
+    h.update(task_id.hex().encode())
+    return h.digest()
+
+
+def host_binding(
+    *,
+    session_id: bytes,
+    transport: str,
+    host_id: str,
+    host_version: str,
+    profile_hash_bytes: bytes,
+    host_correlation_id: str,
+    tasks: Sequence[tuple[bytes, bytes | None]],
+) -> dict[str, Any]:
+    """One ``hosts`` entry in the exact shape the hostchain vectors freeze.
+
+    ``tasks`` are ``(task_id, identity_hash | None)`` pairs; the caller sorts hosts by
+    session_id and tasks by task_id, as the sealer does.
+    """
+    task_values: list[dict[str, Any]] = []
+    for task_id, ih in tasks:
+        tv: dict[str, Any] = {"task_id": task_id.hex()}
+        if ih is not None:
+            tv["identity_hash"] = ih.hex()
+        task_values.append(tv)
+    return {
+        "session_id": session_id.hex(),
+        "transport": transport,
+        "host_id": host_id,
+        "host_version": host_version,
+        "profile_hash": profile_hash_bytes.hex(),
+        "host_correlation_id": host_correlation_id,
+        "tasks": task_values,
     }

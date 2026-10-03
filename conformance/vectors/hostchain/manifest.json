@@ -1,0 +1,375 @@
+{
+ "_readme": "Frozen hostchain-family conformance contract (ADR-0017). README.md is normative; this file is the referee.",
+ "keys": {
+  "device": {
+   "seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+   "public_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+   "key_id": "ed25519:10ba682c8ad13513"
+  },
+  "server": {
+   "seed_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+   "public_hex": "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+   "key_id": "ed25519:1325b850c2871916"
+  }
+ },
+ "profiles": {
+  "cem888": {
+   "profile": {
+    "arrest_mode": "recommend",
+    "host_id": "cem888",
+    "host_version": "2.0.1",
+    "owns_config_surface": true,
+    "owns_execution": true,
+    "owns_memory": true,
+    "schema_version": "m1p.v1",
+    "supplies_identity": true
+   },
+   "canonical": "{\"arrest_mode\":\"recommend\",\"host_id\":\"cem888\",\"host_version\":\"2.0.1\",\"owns_config_surface\":true,\"owns_execution\":true,\"owns_memory\":true,\"schema_version\":\"m1p.v1\",\"supplies_identity\":true}",
+   "hash_hex": "b29c393601536620afd93798ebfdf0573afbde6706b1e9a53ac3046770de6ef3"
+  },
+  "tailhost": {
+   "profile": {
+    "arrest_mode": "act",
+    "host_id": "tailhost",
+    "host_version": "0.9",
+    "owns_config_surface": false,
+    "owns_execution": true,
+    "owns_memory": false,
+    "schema_version": "m1p.v1",
+    "supplies_identity": false
+   },
+   "canonical": "{\"arrest_mode\":\"act\",\"host_id\":\"tailhost\",\"host_version\":\"0.9\",\"owns_config_surface\":false,\"owns_execution\":true,\"owns_memory\":false,\"schema_version\":\"m1p.v1\",\"supplies_identity\":false}",
+   "hash_hex": "4d557fb0c794ed49480cd5fb9aa537102c7e4278e88e03397f842c1ff7db21b9"
+  },
+  "default": {
+   "profile": {
+    "arrest_mode": "act",
+    "host_id": "",
+    "host_version": "",
+    "owns_config_surface": true,
+    "owns_execution": false,
+    "owns_memory": true,
+    "schema_version": "",
+    "supplies_identity": false
+   },
+   "canonical": "{\"arrest_mode\":\"act\",\"host_id\":\"\",\"host_version\":\"\",\"owns_config_surface\":true,\"owns_execution\":false,\"owns_memory\":true,\"schema_version\":\"\",\"supplies_identity\":false}",
+   "hash_hex": "e563e71912c3ad5ec1ba2249f591ceb1af277edac9ffe0e42285e68beb78fe83"
+  }
+ },
+ "identity_domain_hex": "6d31702e76312f686f73742d6964656e7469747900",
+ "leaves_hex": [
+  [
+   "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+   "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+   "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+  ],
+  [
+   "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+  ],
+  [
+   "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+   "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+  ]
+ ],
+ "chain": [
+  {
+   "seq": 1,
+   "payload": {
+    "v": 1,
+    "type": "checkpoint",
+    "tenant_id": "11111111-1111-1111-1111-111111111111",
+    "seq": 1,
+    "prev_receipt_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "device_id": "33333333-3333-3333-3333-333333333333",
+    "device_key_id": "ed25519:10ba682c8ad13513",
+    "issued_at": "2026-10-03T00:00:01Z",
+    "checkpoint_seq": 1,
+    "merkle_root": "1f94f20bf6c1dd1e88ba7818364bc65b70df65736f4a4bbc5a5ed9bdba75a193",
+    "leaf_count": 3
+   },
+   "canonical_json": "{\"checkpoint_seq\":1,\"device_id\":\"33333333-3333-3333-3333-333333333333\",\"device_key_id\":\"ed25519:10ba682c8ad13513\",\"issued_at\":\"2026-10-03T00:00:01Z\",\"leaf_count\":3,\"merkle_root\":\"1f94f20bf6c1dd1e88ba7818364bc65b70df65736f4a4bbc5a5ed9bdba75a193\",\"prev_receipt_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"seq\":1,\"tenant_id\":\"11111111-1111-1111-1111-111111111111\",\"type\":\"checkpoint\",\"v\":1}",
+   "receipt_hash_hex": "7c98275f6e2e4069017825f95ff1939783e352aee0e2199f7d1ecf7573421413",
+   "device_key_id": "ed25519:10ba682c8ad13513",
+   "device_signature_hex": "7c7a4ff271eee22c470a086851bc32b4da80c5eda24bde8f723a18258791d6fa791b266609f5c131ed1142981e656b3f5c7fc94edc79fa01157a020bf60c430e",
+   "server_key_id": "ed25519:1325b850c2871916",
+   "server_signature_hex": "218be08f926c5837b0929f1090f7da29003c63967f515c199ff72725d580c3114edecc67b0bf52bf4761f737457b54685fac4ab40961dc69ccd508a9b8f6ca04"
+  },
+  {
+   "seq": 2,
+   "payload": {
+    "v": 2,
+    "type": "checkpoint",
+    "tenant_id": "11111111-1111-1111-1111-111111111111",
+    "seq": 2,
+    "prev_receipt_hash": "7c98275f6e2e4069017825f95ff1939783e352aee0e2199f7d1ecf7573421413",
+    "device_id": "33333333-3333-3333-3333-333333333333",
+    "device_key_id": "ed25519:10ba682c8ad13513",
+    "issued_at": "2026-10-03T00:00:02Z",
+    "checkpoint_seq": 2,
+    "merkle_root": "59ca4df0a035302b2de186169e9f15524c1c95c3b2103d5802bd68914452e8a4",
+    "leaf_count": 1,
+    "hosts": [
+     {
+      "session_id": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "transport": "native",
+      "host_id": "",
+      "host_version": "",
+      "profile_hash": "e563e71912c3ad5ec1ba2249f591ceb1af277edac9ffe0e42285e68beb78fe83",
+      "host_correlation_id": "",
+      "tasks": [
+       {
+        "task_id": "03030303030303030303030303030303"
+       }
+      ]
+     },
+     {
+      "session_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "transport": "fabric",
+      "host_id": "cem888",
+      "host_version": "2.0.1",
+      "profile_hash": "b29c393601536620afd93798ebfdf0573afbde6706b1e9a53ac3046770de6ef3",
+      "host_correlation_id": "cem888-run-7f3a",
+      "tasks": [
+       {
+        "task_id": "01010101010101010101010101010101",
+        "identity_hash": "f77fb8409e5f0c657b77ff697fd2e715b8bf38b8b9a6cdb9945923dab14c1961"
+       },
+       {
+        "task_id": "02020202020202020202020202020202",
+        "identity_hash": "c5510d526cdafd80a90a4ed1f5fc7850eb716e8fe3d5b471acbbb0c2d1e348f3"
+       }
+      ]
+     }
+    ],
+    "arrests_acted": 1,
+    "arrests_recommended": 2
+   },
+   "canonical_json": "{\"arrests_acted\":1,\"arrests_recommended\":2,\"checkpoint_seq\":2,\"device_id\":\"33333333-3333-3333-3333-333333333333\",\"device_key_id\":\"ed25519:10ba682c8ad13513\",\"hosts\":[{\"host_correlation_id\":\"\",\"host_id\":\"\",\"host_version\":\"\",\"profile_hash\":\"e563e71912c3ad5ec1ba2249f591ceb1af277edac9ffe0e42285e68beb78fe83\",\"session_id\":\"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b\",\"tasks\":[{\"task_id\":\"03030303030303030303030303030303\"}],\"transport\":\"native\"},{\"host_correlation_id\":\"cem888-run-7f3a\",\"host_id\":\"cem888\",\"host_version\":\"2.0.1\",\"profile_hash\":\"b29c393601536620afd93798ebfdf0573afbde6706b1e9a53ac3046770de6ef3\",\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"tasks\":[{\"identity_hash\":\"f77fb8409e5f0c657b77ff697fd2e715b8bf38b8b9a6cdb9945923dab14c1961\",\"task_id\":\"01010101010101010101010101010101\"},{\"identity_hash\":\"c5510d526cdafd80a90a4ed1f5fc7850eb716e8fe3d5b471acbbb0c2d1e348f3\",\"task_id\":\"02020202020202020202020202020202\"}],\"transport\":\"fabric\"}],\"issued_at\":\"2026-10-03T00:00:02Z\",\"leaf_count\":1,\"merkle_root\":\"59ca4df0a035302b2de186169e9f15524c1c95c3b2103d5802bd68914452e8a4\",\"prev_receipt_hash\":\"7c98275f6e2e4069017825f95ff1939783e352aee0e2199f7d1ecf7573421413\",\"seq\":2,\"tenant_id\":\"11111111-1111-1111-1111-111111111111\",\"type\":\"checkpoint\",\"v\":2}",
+   "receipt_hash_hex": "ab1a686ea5f33398ca2fb9d67038cee29363d12c3df6daaf32c8d1ce5a1517c1",
+   "device_key_id": "ed25519:10ba682c8ad13513",
+   "device_signature_hex": "e7f79759e9d276cee2d7ec3cad748205ba4d4a794c5c3d736685ea9ef6fe192c533ecb578c9070f5292d1cc15a63ec702e905a66936f77afb7dea772d4595e00",
+   "server_key_id": "ed25519:1325b850c2871916",
+   "server_signature_hex": "576ca4158ca71b32591184a42d179a82d9f4aff8f595a83a1acfe17d07604faf1ddb43b3d47b3619cb0ea8a58c36cb63a93349d4285568090a592a242bf8d50d"
+  },
+  {
+   "seq": 3,
+   "payload": {
+    "v": 2,
+    "type": "checkpoint",
+    "tenant_id": "11111111-1111-1111-1111-111111111111",
+    "seq": 3,
+    "prev_receipt_hash": "ab1a686ea5f33398ca2fb9d67038cee29363d12c3df6daaf32c8d1ce5a1517c1",
+    "device_id": "33333333-3333-3333-3333-333333333333",
+    "device_key_id": "ed25519:10ba682c8ad13513",
+    "issued_at": "2026-10-03T00:00:03Z",
+    "checkpoint_seq": 3,
+    "merkle_root": "983ba4016a20af4fe1678fa38589b6263d83c2f315dcea31ac383fa60327f077",
+    "leaf_count": 2,
+    "hosts": [
+     {
+      "session_id": "cccccccccccccccccccccccccccccccc",
+      "transport": "jsonl",
+      "host_id": "tailhost",
+      "host_version": "0.9",
+      "profile_hash": "4d557fb0c794ed49480cd5fb9aa537102c7e4278e88e03397f842c1ff7db21b9",
+      "host_correlation_id": "",
+      "tasks": []
+     }
+    ],
+    "arrests_acted": 0,
+    "arrests_recommended": 0
+   },
+   "canonical_json": "{\"arrests_acted\":0,\"arrests_recommended\":0,\"checkpoint_seq\":3,\"device_id\":\"33333333-3333-3333-3333-333333333333\",\"device_key_id\":\"ed25519:10ba682c8ad13513\",\"hosts\":[{\"host_correlation_id\":\"\",\"host_id\":\"tailhost\",\"host_version\":\"0.9\",\"profile_hash\":\"4d557fb0c794ed49480cd5fb9aa537102c7e4278e88e03397f842c1ff7db21b9\",\"session_id\":\"cccccccccccccccccccccccccccccccc\",\"tasks\":[],\"transport\":\"jsonl\"}],\"issued_at\":\"2026-10-03T00:00:03Z\",\"leaf_count\":2,\"merkle_root\":\"983ba4016a20af4fe1678fa38589b6263d83c2f315dcea31ac383fa60327f077\",\"prev_receipt_hash\":\"ab1a686ea5f33398ca2fb9d67038cee29363d12c3df6daaf32c8d1ce5a1517c1\",\"seq\":3,\"tenant_id\":\"11111111-1111-1111-1111-111111111111\",\"type\":\"checkpoint\",\"v\":2}",
+   "receipt_hash_hex": "936f4625841622deb7ab322a483211a7fc2229d0519e243871f520d7c76439dd",
+   "device_key_id": "ed25519:10ba682c8ad13513",
+   "device_signature_hex": "65873325ab1b7c9415f8e27da6f37caa841fc8af92ee9bbaf41ef981f6ede99a4b537666e2ef6c918838bb8ddfe33d6b29299668fb2fabc2a0ffe3ecd1d8380f",
+   "server_key_id": "ed25519:1325b850c2871916",
+   "server_signature_hex": "413e3bde9a805eda2f2c0938b29a35971335ae2f8baca83f9fa98122d50cf69611f0833c2a592af8ab67b2d3dbda676fbfc66bba49d8be53e8283e9022e0b506"
+  }
+ ],
+ "negatives": [
+  {
+   "name": "host_block_rewritten",
+   "receipt": {
+    "seq": 2,
+    "payload": {
+     "v": 2,
+     "type": "checkpoint",
+     "tenant_id": "11111111-1111-1111-1111-111111111111",
+     "seq": 2,
+     "prev_receipt_hash": "7c98275f6e2e4069017825f95ff1939783e352aee0e2199f7d1ecf7573421413",
+     "device_id": "33333333-3333-3333-3333-333333333333",
+     "device_key_id": "ed25519:10ba682c8ad13513",
+     "issued_at": "2026-10-03T00:00:02Z",
+     "checkpoint_seq": 2,
+     "merkle_root": "59ca4df0a035302b2de186169e9f15524c1c95c3b2103d5802bd68914452e8a4",
+     "leaf_count": 1,
+     "hosts": [
+      {
+       "session_id": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+       "transport": "native",
+       "host_id": "",
+       "host_version": "",
+       "profile_hash": "e563e71912c3ad5ec1ba2249f591ceb1af277edac9ffe0e42285e68beb78fe83",
+       "host_correlation_id": "",
+       "tasks": [
+        {
+         "task_id": "03030303030303030303030303030303"
+        }
+       ]
+      },
+      {
+       "session_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "transport": "fabric",
+       "host_id": "someone-else",
+       "host_version": "2.0.1",
+       "profile_hash": "b29c393601536620afd93798ebfdf0573afbde6706b1e9a53ac3046770de6ef3",
+       "host_correlation_id": "cem888-run-7f3a",
+       "tasks": [
+        {
+         "task_id": "01010101010101010101010101010101",
+         "identity_hash": "f77fb8409e5f0c657b77ff697fd2e715b8bf38b8b9a6cdb9945923dab14c1961"
+        },
+        {
+         "task_id": "02020202020202020202020202020202",
+         "identity_hash": "c5510d526cdafd80a90a4ed1f5fc7850eb716e8fe3d5b471acbbb0c2d1e348f3"
+        }
+       ]
+      }
+     ],
+     "arrests_acted": 1,
+     "arrests_recommended": 2
+    },
+    "canonical_json": "{\"arrests_acted\":1,\"arrests_recommended\":2,\"checkpoint_seq\":2,\"device_id\":\"33333333-3333-3333-3333-333333333333\",\"device_key_id\":\"ed25519:10ba682c8ad13513\",\"hosts\":[{\"host_correlation_id\":\"\",\"host_id\":\"\",\"host_version\":\"\",\"profile_hash\":\"e563e71912c3ad5ec1ba2249f591ceb1af277edac9ffe0e42285e68beb78fe83\",\"session_id\":\"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b\",\"tasks\":[{\"task_id\":\"03030303030303030303030303030303\"}],\"transport\":\"native\"},{\"host_correlation_id\":\"cem888-run-7f3a\",\"host_id\":\"cem888\",\"host_version\":\"2.0.1\",\"profile_hash\":\"b29c393601536620afd93798ebfdf0573afbde6706b1e9a53ac3046770de6ef3\",\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"tasks\":[{\"identity_hash\":\"f77fb8409e5f0c657b77ff697fd2e715b8bf38b8b9a6cdb9945923dab14c1961\",\"task_id\":\"01010101010101010101010101010101\"},{\"identity_hash\":\"c5510d526cdafd80a90a4ed1f5fc7850eb716e8fe3d5b471acbbb0c2d1e348f3\",\"task_id\":\"02020202020202020202020202020202\"}],\"transport\":\"fabric\"}],\"issued_at\":\"2026-10-03T00:00:02Z\",\"leaf_count\":1,\"merkle_root\":\"59ca4df0a035302b2de186169e9f15524c1c95c3b2103d5802bd68914452e8a4\",\"prev_receipt_hash\":\"7c98275f6e2e4069017825f95ff1939783e352aee0e2199f7d1ecf7573421413\",\"seq\":2,\"tenant_id\":\"11111111-1111-1111-1111-111111111111\",\"type\":\"checkpoint\",\"v\":2}",
+    "receipt_hash_hex": "ab1a686ea5f33398ca2fb9d67038cee29363d12c3df6daaf32c8d1ce5a1517c1",
+    "device_key_id": "ed25519:10ba682c8ad13513",
+    "device_signature_hex": "e7f79759e9d276cee2d7ec3cad748205ba4d4a794c5c3d736685ea9ef6fe192c533ecb578c9070f5292d1cc15a63ec702e905a66936f77afb7dea772d4595e00",
+    "server_key_id": "ed25519:1325b850c2871916",
+    "server_signature_hex": "576ca4158ca71b32591184a42d179a82d9f4aff8f595a83a1acfe17d07604faf1ddb43b3d47b3619cb0ea8a58c36cb63a93349d4285568090a592a242bf8d50d"
+   },
+   "expect_defect": "payload_mismatch"
+  },
+  {
+   "name": "signed_a_different_host_block",
+   "receipt": {
+    "seq": 2,
+    "payload": {
+     "v": 2,
+     "type": "checkpoint",
+     "tenant_id": "11111111-1111-1111-1111-111111111111",
+     "seq": 2,
+     "prev_receipt_hash": "7c98275f6e2e4069017825f95ff1939783e352aee0e2199f7d1ecf7573421413",
+     "device_id": "33333333-3333-3333-3333-333333333333",
+     "device_key_id": "ed25519:10ba682c8ad13513",
+     "issued_at": "2026-10-03T00:00:02Z",
+     "checkpoint_seq": 2,
+     "merkle_root": "59ca4df0a035302b2de186169e9f15524c1c95c3b2103d5802bd68914452e8a4",
+     "leaf_count": 1,
+     "hosts": [
+      {
+       "session_id": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+       "transport": "native",
+       "host_id": "",
+       "host_version": "",
+       "profile_hash": "e563e71912c3ad5ec1ba2249f591ceb1af277edac9ffe0e42285e68beb78fe83",
+       "host_correlation_id": "",
+       "tasks": [
+        {
+         "task_id": "03030303030303030303030303030303"
+        }
+       ]
+      },
+      {
+       "session_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "transport": "fabric",
+       "host_id": "cem888",
+       "host_version": "2.0.1",
+       "profile_hash": "b29c393601536620afd93798ebfdf0573afbde6706b1e9a53ac3046770de6ef3",
+       "host_correlation_id": "cem888-run-7f3a",
+       "tasks": [
+        {
+         "task_id": "01010101010101010101010101010101",
+         "identity_hash": "f77fb8409e5f0c657b77ff697fd2e715b8bf38b8b9a6cdb9945923dab14c1961"
+        },
+        {
+         "task_id": "02020202020202020202020202020202",
+         "identity_hash": "c5510d526cdafd80a90a4ed1f5fc7850eb716e8fe3d5b471acbbb0c2d1e348f3"
+        }
+       ]
+      }
+     ],
+     "arrests_acted": 1,
+     "arrests_recommended": 2
+    },
+    "canonical_json": "{\"arrests_acted\":1,\"arrests_recommended\":2,\"checkpoint_seq\":2,\"device_id\":\"33333333-3333-3333-3333-333333333333\",\"device_key_id\":\"ed25519:10ba682c8ad13513\",\"hosts\":[{\"host_correlation_id\":\"\",\"host_id\":\"\",\"host_version\":\"\",\"profile_hash\":\"e563e71912c3ad5ec1ba2249f591ceb1af277edac9ffe0e42285e68beb78fe83\",\"session_id\":\"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b\",\"tasks\":[{\"task_id\":\"03030303030303030303030303030303\"}],\"transport\":\"native\"},{\"host_correlation_id\":\"cem888-run-7f3a\",\"host_id\":\"cem888\",\"host_version\":\"2.0.1\",\"profile_hash\":\"b29c393601536620afd93798ebfdf0573afbde6706b1e9a53ac3046770de6ef3\",\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"tasks\":[{\"identity_hash\":\"f77fb8409e5f0c657b77ff697fd2e715b8bf38b8b9a6cdb9945923dab14c1961\",\"task_id\":\"01010101010101010101010101010101\"},{\"identity_hash\":\"c5510d526cdafd80a90a4ed1f5fc7850eb716e8fe3d5b471acbbb0c2d1e348f3\",\"task_id\":\"02020202020202020202020202020202\"}],\"transport\":\"fabric\"}],\"issued_at\":\"2026-10-03T00:00:02Z\",\"leaf_count\":1,\"merkle_root\":\"59ca4df0a035302b2de186169e9f15524c1c95c3b2103d5802bd68914452e8a4\",\"prev_receipt_hash\":\"7c98275f6e2e4069017825f95ff1939783e352aee0e2199f7d1ecf7573421413\",\"seq\":2,\"tenant_id\":\"11111111-1111-1111-1111-111111111111\",\"type\":\"checkpoint\",\"v\":2}",
+    "receipt_hash_hex": "ab1a686ea5f33398ca2fb9d67038cee29363d12c3df6daaf32c8d1ce5a1517c1",
+    "device_key_id": "ed25519:10ba682c8ad13513",
+    "device_signature_hex": "e3fcb46fb37b581922b83f9a91bc09fe9f1b6bb9564be285af6b904a280ca3b0c8c1ea86ab1f74c20004333951a70d144021fe23af768d43f3a5e9b8e11b290f",
+    "server_key_id": "ed25519:1325b850c2871916",
+    "server_signature_hex": "576ca4158ca71b32591184a42d179a82d9f4aff8f595a83a1acfe17d07604faf1ddb43b3d47b3619cb0ea8a58c36cb63a93349d4285568090a592a242bf8d50d"
+   },
+   "expect_defect": "bad_signature"
+  },
+  {
+   "name": "recommended_counted_as_acted",
+   "receipt": {
+    "seq": 2,
+    "payload": {
+     "v": 2,
+     "type": "checkpoint",
+     "tenant_id": "11111111-1111-1111-1111-111111111111",
+     "seq": 2,
+     "prev_receipt_hash": "7c98275f6e2e4069017825f95ff1939783e352aee0e2199f7d1ecf7573421413",
+     "device_id": "33333333-3333-3333-3333-333333333333",
+     "device_key_id": "ed25519:10ba682c8ad13513",
+     "issued_at": "2026-10-03T00:00:02Z",
+     "checkpoint_seq": 2,
+     "merkle_root": "59ca4df0a035302b2de186169e9f15524c1c95c3b2103d5802bd68914452e8a4",
+     "leaf_count": 1,
+     "hosts": [
+      {
+       "session_id": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+       "transport": "native",
+       "host_id": "",
+       "host_version": "",
+       "profile_hash": "e563e71912c3ad5ec1ba2249f591ceb1af277edac9ffe0e42285e68beb78fe83",
+       "host_correlation_id": "",
+       "tasks": [
+        {
+         "task_id": "03030303030303030303030303030303"
+        }
+       ]
+      },
+      {
+       "session_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "transport": "fabric",
+       "host_id": "cem888",
+       "host_version": "2.0.1",
+       "profile_hash": "b29c393601536620afd93798ebfdf0573afbde6706b1e9a53ac3046770de6ef3",
+       "host_correlation_id": "cem888-run-7f3a",
+       "tasks": [
+        {
+         "task_id": "01010101010101010101010101010101",
+         "identity_hash": "f77fb8409e5f0c657b77ff697fd2e715b8bf38b8b9a6cdb9945923dab14c1961"
+        },
+        {
+         "task_id": "02020202020202020202020202020202",
+         "identity_hash": "c5510d526cdafd80a90a4ed1f5fc7850eb716e8fe3d5b471acbbb0c2d1e348f3"
+        }
+       ]
+      }
+     ],
+     "arrests_acted": 3,
+     "arrests_recommended": 0
+    },
+    "canonical_json": "{\"arrests_acted\":3,\"arrests_recommended\":0,\"checkpoint_seq\":2,\"device_id\":\"33333333-3333-3333-3333-333333333333\",\"device_key_id\":\"ed25519:10ba682c8ad13513\",\"hosts\":[{\"host_correlation_id\":\"\",\"host_id\":\"\",\"host_version\":\"\",\"profile_hash\":\"e563e71912c3ad5ec1ba2249f591ceb1af277edac9ffe0e42285e68beb78fe83\",\"session_id\":\"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b\",\"tasks\":[{\"task_id\":\"03030303030303030303030303030303\"}],\"transport\":\"native\"},{\"host_correlation_id\":\"cem888-run-7f3a\",\"host_id\":\"cem888\",\"host_version\":\"2.0.1\",\"profile_hash\":\"b29c393601536620afd93798ebfdf0573afbde6706b1e9a53ac3046770de6ef3\",\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"tasks\":[{\"identity_hash\":\"f77fb8409e5f0c657b77ff697fd2e715b8bf38b8b9a6cdb9945923dab14c1961\",\"task_id\":\"01010101010101010101010101010101\"},{\"identity_hash\":\"c5510d526cdafd80a90a4ed1f5fc7850eb716e8fe3d5b471acbbb0c2d1e348f3\",\"task_id\":\"02020202020202020202020202020202\"}],\"transport\":\"fabric\"}],\"issued_at\":\"2026-10-03T00:00:02Z\",\"leaf_count\":1,\"merkle_root\":\"59ca4df0a035302b2de186169e9f15524c1c95c3b2103d5802bd68914452e8a4\",\"prev_receipt_hash\":\"7c98275f6e2e4069017825f95ff1939783e352aee0e2199f7d1ecf7573421413\",\"seq\":2,\"tenant_id\":\"11111111-1111-1111-1111-111111111111\",\"type\":\"checkpoint\",\"v\":2}",
+    "receipt_hash_hex": "ab1a686ea5f33398ca2fb9d67038cee29363d12c3df6daaf32c8d1ce5a1517c1",
+    "device_key_id": "ed25519:10ba682c8ad13513",
+    "device_signature_hex": "e7f79759e9d276cee2d7ec3cad748205ba4d4a794c5c3d736685ea9ef6fe192c533ecb578c9070f5292d1cc15a63ec702e905a66936f77afb7dea772d4595e00",
+    "server_key_id": "ed25519:1325b850c2871916",
+    "server_signature_hex": "576ca4158ca71b32591184a42d179a82d9f4aff8f595a83a1acfe17d07604faf1ddb43b3d47b3619cb0ea8a58c36cb63a93349d4285568090a592a242bf8d50d"
+   },
+   "expect_defect": "payload_mismatch"
+  }
+ ]
+}

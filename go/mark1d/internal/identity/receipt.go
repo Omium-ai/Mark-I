@@ -283,13 +283,19 @@ type Checkpoint struct {
 	CheckpointSeq   int64
 	MerkleRoot      [32]byte
 	LeafCount       int
+
+	// ADR-0017 (payload v2). Hosts nil = v1, today's bytes; non-nil (even
+	// empty) = v2 with hosts and the two arrest counters inside the signed text.
+	Hosts              []HostBinding
+	ArrestsActed       uint32
+	ArrestsRecommended uint32
 }
 
 // Payload builds the checkpoint receipt payload in the exact field set the
 // chain vectors freeze. deviceKeyID goes INSIDE: the origin claim is part of
 // what gets signed.
 func (c Checkpoint) Payload(deviceKeyID string) map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"v":                 1,
 		"type":              "checkpoint",
 		"tenant_id":         c.TenantID,
@@ -302,6 +308,13 @@ func (c Checkpoint) Payload(deviceKeyID string) map[string]any {
 		"merkle_root":       hex.EncodeToString(c.MerkleRoot[:]),
 		"leaf_count":        c.LeafCount,
 	}
+	if c.Hosts != nil {
+		m["v"] = 2
+		m["hosts"] = hostsValue(c.Hosts)
+		m["arrests_acted"] = int(c.ArrestsActed)
+		m["arrests_recommended"] = int(c.ArrestsRecommended)
+	}
+	return m
 }
 
 // OriginSigned is the device's half of a dual-signed receipt: the exact text

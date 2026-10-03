@@ -23,8 +23,9 @@ pub use canonical::{
 };
 pub use chain::{verify_chain, ChainReport, Defect, DefectKind, ReceiptRow, DEVICE_ORIGIN_TYPES};
 pub use checkpoint::{
-    dual_sign, inclusion_path, leaf_hash, merkle_root, node_hash, verify_inclusion,
-    verify_merkle_root, CheckpointPayload, MerkleError, HASH_LEN, LEAF_LEN,
+    dual_sign, identity_hash, inclusion_path, leaf_hash, merkle_root, node_hash, profile_hash,
+    verify_inclusion, verify_merkle_root, CheckpointPayload, HostBinding, MerkleError, TaskBinding,
+    HASH_LEN, HOST_IDENTITY_DOMAIN, LEAF_LEN,
 };
 pub use keys::{
     derive_key_id, verify, CrossSig, Ed25519Signer, KeyCheck, KeyEntry, KeyRing, KeyRole, Signer,
