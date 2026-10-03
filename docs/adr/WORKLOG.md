@@ -207,3 +207,46 @@ pre-existing failures, not a regression.
 - Decision recorded in ADR-0016: proposals are bounded per call by MInject and
   de-duplicated per task by `seen`, but do not consume the task's injection budget —
   nothing was injected, the budget is the host's to spend.
+
+## Part 6 — host-bound receipts (ADR-0017)
+
+- 6.1 Docs: ADR-0017; 02 §9 FR-SPINE-050..053; 08 §3.4 "Checkpoint payload v2" and §7.7
+  (verifier accepts v1 and v2); 07 ReceiptCheckpoint fields 8..11 + `m1_090` row; receipt
+  vectors README changelog (that family stays v1, byte-identical); traceability.
+- 6.2 Proto (additive, buf breaking clean): `ReceiptCheckpoint.payload_version = 8`,
+  `hosts = 9`, `arrests_acted = 10`, `arrests_recommended = 11`; `message HostBinding`,
+  `message TaskBinding`; `just gen`; `migrations/m1_090_receipt_host_bindings.sql`.
+- 6.3 mark1d: `identity/hostbind.go` (HostBinding, TaskBinding, SessionBinding, BatchFacts
+  with Note/Merge/Bind, ProfileHash, IdentityHash, hostsValue); `Checkpoint.Payload` is v2
+  iff `Hosts != nil`; `admit.Session.Transport` set at both bind sites ("fabric", "jsonl");
+  `uplink.batchFacts` (same tag scan as batchLeaves; session field 3, task field 4,
+  GuardDecision 20 with a task = acted, ArrestRecommendation 24 = recommended) and the
+  hook `Checkpoint(ctx, leaves, facts)`; `Sealer.Seal(ctx, leaves, facts)` merges pending
+  facts, `Config.Session` lookup, `Bind` returns nil (v1) unless a bound session has a
+  leaf; the wire event carries payload_version 2 + hosts + counters; `cmd/hostbind.go`
+  `sessionBinding(door)` wires the admit door.
+- 6.4 controld: `receipts/hostbind.go` mirror + `Checkpoint.Payload` v2; `CheckpointEvent`
+  gains PayloadVersion/Hosts/counters; `store.AppendCheckpoint` rebuilds v2 iff
+  payload_version == 2 (a v2 claim under version 1 fails bad_signature, never re-shaped) and
+  writes the m1_090 columns; `sidefx.hostBindings` maps the wire; the three keys join
+  `reservedPayloadKeys`.
+- 6.5 Lock-step builders: Rust `CheckpointPayload::to_value_bound`, `HostBinding`,
+  `TaskBinding`, `profile_hash`, `identity_hash` (`to_value` untouched, so no literal site
+  changes); Python `build_checkpoint_payload(hosts=, arrests_acted=, arrests_recommended=)`,
+  `host_binding`, `profile_hash`, `identity_hash`. Vectors: `conformance/vectors/hostchain`
+  (gen_vectors.py imports the receipt family's primitives; v1→v2→v2 chain, three profiles,
+  identity domain, three negatives) armed in `EXPECTED` and `PY_REQUIRED`; consumers
+  `TestConfVectorsHostchain{Profiles,Chain,Negatives}` (mark1d identity),
+  `TestConfVectorsHostchainControld{Chain,Negatives}`, `test_conf_vectors_hostchain.py`,
+  `conf_vectors_hostchain_*` (mark1-receipt) and `conf_vectors_hostchain_verifier_*`
+  (rust/verifier through `verify()`, leaves included).
+- 6.6 Unit tests: `TestBatchFactsBindKeepsV1ForSoloDevelopers`,
+  `TestBatchFactsBindIsSortedAndIdentityIsPerTask`, `TestBatchFactsMergeCarriesPendingLeaves`,
+  `TestBatchFactsCountsActedAndRecommendedApart`, `TestSealBindsHostsAsControldWould`
+  (receipt package — disk-blocked on this machine, see BLOCKERS §1; vetted, runs on CI),
+  `TestHostBindingsMapTheWireFieldForField`.
+- Decisions recorded in ADR-0017: v1 stays the solo developer's payload (v2 only when a
+  bound session has a leaf; a mixed batch lists its native sessions as "native"); per-task
+  identity hash = sha256("m1p.v1/host-identity\0" ‖ host_id ‖ 0 ‖ host_correlation_id ‖ 0 ‖
+  task hex), present iff supplies_identity; counts from the batch's own records; the
+  verifiers carry the host block without interpreting it.

@@ -18,6 +18,9 @@ possible. CI runs on Linux and sees none of them. No FR row is held at Phase 2 b
   reason.
 - **Tried:** removing the scratch worktree and build caches (does not reach the 24 GB the stop
   needs); running the packages alone (the same tests fail with the same "0 records").
+  Measured on 2026-10-03: `%TEMP%` holds 7.8 GB of Visual Studio installer extractions and
+  3.6 GB of VS package caches (not this work's to delete); `go clean -cache` and the stale
+  test temp dirs recovered ~3 GB, enough to build and lint, not enough for the spool stop.
 - **Believed fix:** free the disk below 95 % and rerun; or run on CI. The test set is the one in
   `docs/adr/WORKLOG.md` "Environment" notes, unchanged across Parts 1–8.
 
