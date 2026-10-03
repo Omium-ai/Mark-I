@@ -37,7 +37,7 @@ type Options struct {
 	Socket string // test seam
 	// Profile is the ADR-0013 host profile of the session this doctor acts for;
 	// nil is provision.DefaultProfile. A declared host that owns the config surface
-	// is reported as HostOwned (M1E-7105): its configuration is not ours to inspect.
+	// is reported as HostOwned (M1E-7107): its configuration is not ours to inspect.
 	Profile *prov.Profile
 	// ClaudeSettings overrides the transcript-retention probe target
 	// (default ~/.claude/settings.json); a test seam.
@@ -54,7 +54,7 @@ type Report struct {
 	Looked      []Looked     `json:"anchors_looked"` // per workspace: the kinds the daemon looked for and did not derive
 	Agents      []Agent      `json:"agents"`
 	Fragments   []Fragment   `json:"fragments"`
-	HostOwned   string       `json:"host_owned,omitempty"` // M1E-7105 reason when a declared host owns the config surface (ADR-0014 §4)
+	HostOwned   string       `json:"host_owned,omitempty"` // M1E-7107 reason when a declared host owns the config surface (ADR-0014 §4)
 	Health      []Check      `json:"health"`
 	StopGate    cli.StopGate `json:"stop_gate"`
 	Exploration cli.StopGate `json:"exploration"`

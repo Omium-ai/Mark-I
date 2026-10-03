@@ -12,7 +12,7 @@ import (
 
 // TestDoctorSurfacesAHostOwnedSurface is FR-SPINE-042 for `mark1 doctor`: for
 // a session whose declared host owns the config surface, the report carries
-// the M1E-7105 reason as host_owned and the human form prints the one line;
+// the M1E-7107 reason as host_owned and the human form prints the one line;
 // with no declared host there is no such line.
 func TestDoctorSurfacesAHostOwnedSurface(t *testing.T) {
 	cem := prov.Profile{HostID: "cem888", HostVersion: "2.0.1", OwnsExecution: true, OwnsConfigSurface: true, OwnsMemory: true, ArrestMode: "recommend", SuppliesIdentity: true, SchemaVersion: "m1p.v1"}
@@ -23,7 +23,7 @@ func TestDoctorSurfacesAHostOwnedSurface(t *testing.T) {
 		t.Fatalf("doctor --json is not one object: %v\n%s", err, out.String())
 	}
 	if !strings.HasPrefix(rep.HostOwned, prov.CodeHostOwnsSurface) || !strings.Contains(rep.HostOwned, "cem888") {
-		t.Fatalf("host_owned = %q, want the M1E-7105 reason naming the host", rep.HostOwned)
+		t.Fatalf("host_owned = %q, want the M1E-7107 reason naming the host", rep.HostOwned)
 	}
 
 	henv, _ := enrolledEnv(t)

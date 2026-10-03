@@ -11,7 +11,7 @@ import (
 
 // TestApplyRefusesAHostOwnedSurface is FR-SPINE-041: a declared host that
 // owns the config surface gets nothing written — every walked adapter is
-// refused with M1E-7105 naming the host — while hostprofile.Default walks
+// refused with M1E-7107 naming the host — while hostprofile.Default walks
 // exactly as before; RevertUnless is the matching no-op.
 func TestApplyRefusesAHostOwnedSurface(t *testing.T) {
 	home, state := t.TempDir(), t.TempDir()
@@ -30,7 +30,7 @@ func TestApplyRefusesAHostOwnedSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(res.Provisioned) != 0 || len(res.Refused) != 1 || res.Refused[0].Code != CodeHostOwnsSurface || res.Refused[0].Agent != "claudecode" {
-		t.Fatalf("host-owned surface: %+v, want one M1E-7105 refusal for claudecode and nothing provisioned", res)
+		t.Fatalf("host-owned surface: %+v, want one M1E-7107 refusal for claudecode and nothing provisioned", res)
 	}
 	if !strings.Contains(res.Refused[0].Detail, "cem888") || !strings.Contains(res.Refused[0].Detail, "attached through the fabric") {
 		t.Fatalf("refusal must name the host and say why: %q", res.Refused[0].Detail)
@@ -46,7 +46,7 @@ func TestApplyRefusesAHostOwnedSurface(t *testing.T) {
 		t.Fatalf("a manifest was written for a refused walk: %v", entries)
 	}
 	if _, _, refused := RevertUnless(cem, state); !strings.HasPrefix(refused, CodeHostOwnsSurface) {
-		t.Fatalf("RevertUnless for a host-owned surface: %q, want the M1E-7105 reason", refused)
+		t.Fatalf("RevertUnless for a host-owned surface: %q, want the M1E-7107 reason", refused)
 	}
 
 	// Default: Mark 1 owns the surface and provisions as it always has.

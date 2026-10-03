@@ -12,7 +12,7 @@ import (
 
 // TestEnableSurfacesAHostOwnedSurface is FR-SPINE-042 for `mark1 enable`: for
 // a session whose declared host owns the config surface every walked adapter
-// is refused with M1E-7105 (rendered as NOT PROVISIONED, the existing style),
+// is refused with M1E-7107 (rendered as NOT PROVISIONED, the existing style),
 // nothing is written under the vendor's home, and enable itself succeeds —
 // Mark 1 is attached through the fabric, not through the file.
 func TestEnableSurfacesAHostOwnedSurface(t *testing.T) {
@@ -30,7 +30,7 @@ func TestEnableSurfacesAHostOwnedSurface(t *testing.T) {
 	}
 	for _, r := range res.AgentsRefused {
 		if r.Code != provision.CodeHostOwnsSurface || !strings.Contains(r.Detail, "cem888") || !strings.Contains(r.Detail, "attached through the fabric") {
-			t.Fatalf("refusal %+v, want M1E-7105 naming the host with the one-line reason", r)
+			t.Fatalf("refusal %+v, want M1E-7107 naming the host with the one-line reason", r)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(home, ".claude")); err == nil {

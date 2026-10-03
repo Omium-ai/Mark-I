@@ -14,7 +14,7 @@ import (
 
 // TestOffSurfacesAHostOwnedSurface is FR-SPINE-042 for `mark1 off`: for a
 // session whose declared host owns the config surface, off reverts nothing
-// (there is nothing of ours there), reports M1E-7105 in --json as host_owned,
+// (there is nothing of ours there), reports M1E-7107 in --json as host_owned,
 // and prints the one explanatory line in human form. Off itself still
 // succeeds: the marker is written, the daemon is observed as usual.
 func TestOffSurfacesAHostOwnedSurface(t *testing.T) {
@@ -28,7 +28,7 @@ func TestOffSurfacesAHostOwnedSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(res.HostOwned, provision.CodeHostOwnsSurface) || !strings.Contains(res.HostOwned, "cem888") {
-		t.Fatalf("host_owned = %q, want the M1E-7105 reason naming the host", res.HostOwned)
+		t.Fatalf("host_owned = %q, want the M1E-7107 reason naming the host", res.HostOwned)
 	}
 	if len(res.Reverted) != 0 || len(res.NotReverted) != 0 {
 		t.Fatalf("a host-owned surface was reverted or reported partial: %+v", res)

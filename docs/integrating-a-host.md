@@ -198,7 +198,7 @@ their own features and are described in the sections that follow when they land.
 
 Declare `owns_config_surface: true` and Mark 1's provisioning never writes into your
 agent's configuration: `mark1 enable`, the control API and `mark1 off` refuse every
-adapter for your session with `M1E-7105` ("host owns config surface", naming your
+adapter for your session with `M1E-7107` ("host owns config surface", naming your
 `host_id`), write nothing, and say so in one line — the active host owns its own
 configuration; Mark 1 is attached through the fabric. Nothing of Mark 1's is in your
 files, so there is nothing to detach either. The fence you would otherwise get

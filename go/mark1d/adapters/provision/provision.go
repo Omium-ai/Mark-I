@@ -63,7 +63,7 @@ var DefaultProfile = hostprofile.Default
 
 // CodeHostOwnsSurface is 08 §9's row for ADR-0014 §4: a declared host owns
 // the agent's config surface, so provisioning writes nothing into it.
-const CodeHostOwnsSurface = "M1E-7105"
+const CodeHostOwnsSurface = "M1E-7107"
 
 // HostOwnsSurface reports whether p is a DECLARED host (host_id set) that
 // owns the config surface. hostprofile.Default describes Mark 1's own posture,
@@ -74,7 +74,7 @@ func HostOwnsSurface(p hostprofile.Profile) bool {
 }
 
 // RefusalHostOwnsSurface is the one-line explanation every CLI surface prints
-// for M1E-7105 (08 §8.3 step 0).
+// for M1E-7107 (08 §8.3 step 0).
 func RefusalHostOwnsSurface(p hostprofile.Profile) string {
 	return fmt.Sprintf("%s: host owns config surface — %s %s owns its own configuration; Mark 1 is attached through the fabric and writes nothing here", CodeHostOwnsSurface, p.HostID, p.HostVersion)
 }
@@ -129,7 +129,7 @@ func Apply(opts Options) (Result, error) {
 	walk := func(name string) bool { return opts.Only == nil || slices.Contains(opts.Only, name) }
 	// ADR-0014 §4 (08 §8.3 step 0): a declared host that owns the config
 	// surface gets nothing written — every adapter in the walk is refused
-	// with M1E-7105 naming it. hostprofile.Default is Mark 1's own posture
+	// with M1E-7107 naming it. hostprofile.Default is Mark 1's own posture
 	// and never trips this.
 	if HostOwnsSurface(res.Profile) {
 		for _, name := range Names {

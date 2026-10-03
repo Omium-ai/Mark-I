@@ -30,7 +30,7 @@ type Options struct {
 	ObserveGrace time.Duration
 	// Profile is the ADR-0013 host profile of the session this off acts for; nil
 	// is provision.DefaultProfile. A declared host that owns the config surface has
-	// nothing of ours to revert: reported as HostOwned (M1E-7105), not as a
+	// nothing of ours to revert: reported as HostOwned (M1E-7107), not as a
 	// partial off.
 	Profile *provision.Profile
 }
@@ -49,7 +49,7 @@ type Result struct {
 	// verbatim deserves to know which file and why, not just `false`.
 	Reverted    []Reverted `json:"reverted,omitempty"`
 	NotReverted []string   `json:"not_reverted,omitempty"`
-	// HostOwned is the M1E-7105 reason when the session's declared host owns the
+	// HostOwned is the M1E-7107 reason when the session's declared host owns the
 	// config surface (ADR-0014 §4): nothing was reverted because nothing of
 	// ours is there.
 	HostOwned string `json:"host_owned,omitempty"`

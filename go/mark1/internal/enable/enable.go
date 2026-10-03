@@ -35,7 +35,7 @@ type Options struct {
 	// Profile is the ADR-0013 host profile of the session this enable acts for;
 	// nil is provision.DefaultProfile (the daemon-down CLI has no session). A
 	// declared host that owns the config surface is refused per adapter
-	// with M1E-7105 (ADR-0014 §4) and rendered as NOT PROVISIONED.
+	// with M1E-7107 (ADR-0014 §4) and rendered as NOT PROVISIONED.
 	Profile *provision.Profile
 	// Exploration is --exploration: D-EF's local half of ε>0 consent;
 	// NoExploration is --no-exploration.

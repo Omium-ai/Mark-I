@@ -1250,7 +1250,7 @@ Storing the original bytes, not just their hash, is what makes byte-equality res
 ```
 apply(target, fragment):
   0. if the session's host profile (ADR-0013) is a DECLARED host (host_id set) with
-     owns_config_surface = true → refuse the whole walk, every adapter: M1E-7105
+     owns_config_surface = true → refuse the whole walk, every adapter: M1E-7107
      "host owns config surface" naming host_id; write nothing (ADR-0014 §4).
      hostprofile.Default is Mark 1's own posture and never refuses.
   1. read target (missing file: mechanism A creates; mechanism B refuses — we do not
@@ -1278,7 +1278,7 @@ is the idempotence contract, and CI asserts it (apply ∘ apply ≡ apply).
 ```
 revert(target, manifest):                                          (drift-aware, ADR-0014)
   0. if the session's host profile is a DECLARED host with owns_config_surface = true
-     → no-op, reason M1E-7105: nothing of ours is in a surface the host owns.
+     → no-op, reason M1E-7107: nothing of ours is in a surface the host owns.
   1. read target. Classify drift with ONE shared pure function,
      fence.Classify(pre_image, post_image, current) — for strict JSON "outside the
      fence" is the document with our keys removed and "inside" is our entries
@@ -1368,7 +1368,7 @@ Normative. Later documents (04, 05, 11, 12) cite these codes; they do not invent
 | provision | `M1E-7101` | fence target absent (mechanism B) | local | no | doctor | refusal — we do not create user files |
 | provision | `M1E-7102` | user edit inside our fence (checksum broken) | local | via `doctor --fix` only | doctor | refusal — no silent overwrite |
 | provision | `M1E-7103` | duplicate key in the settings object | local | no | doctor | refusal — legal JSON that every decoder collapses differently, so a rewrite would silently delete one of the user's values |
-| provision | `M1E-7105` | host owns config surface (ADR-0014 §4, §8.3 step 0): the session's declared host set `owns_config_surface`, so provisioning writes nothing and revert is a no-op; `enable`/`off`/`doctor` say the active host owns its own configuration and Mark 1 is attached through the fabric | local | no | enable/off/doctor | refusal — never a write into a surface another party owns |
+| provision | `M1E-7107` | host owns config surface (ADR-0014 §4, §8.3 step 0): the session's declared host set `owns_config_surface`, so provisioning writes nothing and revert is a no-op; `enable`/`off`/`doctor` say the active host owns its own configuration and Mark 1 is attached through the fabric | local | no | enable/off/doctor | refusal — never a write into a surface another party owns |
 | provision | `M1E-7104` | provisioning manifest unreadable | local | no | doctor | refusal — the manifest's `pre_image` is the only byte-equality revert target, so apply refuses rather than re-snapshot over an unknown prior state |
 | provision | `M1E-7105` | base-URL fragment requested without a detected API-key credential | local | no | doctor | **fail-closed — the CON-001 boundary.** Every non-affirmative answer collapses here (no key, a subscription credential, a detection that errored, no proxy listening): on this path "I could not tell" and "no" must be the same answer, and there is no force path |
 | provision | `M1E-7106` | the agent's settings already set this variable | local | no | doctor | refusal — Mark 1 never overwrites a base URL or header the user set |

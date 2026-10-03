@@ -32,7 +32,7 @@ Each adapter also carried its own copy of the drift judgement, inline in its `Re
 
 3. **Pre-image restore stays exactly where it was.** Only `DriftNone` restores the pre-image. Restoring it over an outside-fence edit would delete a second writer's lines; restoring it over an inside-fence edit would silently overwrite a human's bytes. Both are the rewrite 08 §8 forbids.
 
-4. **A host that owns the config surface is refused, not written.** `provision.Apply` reads the session's profile. When a **declared host** (`HostID` non-empty) has `OwnsConfigSurface: true`, every adapter in the walk is refused with **`M1E-7105`** — *host owns config surface* — naming the host, nothing is written, and the manifest is left as it is. `Revert` for such a session is a no-op with the same reason. `hostprofile.Default` is Mark 1's own posture, so its `OwnsConfigSurface: true` reads "the surface's owner — Mark 1 — owns it" and provisioning writes as it always has; the refusal keys on the declared host, which is the only case where the owner is not Mark 1.
+4. **A host that owns the config surface is refused, not written.** `provision.Apply` reads the session's profile. When a **declared host** (`HostID` non-empty) has `OwnsConfigSurface: true`, every adapter in the walk is refused with **`M1E-7107`** — *host owns config surface* — naming the host, nothing is written, and the manifest is left as it is. `Revert` for such a session is a no-op with the same reason. `hostprofile.Default` is Mark 1's own posture, so its `OwnsConfigSurface: true` reads "the surface's owner — Mark 1 — owns it" and provisioning writes as it always has; the refusal keys on the declared host, which is the only case where the owner is not Mark 1.
 
 5. **The CLI says so in one line.** `mark1 enable`, `mark1 off` and `mark1 doctor` surface the refusal in their existing style with one line: the active host owns its own configuration and Mark 1 is attached through the fabric.
 
@@ -40,7 +40,7 @@ Each adapter also carried its own copy of the drift judgement, inline in its `Re
 
 - Revert is byte-faithful in one more case (reformat-only) and identical in every other.
 - Four adapters (claudecode incl. its base-URL fragment, codex, gemini, cursor) share one judgement; copilot and opencode are mechanism A (owned files) and need none.
-- 08 §8.2 (manifest), §8.3 (step 1 refusal), §8.4 (rewritten drift-aware), §9 (`M1E-7105`); 02 §9 FR-SPINE-039..042.
+- 08 §8.2 (manifest), §8.3 (step 1 refusal), §8.4 (rewritten drift-aware), §9 (`M1E-7107`); 02 §9 FR-SPINE-039..042.
 - `consent_test.go` and every §8 fixture are unchanged and green: the surgical and damaged paths are the same code.
 
 ## Not decided here
