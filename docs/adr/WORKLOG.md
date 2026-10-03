@@ -250,3 +250,27 @@ pre-existing failures, not a regression.
   identity hash = sha256("m1p.v1/host-identity\0" ‖ host_id ‖ 0 ‖ host_correlation_id ‖ 0 ‖
   task hex), present iff supplies_identity; counts from the batch's own records; the
   verifiers carry the host block without interpreting it.
+
+## Part 7 — the MCP surface as an external writer (ADR-0018)
+
+- 7.1 Docs: ADR-0018; 02 §9 FR-SPINE-054..056; 08 §6.7–6.9 (the three tools) and §10 `M1E-4008`;
+  the host guide §9; traceability.
+- 7.2 cortexd: `fabric::exchange` is the one Hello → HelloAck → frames sequence; `deliver`
+  (first-party push) builds the same Hello as before over it, `ext_hello` / `ext_exchange` are
+  the external-writer path (returns the ack's minted session when the Hello carried none).
+  `mcp/mark1.rs`: `tool_list` (schemas), `call` (dispatch on the `mark1.` prefix, before
+  `call_tool`'s index gates — no budget, no CortexInjection), `send_manifest`, `emit_event`,
+  `get_recommendations`; `manifest_from_json`, `event_from_json` (protojson, proto or camel
+  names, base64 or hex bytes, enum names or numbers, RFC 3339), `state_dir`, `read_lines`;
+  `Shared.ext_sessions` keeps one `ExtSession` per client. Refusal envelope: `M1E-4003` /
+  `M1E-4007` (daemon closed the handshake) / `M1E-4008` (unreachable; new row in 08 §10).
+- 7.3 Tests: `ext_exchange_binds_the_minted_session_on_a_named_pipe` (windows) /
+  `_on_a_socket` (unix, also the EOF-is-refusal case), `deliver_lands_on_a_named_pipe`
+  unchanged; `mark1::tests::{base64_and_hex_bytes, rfc3339_to_unix,
+  manifest_accepts_proto_and_camel_spellings, events_from_protojson_for_every_writer_body,
+  events_need_exactly_one_body, client_names_are_bounded, tool_list_names_the_three_tools,
+  daemon_files_are_read_line_by_line, get_recommendations_reads_the_sessions_files}`;
+  cortexd's golden tests unchanged.
+- Decisions recorded in ADR-0018: one session per client per cortexd process; a hex string of
+  32/64 characters reads as an id/hash before base64; recommendations come from the daemon's
+  files rather than a held fabric connection.
