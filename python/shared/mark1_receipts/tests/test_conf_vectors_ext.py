@@ -27,8 +27,12 @@ def _load_emitter():
 
 def test_conf_vectors_ext_emitter_matches_golden():
     emit = _load_emitter()
-    assert emit.jsonl() == (VECTORS / "sample.jsonl").read_bytes(), "emit.py drifted from the frozen sample.jsonl"
-    assert emit.manifest() == (VECTORS / "sample.manifest.json").read_bytes(), "emit.py drifted from the frozen sidecar"
+    assert emit.jsonl() == (VECTORS / "sample.jsonl").read_bytes(), (
+        "emit.py drifted from the frozen sample.jsonl"
+    )
+    assert emit.manifest() == (VECTORS / "sample.manifest.json").read_bytes(), (
+        "emit.py drifted from the frozen sidecar"
+    )
 
 
 def test_conf_vectors_ext_golden_is_well_formed():

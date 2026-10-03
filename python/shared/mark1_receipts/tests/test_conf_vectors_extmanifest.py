@@ -28,11 +28,15 @@ def _load_emitter():
 def test_conf_vectors_extmanifest_emitter_matches_golden():
     emit = _load_emitter()
     assert emit.jsonl() == (VECTORS / "sample.jsonl").read_bytes()
-    assert emit.manifest(True) == (VECTORS / "sample.manifest.json").read_bytes(), "emit.py --manifest drifted from the frozen sidecar"
+    assert emit.manifest(True) == (VECTORS / "sample.manifest.json").read_bytes(), (
+        "emit.py --manifest drifted from the frozen sidecar"
+    )
 
 
 def test_conf_vectors_extmanifest_events_equal_ext_and_block_is_the_cem888_profile():
-    assert (VECTORS / "sample.jsonl").read_bytes() == (EXT / "sample.jsonl").read_bytes(), "declaring a profile must change no event"
+    assert (VECTORS / "sample.jsonl").read_bytes() == (EXT / "sample.jsonl").read_bytes(), (
+        "declaring a profile must change no event"
+    )
     sidecar = json.loads((VECTORS / "sample.manifest.json").read_text(encoding="utf-8"))
     block = sidecar["host_manifest"]
     assert block == {
