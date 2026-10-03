@@ -948,6 +948,53 @@ Served by `cortexd` from the locally-synced, tenant-scoped artifact cache that `
 
 ---
 
+### 6.7 `mark1.send_manifest` — declare the host, open the external-writer session (ADR-0018)
+
+The three `mark1.*` tools make an MCP client an **external writer** (ADR-0012/0013): `cortexd` is the transport, the daemon is the authority. They bypass the index-state gates above, spend no budget and emit no `CortexInjection`; their refusal envelope is §6's with fabric reason codes.
+
+```json
+// input
+{ "client": "cem888",                      // ^[A-Za-z0-9._-]{1,64}$ → fabric component "ext:mcp/cem888"
+  "host_manifest": { "host_id": "cem888", "host_version": "2.0.1", "owns_execution": true,
+                     "owns_config_surface": true, "owns_memory": true, "arrest_mode": "recommend",
+                     "supplies_identity": true, "schema_version": "m1p.v1" },   // m1p.v1.HostManifest, §4.3 step 2b
+  "host_correlation_id": "run-7f3a" }      // optional, ≤ 256 bytes; kept on the session, never a Mark 1 session id
+// output
+{ "refused": false, "session_id": "<32 hex>", "component": "ext:mcp/cem888" }
+// refusals: M1E-4007 (the daemon closed the handshake: manifest or version refused — its log names which),
+//           M1E-4008 (mark1d not reachable). Never retried.
+```
+
+The Hello carries no `session_id`, so the daemon mints one (ADR-0012) and `cortexd` keeps it, with the manifest and correlation id, for the life of its process: every later Hello for this `client` presents the same three, so the daemon binds the same session and §4.3 step 4a's echo check holds. One session per client per `cortexd` process; a second `send_manifest` is a new declaration and a new session.
+
+### 6.8 `mark1.emit_event` — forward one Event as the host's session
+
+```json
+// input: one m1p.v1.Event in protojson (§4.6.2's line format; proto or lowerCamelCase names)
+{ "client": "cem888",
+  "event": { "task_id": "<base64 or 32 hex>", "occurred_at": "2026-10-03T12:34:56.789Z",
+             "usage": { "model": "claude-sonnet-5-5", "input_tokens": "812", "output_tokens": 95,
+                        "source": "USAGE_SOURCE_TRANSCRIPT" } } }
+// output
+{ "refused": false, "session_id": "<32 hex>", "delivered": 1 }
+```
+
+Exactly one of `task_open`, `task_close`, `turn`, `usage`, `artifact_outcome` (the external-writer vocabulary, §4.6); anything else is an invalid-params error, not a refusal. `event_id`, `seq` and `session_id` are ignored — the daemon stamps them, and `Usage.idem_key` is the daemon's (ADR-0012 §4); `occurred_at` defaults to now. A client that never called `send_manifest` gets a session minted under `hostprofile.Default` on its first event, as any `ext:` Hello without a manifest does. Refusals: `M1E-4003` / `M1E-4007` / `M1E-4008` as in §6.7.
+
+### 6.9 `mark1.get_recommendations` — what the daemon left for the session
+
+```json
+// input
+{ "client": "cem888" }
+// output
+{ "refused": false, "session_id": "<32 hex>",
+  "recommendations": [ { "sessionId": "…", "arrestRecommendation": { "kind": "knee_arrest", … } } ],   // §4.7
+  "proposals":       [ { "sessionId": "…", "memoryProposal": { "category": "PROPOSAL_CATEGORY_PITFALL", … } } ],  // §3.7
+  "unparsed_lines": 0 }
+```
+
+Read from `<state>/run/recommendations/<session-hex>.jsonl` and `<state>/run/proposals/<session-hex>.jsonl` — the file-tail host's path, which needs no connection to be open when the gate decides. `<state>` is `MARK1_STATE_DIR`, else `$HOME/.omium/mark1`. An absent file is an empty list; a malformed line is counted in `unparsed_lines`, never fatal. Refused with `M1E-4003` when the client has no session yet.
+
 ## 7. CLI surface (`mark1`)
 
 Global contract, all subcommands:
@@ -1307,6 +1354,7 @@ Normative. Later documents (04, 05, 11, 12) cite these codes; they do not invent
 | fabric | `M1E-4005` | loopback request carries `Origin` | 403 | no | security event | **fail-closed** |
 | fabric | `M1E-4006` | `mark1 validate-events` found an error in an external writer's JSONL (§7.8): a line that the daemon would quarantine or an ordering the contract forbids (§4.6.3) | CLI exit 5 | n/a | no | n/a — a pre-connect check; the file is the host's to fix |
 | fabric | `M1E-4007` | host manifest invalid (§4.3 step 2b, ADR-0013): empty `host_id`/`host_version`, `arrest_mode` unspecified, `owns_execution` false on an `ext:` connection, `schema_version` outside the accepted set, or a manifest from a non-`ext:` writer | local | no — connection closed / file not tailed | no | fail-closed for that writer; nothing else is affected |
+| fabric | `M1E-4008` | mark1d not reachable from the MCP surface (§6.7–6.9, ADR-0018): the socket or pipe refused the connection or timed out. Reported in the tool's refusal envelope, never retried. | n/a |
 | gate | `M1E-5001` | gate query timeout / verdict cache unavailable | local | n/a | no | **fail-open — gate answers allow**; `Dropped{gate_timeout}` |
 | gate | `M1E-5002` | local hard cap hit (≤3 consecutive blocks, hourly ceiling) | local | n/a | transcript feedback | fail-open (stop allowed) |
 | gate | `M1E-5003` | verdict is `uncertified/bootstrapping` where certification required | local/API | n/a | labeled honestly | refusal to gate memory/corpus, never a fake cert |

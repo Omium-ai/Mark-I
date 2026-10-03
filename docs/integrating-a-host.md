@@ -209,3 +209,13 @@ Mark 1 wrote, or merely reformatted, the original bytes come back verbatim; if a
 second writer added entries before or after Mark 1's, exactly Mark 1's entries are
 removed and theirs survive; an edit inside Mark 1's entries is left alone and
 reported, never silently overwritten.
+
+## 9. If you already speak MCP: the `mark1.*` tools
+
+A host that talks to `cortexd` over MCP for the index tools can do everything in §§3–5 and §8 through three more tools, with `cortexd` as the transport and no M1PL client of its own (08 §6.7–6.9, ADR-0018):
+
+1. `mark1.send_manifest { client, host_manifest, host_correlation_id? }` — the §8 manifest, as JSON. The daemon validates it (M1E-4007 on refusal) and mints your session; the result carries the session id. Your fabric component is `ext:mcp/<client>`.
+2. `mark1.emit_event { client, event }` — one Event per call, the §5 vocabulary in the §4 line format (protojson): `task_open`, `task_close`, `turn`, `usage`, `artifact_outcome`. Leave `event_id`, `seq`, `session_id` and `idem_key` out; the daemon stamps them.
+3. `mark1.get_recommendations { client }` — the gate's recommendations (§8, `arrest_mode: recommend`) and memory's proposals (`owns_memory: true`) for your session so far, read from the daemon's run files.
+
+What you get is the whole lane: your sessions are bound and validated like a socket host's, your arrests are recommended instead of acted when you asked for that, your memory is proposed instead of injected, and the receipts the daemon seals name your host (ADR-0017: transport `fabric`, your `host_id`, your correlation id). The daemon learns nothing new about you — `ext:mcp/<client>` is an `ext:` writer, full stop. One session per client per `cortexd` process; a refusal from the daemon comes back in the tool result (`refused: true`, `reason_code` M1E-4003 / M1E-4007 / M1E-4008) and is never retried for you.
