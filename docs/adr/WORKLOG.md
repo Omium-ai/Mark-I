@@ -177,3 +177,33 @@ Environment note (Part 4 runs): `controld/internal/querychoke TestTVOReportContr
 identically on the pre-Part-4 commit b7ee1fc in a scratch worktree (calendar-sensitive:
 its 7-day window has moved past the fixture's rollup days) — listed with the other
 pre-existing failures, not a regression.
+
+## Part 5 — memory modes (ADR-0016)
+
+- 5.1 Docs: ADR-0016; 02 §9 FR-SPINE-047..049; 06 §9.5 "Memory modes" (the rules
+  below it are STORE_AND_INJECT; PROPOSE for a declared host that owns memory); 08 §3.7
+  edge-side note (no `/memory/match` hop for a PROPOSE session) and §4.2 `MemoryProposal`
+  row; 07 §3 family note; traceability.
+- 5.2 Proto (additive, buf breaking clean): `enum ProposalCategory`, `message
+  MemoryProposal{artifact_id, category, candidate_trigger, candidate_guidance, evidence,
+  channel, session_id, task_id}` (intelligence.proto); `Event.memory_proposal = 40`;
+  `FabricFrame.memory_proposal = 12`; `just gen`; Rust needs no literal patch (a new oneof
+  arm only).
+- 5.3 memory/propose.go: `ProposeMode(p)` = declared host (`HostID != ""`) that owns
+  memory — `hostprofile.Default`'s `OwnsMemory` reads "Mark 1 owns it", the ADR-0014
+  declared-host reading; `Cache.Context` branches to `propose` right after task
+  resolution, before either tier, so the fuzz hop (`c.fuzz`) is never reached for the
+  session. `propose` walks the same candidates `pack`/`pitfall` would have chosen (same
+  kind allowlist, LCB order, MInject room, per-task `seen`) and hands each to the
+  `SetOnPropose` sink; it never calls `record`, so no `MemoryInjection` and, with no
+  `st.ids`, no `ArtifactOutcome` at close. cmd/propose.go `proposeSink` mirrors
+  `recommendSink` (shared `appendSessionLine`): fabric push, `<state>/run/proposals/
+  <session-hex>.jsonl`, the ledger → hub family `proposal` + verify-ring row.
+- 5.4 Tests: `TestProposeModeIsADeclaredHostThatOwnsMemory`,
+  `TestProposeInjectsNothingAndRecordsNothing` (pack and reactive propose, no text, no
+  injection/outcome, zero `/memory/match` calls, and the same cache injects for a Default
+  session), `TestProposeSinkFansOutOnEveryPath`, `TestProposalReachesTheControlAPI`; the
+  existing memory suite unchanged; `TestSocketStreamGolden` unchanged.
+- Decision recorded in ADR-0016: proposals are bounded per call by MInject and
+  de-duplicated per task by `seen`, but do not consume the task's injection budget —
+  nothing was injected, the budget is the host's to spend.
