@@ -72,3 +72,19 @@ possible. CI runs on Linux and sees none of them. No FR row is held at Phase 2 b
 
 - Installed with `uv tool install pip-audit`; the recipe is green ("No known vulnerabilities
   found"). Recorded because the toolchain rule is "install, never skip".
+
+## 8. `tools/ci/otel_gate.sh` docs sweep and `just gen-check` — Git Bash on Windows
+
+- **`otel_gate.sh`** (run directly): Rust and Go lock-file sections pass; the docs sweep
+  reports "OTel identifier references do not match the reviewed allow-list" while the diff it
+  prints shows the same line of `docs/adr/0005-no-otel-m1p.md` as both removed and added —
+  the allow-list and every document it names are byte-identical to `main`
+  (`git diff main --stat` on them is empty). A `grep` output-encoding difference under Git
+  Bash, not a reference this work added. The other thirteen gate scripts are listed with
+  their results in FINAL_REPORT.md.
+- **`just gen-check`** calls `tools/ci/gen_fresh.sh`, which runs a nested `just gen` with
+  `just`'s default shell; on this machine that resolves to WSL's `/bin/bash`, which does not
+  exist. The check it performs — regenerate and diff — was run by hand after the last proto
+  change: `just --shell <git-bash> --shell-arg -c gen` followed by
+  `git status --porcelain proto/gen rust/m1p-wire/gen` prints nothing.
+- **Believed fix:** none needed on Linux CI.

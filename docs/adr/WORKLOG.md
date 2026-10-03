@@ -274,3 +274,24 @@ pre-existing failures, not a regression.
 - Decisions recorded in ADR-0018: one session per client per cortexd process; a hex string of
   32/64 characters reads as an id/hash before base64; recommendations come from the daemon's
   files rather than a held fabric connection.
+
+## Part 8 — close out
+
+- M1E-7105 collision: ADR-0014's host-owned refusal had reused the number 08 §10 already
+  gives the base-URL/credential eligibility refusal (claudecode/copilot/cursor
+  `CodeNotEligible`). Renumbered to **M1E-7107** in provision, enable/off/doctor, 02, 08
+  (§8.3 steps and the row), ADR-0014, the host guide and this log's Part 3 entries; the
+  pre-existing row keeps M1E-7105. Found by the final 08 §10 sweep for the report.
+- Host guide: §8's closing paragraph now points at the consumers that landed; §8.2 arrest
+  modes (four paths), §8.3 memory modes, §8.4 what the receipts say (payload v2 shape,
+  cem888's profile hash from the hostchain vectors), §10 cem888 end to end (eight steps,
+  every command in the repository).
+- Every FR row this work added (FR-SPINE-027..056) is Phase 1 with named evidence;
+  `trace-check: ok` (under the Windows shim, BLOCKERS §5).
+- Final suite: gofmt / go vet / golangci-lint (mark1d, controld, mark1) clean; cargo fmt,
+  clippy -D warnings, cargo test workspace green; ruff format/check, pytest lanes green
+  under PYTHONUTF8=1; buf lint + buf breaking against main clean; `just gen` byte-stable;
+  tools/ci gates run one by one (BLOCKERS lists the environment-only exceptions:
+  disk-full spool packages, TestTVOReportContract, D-AP CRLF, cp1252, unix-only tests
+  in trace-check, mark1 agent-detection tests, gen-check's nested `just` under WSL).
+- FINAL_REPORT.md written; branch Fazil pushed to origin.
