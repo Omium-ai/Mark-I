@@ -523,6 +523,12 @@ enum DurabilityClass {
 // Edge fleet health — the one family this document does not transcribe
 // ---------------------------------------------------------------------------
 //
+// message MemoryProposal — ADDED under ADR-0016 as Event.body field 40, diagnostic class:
+// memory's candidate (artifact_id, category, candidate_trigger, candidate_guidance,
+// evidence, channel, session_id, task_id) for a session whose declared host owns
+// memory, recorded INSTEAD OF a MemoryInjection (06 §9.5). Transcribed in
+// intelligence.proto.
+
 // message ArrestRecommendation — ADDED under ADR-0015 as Event.body field 24, diagnostic
 // class: the gate's judgement (kind, reason, k_star_estimate, projected_cost, task_id,
 // turn, session_id, evidence_ref) for a session whose host profile says RECOMMEND,

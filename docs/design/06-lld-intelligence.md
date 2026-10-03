@@ -669,6 +669,9 @@ where `d̂` is the discrepancy-distance estimate from **unlabeled repo features*
 
 ### 9.5 Injection rules
 
+**Memory modes (ADR-0016).** The rules below are the STORE_AND_INJECT mode — every session whose host profile is `hostprofile.Default` (Mark 1 owns memory) or that declared `owns_memory: false`. A **declared host that owns memory** (`owns_memory: true`, ADR-0013) is in PROPOSE mode: detection runs exactly as below, but nothing is injected, no `MemoryInjection` or `ArtifactOutcome` is recorded, the reactive tier never makes the `/api/v1/memory/match` hop for that session, and each candidate that would have been injected is emitted as one `MemoryProposal` (category CONVENTION / PITFALL / TOOL_GUIDANCE, the trigger and guidance, the selecting evidence) to the host: pushed on its fabric connection, appended to `<state>/run/proposals/<session>.jsonl`, and recorded in the ledger. Nothing of a PROPOSE session reaches ADMIT-LCB (§9.3).
+
+
 - **Memory pack at TaskOpen** (contract C8): top-scoring artifacts by §9.4, within the bundle's `pack_tokens_max` budget.
 - **Reactive pitfall injection:** `pitfall` artifacts fire on `PostToolUseFailure` whose error signature matches the artifact's trigger (exact digest, else HNSW fuzz within distance 0.15, D29) — the remedy arrives at the moment of the mistake, which is when it is worth tokens.
 - **Interaction-bounded multi-artifact retrieval** (Paper III): at most `m_inject = 3` artifacts per task (D30), and utility attribution (`ArtifactOutcome`) is recorded per artifact only for injection sets of size ≤ m_inject. WHY: ADMIT-LCB's samples assume near-additive utility; unbounded co-injection makes `u_i` unattributable and quietly voids the do-no-harm precondition. Larger packs are a research toggle, off in production.
