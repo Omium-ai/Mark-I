@@ -212,4 +212,26 @@ message ReceiptCheckpoint {
   // signing new receipts and are NEVER unpublished: a receipt signed under an
   // unpublished key is one nobody can verify, i.e. one we never issued.
   string key_id = 7;
+  // ADR-0017 host-bound receipts (payload v2). controld rebuilds the signed
+  // payload from these: v2 iff payload_version == 2, else the v1 shape.
+  uint32 payload_version = 8;            // 0/1 = v1 (no host block), 2 = v2
+  repeated HostBinding hosts = 9;        // sorted by session_id, the payload's "hosts"
+  uint32 arrests_acted = 10;             // GuardDecision leaves with a task (ACT)
+  uint32 arrests_recommended = 11;       // ArrestRecommendation leaves (ADR-0015)
+}
+
+// One session's host as a v2 checkpoint payload attests it (ADR-0017 §1).
+message HostBinding {
+  bytes session_id = 1;             // 16 bytes
+  string transport = 2;             // "fabric" | "jsonl" | "native"
+  string host_id = 3;               // empty for a native session
+  string host_version = 4;
+  bytes profile_hash = 5;           // 32 bytes: sha256(hostprofile.Canonical(profile))
+  string host_correlation_id = 6;
+  repeated TaskBinding tasks = 7;   // sorted by task_id
+}
+
+message TaskBinding {
+  bytes task_id = 1;                // 16 bytes
+  bytes identity_hash = 2;          // 32 bytes iff the host supplies identity, else empty
 }

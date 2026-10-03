@@ -162,6 +162,55 @@ pub struct ReceiptCheckpoint {
     /// unpublished key is one nobody can verify, i.e. one we never issued.
     #[prost(string, tag="7")]
     pub key_id: ::prost::alloc::string::String,
+    /// ADR-0017 host-bound receipts (payload v2). controld rebuilds the signed
+    /// payload from these: v2 iff payload_version == 2, else the v1 shape.
+    ///
+    /// 0/1 = v1 (no host block), 2 = v2
+    #[prost(uint32, tag="8")]
+    pub payload_version: u32,
+    /// sorted by session_id, the payload's "hosts"
+    #[prost(message, repeated, tag="9")]
+    pub hosts: ::prost::alloc::vec::Vec<HostBinding>,
+    /// GuardDecision leaves with a task (ACT)
+    #[prost(uint32, tag="10")]
+    pub arrests_acted: u32,
+    /// ArrestRecommendation leaves (ADR-0015)
+    #[prost(uint32, tag="11")]
+    pub arrests_recommended: u32,
+}
+/// One session's host as a v2 checkpoint payload attests it (ADR-0017 §1).
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HostBinding {
+    /// 16 bytes
+    #[prost(bytes="vec", tag="1")]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    /// "fabric" | "jsonl" | "native"
+    #[prost(string, tag="2")]
+    pub transport: ::prost::alloc::string::String,
+    /// empty for a native session
+    #[prost(string, tag="3")]
+    pub host_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub host_version: ::prost::alloc::string::String,
+    /// 32 bytes: sha256(hostprofile.Canonical(profile))
+    #[prost(bytes="vec", tag="5")]
+    pub profile_hash: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag="6")]
+    pub host_correlation_id: ::prost::alloc::string::String,
+    /// sorted by task_id
+    #[prost(message, repeated, tag="7")]
+    pub tasks: ::prost::alloc::vec::Vec<TaskBinding>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TaskBinding {
+    /// 16 bytes
+    #[prost(bytes="vec", tag="1")]
+    pub task_id: ::prost::alloc::vec::Vec<u8>,
+    /// 32 bytes iff the host supplies identity, else empty
+    #[prost(bytes="vec", tag="2")]
+    pub identity_hash: ::prost::alloc::vec::Vec<u8>,
 }
 // ---------------------------------------------------------------------------
 // Verdict vocabulary (07 §4, verbatim)

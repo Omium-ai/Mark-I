@@ -465,6 +465,37 @@ class ReceiptCheckpoint(betterproto.Message):
      unpublished key is one nobody can verify, i.e. one we never issued.
     """
 
+    payload_version: int = betterproto.uint32_field(8)
+    """
+    ADR-0017 host-bound receipts (payload v2). controld rebuilds the signed
+     payload from these: v2 iff payload_version == 2, else the v1 shape.
+    """
+
+    hosts: List["HostBinding"] = betterproto.message_field(9)
+    arrests_acted: int = betterproto.uint32_field(10)
+    arrests_recommended: int = betterproto.uint32_field(11)
+
+
+@dataclass(eq=False, repr=False)
+class HostBinding(betterproto.Message):
+    """
+    One session's host as a v2 checkpoint payload attests it (ADR-0017 §1).
+    """
+
+    session_id: bytes = betterproto.bytes_field(1)
+    transport: str = betterproto.string_field(2)
+    host_id: str = betterproto.string_field(3)
+    host_version: str = betterproto.string_field(4)
+    profile_hash: bytes = betterproto.bytes_field(5)
+    host_correlation_id: str = betterproto.string_field(6)
+    tasks: List["TaskBinding"] = betterproto.message_field(7)
+
+
+@dataclass(eq=False, repr=False)
+class TaskBinding(betterproto.Message):
+    task_id: bytes = betterproto.bytes_field(1)
+    identity_hash: bytes = betterproto.bytes_field(2)
+
 
 @dataclass(eq=False, repr=False)
 class SessionStart(betterproto.Message):

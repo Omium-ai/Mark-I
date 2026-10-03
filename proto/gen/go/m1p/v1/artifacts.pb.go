@@ -641,9 +641,15 @@ type ReceiptCheckpoint struct {
 	// cannot lie (07, m1_server_signing_keys/m1_device_keys). Retired keys stop
 	// signing new receipts and are NEVER unpublished: a receipt signed under an
 	// unpublished key is one nobody can verify, i.e. one we never issued.
-	KeyId         string `protobuf:"bytes,7,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	KeyId string `protobuf:"bytes,7,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	// ADR-0017 host-bound receipts (payload v2). controld rebuilds the signed
+	// payload from these: v2 iff payload_version == 2, else the v1 shape.
+	PayloadVersion     uint32         `protobuf:"varint,8,opt,name=payload_version,json=payloadVersion,proto3" json:"payload_version,omitempty"`              // 0/1 = v1 (no host block), 2 = v2
+	Hosts              []*HostBinding `protobuf:"bytes,9,rep,name=hosts,proto3" json:"hosts,omitempty"`                                                       // sorted by session_id, the payload's "hosts"
+	ArrestsActed       uint32         `protobuf:"varint,10,opt,name=arrests_acted,json=arrestsActed,proto3" json:"arrests_acted,omitempty"`                   // GuardDecision leaves with a task (ACT)
+	ArrestsRecommended uint32         `protobuf:"varint,11,opt,name=arrests_recommended,json=arrestsRecommended,proto3" json:"arrests_recommended,omitempty"` // ArrestRecommendation leaves (ADR-0015)
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ReceiptCheckpoint) Reset() {
@@ -725,6 +731,179 @@ func (x *ReceiptCheckpoint) GetKeyId() string {
 	return ""
 }
 
+func (x *ReceiptCheckpoint) GetPayloadVersion() uint32 {
+	if x != nil {
+		return x.PayloadVersion
+	}
+	return 0
+}
+
+func (x *ReceiptCheckpoint) GetHosts() []*HostBinding {
+	if x != nil {
+		return x.Hosts
+	}
+	return nil
+}
+
+func (x *ReceiptCheckpoint) GetArrestsActed() uint32 {
+	if x != nil {
+		return x.ArrestsActed
+	}
+	return 0
+}
+
+func (x *ReceiptCheckpoint) GetArrestsRecommended() uint32 {
+	if x != nil {
+		return x.ArrestsRecommended
+	}
+	return 0
+}
+
+// One session's host as a v2 checkpoint payload attests it (ADR-0017 §1).
+type HostBinding struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	SessionId         []byte                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // 16 bytes
+	Transport         string                 `protobuf:"bytes,2,opt,name=transport,proto3" json:"transport,omitempty"`                  // "fabric" | "jsonl" | "native"
+	HostId            string                 `protobuf:"bytes,3,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`          // empty for a native session
+	HostVersion       string                 `protobuf:"bytes,4,opt,name=host_version,json=hostVersion,proto3" json:"host_version,omitempty"`
+	ProfileHash       []byte                 `protobuf:"bytes,5,opt,name=profile_hash,json=profileHash,proto3" json:"profile_hash,omitempty"` // 32 bytes: sha256(hostprofile.Canonical(profile))
+	HostCorrelationId string                 `protobuf:"bytes,6,opt,name=host_correlation_id,json=hostCorrelationId,proto3" json:"host_correlation_id,omitempty"`
+	Tasks             []*TaskBinding         `protobuf:"bytes,7,rep,name=tasks,proto3" json:"tasks,omitempty"` // sorted by task_id
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *HostBinding) Reset() {
+	*x = HostBinding{}
+	mi := &file_m1p_v1_artifacts_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostBinding) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostBinding) ProtoMessage() {}
+
+func (x *HostBinding) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_artifacts_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostBinding.ProtoReflect.Descriptor instead.
+func (*HostBinding) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_artifacts_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *HostBinding) GetSessionId() []byte {
+	if x != nil {
+		return x.SessionId
+	}
+	return nil
+}
+
+func (x *HostBinding) GetTransport() string {
+	if x != nil {
+		return x.Transport
+	}
+	return ""
+}
+
+func (x *HostBinding) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *HostBinding) GetHostVersion() string {
+	if x != nil {
+		return x.HostVersion
+	}
+	return ""
+}
+
+func (x *HostBinding) GetProfileHash() []byte {
+	if x != nil {
+		return x.ProfileHash
+	}
+	return nil
+}
+
+func (x *HostBinding) GetHostCorrelationId() string {
+	if x != nil {
+		return x.HostCorrelationId
+	}
+	return ""
+}
+
+func (x *HostBinding) GetTasks() []*TaskBinding {
+	if x != nil {
+		return x.Tasks
+	}
+	return nil
+}
+
+type TaskBinding struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TaskId        []byte                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`                   // 16 bytes
+	IdentityHash  []byte                 `protobuf:"bytes,2,opt,name=identity_hash,json=identityHash,proto3" json:"identity_hash,omitempty"` // 32 bytes iff the host supplies identity, else empty
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TaskBinding) Reset() {
+	*x = TaskBinding{}
+	mi := &file_m1p_v1_artifacts_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TaskBinding) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TaskBinding) ProtoMessage() {}
+
+func (x *TaskBinding) ProtoReflect() protoreflect.Message {
+	mi := &file_m1p_v1_artifacts_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TaskBinding.ProtoReflect.Descriptor instead.
+func (*TaskBinding) Descriptor() ([]byte, []int) {
+	return file_m1p_v1_artifacts_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *TaskBinding) GetTaskId() []byte {
+	if x != nil {
+		return x.TaskId
+	}
+	return nil
+}
+
+func (x *TaskBinding) GetIdentityHash() []byte {
+	if x != nil {
+		return x.IdentityHash
+	}
+	return nil
+}
+
 var File_m1p_v1_artifacts_proto protoreflect.FileDescriptor
 
 const file_m1p_v1_artifacts_proto_rawDesc = "" +
@@ -751,7 +930,7 @@ const file_m1p_v1_artifacts_proto_rawDesc = "" +
 	"\vartifact_id\x18\x01 \x01(\fR\n" +
 	"artifactId\x122\n" +
 	"\ftask_verdict\x18\x02 \x01(\x0e2\x0f.m1p.v1.VerdictR\vtaskVerdict\x12+\n" +
-	"\x11artifact_followed\x18\x03 \x01(\bR\x10artifactFollowed\"\x86\x02\n" +
+	"\x11artifact_followed\x18\x03 \x01(\bR\x10artifactFollowed\"\xb0\x03\n" +
 	"\x11ReceiptCheckpoint\x12%\n" +
 	"\x0echeckpoint_seq\x18\x01 \x01(\x04R\rcheckpointSeq\x12\x1f\n" +
 	"\vmerkle_root\x18\x02 \x01(\fR\n" +
@@ -761,7 +940,24 @@ const file_m1p_v1_artifacts_proto_rawDesc = "" +
 	"\x0efirst_event_id\x18\x04 \x01(\fR\ffirstEventId\x12\"\n" +
 	"\rlast_event_id\x18\x05 \x01(\fR\vlastEventId\x12)\n" +
 	"\x10origin_signature\x18\x06 \x01(\fR\x0foriginSignature\x12\x15\n" +
-	"\x06key_id\x18\a \x01(\tR\x05keyId*w\n" +
+	"\x06key_id\x18\a \x01(\tR\x05keyId\x12'\n" +
+	"\x0fpayload_version\x18\b \x01(\rR\x0epayloadVersion\x12)\n" +
+	"\x05hosts\x18\t \x03(\v2\x13.m1p.v1.HostBindingR\x05hosts\x12#\n" +
+	"\rarrests_acted\x18\n" +
+	" \x01(\rR\farrestsActed\x12/\n" +
+	"\x13arrests_recommended\x18\v \x01(\rR\x12arrestsRecommended\"\x84\x02\n" +
+	"\vHostBinding\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\fR\tsessionId\x12\x1c\n" +
+	"\ttransport\x18\x02 \x01(\tR\ttransport\x12\x17\n" +
+	"\ahost_id\x18\x03 \x01(\tR\x06hostId\x12!\n" +
+	"\fhost_version\x18\x04 \x01(\tR\vhostVersion\x12!\n" +
+	"\fprofile_hash\x18\x05 \x01(\fR\vprofileHash\x12.\n" +
+	"\x13host_correlation_id\x18\x06 \x01(\tR\x11hostCorrelationId\x12)\n" +
+	"\x05tasks\x18\a \x03(\v2\x13.m1p.v1.TaskBindingR\x05tasks\"K\n" +
+	"\vTaskBinding\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\fR\x06taskId\x12#\n" +
+	"\ridentity_hash\x18\x02 \x01(\fR\fidentityHash*w\n" +
 	"\aVerdict\x12\x17\n" +
 	"\x13VERDICT_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11VERDICT_SATISFIED\x10\x01\x12\x14\n" +
@@ -802,7 +998,7 @@ func file_m1p_v1_artifacts_proto_rawDescGZIP() []byte {
 }
 
 var file_m1p_v1_artifacts_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_m1p_v1_artifacts_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_m1p_v1_artifacts_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_m1p_v1_artifacts_proto_goTypes = []any{
 	(Verdict)(0),              // 0: m1p.v1.Verdict
 	(EvidenceCategory)(0),     // 1: m1p.v1.EvidenceCategory
@@ -813,18 +1009,22 @@ var file_m1p_v1_artifacts_proto_goTypes = []any{
 	(*EvidenceExcerpt)(nil),   // 6: m1p.v1.EvidenceExcerpt
 	(*ArtifactOutcome)(nil),   // 7: m1p.v1.ArtifactOutcome
 	(*ReceiptCheckpoint)(nil), // 8: m1p.v1.ReceiptCheckpoint
+	(*HostBinding)(nil),       // 9: m1p.v1.HostBinding
+	(*TaskBinding)(nil),       // 10: m1p.v1.TaskBinding
 }
 var file_m1p_v1_artifacts_proto_depIdxs = []int32{
-	1, // 0: m1p.v1.EvidenceRecord.category:type_name -> m1p.v1.EvidenceCategory
-	5, // 1: m1p.v1.EvidenceRecord.counts:type_name -> m1p.v1.EvidenceCounts
-	2, // 2: m1p.v1.EvidenceRecord.path_role:type_name -> m1p.v1.PathRole
-	3, // 3: m1p.v1.EvidenceExcerpt.tier:type_name -> m1p.v1.EvidenceTier
-	0, // 4: m1p.v1.ArtifactOutcome.task_verdict:type_name -> m1p.v1.Verdict
-	5, // [5:5] is the sub-list for method output_type
-	5, // [5:5] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	1,  // 0: m1p.v1.EvidenceRecord.category:type_name -> m1p.v1.EvidenceCategory
+	5,  // 1: m1p.v1.EvidenceRecord.counts:type_name -> m1p.v1.EvidenceCounts
+	2,  // 2: m1p.v1.EvidenceRecord.path_role:type_name -> m1p.v1.PathRole
+	3,  // 3: m1p.v1.EvidenceExcerpt.tier:type_name -> m1p.v1.EvidenceTier
+	0,  // 4: m1p.v1.ArtifactOutcome.task_verdict:type_name -> m1p.v1.Verdict
+	9,  // 5: m1p.v1.ReceiptCheckpoint.hosts:type_name -> m1p.v1.HostBinding
+	10, // 6: m1p.v1.HostBinding.tasks:type_name -> m1p.v1.TaskBinding
+	7,  // [7:7] is the sub-list for method output_type
+	7,  // [7:7] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_m1p_v1_artifacts_proto_init() }
@@ -838,7 +1038,7 @@ func file_m1p_v1_artifacts_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_m1p_v1_artifacts_proto_rawDesc), len(file_m1p_v1_artifacts_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
